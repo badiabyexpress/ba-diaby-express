@@ -201,6 +201,9 @@ const STATUS_STYLE = {
   "Annulé": { bg: "#2B1620", fg: "#E23F52", icon: X },
 };
 const ROLES = ["Administrateur", "Agent", "Comptable", "Chauffeur", "Partenaire"];
+// Sites d'achat en ligne les plus courants pour les clients de Ba-Diaby Express — sert à savoir
+// d'où provient un colis (utile pour les pré-alertes et le suivi à la réception).
+const VENDEURS_EN_LIGNE = ["Shein", "Amazon", "Jumia", "AliExpress", "Temu", "Alibaba", "Autre"];
 
 // Parcours de validation d'un bordereau : 5 étapes, avec bouton "Statut suivant" fonctionnel.
 const BORDEREAU_STATUSES = ["Brouillon", "Acheminement", "Validé", "Arrivé", "Livré"];
@@ -374,6 +377,18 @@ function calcCommission(colis, commissionConfig, categories) {
     return total + rate * base;
   }, 0);
 }
+/**
+ * Frais de réception/récupération à l'agence, calculés sur le poids TOTAL des colis
+ * sélectionnés pour un même bordereau de réception client. Tarif par paliers (ex : 1-10 kg,
+ * 11-40 kg, 41-100 kg) : le palier atteint par le poids total du lot s'applique à tout le lot.
+ */
+function calcReceptionFee(poidsTotal, tarifs) {
+  const paliers = tarifs?.paliers || [{ max: 10, tarif: 100000 }, { max: 40, tarif: 95000 }, { max: 100, tarif: 92000 }];
+  const sorted = [...paliers].sort((a, b) => a.max - b.max);
+  const palier = sorted.find((p) => poidsTotal <= p.max) || sorted[sorted.length - 1];
+  const tauxParKg = palier.tarif;
+  return { tauxParKg, total: Math.round(poidsTotal * tauxParKg), palier };
+}
 /** Ajoute une entrée au journal d'activité global (les 500 dernières actions sont conservées). */
 function pushActivity(data, session, action, detail) {
   const entry = { id: `log${Date.now()}${Math.random().toString(36).slice(2,5)}`, action, detail, date: new Date().toISOString(), utilisateur: `${session.prenom} ${session.nom}`, role: session.role };
@@ -428,6 +443,20 @@ async function ensureQRCodeLib() {
   try { await loadScript("https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"); return true; }
   catch (e) { console.error("Librairie QR indisponible.", e); return false; }
 }
+/** Charge JsBarcode (génération de vrais codes-barres Code128) depuis le CDN, à la demande. */
+async function ensureBarcodeLib() {
+  if (window.JsBarcode) return true;
+  try { await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jsbarcode/3.11.3/JsBarcode.all.min.js"); return true; }
+  catch (e) { console.error("Librairie code-barres indisponible.", e); return false; }
+}
+/** Génère un vrai code-barres Code128 en image PNG, entièrement côté navigateur. */
+async function generateBarcodeDataUrl(text) {
+  const ok = await ensureBarcodeLib();
+  if (!ok) throw new Error("Librairie code-barres non chargée");
+  const canvas = document.createElement("canvas");
+  window.JsBarcode(canvas, text, { format: "CODE128", displayValue: false, margin: 0, height: 60, width: 2.2, background: "#ffffff", lineColor: "#0A0A0A" });
+  return canvas.toDataURL("image/png");
+}
 /** Génère un QR code entièrement côté navigateur (aucun appel réseau vers un service tiers). */
 async function generateQRDataUrl(text, size = 200) {
   const ok = await ensureQRCodeLib();
@@ -451,9 +480,13 @@ async function generateQRDataUrl(text, size = 200) {
 function defaultSeed() {
   const emojis = { "Vêtements": "👕", "Électronique": "📱", "Documents": "📄", "Alimentaire": "🍎", "Cosmétiques": "💄", "Autre": "📦" };
   return {
-    users: [{ id: "u1", prenom: "Ibrahima", nom: "Ba-Diaby", email: "contact@badiaby-express.com", telephone: "+224620000000", identifiant: "admin", motdepasse: hash("admin123"), role: "Administrateur", twoFA: false }],
+    users: [{ id: "u1", prenom: "Ibrahima", nom: "Ba-Diaby", email: "badiabyexpress.bde@gmail.com", telephone: "+224620000000", identifiant: "admin", motdepasse: hash("admin123"), role: "Administrateur", twoFA: false }],
     colis: [], lang: "fr", theme: "dark",
     branding: { logo: DEFAULT_LOGO },
+    clientAccounts: [],
+    preAlertes: [],
+    receptionTarifs: { paliers: [{ max: 10, tarif: 100000 }, { max: 40, tarif: 95000 }, { max: 100, tarif: 92000 }] },
+    expressTarifEurKg: 12,
     exchangeRates: { ...CURRENCIES },
     categories: ["Vêtements", "Électronique", "Documents", "Alimentaire", "Cosmétiques", "Autre"].map((nom, i) => ({
       id: `cat-${i}`, nom, description: "", emoji: emojis[nom] || "📦", type: "kg",
@@ -636,6 +669,10 @@ function App() {
   const isPublicTracking = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("suivi");
   if (isPublicTracking) {
     return <Shell rtl={false} theme={theme}><PublicTrackingPage data={data} loading={loading} /></Shell>;
+  }
+  const isClientPortal = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("client");
+  if (isClientPortal) {
+    return <Shell rtl={false} theme={theme}><ClientPortalPage data={data} loading={loading} persist={persist} /></Shell>;
   }
 
   if (loading) {
@@ -947,8 +984,457 @@ function PublicTrackingPage({ data, loading }) {
   );
 }
 
+/**
+ * Espace Client — accessible sans compte staff, via "?client=1". Un client identifié par son
+ * numéro de téléphone (celui utilisé comme destinataire lors de l'enregistrement de ses colis)
+ * voit TOUS ses colis d'un coup : statuts, paiements, factures — au lieu de devoir suivre
+ * chaque colis un par un avec un numéro de suivi. Pensé pour les clients réguliers qui
+ * reçoivent plusieurs colis par semaine et perdent facilement le fil des paiements.
+ *
+ * Identification par numéro de téléphone uniquement (pas de mot de passe dédié) : pratique et
+ * sans friction, mais quelqu'un connaissant le numéro d'un client pourrait voir ses données.
+ * Acceptable pour du suivi de colis, mais à garder en tête.
+ */
+function ClientRegisterForm({ data, persist, onRegistered, onCancel }) {
+  const [nom, setNom] = useState("");
+  const [prenom, setPrenom] = useState("");
+  const [identifiant, setIdentifiant] = useState("");
+  const [motdepasse, setMotdepasse] = useState("");
+  const [showPw, setShowPw] = useState(false);
+  const [telephone, setTelephone] = useState("");
+  const [adresse, setAdresse] = useState("");
+  const [email, setEmail] = useState("");
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    setErr("");
+    if (!nom || !prenom || !identifiant || !motdepasse || !telephone) { setErr("Merci de renseigner au moins le nom, prénom, identifiant, mot de passe et téléphone."); return; }
+    if ((data.clientAccounts || []).some((c) => c.identifiant.toLowerCase() === identifiant.trim().toLowerCase())) { setErr("Cet identifiant est déjà utilisé. Choisissez-en un autre."); return; }
+    setLoading(true);
+    try {
+      const salt = genSalt();
+      const motdepasseSecure = await hashSecure(motdepasse, salt);
+      const account = {
+        id: `cli${Date.now()}`, nom, prenom, identifiant: identifiant.trim(), motdepasseSalt: salt, motdepasseSecure,
+        telephone, adresse, email, createdAt: new Date().toISOString(),
+      };
+      persist({ ...data, clientAccounts: [...(data.clientAccounts || []), account] });
+      onRegistered(account);
+    } catch (ex) {
+      console.error("Échec de la création du compte :", ex);
+      setErr("Une erreur technique est survenue. Réessayez, ou contactez l'agence si le problème persiste.");
+    }
+    setLoading(false);
+  }
+
+  return (
+    <div style={{ width: "100%", maxWidth: 420, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 24 }}>
+      <div style={{ fontSize: 16, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>Créer mon compte client</div>
+      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 18 }}>Suivez tous vos colis Ba-Diaby Express en un seul endroit.</div>
+      <form onSubmit={submit}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <Field label="Prénom *"><input value={prenom} onChange={(e) => setPrenom(e.target.value)} style={inputStyle} /></Field>
+          <Field label="Nom *"><input value={nom} onChange={(e) => setNom(e.target.value)} style={inputStyle} /></Field>
+        </div>
+        <Field label="Identifiant *"><input value={identifiant} onChange={(e) => setIdentifiant(e.target.value)} style={inputStyle} placeholder="ex : fatoumata.diallo" /></Field>
+        <Field label="Mot de passe *">
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <input type={showPw ? "text" : "password"} autoComplete="new-password" value={motdepasse} onChange={(e) => setMotdepasse(e.target.value)} style={{ ...inputStyle, flex: 1 }} />
+            <button type="button" onClick={() => setShowPw((s) => !s)} style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, width: 34, height: 34, cursor: "pointer", display: "grid", placeItems: "center", flexShrink: 0 }}>
+              {showPw ? <EyeOff size={14} color="var(--muted)" /> : <Eye size={14} color="var(--muted)" />}
+            </button>
+          </div>
+        </Field>
+        <Field label="Téléphone *"><PhoneInput value={telephone} onChange={setTelephone} /></Field>
+        <Field label="Adresse (optionnel)"><input value={adresse} onChange={(e) => setAdresse(e.target.value)} style={inputStyle} /></Field>
+        <Field label="E-mail (optionnel)"><input value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} /></Field>
+        {err && <div style={{ color: "#E23F52", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
+        <button type="submit" disabled={loading} style={{ width: "100%", marginTop: 4, background: "#E23F52", color: "#fff", border: "none", borderRadius: 9, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>{loading ? "Création…" : "Créer mon compte"}</button>
+        <button type="button" onClick={onCancel} style={{ width: "100%", marginTop: 8, background: "none", border: "none", color: "var(--muted)", fontSize: 12.5, cursor: "pointer" }}>J'ai déjà un compte — me connecter</button>
+      </form>
+    </div>
+  );
+}
 
 /**
+ * Espace Client — accessible sans compte staff, via "?client=1". Chaque client dispose d'un
+ * vrai compte sécurisé (identifiant + mot de passe, même hachage salé que le personnel).
+ * Les agents rattachent chaque colis reçu au bon compte client en recherchant son nom
+ * (celui écrit sur le colis) dans la fiche de réception — voir ClientAccountLinker dans
+ * le formulaire de création de colis.
+ */
+/**
+ * Récupération de mot de passe client — sans envoi d'e-mail (aucun service d'envoi configuré),
+ * la vérification se fait en confirmant l'identifiant ET le numéro de téléphone du compte.
+ * Moins robuste qu'un vrai lien de réinitialisation par e-mail, mais reste self-service.
+ */
+function ClientResetPasswordForm({ data, persist, onDone, onCancel }) {
+  const [identifiant, setIdentifiant] = useState("");
+  const [telephone, setTelephone] = useState("");
+  const [motdepasse, setMotdepasse] = useState("");
+  const [showPw, setShowPw] = useState(false);
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    setErr("");
+    const acc = (data.clientAccounts || []).find((c) => c.identifiant.toLowerCase() === identifiant.trim().toLowerCase());
+    if (!acc || (acc.telephone || "").replace(/\s/g, "") !== telephone.replace(/\s/g, "")) {
+      setErr("Identifiant ou numéro de téléphone incorrect.");
+      return;
+    }
+    if (!motdepasse || motdepasse.length < 4) { setErr("Choisissez un nouveau mot de passe (4 caractères minimum)."); return; }
+    setLoading(true);
+    const salt = genSalt();
+    const motdepasseSecure = await hashSecure(motdepasse, salt);
+    persist({ ...data, clientAccounts: (data.clientAccounts || []).map((c) => (c.id === acc.id ? { ...c, motdepasseSalt: salt, motdepasseSecure } : c)) });
+    setLoading(false);
+    onDone();
+  }
+
+  return (
+    <form onSubmit={submit} style={{ width: "100%", maxWidth: 380, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 24 }}>
+      <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>Mot de passe oublié</div>
+      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16 }}>Confirmez votre identifiant et votre téléphone pour choisir un nouveau mot de passe.</div>
+      <Field label="Identifiant"><input value={identifiant} onChange={(e) => setIdentifiant(e.target.value)} style={inputStyle} /></Field>
+      <Field label="Téléphone associé au compte"><PhoneInput value={telephone} onChange={setTelephone} /></Field>
+      <Field label="Nouveau mot de passe">
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <input type={showPw ? "text" : "password"} value={motdepasse} onChange={(e) => setMotdepasse(e.target.value)} style={{ ...inputStyle, flex: 1 }} />
+          <button type="button" onClick={() => setShowPw((s) => !s)} style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, width: 34, height: 34, cursor: "pointer", display: "grid", placeItems: "center", flexShrink: 0 }}>
+            {showPw ? <EyeOff size={14} color="var(--muted)" /> : <Eye size={14} color="var(--muted)" />}
+          </button>
+        </div>
+      </Field>
+      {err && <div style={{ color: "#E23F52", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
+      <button type="submit" disabled={loading} style={{ width: "100%", marginTop: 4, background: "#E23F52", color: "#fff", border: "none", borderRadius: 9, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>{loading ? "…" : "Changer le mot de passe"}</button>
+      <button type="button" onClick={onCancel} style={{ width: "100%", marginTop: 8, background: "none", border: "none", color: "var(--muted)", fontSize: 12.5, cursor: "pointer" }}>Retour à la connexion</button>
+    </form>
+  );
+}
+
+/** Modale pour qu'un client modifie ses propres coordonnées (téléphone, adresse, e-mail). */
+function ClientProfilModal({ compte, onSave, onClose }) {
+  const [telephone, setTelephone] = useState(compte.telephone || "");
+  const [adresse, setAdresse] = useState(compte.adresse || "");
+  const [email, setEmail] = useState(compte.email || "");
+  const [saved, setSaved] = useState(false);
+
+  function submit(e) {
+    e.preventDefault();
+    onSave({ telephone, adresse, email });
+    setSaved(true);
+    setTimeout(onClose, 900);
+  }
+
+  return (
+    <Modal onClose={onClose} title="Mon profil">
+      <form onSubmit={submit}>
+        <Field label="Téléphone"><PhoneInput value={telephone} onChange={setTelephone} /></Field>
+        <Field label="Adresse"><input value={adresse} onChange={(e) => setAdresse(e.target.value)} style={inputStyle} /></Field>
+        <Field label="E-mail"><input value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} /></Field>
+        {saved && <div style={{ color: "#3ECB84", fontSize: 12.5, marginBottom: 10 }}>✓ Profil mis à jour</div>}
+        <button type="submit" style={{ width: "100%", background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 9, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
+      </form>
+    </Modal>
+  );
+}
+
+/**
+ * Modale pré-alerte : le client indique à l'avance un colis qu'il attend (ex : numéro de suivi
+ * Shein), pour aider les agents à savoir à qui rattacher le colis dès sa réception, plutôt que
+ * de chercher le nom au moment où il arrive.
+ */
+function ClientPreAlerteModal({ preAlertes, onAdd, onRemove, onClose }) {
+  const [trackingExterne, setTrackingExterne] = useState("");
+  const [provenance, setProvenance] = useState("Shein");
+  const [description, setDescription] = useState("");
+
+  function submit(e) {
+    e.preventDefault();
+    if (!trackingExterne.trim()) return;
+    onAdd(trackingExterne.trim(), description.trim(), provenance);
+    setTrackingExterne(""); setDescription("");
+  }
+
+  return (
+    <Modal onClose={onClose} title="Pré-alerte de colis" wide>
+      <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 16 }}>Prévenez-nous d'un colis que vous attendez (ex : commande Shein), pour qu'on le retrouve plus vite à son arrivée.</div>
+      <form onSubmit={submit} style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
+        <select value={provenance} onChange={(e) => setProvenance(e.target.value)} style={{ ...inputStyle, width: 130, marginBottom: 0 }}>
+          {VENDEURS_EN_LIGNE.map((v) => <option key={v} value={v}>{v}</option>)}
+        </select>
+        <input value={trackingExterne} onChange={(e) => setTrackingExterne(e.target.value)} placeholder="N° de suivi du vendeur" style={{ ...inputStyle, flex: 1, minWidth: 160, marginBottom: 0 }} />
+        <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description (optionnel)" style={{ ...inputStyle, flex: 1, minWidth: 160, marginBottom: 0 }} />
+        <button type="submit" style={{ background: "#E23F52", color: "#fff", border: "none", borderRadius: 9, padding: "0 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Ajouter</button>
+      </form>
+
+      <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", marginBottom: 8 }}>Mes pré-alertes ({preAlertes.length})</div>
+      {preAlertes.length === 0 ? (
+        <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Aucune pré-alerte pour le moment.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {preAlertes.map((p) => (
+            <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--surface2)", borderRadius: 9, padding: "9px 12px" }}>
+              <div>
+                <div style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>
+                  <span style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6, padding: "1px 7px", fontSize: 10.5, marginInlineEnd: 6 }}>{p.provenance || "Autre"}</span>
+                  {p.trackingExterne}{p.description ? ` — ${p.description}` : ""}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--muted)" }}>{p.statut} · {new Date(p.dateCreation).toLocaleDateString("fr-FR")}</div>
+              </div>
+              <button onClick={() => onRemove(p.id)} style={{ background: "none", border: "none", color: "#E23F52", cursor: "pointer" }}><X size={15} /></button>
+            </div>
+          ))}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+/** Historique de tous les paiements du client, tous colis confondus, en un seul endroit. */
+function ClientPaiementsModal({ colisListe, onClose }) {
+  const paiements = colisListe.flatMap((c) => (c.paiements || []).map((p) => ({ ...p, tracking: c.tracking }))).sort((a, b) => new Date(b.date) - new Date(a.date));
+  const total = paiements.reduce((s, p) => s + (p.deviseSaisie ? p.montant / (LIVE_RATES[p.deviseSaisie] || 1) : p.montant), 0);
+
+  return (
+    <Modal onClose={onClose} title="Mes paiements" wide>
+      <div style={{ background: "var(--surface2)", borderRadius: 10, padding: 14, marginBottom: 16, display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+        <span style={{ color: "var(--muted)" }}>Total payé (tous colis)</span>
+        <span style={{ color: "var(--text)", fontWeight: 700 }}>{fmt(total, "EUR")}</span>
+      </div>
+      {paiements.length === 0 ? (
+        <div style={{ fontSize: 12.5, color: "var(--muted)", textAlign: "center", padding: 20 }}>Aucun paiement enregistré pour le moment.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {paiements.map((p) => (
+            <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--surface2)", borderRadius: 9, padding: "9px 12px" }}>
+              <div>
+                <div style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>{p.tracking} · {p.mode}</div>
+                <div style={{ fontSize: 11, color: "var(--muted)" }}>{new Date(p.date).toLocaleString("fr-FR")}</div>
+              </div>
+              <div style={{ fontSize: 13, color: "#3ECB84", fontWeight: 700 }}>{p.deviseSaisie ? fmt(p.montant, p.deviseSaisie) : fmt(p.montant, "EUR")}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+
+function ClientPortalPage({ data, loading, persist }) {
+  const [mode, setMode] = useState("login"); // login | inscription | reset
+  const [identifiant, setIdentifiant] = useState("");
+  const [motdepasse, setMotdepasse] = useState("");
+  const [showPw, setShowPw] = useState(false);
+  const [err, setErr] = useState("");
+  const [compte, setCompte] = useState(null);
+  const [filtreStatut, setFiltreStatut] = useState("tous");
+  const [showProfil, setShowProfil] = useState(false);
+  const [showPreAlerte, setShowPreAlerte] = useState(false);
+  const [showPaiements, setShowPaiements] = useState(false);
+  const [notifCount, setNotifCount] = useState(0);
+
+  if (loading || !data) return <BrandedLoader />;
+
+  async function connecter(e) {
+    e.preventDefault();
+    setErr("");
+    const acc = (data.clientAccounts || []).find((c) => c.identifiant.toLowerCase() === identifiant.trim().toLowerCase());
+    if (!acc) { setErr("Identifiant ou mot de passe incorrect."); return; }
+    const { ok } = await verifyPassword(motdepasse, { motdepasseSalt: acc.motdepasseSalt, motdepasseSecure: acc.motdepasseSecure });
+    if (!ok) { setErr("Identifiant ou mot de passe incorrect."); return; }
+    const previousVisite = acc.derniereVisite;
+    if (previousVisite) {
+      const theirColis = data.colis.filter((c) => c.clientAccountId === acc.id);
+      const nouveaux = theirColis.reduce((n, c) => n + (c.historique || []).filter((h) => new Date(h.date) > new Date(previousVisite)).length, 0);
+      setNotifCount(nouveaux);
+    }
+    const updated = { ...acc, derniereVisite: new Date().toISOString() };
+    persist({ ...data, clientAccounts: (data.clientAccounts || []).map((c) => (c.id === acc.id ? updated : c)) });
+    setCompte(updated);
+  }
+
+  const mesColis = compte && data ? data.colis.filter((c) => c.clientAccountId === compte.id) : [];
+  const enCours = mesColis.filter((c) => c.status !== "Livré" && c.status !== "Annulé");
+  const livres = mesColis.filter((c) => c.status === "Livré");
+  const nonPayes = mesColis.filter((c) => c.reste > 0 && c.status !== "Annulé");
+  const totalRestant = nonPayes.reduce((s, c) => s + c.reste, 0);
+  const expressTarif = data.expressTarifEurKg ?? 12;
+
+  function demanderExpress(c) {
+    const montant = +(c.poids * expressTarif).toFixed(2);
+    const demande = { statut: "En attente", montant, demandeLe: new Date().toISOString() };
+    persist({ ...data, colis: data.colis.map((x) => (x.tracking === c.tracking ? { ...x, demandeExpress: demande } : x)) });
+  }
+
+  const mesPreAlertes = compte ? (data.preAlertes || []).filter((p) => p.clientAccountId === compte.id) : [];
+  function ajouterPreAlerte(trackingExterne, description, provenance) {
+    const p = { id: `pa${Date.now()}`, clientAccountId: compte.id, trackingExterne, description, provenance, dateCreation: new Date().toISOString(), statut: "En attente" };
+    persist({ ...data, preAlertes: [p, ...(data.preAlertes || [])] });
+  }
+  function retirerPreAlerte(id) {
+    persist({ ...data, preAlertes: (data.preAlertes || []).filter((p) => p.id !== id) });
+  }
+  function majProfil(patch) {
+    const updated = { ...compte, ...patch };
+    persist({ ...data, clientAccounts: (data.clientAccounts || []).map((c) => (c.id === compte.id ? updated : c)) });
+    setCompte(updated);
+  }
+
+  const listeAffichee = mesColis.filter((c) => {
+    if (filtreStatut === "tous") return true;
+    if (filtreStatut === "en_cours") return c.status !== "Livré" && c.status !== "Annulé";
+    if (filtreStatut === "livres") return c.status === "Livré";
+    if (filtreStatut === "impayes") return c.reste > 0;
+    return true;
+  });
+
+  if (!compte) {
+    return (
+      <div style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", flexDirection: "column", alignItems: "center", padding: "60px 16px" }}>
+        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 22, color: "var(--text)", marginBottom: 4 }}>Espace Client</div>
+        <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 28, textAlign: "center" }}>Retrouvez tous vos colis, leurs statuts et vos paiements en un coup d'œil.</div>
+
+        {mode === "inscription" ? (
+          <ClientRegisterForm data={data} persist={persist} onRegistered={(acc) => setCompte(acc)} onCancel={() => setMode("login")} />
+        ) : mode === "reset" ? (
+          <ClientResetPasswordForm data={data} persist={persist} onDone={() => { setMode("login"); setErr(""); }} onCancel={() => setMode("login")} />
+        ) : (
+          <form onSubmit={connecter} style={{ width: "100%", maxWidth: 380, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 24 }}>
+            <Field label="Identifiant"><input value={identifiant} onChange={(e) => setIdentifiant(e.target.value)} style={inputStyle} autoFocus /></Field>
+            <Field label="Mot de passe">
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <input type={showPw ? "text" : "password"} autoComplete="current-password" value={motdepasse} onChange={(e) => setMotdepasse(e.target.value)} style={{ ...inputStyle, flex: 1 }} />
+                <button type="button" onClick={() => setShowPw((s) => !s)} style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, width: 34, height: 34, cursor: "pointer", display: "grid", placeItems: "center", flexShrink: 0 }}>
+                  {showPw ? <EyeOff size={14} color="var(--muted)" /> : <Eye size={14} color="var(--muted)" />}
+                </button>
+              </div>
+            </Field>
+            {err && <div style={{ color: "#E23F52", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
+            <button type="submit" style={{ width: "100%", marginTop: 4, background: "#E23F52", color: "#fff", border: "none", borderRadius: 9, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>Se connecter</button>
+            <button type="button" onClick={() => { setMode("reset"); setErr(""); }} style={{ width: "100%", marginTop: 10, background: "none", border: "none", color: "var(--muted)", fontSize: 12, cursor: "pointer" }}>Mot de passe oublié ?</button>
+            <button type="button" onClick={() => { setMode("inscription"); setErr(""); }} style={{ width: "100%", marginTop: 6, background: "none", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 0", fontSize: 13, fontWeight: 600, color: "var(--text)", cursor: "pointer" }}>Créer un compte</button>
+          </form>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", background: "var(--bg)" }}>
+      <div style={{ maxWidth: 900, margin: "0 auto", padding: "32px 20px 60px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, flexWrap: "wrap", gap: 10 }}>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 20, color: "var(--text)" }}>Espace Client</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={() => setShowPreAlerte(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>Pré-alerte colis</button>
+            <button onClick={() => setShowPaiements(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>Mes paiements</button>
+            <button onClick={() => setShowProfil(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>Mon profil</button>
+            {mesColis.length > 0 && <button onClick={() => downloadClientManifest(compte, mesColis)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>Mon bordereau (PDF)</button>}
+            <button onClick={() => { setCompte(null); setIdentifiant(""); setMotdepasse(""); setMode("login"); }} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--muted)", cursor: "pointer" }}>Déconnexion</button>
+          </div>
+        </div>
+        <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 22 }}>Bonjour {compte.prenom} {compte.nom}</div>
+
+        {notifCount > 0 && (
+          <div style={{ background: "#0F2A3D", border: "1px solid #1E4A6B", borderRadius: 12, padding: "10px 14px", marginBottom: 18, fontSize: 12.5, color: "#5B8DEF" }}>
+            🔔 {notifCount} mise{notifCount > 1 ? "s" : ""} à jour sur vos colis depuis votre dernière visite.
+          </div>
+        )}
+
+        {showProfil && <ClientProfilModal compte={compte} onSave={majProfil} onClose={() => setShowProfil(false)} />}
+        {showPreAlerte && <ClientPreAlerteModal preAlertes={mesPreAlertes} onAdd={ajouterPreAlerte} onRemove={retirerPreAlerte} onClose={() => setShowPreAlerte(false)} />}
+        {showPaiements && <ClientPaiementsModal colisListe={mesColis} onClose={() => setShowPaiements(false)} />}
+
+        {mesColis.length === 0 ? (
+          <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>
+            Aucun colis rattaché à votre compte pour le moment. Dès qu'un agent enregistre un colis à votre nom, il apparaîtra ici automatiquement.
+          </div>
+        ) : (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 12, marginBottom: 22 }}>
+              <StatCard label="Total colis" value={mesColis.length} icon={Package} tint="#3D63FF" />
+              <StatCard label="En cours" value={enCours.length} icon={Truck} tint="#5B8DEF" />
+              <StatCard label="Livrés" value={livres.length} icon={CheckCircle2} tint="#3ECB84" />
+              <StatCard label="Reste à payer" value={fmt(totalRestant, "EUR")} icon={DollarSign} tint={totalRestant > 0 ? "#E23F52" : "#3ECB84"} />
+            </div>
+
+            {nonPayes.length > 0 && (
+              <div style={{ background: "#2B1620", border: "1px solid #4A2530", borderRadius: 12, padding: 14, marginBottom: 22, display: "flex", alignItems: "center", gap: 10 }}>
+                <AlertTriangle size={18} color="#E23F52" />
+                <div style={{ fontSize: 12.5, color: "#F5B8C0" }}>{nonPayes.length} colis en attente de paiement — {fmt(totalRestant, "EUR")} au total.</div>
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+              {[["tous", "Tous"], ["en_cours", "En cours"], ["livres", "Livrés"], ["impayes", "Non payés"]].map(([k, label]) => (
+                <button key={k} onClick={() => setFiltreStatut(k)} style={{ padding: "7px 14px", borderRadius: 20, border: "1.5px solid " + (filtreStatut === k ? "#E23F52" : "var(--border)"), background: filtreStatut === k ? "#E23F52" : "var(--surface)", color: filtreStatut === k ? "#fff" : "var(--muted)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>{label}</button>
+              ))}
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {listeAffichee.map((c) => {
+                const st = STATUS_STYLE[c.status];
+                return (
+                  <div key={c.tracking} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 8 }}>
+                      <div>
+                        <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{c.tracking}{c.provenance && <span style={{ marginInlineStart: 8, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 6, padding: "1px 7px", fontSize: 10, fontWeight: 600, color: "var(--muted)" }}>{c.provenance}</span>}</div>
+                        <div style={{ fontSize: 11.5, color: "var(--muted)" }}>{routeLabel(c.pays, c.direction)} · {c.poids} kg · {new Date(c.createdAt).toLocaleDateString("fr-FR")}</div>
+                        {c.status !== "Livré" && c.status !== "Annulé" && (() => {
+                          const pays = COUNTRIES.find((x) => x.code === c.pays);
+                          const delai = c.mode === "air" ? pays?.delayAir : pays?.delaySea;
+                          if (!delai) return null;
+                          const debut = new Date(c.createdAt);
+                          const min = new Date(debut); min.setDate(min.getDate() + Math.max(1, delai - 2));
+                          const max = new Date(debut); max.setDate(max.getDate() + delai + 2);
+                          return <div style={{ fontSize: 11, color: "#5B8DEF", marginTop: 2 }}>📅 Réception estimée entre le {min.toLocaleDateString("fr-FR")} et le {max.toLocaleDateString("fr-FR")}</div>;
+                        })()}
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                        <span style={{ background: st?.bg, color: st?.fg, padding: "4px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>{c.status}</span>
+                        <span style={{ fontSize: 11.5, fontWeight: 700, color: c.reste > 0 ? "#E23F52" : "#3ECB84" }}>{c.reste > 0 ? `${fmt(c.reste, "EUR")} dû` : "Payé"}</span>
+                        <button onClick={() => downloadInvoice(c)} style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 10px", fontSize: 11, color: "var(--text)", cursor: "pointer" }}>Facture</button>
+                        <a href={`https://wa.me/224612479339?text=${encodeURIComponent(`Bonjour, j'ai une question concernant mon colis ${c.tracking}.`)}`} target="_blank" rel="noopener noreferrer" style={{ background: "#12261D", border: "1px solid #1E4A32", borderRadius: 8, padding: "6px 10px", fontSize: 11, color: "#3ECB84", textDecoration: "none" }}>💬 Contacter (GN)</a>
+                        <a href={`https://wa.me/33767562963?text=${encodeURIComponent(`Bonjour, j'ai une question concernant mon colis ${c.tracking}.`)}`} target="_blank" rel="noopener noreferrer" style={{ background: "#12261D", border: "1px solid #1E4A32", borderRadius: 8, padding: "6px 10px", fontSize: 11, color: "#3ECB84", textDecoration: "none" }}>💬 Contacter (FR)</a>
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                      {(c.historique || []).map((h, i) => (
+                        <span key={i} style={{ fontSize: 10, color: "var(--muted)", background: "var(--surface2)", borderRadius: 6, padding: "2px 7px" }}>{h.status} · {new Date(h.date).toLocaleDateString("fr-FR")}</span>
+                      ))}
+                    </div>
+                    {c.status !== "Livré" && c.status !== "Annulé" && (
+                      <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+                        {c.demandeExpress ? (
+                          <div style={{ fontSize: 11.5, color: "#E0A63A" }}>⚡ Livraison express demandée ({fmt(c.demandeExpress.montant, "EUR")}) — {c.demandeExpress.statut}</div>
+                        ) : (
+                          <button onClick={() => demanderExpress(c)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "1px solid #E0A63A", borderRadius: 8, padding: "6px 12px", fontSize: 11.5, color: "#E0A63A", fontWeight: 600, cursor: "pointer" }}>
+                            ⚡ Demander une livraison express (72h) — {fmt(c.poids * expressTarif, "EUR")}
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+
+        <div style={{ textAlign: "center", fontSize: 11, color: "var(--muted)", marginTop: 30 }}>Ba-Diaby Express — Transport de colis Conakry ⇄ Monde</div>
+      </div>
+    </div>
+  );
+}
+
+
+/**
+
  * Page d'accueil publique (site vitrine) — ce que voit n'importe quel visiteur qui arrive sur le
  * domaine sans être connecté. Combine la présentation de l'entreprise (personnalisable dans
  * Configuration → Site Vitrine Public) avec le suivi de colis en direct, sans obliger le client à
@@ -982,7 +1468,14 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
           <img src={data.branding?.logo || DEFAULT_LOGO} alt="logo" style={{ width: 26, height: 26, borderRadius: 6, objectFit: "cover", verticalAlign: "middle", marginInlineEnd: 8 }} />
           {nomPublic.split(" ")[0]} <span style={{ color: "#E23F52" }}>{nomPublic.split(" ").slice(1).join(" ")}</span>
         </div>
-        <button onClick={onConnexionClick} style={{ background: "var(--surface)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 9, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Se connecter</button>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <button onClick={() => {
+            const url = new URL(window.location.href);
+            url.search = ""; url.searchParams.set("client", "1");
+            window.location.href = url.toString();
+          }} style={{ background: "none", border: "none", fontSize: 13, fontWeight: 600, color: "var(--text)", cursor: "pointer" }}>Espace Client</button>
+          <button onClick={onConnexionClick} style={{ background: "var(--surface)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 9, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Se connecter</button>
+        </div>
       </div>
 
       <div style={{ maxWidth: 720, margin: "40px auto 0", padding: "0 24px", textAlign: "center" }}>
@@ -1373,6 +1866,7 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
   if (sub === "routes") return <RoutesTarifsPage data={data} persist={persist} session={session} notify={notify} onBack={back} />;
   if (sub === "devises") return <GestionDevisesPage data={data} persist={persist} session={session} notify={notify} onBack={back} />;
   if (sub === "commissions") return <CommissionsPage data={data} persist={persist} session={session} notify={notify} onBack={back} />;
+  if (sub === "reception") return <ReceptionTarifsPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "categories") return <CategoriesProduitsPage data={data} persist={persist} session={session} notify={notify} onBack={back} />;
   if (sub === "sites") return <SitesOperationPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "notifications") return <NotificationsPage data={data} persist={persist} notify={notify} onBack={back} />;
@@ -1421,6 +1915,7 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
         <Card icon={DollarSign} tint="#8B5CF6" title="Routes &amp; Tarifs" desc="Gérer les taux de change, prix par kg et destinations." onClick={() => setSub("routes")} />
         <Card icon={RefreshCw} tint="#0EA5E9" title="Gestion des devises" desc="Un taux par devise, partagé automatiquement par tous les pays concernés." onClick={() => setSub("devises")} />
         <Card icon={Users} tint="#2FAE73" title="Commissions par Agence" desc="Définissez combien chaque agence gagne par kg et par unité vendue." onClick={() => setSub("commissions")} />
+        <Card icon={Package} tint="#E23F52" title="Tarifs de réception client" desc="Le tarif au kg appliqué sur les bordereaux de réception, selon le poids du lot." onClick={() => setSub("reception")} />
         <Card icon={Receipt} tint="#E0794E" title="Catégories de Produits" desc="Configuration des types de marchandises et taxes." onClick={() => setSub("categories")} />
         <Card icon={MapPin} tint="#2FAE73" title="Sites d'opération" desc="Gérez vos points d'enregistrement et de retrait, et les informations affichées sur le ticket d'envoi (horaires, paiements, stockage...)." onClick={() => setSub("sites")} />
         <Card icon={AlertTriangle} tint="#3ECB84" title="Notifications" desc="Gérez les notifications WhatsApp automatiques et contrôlez les évènements." onClick={() => setSub("notifications")} />
@@ -1494,6 +1989,73 @@ function RoutesTarifsPage({ data, persist, session, notify, onBack }) {
           <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8, textAlign: "center" }}>Conakry → {dest?.city} · {mode === "air" ? "Aérien" : "Maritime"} · devise {dest?.currency}</div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function ReceptionTarifsPage({ data, persist, notify, onBack }) {
+  const defautPaliers = [{ max: 10, tarif: 100000 }, { max: 40, tarif: 95000 }, { max: 100, tarif: 92000 }];
+  const [paliers, setPaliers] = useState(data.receptionTarifs?.paliers || defautPaliers);
+  const [expressTarifEurKg, setExpressTarifEurKg] = useState(data.expressTarifEurKg ?? 12);
+
+  function updatePalier(i, key, value) {
+    setPaliers((list) => list.map((p, idx) => (idx === i ? { ...p, [key]: Number(value) || 0 } : p)));
+  }
+  function ajouterPalier() {
+    const dernier = paliers[paliers.length - 1];
+    setPaliers((list) => [...list, { max: (dernier?.max || 0) + 20, tarif: Math.max(0, (dernier?.tarif || 0) - 3000) }]);
+  }
+  function retirerPalier(i) {
+    setPaliers((list) => list.filter((_, idx) => idx !== i));
+  }
+
+  function save() {
+    const sorted = [...paliers].sort((a, b) => a.max - b.max);
+    persist({ ...data, receptionTarifs: { paliers: sorted }, expressTarifEurKg: Number(expressTarifEurKg) || 0 });
+    notify?.("Tarifs mis à jour");
+  }
+
+  const sortedPreview = [...paliers].sort((a, b) => a.max - b.max);
+
+  return (
+    <div>
+      <ConfigPageHeader title="Tarifs de réception & livraison express" desc="Tarif au kg par paliers pour le bordereau de réception, et le tarif de la livraison express demandée par les clients." onBack={onBack} />
+
+      <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, maxWidth: 560, border: "1px solid var(--border)", marginBottom: 20 }}>
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Paliers de réception (GNF / kg)</div>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16 }}>Le poids total du lot sélectionné détermine le palier appliqué à l'ensemble du lot.</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 12 }}>
+          {paliers.map((p, i) => {
+            const min = i === 0 ? 1 : (sortedPreview[sortedPreview.indexOf(p)] ? sortedPreview[Math.max(0, sortedPreview.indexOf(p) - 1)]?.max + 1 : "");
+            return (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface2)", borderRadius: 9, padding: "9px 12px" }}>
+                <span style={{ fontSize: 12, color: "var(--muted)", width: 60, flexShrink: 0 }}>Jusqu'à</span>
+                <input type="number" value={p.max} onChange={(e) => updatePalier(i, "max", e.target.value)} style={{ ...inputStyle, width: 80, marginBottom: 0 }} />
+                <span style={{ fontSize: 12, color: "var(--muted)" }}>kg →</span>
+                <input type="number" value={p.tarif} onChange={(e) => updatePalier(i, "tarif", e.target.value)} style={{ ...inputStyle, width: 110, marginBottom: 0 }} />
+                <span style={{ fontSize: 12, color: "var(--muted)" }}>GNF/kg</span>
+                {paliers.length > 1 && <button onClick={() => retirerPalier(i)} style={{ marginInlineStart: "auto", background: "none", border: "none", color: "#E23F52", cursor: "pointer" }}><X size={15} /></button>}
+              </div>
+            );
+          })}
+        </div>
+        <button onClick={ajouterPalier} style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 14px", fontSize: 12, color: "var(--text)", cursor: "pointer", marginBottom: 14 }}>+ Ajouter un palier</button>
+        <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "10px 12px", fontSize: 11.5, color: "var(--muted)" }}>
+          {sortedPreview.map((p, i) => {
+            const prevMax = i === 0 ? 1 : sortedPreview[i - 1].max + 1;
+            return <div key={i}>De {prevMax} à {p.max} kg : {p.tarif.toLocaleString("fr-FR")} GNF/kg</div>;
+          })}
+          <div>Au-delà de {sortedPreview[sortedPreview.length - 1]?.max} kg : {sortedPreview[sortedPreview.length - 1]?.tarif.toLocaleString("fr-FR")} GNF/kg (dernier palier)</div>
+        </div>
+      </div>
+
+      <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, maxWidth: 460, border: "1px solid var(--border)", marginBottom: 20 }}>
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Livraison express (72h)</div>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14 }}>Tarif que les clients voient dans leur espace pour demander une livraison express sur un de leurs colis.</div>
+        <Field label="Tarif (€ / kg)"><input type="number" step="0.5" value={expressTarifEurKg} onChange={(e) => setExpressTarifEurKg(e.target.value)} style={inputStyle} /></Field>
+      </div>
+
+      <button onClick={save} style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 9, padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
     </div>
   );
 }
@@ -1932,6 +2494,7 @@ function ColisView({ data, persist, session, notify, t }) {
   const [showForm, setShowForm] = useState(false);
   const [showAi, setShowAi] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const [showReception, setShowReception] = useState(false);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(null);
   const isChauffeur = session.role === "Chauffeur";
@@ -1943,7 +2506,11 @@ function ColisView({ data, persist, session, notify, t }) {
 
   function logActivity(action, detail) { return pushActivity(data, session, action, detail); }
   function addColis(colis) {
-    persist({ ...data, colis: [colis, ...data.colis], activityLog: logActivity("Colis créé", `${colis.tracking} — ${colis.destinataire}`) });
+    const { preAlerteRapprochee, ...colisPropre } = colis;
+    const preAlertes = preAlerteRapprochee
+      ? (data.preAlertes || []).map((p) => (p.id === preAlerteRapprochee ? { ...p, statut: "Rapproché", colisTracking: colis.tracking } : p))
+      : data.preAlertes;
+    persist({ ...data, colis: [colisPropre, ...data.colis], preAlertes, activityLog: logActivity("Colis créé", `${colis.tracking} — ${colis.destinataire}`) });
     notify(`Colis ${colis.tracking} enregistré`);
     setShowForm(false);
   }
@@ -2011,6 +2578,7 @@ function ColisView({ data, persist, session, notify, t }) {
         {peutCreer && (
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             <button onClick={() => setShowImport(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><Download size={16} color="#5B8DEF" style={{ transform: "rotate(180deg)" }} /> Importer Excel</button>
+            <button onClick={() => setShowReception(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={16} color="#3ECB84" /> Bordereau de réception</button>
             <button onClick={() => setShowAi(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><Sparkles size={16} color="#8B5CF6" /> Créer par IA</button>
             <button onClick={() => setShowForm(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "#E23F52", color: "#fff", border: "none", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><Plus size={16} /> {t.newColis}</button>
           </div>
@@ -2024,9 +2592,10 @@ function ColisView({ data, persist, session, notify, t }) {
         {list.map((c) => <TicketCard key={c.tracking} colis={c} onOpen={() => setSelected(c)} />)}
         {list.length === 0 && <div style={{ color: "var(--muted)", fontSize: 13.5 }}>Aucun colis à afficher.</div>}
       </div>
-      {showForm && <ColisForm onClose={() => setShowForm(false)} onSave={addColis} existingColis={data.colis} categories={data.categories || []} session={session} sites={data.sites} partenaires={(data.users || []).filter((u) => u.role === "Partenaire")} />}
+      {showForm && <ColisForm onClose={() => setShowForm(false)} onSave={addColis} existingColis={data.colis} categories={data.categories || []} session={session} sites={data.sites} partenaires={(data.users || []).filter((u) => u.role === "Partenaire")} clientAccounts={data.clientAccounts || []} preAlertes={data.preAlertes || []} />}
       {showAi && <AiColisModal onClose={() => setShowAi(false)} onCreate={addColis} data={data} />}
       {showImport && <ImportExcelModal onClose={() => setShowImport(false)} onImportMany={importerColisMany} data={data} />}
+      {showReception && <ReceptionBordereauModal onClose={() => setShowReception(false)} data={data} />}
       {selected && <ColisDetail colis={selected} onClose={() => setSelected(null)} onAdvance={() => advance(selected.tracking)} onDelete={() => remove(selected.tracking)} onCancel={(motif) => annuler(selected.tracking, motif)} onUpdate={(patch) => updateColis(selected.tracking, patch)} onEncaisser={(montant, mode, montantSaisi, deviseSaisie, details) => encaisser(selected.tracking, montant, mode, montantSaisi, deviseSaisie, details)} canManage={!isChauffeur} isAdmin={session.role === "Administrateur"} isChauffeur={isChauffeur} data={data} session={session} />}
     </div>
   );
@@ -2375,7 +2944,7 @@ function splitNom(full) {
   return { prenom: parts[0], nom: parts.slice(1).join(" ") };
 }
 
-function ColisForm({ onClose, onSave, existingColis, categories, session, sites, partenaires }) {
+function ColisForm({ onClose, onSave, existingColis, categories, session, sites, partenaires, clientAccounts, preAlertes }) {
   const availableCountries = allowedCountries(session);
   const clientDirectory = useMemo(() => buildClientDirectory(existingColis || []), [existingColis]);
   const [step, setStep] = useState(0);
@@ -2402,6 +2971,10 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
   const [rabaisDevise, setRabaisDevise] = useState("GNF");
   const [agence, setAgence] = useState(sites?.[0]?.nom || "Bambeto");
   const [partenaireId, setPartenaireId] = useState("");
+  const [clientAccountId, setClientAccountId] = useState("");
+  const [preAlerteRapprochee, setPreAlerteRapprochee] = useState("");
+  const [provenance, setProvenance] = useState("");
+  const [rechercheClient, setRechercheClient] = useState("");
 
   function chercherClient(tel, cote) {
     const clean = (tel || "").replace(/\s/g, "");
@@ -2495,7 +3068,8 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
       tracking: genTracking((existingColis || []).map((c) => c.tracking)),
       expediteur: `${expPrenom} ${expNom}`.trim(), expediteurTelephone: expTelephone, expediteurEmail: expEmail, expediteurAdresse: expAdresse, expediteurPays: expPays,
       destinataire: `${destPrenom} ${destNom}`.trim(), telephone: destTelephone, destinataireEmail: destEmail, destinataireAdresse: destAdresse, destinataireVille: destVille, destinataireCodePostal: destCodePostal, destinatairePays: destPays,
-      pays, direction, mode, produits, poids: +poidsTotal.toFixed(2), volume: 0, valeurDeclaree, site: agence, partenaireId: partenaireId || null,
+      pays, direction, mode, produits, poids: +poidsTotal.toFixed(2), volume: 0, valeurDeclaree, site: agence, partenaireId: partenaireId || null, clientAccountId: clientAccountId || null, provenance: provenance || null, preAlerteRapprochee: preAlerteRapprochee || null,
+      agentCreation: session ? `${session.prenom} ${session.nom}`.trim() || session.identifiant : "",
       prixBrut, discountLoyalty, rabaisMontant: Number(rabaisMontant) || 0, rabaisDevise, rabaisEUR, prix, paye: payeNum, reste, photos,
       paiements: payeNum > 0 ? [{ id: `pay${Date.now()}`, montant: payeNum, mode: "Espèces", date: new Date().toISOString(), par: "Enregistrement initial" }] : [],
       notesInternes: "",
@@ -2676,6 +3250,59 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
                   {(sites && sites.length > 0 ? sites : [{ id: "x", nom: "Bambeto" }]).map((s) => <option key={s.id} value={s.nom}>{s.nom}</option>)}
                 </select>
               </Field>
+              {clientAccounts && clientAccounts.length > 0 && (
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <Field label="Rattacher à un compte client (recherche par nom écrit sur le colis)">
+                    {clientAccountId ? (
+                      <div>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "#0F2A1C", border: "1px solid #1E4A32", borderRadius: 9, padding: "9px 12px" }}>
+                          <span style={{ fontSize: 12.5, color: "#3ECB84", fontWeight: 600 }}>
+                            ✓ Rattaché à {clientAccounts.find((c) => c.id === clientAccountId)?.prenom} {clientAccounts.find((c) => c.id === clientAccountId)?.nom}
+                          </span>
+                          <button type="button" onClick={() => { setClientAccountId(""); setRechercheClient(""); }} style={{ background: "none", border: "none", color: "#3ECB84", cursor: "pointer", fontSize: 12 }}>Retirer</button>
+                        </div>
+                        {preAlertes && preAlertes.filter((p) => p.clientAccountId === clientAccountId && p.statut === "En attente").length > 0 && (
+                          <div style={{ marginTop: 8 }}>
+                            <div style={{ fontSize: 11.5, color: "#E0A63A", marginBottom: 6 }}>⚡ Ce colis correspond-il à l'une de ses pré-alertes ?</div>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                              {preAlertes.filter((p) => p.clientAccountId === clientAccountId && p.statut === "En attente").map((p) => (
+                                <label key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface2)", borderRadius: 8, padding: "7px 10px", cursor: "pointer", fontSize: 12 }}>
+                                  <input type="radio" name="preAlerte" checked={preAlerteRapprochee === p.id} onChange={() => setPreAlerteRapprochee(p.id)} />
+                                  <span style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 5, padding: "1px 6px", fontSize: 10 }}>{p.provenance || "Autre"}</span>
+                                  {p.trackingExterne}{p.description ? ` — ${p.description}` : ""}
+                                </label>
+                              ))}
+                              {preAlerteRapprochee && <button type="button" onClick={() => setPreAlerteRapprochee("")} style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 11, cursor: "pointer", textAlign: "start" }}>Aucune correspondance</button>}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <>
+                        <input value={rechercheClient} onChange={(e) => setRechercheClient(e.target.value)} style={inputStyle} placeholder="ex : Fatoumata Sirraye Ba-Diaby" />
+                        {rechercheClient.trim().length >= 2 && (
+                          <div style={{ border: "1px solid var(--border)", borderRadius: 9, overflow: "hidden", marginTop: -6, marginBottom: 10, maxHeight: 160, overflowY: "auto" }}>
+                            {clientAccounts.filter((c) => `${c.prenom} ${c.nom}`.toLowerCase().includes(rechercheClient.trim().toLowerCase())).slice(0, 6).map((c) => (
+                              <button type="button" key={c.id} onClick={() => { setClientAccountId(c.id); setRechercheClient(""); }} style={{ display: "block", width: "100%", textAlign: "start", padding: "9px 12px", background: "var(--surface2)", border: "none", borderTop: "1px solid var(--border)", cursor: "pointer", fontSize: 12.5, color: "var(--text)" }}>
+                                {c.prenom} {c.nom} <span style={{ color: "var(--muted)" }}>· {c.telephone}</span>
+                              </button>
+                            ))}
+                            {clientAccounts.filter((c) => `${c.prenom} ${c.nom}`.toLowerCase().includes(rechercheClient.trim().toLowerCase())).length === 0 && (
+                              <div style={{ padding: "9px 12px", fontSize: 12, color: "var(--muted)", background: "var(--surface2)" }}>Aucun compte trouvé — le client n'a peut-être pas encore de compte.</div>
+                            )}
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </Field>
+                </div>
+              )}
+              <Field label="Provenance / site d'achat (optionnel)">
+                <select value={provenance} onChange={(e) => setProvenance(e.target.value)} style={inputStyle}>
+                  <option value="">Non renseigné</option>
+                  {VENDEURS_EN_LIGNE.map((v) => <option key={v} value={v}>{v}</option>)}
+                </select>
+              </Field>
               {partenaires && partenaires.length > 0 && (
                 <Field label="Partenaire apporteur (optionnel)">
                   <select value={partenaireId} onChange={(e) => setPartenaireId(e.target.value)} style={inputStyle}>
@@ -2813,6 +3440,126 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
   );
 }
 
+/**
+ * Bordereau de réception client — généré après qu'un agent a sélectionné les colis disponibles
+ * (arrivés, prêts à être récupérés) d'un client. Calcule les frais de récupération selon le
+ * poids total du lot, avec le tarif dégressif au kg configuré (moins cher au-delà du seuil).
+ */
+/** Bordereau personnel PDF pour un client — récapitulatif de tous ses colis, à télécharger depuis son espace. */
+async function downloadClientManifest(compte, colisListe) {
+  const jspdf = await loadJsPDF();
+  const doc = new jspdf.jsPDF();
+
+  doc.setFillColor(10, 38, 71); doc.rect(0, 0, 210, 32, "F");
+  doc.setFillColor(255, 255, 255); doc.roundedRect(14, 6, 22, 22, 3, 3, "F");
+  doc.addImage(DEFAULT_LOGO, "PNG", 15.3, 7.3, 19.4, 19.4);
+  doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold"); doc.setFontSize(15);
+  doc.text("BA-DIABY EXPRESS", 41, 15);
+  doc.setFont(undefined, "normal"); doc.setFontSize(9.5); doc.setTextColor(180, 195, 220);
+  doc.text("Mon bordereau personnel", 41, 21.5);
+  doc.setFontSize(8); doc.text(`Généré le ${new Date().toLocaleDateString("fr-FR")}`, 41, 27);
+
+  let y = 42;
+  doc.setTextColor(10, 38, 71); doc.setFont(undefined, "bold"); doc.setFontSize(12);
+  doc.text(`${compte.prenom} ${compte.nom}`, 14, y);
+  y += 5.5;
+  doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(100, 100, 100);
+  doc.text(compte.telephone || "—", 14, y);
+  y += 10;
+
+  const totalPoids = colisListe.reduce((s, c) => s + (Number(c.poids) || 0), 0);
+  const totalReste = colisListe.reduce((s, c) => s + (Number(c.reste) || 0), 0);
+  doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, 16, "F");
+  doc.setFontSize(9); doc.setTextColor(90, 90, 90);
+  doc.text(`${colisListe.length} colis · ${totalPoids.toFixed(1)} kg au total`, 20, y + 10);
+  doc.setFont(undefined, "bold"); doc.setTextColor(totalReste > 0 ? [226, 63, 82] : [62, 160, 90]);
+  doc.text(totalReste > 0 ? `Reste à payer : ${fmt(totalReste, "EUR")}` : "Tout est payé", 190, y + 10, { align: "right" });
+  y += 24;
+
+  const hasAutoTable = await ensureAutoTable();
+  const rows = colisListe.map((c) => [c.tracking, routeLabel(c.pays, c.direction), c.status, `${c.poids} kg`, c.reste > 0 ? fmt(c.reste, "EUR") : "Payé"]);
+  if (hasAutoTable && doc.autoTable) {
+    doc.autoTable({
+      startY: y, head: [["N° de suivi", "Route", "Statut", "Poids", "Paiement"]], body: rows,
+      theme: "grid", headStyles: { fillColor: [10, 38, 71], textColor: 255, fontSize: 8.5 }, styles: { fontSize: 8.5, textColor: [40, 40, 40] },
+      margin: { left: 14, right: 14 },
+    });
+  }
+
+  doc.setFontSize(7.3); doc.setTextColor(140, 140, 140); doc.setFont(undefined, "normal");
+  doc.text("Ba-Diaby Express — Transport de colis Conakry ⇄ Monde · badiabyexpress.bde@gmail.com", 14, 288);
+
+  openPdf(doc, `mon-bordereau-${compte.nom}.pdf`);
+}
+
+async function downloadReceptionBordereau(compte, colisSelectionnes, tarifs) {
+  const jspdf = await loadJsPDF();
+  const doc = new jspdf.jsPDF();
+  const poidsTotal = colisSelectionnes.reduce((s, c) => s + (Number(c.poids) || 0), 0);
+  const { tauxParKg, total, palier: palierUtilise } = calcReceptionFee(poidsTotal, tarifs);
+  const numero = `REC-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${String(Date.now()).slice(-4)}`;
+
+  doc.setFillColor(10, 38, 71); doc.rect(0, 0, 210, 32, "F");
+  doc.setFillColor(255, 255, 255); doc.roundedRect(14, 6, 22, 22, 3, 3, "F");
+  doc.addImage(DEFAULT_LOGO, "PNG", 15.3, 7.3, 19.4, 19.4);
+  doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold"); doc.setFontSize(15);
+  doc.text("BA-DIABY EXPRESS", 41, 15);
+  doc.setFont(undefined, "normal"); doc.setFontSize(9.5); doc.setTextColor(180, 195, 220);
+  doc.text("Bordereau de réception client", 41, 21.5);
+  doc.setFontSize(8); doc.text(`N° ${numero} · ${new Date().toLocaleDateString("fr-FR")}`, 41, 27);
+
+  let y = 42;
+  doc.setTextColor(10, 38, 71); doc.setFont(undefined, "bold"); doc.setFontSize(10);
+  doc.text("CLIENT", 14, y);
+  y += 6;
+  doc.setTextColor(30, 30, 30); doc.setFont(undefined, "bold"); doc.setFontSize(12);
+  doc.text(`${compte.prenom} ${compte.nom}`, 14, y);
+  y += 5.5;
+  doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(100, 100, 100);
+  doc.text(compte.telephone || "—", 14, y);
+  y += 10;
+  doc.setDrawColor(220); doc.line(14, y, 196, y);
+  y += 8;
+
+  doc.setFont(undefined, "bold"); doc.setFontSize(10); doc.setTextColor(10, 38, 71);
+  doc.text(`COLIS DISPONIBLES SÉLECTIONNÉS (${colisSelectionnes.length})`, 14, y);
+  y += 3;
+
+  const hasAutoTable = await ensureAutoTable();
+  const rows = colisSelectionnes.map((c) => [c.tracking, c.destinataire, routeLabel(c.pays, c.direction), `${c.poids} kg`]);
+  if (hasAutoTable && doc.autoTable) {
+    doc.autoTable({
+      startY: y + 4, head: [["N° de suivi", "Destinataire", "Route", "Poids"]], body: rows,
+      theme: "grid", headStyles: { fillColor: [10, 38, 71], textColor: 255, fontSize: 8.5 }, styles: { fontSize: 8.5, textColor: [40, 40, 40] },
+      margin: { left: 14, right: 14 },
+    });
+    y = doc.lastAutoTable.finalY + 10;
+  } else {
+    y += 8;
+    rows.forEach((r) => { doc.setFontSize(9); doc.setTextColor(40, 40, 40); doc.text(`${r[0]} — ${r[1]} — ${r[3]}`, 14, y); y += 6; });
+    y += 4;
+  }
+
+  doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, 34, "F");
+  doc.setFont(undefined, "normal"); doc.setFontSize(9.5); doc.setTextColor(90, 90, 90);
+  doc.text("Poids total du lot", 20, y + 10);
+  doc.text(`Tarif appliqué (palier jusqu'à ${palierUtilise?.max ?? "?"} kg)`, 20, y + 18);
+  doc.setFont(undefined, "bold"); doc.setFontSize(10.5); doc.setTextColor(20, 20, 20);
+  doc.text(`${poidsTotal.toFixed(1)} kg`, 190, y + 10, { align: "right" });
+  doc.text(`${tauxParKg.toLocaleString("fr-FR")} GNF / kg`, 190, y + 18, { align: "right" });
+  doc.setDrawColor(200); doc.line(20, y + 23, 190, y + 23);
+  doc.setFont(undefined, "bold"); doc.setFontSize(13); doc.setTextColor(10, 38, 71);
+  doc.text("TOTAL À PAYER", 20, y + 30);
+  doc.text(`${total.toLocaleString("fr-FR")} GNF`, 190, y + 30, { align: "right" });
+  y += 44;
+
+  doc.setFontSize(7.5); doc.setTextColor(140, 140, 140); doc.setFont(undefined, "normal");
+  doc.text("Ce bordereau récapitule les colis disponibles à la récupération et le montant à régler à l'agence.", 14, y);
+  doc.text("Ba-Diaby Express — Transport de colis Conakry ⇄ Monde · badiabyexpress.bde@gmail.com", 14, y + 5);
+
+  openPdf(doc, `bordereau-reception-${compte.nom}-${numero}.pdf`);
+}
+
 async function downloadRouteManifest(colisRoute, country, direction, bordereau, deviseAffichage) {
   const cur = deviseAffichage || country.currency;
   const jspdf = await loadJsPDF();
@@ -2903,143 +3650,150 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   doc.line(110, sigY + 14, 181, sigY + 14);
 
   doc.setFontSize(7.3); doc.setTextColor(150, 150, 150);
-  doc.text("Ba-Diaby Express — Transport de colis Conakry ⇄ Monde · contact@badiaby-express.com", 14, 288);
+  doc.text("Ba-Diaby Express — Transport de colis Conakry ⇄ Monde · badiabyexpress.bde@gmail.com", 14, 288);
 
   openPdf(doc, `bordereau-${bordereau?.numero || `${country.code}-${direction}`}-${new Date().toISOString().slice(0, 10)}.pdf`);
 }
 
 async function downloadLabel(colis) {
   const jspdf = await loadJsPDF();
-  const doc = new jspdf.jsPDF({ unit: "mm", format: "a6" }); // A6 standard = 105 x 148 mm
+  const doc = new jspdf.jsPDF({ unit: "mm", format: [100, 150] });
   const dest = COUNTRIES.find((c) => c.code === colis.pays);
-  const qrData = await generateQRDataUrl(colis.tracking, 300);
+  const trackingUrl = `${typeof window !== "undefined" ? window.location.origin : "https://ba-diaby-express.vercel.app"}/?suivi=1&code=${colis.tracking}`;
+  const [qrData, barcodeData] = await Promise.all([
+    generateQRDataUrl(trackingUrl, 300),
+    generateBarcodeDataUrl(colis.tracking).catch(() => null),
+  ]);
   const paye = colis.reste <= 0;
-  const W = 105, H = 148;
-  const M = 5.5;
+  const W = 100, H = 150, M = 6;
+  const NAVY = [10, 38, 71], RED = [214, 39, 63], INK = [17, 20, 26], MUTED = [128, 136, 150], LINE = [225, 228, 234];
 
-  const rule = (y) => { doc.setDrawColor(20, 20, 20); doc.setLineWidth(0.3); doc.line(0, y, W, y); };
-  const rect = (x, y, w, h) => { doc.setDrawColor(20, 20, 20); doc.rect(x, y, w, h); };
+  const hr = (y) => { doc.setDrawColor(...LINE); doc.setLineWidth(0.25); doc.line(M, y, W - M, y); };
+  const eyebrow = (text, x, y) => { doc.setFont(undefined, "bold"); doc.setFontSize(6.4); doc.setTextColor(...MUTED); doc.text(text.toUpperCase(), x, y); };
 
   // Cadre extérieur
-  doc.setDrawColor(20, 20, 20); doc.setLineWidth(0.6); doc.rect(0, 0, W, H);
+  doc.setDrawColor(...INK); doc.setLineWidth(0.5); doc.rect(0.6, 0.6, W - 1.2, H - 1.2);
 
-  // En-tête : logo + nom + mode de transport
-  doc.addImage(DEFAULT_LOGO, "PNG", M, 4, 14, 14);
-  doc.setTextColor(20, 20, 20);
-  doc.setFont(undefined, "bold"); doc.setFontSize(11.5);
-  doc.text("BA-DIABY", M + 17, 10);
-  doc.text("EXPRESS", M + 17, 16);
-  doc.setFillColor(10, 38, 71); doc.roundedRect(69, 6, 30, 7.5, 3.75, 3.75, "F");
+  // ── En-tête : logo + wordmark + mode de transport ──────────────────────────
+  doc.addImage(DEFAULT_LOGO, "PNG", M, 4.5, 14, 14);
+  doc.setTextColor(...NAVY); doc.setFont(undefined, "bold"); doc.setFontSize(12);
+  doc.text("BA-DIABY", M + 17, 10.5);
+  doc.setTextColor(...RED);
+  doc.text("EXPRESS", M + 17, 16.5);
+  const modeLabel = colis.mode === "air" ? "AÉRIEN" : "MARITIME";
+  const modeW = doc.getTextWidth(modeLabel) + 11;
+  doc.setFillColor(...NAVY); doc.roundedRect(W - M - modeW, 6, modeW, 7, 3.5, 3.5, "F");
   doc.setTextColor(255, 255, 255); doc.setFontSize(7.5); doc.setFont(undefined, "bold");
-  doc.text(colis.mode === "air" ? "AÉRIEN" : "MARITIME", 84, 11, { align: "center" });
-  rule(20);
+  doc.text(modeLabel, W - M - modeW / 2, 10.5, { align: "center" });
+  doc.setFillColor(...RED); doc.rect(0.6, 21.5, W - 1.2, 0.8, "F");
+  let y = 26;
 
-  // Statut de paiement
-  doc.setFillColor(...(paye ? [18, 38, 29] : [43, 22, 32]));
-  doc.rect(0, 20, W, 7.5, "F");
-  doc.setTextColor(...(paye ? [62, 203, 132] : [226, 63, 82]));
+  // ── Statut de paiement (jamais de montant) + route courte ───────────────────
   doc.setFontSize(8.5); doc.setFont(undefined, "bold");
-  doc.text(paye ? "✓ PAYÉ" : `✗ NON PAYÉ — reste ${fmt(colis.reste, "EUR")}`, M, 25.3);
-  doc.setTextColor(20, 20, 20);
-  rule(27.5);
+  doc.setTextColor(...(paye ? [30, 140, 80] : [200, 40, 55]));
+  doc.text(paye ? "\u2713 PAYÉ" : "\u2717 NON PAYÉ", M, y);
+  doc.setFont(undefined, "bold"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
+  doc.text(`GN \u2192 ${colis.pays}`, W - M, y, { align: "right" });
+  y += 4;
+  hr(y);
+  y += 3;
 
-  // Destinataire
-  let y = 27.5;
-  doc.setFontSize(7); doc.setFont(undefined, "bold"); doc.setTextColor(120, 120, 120);
-  doc.text("DESTINATAIRE / TO", M, y + 5);
-  doc.setTextColor(20, 20, 20); doc.setFontSize(11.5);
+  // ── Destinataire ─────────────────────────────────────────────────────────
+  eyebrow("Livrer à  /  Deliver to", M, y);
+  y += 4.5;
+  doc.setTextColor(...INK); doc.setFont(undefined, "bold"); doc.setFontSize(12.5);
   const nomLines = doc.splitTextToSize(colis.destinataire.toUpperCase(), W - 2 * M);
-  doc.text(nomLines, M, y + 11);
-  y += 11 + nomLines.length * 4.8;
-  doc.setFontSize(8.5); doc.setFont(undefined, "bold");
-  doc.text(`${(dest?.name || "").toUpperCase()}   ${colis.telephone || ""}`, M, y);
-  y += 5;
-  doc.setFont(undefined, "normal"); doc.setFontSize(7.5); doc.setTextColor(80, 80, 80);
+  doc.text(nomLines, M, y);
+  y += nomLines.length * 4.8;
+  doc.setFont(undefined, "normal"); doc.setFontSize(8.3); doc.setTextColor(60, 66, 78);
+  doc.text(colis.telephone || "—", M, y);
+  y += 3.8;
+  if (colis.destinataireEmail) { doc.text(colis.destinataireEmail, M, y); y += 3.8; }
+  y += 2;
+  doc.setFontSize(7.8); doc.setTextColor(...INK);
   if (colis.destinataireAdresse) {
     const addrLines = doc.splitTextToSize(colis.destinataireAdresse, W - 2 * M);
     doc.text(addrLines, M, y);
-    y += addrLines.length * 3.8;
+    y += addrLines.length * 3.6;
   }
   const villeCp = [colis.destinataireCodePostal, colis.destinataireVille].filter(Boolean).join(" ");
-  if (villeCp) { doc.text(villeCp, M, y); y += 4; }
-  if (colis.destinataireEmail) { doc.text(colis.destinataireEmail, M, y); y += 4; }
-  y += 2.5;
-  rule(y);
+  if (villeCp) { doc.text(villeCp, M, y); y += 3.6; }
+  doc.setFont(undefined, "bold");
+  doc.text((dest?.name || "").toUpperCase(), M, y);
+  y += 4.3;
+  hr(y);
+  y += 3;
 
-  // QR + code de suivi
-  doc.setFillColor(246, 248, 251); doc.rect(0, y, W, 4.5 + 27 + 4.5, "F");
-  const qrTop = y + 4.5;
-  doc.addImage(qrData, "PNG", M, qrTop, 27, 27);
-  rect(M, qrTop, 27, 27);
-  doc.setFontSize(7); doc.setFont(undefined, "bold"); doc.setTextColor(120, 120, 120);
-  doc.text("CODE DE SUIVI", M + 32, qrTop + 7);
-  doc.setTextColor(20, 20, 20); doc.setFontSize(13.5);
-  doc.text(colis.tracking, M + 32, qrTop + 15);
-  y = qrTop + 27 + 4.5;
-  rule(y);
+  // ── QR (vers le suivi public — jamais de donnée financière) + n° de suivi ───
+  const qrSize = 23;
+  doc.setDrawColor(...LINE); doc.setLineWidth(0.3); doc.rect(M, y, qrSize, qrSize);
+  doc.addImage(qrData, "PNG", M + 0.6, y + 0.6, qrSize - 1.2, qrSize - 1.2);
+  const txX = M + qrSize + 6;
+  eyebrow("Code de suivi", txX, y + 7);
+  doc.setTextColor(...INK); doc.setFont(undefined, "bold"); doc.setFontSize(14.5);
+  doc.text(colis.tracking, txX, y + 15.5);
+  doc.setFont(undefined, "normal"); doc.setFontSize(6.6); doc.setTextColor(...MUTED);
+  const scanLines = doc.splitTextToSize("Scannez pour suivre le colis en direct", W - M - txX - 2);
+  doc.text(scanLines, txX, y + 20.5);
+  y += qrSize + 2.5;
+  hr(y);
+  y += 3;
 
-  // Code-barres (visuel, dérivé du tracking)
-  const barTop = y + 4.5;
-  let bx = M;
-  for (let i = 0; i < colis.tracking.length * 3; i++) {
-    const seed = colis.tracking.charCodeAt(i % colis.tracking.length) * (i + 1);
-    const w = 0.35 + (seed % 3) * 0.3;
-    if (seed % 4 !== 0) { doc.setFillColor(20, 20, 20); doc.rect(bx, barTop, w, 13, "F"); }
-    bx += w + 0.35;
-    if (bx > W - M) break;
+  // ── Code-barres Code128 réel ────────────────────────────────────────────
+  if (barcodeData) {
+    const bh = 10;
+    doc.addImage(barcodeData, "PNG", M, y, W - 2 * M, bh);
+    y += bh + 1.5;
   }
-  doc.setFontSize(7.5); doc.setFont(undefined, "bold"); doc.setTextColor(20, 20, 20);
-  doc.text(colis.tracking, W / 2, barTop + 17.5, { align: "center" });
-  y = barTop + 21.5;
-  rule(y);
+  doc.setFont(undefined, "bold"); doc.setFontSize(7.5); doc.setTextColor(...INK);
+  doc.text(colis.tracking, W / 2, y, { align: "center" });
+  y += 3.3;
+  hr(y);
+  y += 3;
 
-  // Expéditeur
-  doc.setFontSize(7); doc.setFont(undefined, "bold"); doc.setTextColor(120, 120, 120);
-  doc.text("EXPÉDITEUR / FROM", M, y + 5);
-  doc.setTextColor(20, 20, 20); doc.setFontSize(9.5);
-  doc.text(colis.expediteur, M, y + 10.5);
-  doc.setFontSize(8); doc.setFont(undefined, "normal");
-  doc.text(colis.expediteurTelephone || "", W - M, y + 10.5, { align: "right" });
-  y += 14;
-  rule(y);
+  // ── Expéditeur ───────────────────────────────────────────────────────────
+  eyebrow("Expéditeur / From", M, y);
+  y += 4.3;
+  doc.setTextColor(...INK); doc.setFont(undefined, "bold"); doc.setFontSize(9);
+  doc.text(colis.expediteur, M, y);
+  doc.setFont(undefined, "normal"); doc.setFontSize(7.6);
+  doc.text(colis.expediteurTelephone || "", W - M, y, { align: "right" });
+  y += 3.6;
+  if (colis.expediteurAdresse) {
+    doc.setFontSize(6.9); doc.setTextColor(...MUTED);
+    const eLines = doc.splitTextToSize(colis.expediteurAdresse, W - 2 * M).slice(0, 1);
+    doc.text(eLines, M, y);
+    y += 3.2;
+  }
+  y += 1.8;
+  hr(y);
+  y += 3;
 
-  // Poids / Articles / Date
-  doc.setFillColor(246, 248, 251); doc.rect(0, y, W, 15, "F");
+  // ── Poids / Articles / Date ──────────────────────────────────────────────
   const articles = (colis.produits || []).reduce((s, p) => s + (Number(p.quantite) || 1), 0) || 1;
-  const col = (x, w, label, value) => {
-    doc.setFontSize(7); doc.setFont(undefined, "bold"); doc.setTextColor(120, 120, 120);
-    doc.text(label, x + w / 2, y + 5, { align: "center" });
-    doc.setFontSize(10); doc.setTextColor(20, 20, 20);
-    doc.text(String(value), x + w / 2, y + 11, { align: "center" });
-  };
-  const colW = W / 3;
-  col(0, colW, "POIDS", `${colis.poids} kg`);
-  doc.setDrawColor(220); doc.line(colW, y, colW, y + 15); doc.line(colW * 2, y, colW * 2, y + 15);
-  col(colW, colW, "ARTICLES", articles);
-  col(colW * 2, colW, "DATE", new Date(colis.createdAt).toLocaleDateString("fr-FR"));
-  y += 15;
-  rule(y);
-
-  // Référence / route
-  doc.setFontSize(7); doc.setFont(undefined, "bold"); doc.setTextColor(120, 120, 120);
-  doc.text("RÉF.", M, y + 5.5);
-  doc.setTextColor(20, 20, 20); doc.setFontSize(9);
-  doc.text(routeLabel(colis.pays, colis.direction).toUpperCase(), W - M, y + 5.5, { align: "right" });
+  const stats = [["POIDS", `${colis.poids} kg`], ["ARTICLES", String(articles)], ["ENREGISTRÉ", new Date(colis.createdAt).toLocaleDateString("fr-FR")]];
+  const colW = (W - 2 * M) / 3;
+  stats.forEach(([label, value], i) => {
+    const cx = M + colW * i + colW / 2;
+    doc.setFont(undefined, "bold"); doc.setFontSize(6.2); doc.setTextColor(...MUTED);
+    doc.text(label, cx, y, { align: "center" });
+    doc.setFontSize(9); doc.setTextColor(...INK);
+    doc.text(value, cx, y + 4.5, { align: "center" });
+    if (i > 0) { doc.setDrawColor(...LINE); doc.line(M + colW * i, y - 3, M + colW * i, y + 5.5); }
+  });
   y += 8.5;
-  rule(y);
 
-  // Mentions légales (condensées pour tenir sur A6)
-  doc.setFontSize(6.3); doc.setFont(undefined, "normal"); doc.setTextColor(90, 90, 90);
-  const legal = [
-    "Vérifier l'état du colis avant acceptation. Transport soumis aux CGV BA-DIABY EXPRESS.",
-    "Support : contact@badiaby-express.com",
-  ];
-  let ly = y + 4.5;
-  legal.forEach((l) => { const wrapped = doc.splitTextToSize(l, W - 2 * M); doc.text(wrapped, M, ly); ly += wrapped.length * 3.2; });
+  // ── Bandeau route ────────────────────────────────────────────────────────
+  doc.setFillColor(...NAVY); doc.rect(0.6, y, W - 1.2, 7.5, "F");
+  doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold"); doc.setFontSize(7.8);
+  doc.text(routeLabel(colis.pays, colis.direction).toUpperCase(), W / 2, y + 5, { align: "center" });
+  y += 9;
 
-  rule(H - 8);
-  doc.setFontSize(7); doc.setFont(undefined, "bold"); doc.setTextColor(20, 20, 20);
-  doc.text("WWW.BA-DIABY-EXPRESS.COM", W / 2, H - 4, { align: "center" });
+  // ── Pied de page ─────────────────────────────────────────────────────────
+  doc.setFontSize(5.6); doc.setFont(undefined, "normal"); doc.setTextColor(...MUTED);
+  doc.text("Transport soumis aux CGV Ba-Diaby Express · badiabyexpress.bde@gmail.com", W / 2, Math.min(y, H - 6), { align: "center" });
+  doc.setFont(undefined, "bold"); doc.setFontSize(6.4); doc.setTextColor(...NAVY);
+  doc.text("WWW.BA-DIABY-EXPRESS.COM", W / 2, Math.min(y + 3.2, H - 2.8), { align: "center" });
 
   openPdf(doc, `etiquette-${colis.tracking}.pdf`);
 }
@@ -3098,7 +3852,7 @@ async function downloadRecu(colis, paiement) {
 
   doc.setFontSize(7.3); doc.setTextColor(140, 140, 140);
   doc.text("Ce reçu fait foi d'encaissement pour la comptabilité de Ba-Diaby Express.", 10, H - 12);
-  doc.text("contact@badiaby-express.com · www.ba-diaby-express.com", 10, H - 8);
+  doc.text("badiabyexpress.bde@gmail.com · www.ba-diaby-express.com", 10, H - 8);
 
   openPdf(doc, `recu-${colis.tracking}-${paiement.id}.pdf`);
 }
@@ -3142,8 +3896,12 @@ async function downloadInvoice(colis) {
   const doc = new jspdf.jsPDF();
   const dest = COUNTRIES.find((c) => c.code === colis.pays);
   const destCur = dest?.currency || "EUR";
-  const paye = colis.reste <= 0;
+  const statutPaiement = colis.reste <= 0 ? "PAYÉ" : (colis.paye > 0 ? "PAIEMENT PARTIEL" : "NON PAYÉ");
+  const statutColor = colis.reste <= 0 ? [62, 203, 132] : (colis.paye > 0 ? [224, 166, 58] : [226, 63, 82]);
+  const statutBg = colis.reste <= 0 ? [18, 38, 29] : (colis.paye > 0 ? [43, 34, 15] : [43, 22, 32]);
   const qrData = await generateQRDataUrl(colis.tracking, 200).catch(() => null);
+  const categories = [...new Set((colis.produits || []).map((p) => p.categorie).filter(Boolean))].join(", ") || "—";
+  const numeroTicket = `TCK-${colis.tracking}`;
 
   // Bandeau d'en-tête
   doc.setFillColor(10, 38, 71); doc.rect(0, 0, 210, 34, "F");
@@ -3152,53 +3910,74 @@ async function downloadInvoice(colis) {
   doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold"); doc.setFontSize(16);
   doc.text("BA-DIABY EXPRESS", 43, 16);
   doc.setFont(undefined, "normal"); doc.setFontSize(10); doc.setTextColor(180, 195, 220);
-  doc.text("Ticket d'envoi / Facture d'expédition", 43, 23);
-  doc.setFontSize(8.5); doc.text("Conakry, Guinée · contact@badiaby-express.com", 43, 29);
+  doc.text("Ticket d'envoi — Reçu client", 43, 23);
+  doc.setFontSize(8.5); doc.text("Conakry, Guinée · badiabyexpress.bde@gmail.com", 43, 29);
   if (qrData) { doc.addImage(qrData, "PNG", 178, 6, 22, 22); }
 
   // Bandeau statut
-  doc.setFillColor(...(paye ? [18, 38, 29] : [43, 22, 32]));
-  doc.rect(0, 34, 210, 10, "F");
-  doc.setFont(undefined, "bold"); doc.setFontSize(10.5);
-  doc.setTextColor(...(paye ? [62, 203, 132] : [226, 63, 82]));
-  doc.text(paye ? `✓ PAYÉ INTÉGRALEMENT` : `✗ NON PAYÉ — reste ${fmt(colis.reste, "EUR")}`, 14, 40.5);
-  doc.setTextColor(180, 195, 220); doc.setFont(undefined, "normal"); doc.setFontSize(9);
-  doc.text(`N° ${colis.tracking}`, 196, 40.5, { align: "right" });
+  doc.setFillColor(...statutBg);
+  doc.rect(0, 34, 210, 12, "F");
+  doc.setFont(undefined, "bold"); doc.setFontSize(11);
+  doc.setTextColor(...statutColor);
+  doc.text(statutPaiement, 14, 41.5);
+  doc.setTextColor(180, 195, 220); doc.setFont(undefined, "normal"); doc.setFontSize(8.5);
+  doc.text(`Ticket ${numeroTicket}`, 196, 39.5, { align: "right" });
+  doc.text(`Suivi ${colis.tracking}`, 196, 44, { align: "right" });
+
+  let y = 52;
+  doc.setFontSize(8.3); doc.setTextColor(110, 110, 110);
+  doc.text(`${new Date(colis.createdAt).toLocaleString("fr-FR")}  ·  Agent : ${colis.agentCreation || "—"}`, 14, y);
+  y += 8;
+  doc.setDrawColor(220); doc.line(14, y, 196, y);
+  y += 8;
 
   // Résumé expéditeur / destinataire, 2 colonnes
-  let y = 52;
   doc.setTextColor(10, 38, 71); doc.setFont(undefined, "bold"); doc.setFontSize(9);
   doc.text("EXPÉDITEUR", 14, y);
   doc.text("DESTINATAIRE", 110, y);
   y += 6;
-  doc.setFont(undefined, "normal"); doc.setFontSize(10); doc.setTextColor(40, 40, 40);
+  doc.setFont(undefined, "normal"); doc.setFontSize(10.5); doc.setTextColor(30, 30, 30);
   doc.text(colis.expediteur || "—", 14, y);
   doc.text(colis.destinataire || "—", 110, y);
   y += 5.5;
   doc.setFontSize(9); doc.setTextColor(100, 100, 100);
   doc.text(colis.expediteurTelephone || "—", 14, y);
   doc.text(colis.telephone || "—", 110, y);
-  if (colis.destinataireAdresse) {
-    y += 5;
-    const addrLines = doc.splitTextToSize(colis.destinataireAdresse, 85);
-    doc.text(addrLines, 110, y);
+  let yExp = y, yDest = y;
+  if (colis.expediteurAdresse) {
+    yExp += 5;
+    const lines = doc.splitTextToSize(colis.expediteurAdresse, 85);
+    doc.text(lines, 14, yExp);
+    yExp += lines.length * 4.5;
   }
-  y += 12;
+  if (colis.destinataireEmail) { yDest += 5; doc.text(colis.destinataireEmail, 110, yDest); }
+  if (colis.destinataireAdresse) {
+    yDest += 5;
+    const lines = doc.splitTextToSize(colis.destinataireAdresse, 85);
+    doc.text(lines, 110, yDest);
+    yDest += lines.length * 4.5;
+  }
+  const villeCp = [colis.destinataireCodePostal, colis.destinataireVille].filter(Boolean).join(" ");
+  if (villeCp) { yDest += 4.5; doc.text(villeCp, 110, yDest); }
+  const destPaysNom = COUNTRIES.find((c) => c.code === colis.destinatairePays)?.name || dest?.name;
+  if (destPaysNom) { yDest += 4.5; doc.setFont(undefined, "bold"); doc.text(destPaysNom.toUpperCase(), 110, yDest); doc.setFont(undefined, "normal"); }
+  y = Math.max(yExp, yDest) + 6;
   doc.setDrawColor(220); doc.line(14, y, 196, y);
   y += 8;
 
-  // Détails de l'expédition
+  // Détails du colis
   doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(10, 38, 71);
-  doc.text("DÉTAILS DE L'EXPÉDITION", 14, y);
+  doc.text("INFORMATIONS DU COLIS", 14, y);
   y += 7;
   const infoLine = (label, value, x) => { doc.setFontSize(8.5); doc.setTextColor(120, 120, 120); doc.text(label, x, y); doc.setFontSize(10); doc.setTextColor(40, 40, 40); doc.text(String(value), x, y + 5); };
-  infoLine("Route", routeLabel(colis.pays, colis.direction), 14);
-  infoLine("Mode", colis.mode === "air" ? "Aérien" : "Maritime", 78);
-  infoLine("Poids", `${colis.poids} kg`, 142);
+  const articles = (colis.produits || []).reduce((s, p) => s + (Number(p.quantite) || 1), 0) || 1;
+  infoLine("Articles", articles, 14);
+  infoLine("Poids total", `${colis.poids} kg`, 60);
+  infoLine("Catégorie", categories, 106);
+  infoLine("Mode", colis.mode === "air" ? "Aérien" : "Maritime", 160);
   y += 14;
-  infoLine("Date d'enregistrement", new Date(colis.createdAt).toLocaleDateString("fr-FR"), 14);
-  infoLine("Statut actuel", colis.status, 78);
-  infoLine("Agence", colis.site || "—", 142);
+  infoLine("Route", routeLabel(colis.pays, colis.direction), 14);
+  infoLine("Statut actuel", colis.status, 106);
   y += 14;
 
   // Tableau des produits
@@ -3218,6 +3997,9 @@ async function downloadInvoice(colis) {
   // Récapitulatif financier
   doc.setDrawColor(220); doc.line(14, y, 196, y);
   y += 8;
+  doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(10, 38, 71);
+  doc.text("PAIEMENT", 14, y);
+  y += 8;
   const finLine = (label, value, bold) => {
     doc.setFont(undefined, bold ? "bold" : "normal"); doc.setFontSize(bold ? 12 : 9.5);
     doc.setTextColor(...(bold ? [10, 38, 71] : [90, 90, 90]));
@@ -3229,18 +4011,152 @@ async function downloadInvoice(colis) {
     if (colis.discountLoyalty > 0) finLine("Remise fidélité", `-${colis.discountLoyalty}%`);
     if (colis.rabaisMontant > 0) finLine("Rabais", `-${colis.rabaisMontant.toLocaleString("fr-FR")} ${colis.rabaisDevise}`);
   }
-  finLine(`Total (${destCur})`, fmt(colis.prix, destCur));
-  finLine("Total (GNF)", fmt(colis.prix, "GNF"), true);
-  finLine("Payé", fmt(colis.paye, "EUR"));
-  finLine("Reste à payer", fmt(colis.reste, "EUR"), !paye);
+  finLine(`Montant total (${destCur})`, fmt(colis.prix, destCur));
+  finLine("Montant total (GNF)", fmt(colis.prix, "GNF"), true);
+  finLine("Montant payé", fmt(colis.paye, "EUR"));
+  finLine("Reste à payer", fmt(colis.reste, "EUR"), colis.reste > 0);
 
   // Pied de page
-  doc.setDrawColor(220); doc.line(14, 280, 196, 280);
-  doc.setFontSize(7.5); doc.setTextColor(140, 140, 140); doc.setFont(undefined, "normal");
+  doc.setDrawColor(220); doc.line(14, 273, 196, 273);
+  doc.setFont(undefined, "italic"); doc.setFontSize(8.5); doc.setTextColor(90, 90, 90);
+  doc.text("Merci de votre confiance. Conservez ce ticket jusqu'à la livraison de votre colis.", 14, 279);
+  doc.setFont(undefined, "normal"); doc.setFontSize(7.3); doc.setTextColor(140, 140, 140);
   doc.text("Ba-Diaby Express — Transport de colis Conakry ⇄ Monde. Conditions générales disponibles sur demande.", 14, 285);
   doc.text(`Document généré le ${new Date().toLocaleString("fr-FR")}`, 14, 290);
 
-  openPdf(doc, `${colis.tracking}.pdf`);
+  openPdf(doc, `ticket-${colis.tracking}.pdf`);
+}
+
+/**
+ * Ticket d'envoi au format thermique 80 mm — même contenu que la version A4, mis en page
+ * pour une bande continue (largeur fixe, hauteur qui s'adapte au contenu, comme les vrais
+ * tickets de caisse). Le QR permet au personnel connecté d'ouvrir le dossier complet du
+ * colis dans l'application (suivi, paiements, historique).
+ */
+async function downloadTicketThermal(colis) {
+  const jspdf = await loadJsPDF();
+  const dest = COUNTRIES.find((c) => c.code === colis.pays);
+  const destCur = dest?.currency || "EUR";
+  const statutPaiement = colis.reste <= 0 ? "PAYÉ" : (colis.paye > 0 ? "PAIEMENT PARTIEL" : "NON PAYÉ");
+  const statutColor = colis.reste <= 0 ? [30, 140, 80] : (colis.paye > 0 ? [180, 120, 20] : [200, 40, 55]);
+  const qrData = await generateQRDataUrl(colis.tracking, 240).catch(() => null);
+  const categories = [...new Set((colis.produits || []).map((p) => p.categorie).filter(Boolean))].join(", ") || "—";
+  const numeroTicket = `TCK-${colis.tracking}`;
+  const articles = (colis.produits || []).reduce((s, p) => s + (Number(p.quantite) || 1), 0) || 1;
+  const villeCp = [colis.destinataireCodePostal, colis.destinataireVille].filter(Boolean).join(" ");
+  const destPaysNom = COUNTRIES.find((c) => c.code === colis.destinatairePays)?.name || dest?.name;
+
+  const W = 80, M = 4;
+  const INK = [20, 22, 26], MUTED = [130, 136, 148], NAVY = [10, 38, 71];
+
+  // Dessine tout le contenu sur un document déjà créé, retourne la position finale atteinte.
+  // Appelée deux fois : une première fois sur une page volontairement très haute pour mesurer
+  // la hauteur réellement nécessaire, puis une seconde fois sur la page finale, ajustée pile
+  // à cette hauteur — exactement comme un vrai ticket de caisse thermique à la longueur variable.
+  function draw(doc) {
+    let y = 8;
+    const center = (text, size, bold, color = INK) => { doc.setFont(undefined, bold ? "bold" : "normal"); doc.setFontSize(size); doc.setTextColor(...color); doc.text(text, W / 2, y, { align: "center" }); };
+    const dashed = () => { doc.setLineDashPattern([0.8, 0.8], 0); doc.setDrawColor(...MUTED); doc.setLineWidth(0.2); doc.line(M, y, W - M, y); doc.setLineDashPattern([], 0); };
+    const rowLR = (label, value, bold = false) => {
+      doc.setFont(undefined, "normal"); doc.setFontSize(7.4); doc.setTextColor(...MUTED); doc.text(label, M, y);
+      doc.setFont(undefined, bold ? "bold" : "normal"); doc.setFontSize(bold ? 8.6 : 7.6); doc.setTextColor(...INK);
+      doc.text(value, W - M, y, { align: "right" });
+      y += bold ? 5.4 : 4.6;
+    };
+    const sectionTitle = (t) => { doc.setFont(undefined, "bold"); doc.setFontSize(7); doc.setTextColor(...NAVY); doc.text(t.toUpperCase(), M, y); y += 4.6; };
+
+    doc.addImage(DEFAULT_LOGO, "PNG", W / 2 - 8, y - 6, 16, 16);
+    y += 13;
+    center("BA-DIABY EXPRESS", 11.5, true, NAVY); y += 4.5;
+    center("Ticket d'envoi — Reçu client", 7, false, MUTED); y += 5.5;
+    dashed(); y += 5;
+
+    center(statutPaiement, 10.5, true, statutColor); y += 6;
+
+    doc.setFont(undefined, "normal"); doc.setFontSize(7); doc.setTextColor(...MUTED);
+    rowLR("N° ticket", numeroTicket);
+    rowLR("N° de suivi", colis.tracking);
+    rowLR("Date", new Date(colis.createdAt).toLocaleString("fr-FR"));
+    rowLR("Agent", colis.agentCreation || "—");
+    y += 1;
+    dashed(); y += 5;
+
+    sectionTitle("Expéditeur");
+    doc.setFont(undefined, "bold"); doc.setFontSize(8); doc.setTextColor(...INK);
+    doc.text(colis.expediteur || "—", M, y); y += 4;
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.2); doc.setTextColor(...MUTED);
+    doc.text(colis.expediteurTelephone || "—", M, y); y += 4;
+    if (colis.expediteurAdresse) {
+      const lines = doc.splitTextToSize(colis.expediteurAdresse, W - 2 * M);
+      doc.text(lines, M, y); y += lines.length * 3.6;
+    }
+    y += 2;
+    dashed(); y += 5;
+
+    sectionTitle("Destinataire");
+    doc.setFont(undefined, "bold"); doc.setFontSize(8.5); doc.setTextColor(...INK);
+    const nomLines = doc.splitTextToSize(colis.destinataire || "—", W - 2 * M);
+    doc.text(nomLines, M, y); y += nomLines.length * 4;
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.2); doc.setTextColor(...MUTED);
+    doc.text(colis.telephone || "—", M, y); y += 3.8;
+    if (colis.destinataireEmail) { doc.text(colis.destinataireEmail, M, y); y += 3.8; }
+    doc.setTextColor(...INK);
+    if (colis.destinataireAdresse) {
+      const lines = doc.splitTextToSize(colis.destinataireAdresse, W - 2 * M);
+      doc.text(lines, M, y); y += lines.length * 3.6;
+    }
+    if (villeCp) { doc.text(villeCp, M, y); y += 3.6; }
+    if (destPaysNom) { doc.setFont(undefined, "bold"); doc.text(destPaysNom.toUpperCase(), M, y); y += 3.6; }
+    y += 2;
+    dashed(); y += 5;
+
+    sectionTitle("Informations du colis");
+    rowLR("Articles", String(articles));
+    rowLR("Poids total", `${colis.poids} kg`);
+    rowLR("Catégorie", categories);
+    rowLR("Mode", colis.mode === "air" ? "Aérien" : "Maritime");
+    rowLR("Route", routeLabel(colis.pays, colis.direction));
+    y += 1;
+    dashed(); y += 5;
+
+    sectionTitle("Paiement");
+    if (colis.discountLoyalty > 0) rowLR("Remise fidélité", `-${colis.discountLoyalty}%`);
+    if (colis.rabaisMontant > 0) rowLR("Rabais", `-${colis.rabaisMontant.toLocaleString("fr-FR")} ${colis.rabaisDevise}`);
+    rowLR(`Montant total (${destCur})`, fmt(colis.prix, destCur));
+    rowLR("Montant total (GNF)", fmt(colis.prix, "GNF"), true);
+    rowLR("Montant payé", fmt(colis.paye, "EUR"));
+    rowLR("Reste à payer", fmt(colis.reste, "EUR"), colis.reste > 0);
+    y += 1;
+    dashed(); y += 6;
+
+    if (qrData) {
+      const qs = 26;
+      doc.addImage(qrData, "PNG", W / 2 - qs / 2, y, qs, qs);
+      y += qs + 3;
+    }
+    center(colis.tracking, 7.5, true, INK); y += 3.5;
+    center("À scanner dans l'application pour le dossier complet", 6, false, MUTED); y += 6;
+    dashed(); y += 5;
+
+    doc.setFont(undefined, "italic"); doc.setFontSize(7); doc.setTextColor(...INK);
+    const merci = doc.splitTextToSize("Merci de votre confiance. Conservez ce ticket jusqu'à la livraison de votre colis.", W - 2 * M);
+    doc.text(merci, W / 2, y, { align: "center" }); y += merci.length * 3.6 + 3;
+    doc.setFont(undefined, "normal"); doc.setFontSize(6.2); doc.setTextColor(...MUTED);
+    const legal = doc.splitTextToSize("Ba-Diaby Express — Conakry, Guinée · badiabyexpress.bde@gmail.com · Transport soumis aux CGV.", W - 2 * M);
+    doc.text(legal, W / 2, y, { align: "center" }); y += legal.length * 3;
+
+    return y;
+  }
+
+  // Passe 1 : page volontairement très haute, uniquement pour mesurer la hauteur finale nécessaire.
+  const measureDoc = new jspdf.jsPDF({ unit: "mm", format: [W, 400] });
+  const finalHeight = Math.ceil(draw(measureDoc) + 6);
+
+  // Passe 2 : page ajustée pile à la bonne hauteur — c'est celle-ci qui est réellement livrée.
+  const doc = new jspdf.jsPDF({ unit: "mm", format: [W, finalHeight] });
+  draw(doc);
+
+  openPdf(doc, `ticket-thermique-${colis.tracking}.pdf`);
 }
 
 function EditColisForm({ colis, onClose, onSave }) {
@@ -3340,6 +4256,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onUpdate, 
   const [drawing, setDrawing] = useState(false);
   const [labelState, setLabelState] = useState("idle");
   const [invoiceState, setInvoiceState] = useState("idle");
+  const [ticketThermalState, setTicketThermalState] = useState("idle");
 
   async function handleDownloadLabel() {
     setLabelState("loading");
@@ -3350,6 +4267,11 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onUpdate, 
     setInvoiceState("loading");
     try { await downloadInvoice(colis); setInvoiceState("idle"); }
     catch (e) { console.error(e); setInvoiceState("error"); }
+  }
+  async function handleDownloadTicketThermal() {
+    setTicketThermalState("loading");
+    try { await downloadTicketThermal(colis); setTicketThermalState("idle"); }
+    catch (e) { console.error(e); setTicketThermalState("error"); }
   }
   async function handleDownloadRecu(paiement) {
     setRecuState(paiement.id);
@@ -3424,9 +4346,20 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onUpdate, 
 
   return (
     <Modal onClose={onClose} title="Détail du colis" wide>
+      {colis.demandeExpress && (
+        <div style={{ background: "#2B2313", border: "1px solid #4A3D1A", borderRadius: 12, padding: "12px 16px", marginBottom: 16, display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+          <div style={{ fontSize: 12.5, color: "#E0A63A" }}>⚡ Livraison express demandée par le client — {fmt(colis.demandeExpress.montant, "EUR")} · statut : <strong>{colis.demandeExpress.statut}</strong></div>
+          {canManage && colis.demandeExpress.statut === "En attente" && (
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => onUpdate({ demandeExpress: { ...colis.demandeExpress, statut: "Confirmée" } })} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 7, padding: "5px 12px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Confirmer</button>
+              <button onClick={() => onUpdate({ demandeExpress: { ...colis.demandeExpress, statut: "Refusée" } })} style={{ background: "none", border: "1px solid #4A3D1A", color: "#E0A63A", borderRadius: 7, padding: "5px 12px", fontSize: 11.5, cursor: "pointer" }}>Refuser</button>
+            </div>
+          )}
+        </div>
+      )}
       <div style={{ background: "#0A2647", borderRadius: 14, padding: "20px 22px", color: "#fff", marginBottom: 20 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-          <div><div style={{ fontSize: 11, color: "var(--muted)" }}>N° DE SUIVI</div><div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 22, fontWeight: 700 }}>{colis.tracking}</div></div>
+          <div><div style={{ fontSize: 11, color: "var(--muted)" }}>N° DE SUIVI</div><div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 22, fontWeight: 700 }}>{colis.tracking}</div>{colis.provenance && <span style={{ display: "inline-block", marginTop: 4, background: "rgba(255,255,255,0.12)", borderRadius: 6, padding: "2px 8px", fontSize: 11, fontWeight: 600 }}>{colis.provenance}</span>}</div>
           <div style={{ textAlign: "right" }}><div style={{ fontSize: 11, color: "var(--muted)" }}>ROUTE</div><div style={{ fontSize: 15, fontWeight: 700 }}>{routeLabel(colis.pays, colis.direction)}</div></div>
         </div>
         <div style={{ borderTop: "1.5px dashed rgba(255,255,255,0.3)", margin: "16px 0" }} />
@@ -3648,6 +4581,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onUpdate, 
           <button onClick={handleDownloadLabel} disabled={labelState === "loading"} style={smallBtn}><Printer size={13} /> {labelState === "loading" ? "Génération…" : "Étiquette QR"}</button>
           {labelState === "error" && <span style={{ fontSize: 11, color: "#E23F52", alignSelf: "center" }}>Échec — réessayez</span>}
           <button onClick={handleDownloadInvoice} disabled={invoiceState === "loading"} style={smallBtn}><Download size={13} /> {invoiceState === "loading" ? "Génération…" : "Facture PDF"}</button>
+          <button onClick={handleDownloadTicketThermal} disabled={ticketThermalState === "loading"} style={smallBtn}><Receipt size={13} /> {ticketThermalState === "loading" ? "Génération…" : "Ticket thermique 80mm"}</button>
           {invoiceState === "error" && <span style={{ fontSize: 11, color: "#E23F52", alignSelf: "center" }}>Échec — réessayez</span>}
           {canManage && !isLast && colis.status !== "Annulé" && <button onClick={onAdvance} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 9, border: "none", background: "#E23F52", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Statut suivant <ChevronRight size={14} /></button>}
         </div>
@@ -4035,6 +4969,108 @@ async function downloadImportTemplate() {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Colis à importer");
   XLSX.writeFile(wb, "modele-import-colis.xlsx");
+}
+
+/**
+ * Outil pour l'agent : recherche un compte client par nom, affiche ses colis disponibles
+ * (statut "Arrivé", prêts à être récupérés), l'agent en sélectionne un ou plusieurs, le
+ * tarif dégressif au kg s'applique automatiquement selon le poids total du lot sélectionné.
+ */
+function ReceptionBordereauModal({ onClose, data }) {
+  const [recherche, setRecherche] = useState("");
+  const [compte, setCompte] = useState(null);
+  const [selection, setSelection] = useState([]);
+  const [generation, setGeneration] = useState(false);
+  const tarifs = data.receptionTarifs || { paliers: [{ max: 10, tarif: 100000 }, { max: 40, tarif: 95000 }, { max: 100, tarif: 92000 }] };
+
+  const comptesTrouves = recherche.trim().length >= 2
+    ? (data.clientAccounts || []).filter((c) => `${c.prenom} ${c.nom}`.toLowerCase().includes(recherche.trim().toLowerCase()))
+    : [];
+
+  const colisDisponibles = compte ? data.colis.filter((c) => c.clientAccountId === compte.id && c.status === "Arrivé") : [];
+  const colisSelectionnes = colisDisponibles.filter((c) => selection.includes(c.tracking));
+  const poidsTotal = colisSelectionnes.reduce((s, c) => s + (Number(c.poids) || 0), 0);
+  const { tauxParKg, total, palier } = calcReceptionFee(poidsTotal, tarifs);
+
+  function toggle(tracking) {
+    setSelection((s) => (s.includes(tracking) ? s.filter((t) => t !== tracking) : [...s, tracking]));
+  }
+
+  async function generer() {
+    setGeneration(true);
+    try { await downloadReceptionBordereau(compte, colisSelectionnes, tarifs); }
+    catch (e) { console.error(e); }
+    setGeneration(false);
+  }
+
+  return (
+    <Modal onClose={onClose} title="Bordereau de réception client" wide>
+      {!compte ? (
+        <>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>Recherchez le client dont les colis sont disponibles à la récupération.</div>
+          <input value={recherche} onChange={(e) => setRecherche(e.target.value)} style={inputStyle} placeholder="Nom du client..." autoFocus />
+          {comptesTrouves.length > 0 && (
+            <div style={{ border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden", marginTop: 10 }}>
+              {comptesTrouves.map((c) => (
+                <button key={c.id} onClick={() => setCompte(c)} style={{ display: "block", width: "100%", textAlign: "start", padding: "10px 14px", background: "var(--surface2)", border: "none", borderTop: "1px solid var(--border)", cursor: "pointer", fontSize: 13, color: "var(--text)" }}>
+                  {c.prenom} {c.nom} <span style={{ color: "var(--muted)" }}>· {c.telephone}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+            <div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{compte.prenom} {compte.nom}</div>
+              <div style={{ fontSize: 12, color: "var(--muted)" }}>{compte.telephone}</div>
+            </div>
+            <button onClick={() => { setCompte(null); setSelection([]); setRecherche(""); }} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--muted)", cursor: "pointer" }}>Changer de client</button>
+          </div>
+
+          {colisDisponibles.length === 0 ? (
+            <div style={{ background: "var(--surface2)", borderRadius: 10, padding: 20, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>Aucun colis disponible (statut "Arrivé") pour ce client actuellement.</div>
+          ) : (
+            <>
+              <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)", marginBottom: 10 }}>Colis disponibles ({colisDisponibles.length}) — sélectionnez ceux à inclure</div>
+              <div style={{ border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden", marginBottom: 18 }}>
+                {colisDisponibles.map((c) => (
+                  <label key={c.tracking} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", borderTop: "1px solid var(--border)", cursor: "pointer" }}>
+                    <input type="checkbox" checked={selection.includes(c.tracking)} onChange={() => toggle(c.tracking)} />
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>{c.tracking} — {c.destinataire}</div>
+                      <div style={{ fontSize: 11, color: "var(--muted)" }}>{routeLabel(c.pays, c.direction)}</div>
+                    </div>
+                    <div style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>{c.poids} kg</div>
+                  </label>
+                ))}
+              </div>
+
+              {selection.length > 0 && (
+                <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 16 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: "var(--muted)", marginBottom: 6 }}>
+                    <span>Poids total du lot</span><span style={{ color: "var(--text)", fontWeight: 600 }}>{poidsTotal.toFixed(1)} kg</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: "var(--muted)", marginBottom: 10 }}>
+                    <span>Tarif appliqué (palier jusqu'à {palier?.max} kg)</span>
+                    <span style={{ color: "var(--text)", fontWeight: 600 }}>{tauxParKg.toLocaleString("fr-FR")} GNF/kg</span>
+                  </div>
+                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: 10, display: "flex", justifyContent: "space-between", fontSize: 16, fontWeight: 700, color: "var(--text)" }}>
+                    <span>Total à payer</span><span>{total.toLocaleString("fr-FR")} GNF</span>
+                  </div>
+                </div>
+              )}
+
+              <button onClick={generer} disabled={selection.length === 0 || generation} style={{ width: "100%", background: selection.length ? "#3ECB84" : "var(--surface2)", color: selection.length ? "#0A2647" : "var(--muted)", border: "none", borderRadius: 9, padding: "12px 0", fontSize: 14, fontWeight: 700, cursor: selection.length ? "pointer" : "not-allowed" }}>
+                {generation ? "Génération…" : `Générer le bordereau de réception (${selection.length} colis)`}
+              </button>
+            </>
+          )}
+        </>
+      )}
+    </Modal>
+  );
 }
 
 function ImportExcelModal({ onClose, onImportMany, data }) {

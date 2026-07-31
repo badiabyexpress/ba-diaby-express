@@ -148,3 +148,58 @@ messages) et permet une restauration depuis la même page.
 
 Prenez cette sauvegarde **avant** le redéploiement, par précaution — même si ce
 déploiement ne touche pas à la base de données.
+
+---
+
+## 7. Activer WhatsApp (Twilio)
+
+L'envoi automatique est **prêt côté code**. Tant qu'il n'est pas configuré, l'application
+ouvre un brouillon WhatsApp que l'agent envoie lui-même — exactement comme aujourd'hui.
+
+### Étape 1 — Activer le bac à sable WhatsApp
+
+Console Twilio → **Messaging → Try it out → Send a WhatsApp message**.
+
+Vous y trouverez un numéro Twilio partagé et un code d'adhésion (`join xxx-xxx`).
+Chaque personne qui doit recevoir des messages envoie ce code au numéro depuis WhatsApp.
+
+C'est gratuit et immédiat, mais réservé aux **essais avec votre équipe** : vous ne pouvez
+pas demander à un vrai client d'envoyer un code d'adhésion.
+
+> Votre numéro local américain (10DLC) affiché « Messaging disabled — Complete A2P
+> registration » ne sert **pas** pour WhatsApp. C'est un canal SMS distinct, et il est
+> de toute façon inadapté à un envoi vers la Guinée ou la France.
+
+### Étape 2 — Renseigner les trois variables dans Vercel
+
+**Project Settings → Environment Variables** :
+
+| Variable | Valeur |
+|---|---|
+| `TWILIO_ACCOUNT_SID` | votre identifiant de compte (commence par `AC`) |
+| `TWILIO_AUTH_TOKEN` | votre Auth Token — **à ne jamais partager** |
+| `TWILIO_WHATSAPP_FROM` | `whatsapp:+14155238886` (bac à sable) |
+
+Puis **redéployez** : Deployments → dernier déploiement → Redeploy.
+
+### Étape 3 — Essayer
+
+Ouvrez un colis dont le destinataire a rejoint le bac à sable, puis **Notifier WhatsApp**.
+
+- Message parti → le bouton affiche « Message envoyé »
+- Sinon → le brouillon WhatsApp s'ouvre, avec l'explication du refus
+
+### Étape 4 — Passer en WhatsApp Business
+
+Pour écrire à de vrais clients, il faut un numéro validé par Meta (vérification
+d'entreprise, quelques jours). Une fois obtenu, **une seule chose à changer** :
+`TWILIO_WHATSAPP_FROM` prend votre numéro validé. Le code reste identique.
+
+### À savoir : la fenêtre de 24 heures
+
+WhatsApp n'autorise le texte libre que dans les **24 h suivant le dernier message du
+client**. Au-delà, il faut un modèle validé par Meta. L'application détecte ce cas et
+l'explique à l'agent, qui bascule alors sur le brouillon.
+
+Prévoyez de faire valider quelques modèles courants : colis arrivé, colis prêt au
+retrait, rappel de paiement.

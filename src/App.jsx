@@ -153,7 +153,7 @@ function PhoneInput({ value, onChange, onBlur, placeholder, defaultDial }) {
 
   return (
     <div ref={wrapRef} style={{ position: "relative" }}>
-      <div style={{ display: "flex", border: `1.5px solid ${showError ? "var(--danger-fg)" : "var(--border)"}`, borderRadius: 9, overflow: "hidden" }}>
+      <div style={{ display: "flex", border: `1.5px solid ${showError ? "var(--danger-fg)" : "var(--border)"}`, borderRadius: 8, overflow: "hidden" }}>
         <button type="button" onClick={() => setOpen((o) => !o)} style={{ display: "flex", alignItems: "center", gap: 4, background: "var(--surface2)", border: "none", borderInlineEnd: `1.5px solid ${showError ? "var(--danger-fg)" : "var(--border)"}`, padding: "0 10px", cursor: "pointer", color: "var(--text)", fontSize: 13, flexShrink: 0 }}>
           {flag} +{dial} <ChevronRight size={11} style={{ transform: open ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.15s" }} />
         </button>
@@ -167,9 +167,9 @@ function PhoneInput({ value, onChange, onBlur, placeholder, defaultDial }) {
         </div>
       )}
       {open && (
-        <div style={{ position: "absolute", top: "100%", left: 0, marginTop: 4, width: "min(320px, 90vw)", maxHeight: 280, overflowY: "auto", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, boxShadow: "0 12px 32px rgba(0,0,0,0.35)", zIndex: 60 }}>
+        <div style={{ position: "absolute", top: "100%", left: 0, marginTop: 4, width: "min(320px, 90vw)", maxHeight: 280, overflowY: "auto", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, boxShadow: "0 12px 32px rgba(0,0,0,0.35)", zIndex: 60 }}>
           <div style={{ padding: 8, position: "sticky", top: 0, background: "var(--surface)", borderBottom: "1px solid var(--border)" }}>
-            <input autoFocus value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Rechercher un pays..." style={{ width: "100%", border: "1px solid var(--border)", borderRadius: 7, padding: "7px 10px", fontSize: 12.5, background: "var(--surface2)", color: "var(--text)", outline: "none" }} />
+            <input autoFocus value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Rechercher un pays..." style={{ width: "100%", border: "1px solid var(--border)", borderRadius: 6, padding: "7px 10px", fontSize: 12.5, background: "var(--surface2)", color: "var(--text)", outline: "none" }} />
           </div>
           {filtered.map((c, i) => (
             <button type="button" key={`${c.name}-${i}`} onClick={() => chooseCountry(c)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", padding: "9px 12px", background: "none", border: "none", cursor: "pointer", textAlign: "start" }}>
@@ -311,6 +311,15 @@ const PERMISSIONS_SCHEMA = [
   ]},
   { group: "CLIENTS", permissions: [
     { key: "clients.consulter", label: "Consulter les clients" },
+  ]},
+  /*
+   * L'Espace Client est un circuit à part : commandes annoncées, réception et pesée, messages,
+   * demandes express. Tous les agents n'ont pas vocation à y toucher — et un partenaire ne doit
+   * jamais y accéder. Cette permission n'est accordée à personne par défaut hors administrateur :
+   * c'est à l'administrateur de désigner nommément les agents concernés.
+   */
+  { group: "ESPACE CLIENT", permissions: [
+    { key: "espaceclient.gerer", label: "Traiter les demandes de l’Espace Client (réception, messages, express)" },
   ]},
   { group: "COMPTABILITÉ", permissions: [
     { key: "compta.consulter", label: "Consulter la comptabilité" },
@@ -517,6 +526,33 @@ function resizeImageToDataUrl(file, maxWidth = 900, quality = 0.72) {
   });
 }
 function waLink(phone, msg) { return `https://wa.me/${(phone || "").replace(/[^\d]/g, "")}?text=${encodeURIComponent(msg)}`; }
+
+/**
+ * Envoie un message WhatsApp au client.
+ *
+ * Tente d'abord l'envoi automatique via Twilio (fonction serveur /api/whatsapp, où vivent les
+ * identifiants). Si Twilio n'est pas configuré, ou si l'envoi échoue, on retombe sur le
+ * comportement actuel : ouverture d'un brouillon WhatsApp que l'agent envoie lui-même.
+ * Ainsi rien ne casse tant que Twilio n'est pas prêt, et l'agent n'est jamais bloqué.
+ *
+ * Retourne { envoye, raison } — `raison` est un message lisible à afficher à l'agent.
+ */
+async function envoyerWhatsApp(telephone, message) {
+  try {
+    const reponse = await fetch("/api/whatsapp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ to: telephone, message }),
+    });
+    if (reponse.ok) return { envoye: true };
+    const data = await reponse.json().catch(() => ({}));
+    // 501 = Twilio pas encore configuré : cas normal, on ne parle pas d'erreur à l'agent.
+    if (reponse.status === 501) return { envoye: false, raison: null };
+    return { envoye: false, raison: data.error || "L’envoi automatique a échoué." };
+  } catch (e) {
+    return { envoye: false, raison: null };   // hors ligne ou fonction absente
+  }
+}
 /** Le QR imprimé sur l’étiquette pointe vers l’URL de suivi public (?suivi=1&code=XXX) — on
  * en extrait le numéro de suivi ; si le scan renvoie directement un numéro, on le garde tel quel. */
 function extractTrackingFromScan(raw) {
@@ -546,6 +582,45 @@ function loadScript(src) {
     document.head.appendChild(s);
   });
 }
+/**
+ * Nettoie un texte destiné à un PDF.
+ *
+ * Les polices intégrées de jsPDF utilisent l'encodage WinAnsi, qui ne contient qu'un jeu de
+ * caractères limité. Tout caractère absent s'imprime sous forme de glyphe parasite. Deux cas
+ * passaient inaperçus à l'écran mais cassaient les documents imprimés :
+ *
+ *   - l'espace fine insécable (U+202F) que le format français insère dans les nombres :
+ *     « 64 980 GNF » s'imprimait « 64/980 GNF ». Cela touchait TOUS les montants à quatre
+ *     chiffres ou plus, dans tous les documents ;
+ *   - les flèches (→, ⇄) des libellés de route : « Conakry → Paris » devenait « Conakry !' Paris ».
+ *
+ * Ces caractères restent utilisés à l'écran, où ils s'affichent parfaitement ; seule la version
+ * imprimée est convertie.
+ */
+function nettoyerTextePdf(valeur) {
+  return String(valeur ?? "")
+    .replace(/[\u202F\u2009\u200A\u00A0]/g, " ")  // espaces fines / insécables -> espace normal
+    .replace(/[\u2192\u2794\u279C\u27A1]/g, "-")   // flèches vers la droite
+    .replace(/[\u2190\u21C4\u2194]/g, "-")          // autres flèches
+    .replace(/\u2248/g, "~")                         // presque égal
+    .replace(/\u2713/g, "OK")                        // coche
+    .replace(/\u2717/g, "X");                        // croix
+}
+
+/**
+ * Enveloppe un document jsPDF pour que TOUT texte imprimé passe par nettoyerTextePdf().
+ * Appelée juste après la création de chaque document : ainsi aucun futur appel à doc.text()
+ * ne peut réintroduire le problème, y compris dans du code ajouté plus tard.
+ */
+function preparerDocPdf(doc) {
+  const originale = doc.text.bind(doc);
+  doc.text = function (texte, ...reste) {
+    const propre = Array.isArray(texte) ? texte.map(nettoyerTextePdf) : nettoyerTextePdf(texte);
+    return originale(propre, ...reste);
+  };
+  return doc;
+}
+
 async function loadJsPDF() {
   if (!window.jspdf) await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js");
   return window.jspdf;
@@ -627,6 +702,9 @@ function defaultSeed() {
     branding: { logo: DEFAULT_LOGO },
     clientAccounts: [],
     preAlertes: [],
+    // Agence où les clients de l'Espace Client viennent retirer leurs colis. Affichée dans leur
+    // espace dès que le colis est disponible. Modifiable par l'administrateur.
+    agenceRetraitClient: "site-bambeto",
     receptionTarifs: { paliers: [{ max: 10, tarif: 100000 }, { max: 40, tarif: 95000 }, { max: 100, tarif: 92000 }] },
     expressTarifEurKg: 12,
     exchangeRates: { ...CURRENCIES },
@@ -641,7 +719,7 @@ function defaultSeed() {
       { id: "site-madina", nom: "Madina", adresse: "Madina, Conakry", telephone: "+224612479339", horaires: "Lun–Sam 8h–18h", paiements: "Espèces, Orange Money", stockage: "Retrait sous 7 jours" },
     ],
     agencesReception: {
-      FR: { adresse: "", telephone: "+33767562963", horaires: "" },
+      FR: { adresse: "26 rue Saint Blaise, 75020 Paris", telephone: "+33767562963", horaires: "" },
     },
     entreprise: { adresseSiege: "Bambeto, Conakry, Guinée", telephone: "+224612479339", email: "badiabyexpress.bde@gmail.com", siteWeb: "www.ba-diaby-express.com" },
     commissionConfig: { parKg: 2, parUnite: 5 }, // EUR — modifiable par l’Administrateur uniquement
@@ -710,7 +788,7 @@ const QRCodeImg = memo(function QRCodeImg({ value, size = 70 }) {
 
 function Barcode({ value }) {
   return (
-    <div style={{ height: 40, background: "var(--surface)", padding: "4px 8px", borderRadius: 4, display: "flex", alignItems: "center", gap: 1 }}>
+    <div style={{ height: 40, background: "var(--surface)", padding: "4px 8px", borderRadius: 6, display: "flex", alignItems: "center", gap: 1 }}>
       {value.split("").map((ch, i) => (
         <div key={i} style={{ width: (ch.charCodeAt(0) % 3) + 1, height: 28 + (ch.charCodeAt(0) % 8), background: "#0A2647" }} />
       ))}
@@ -736,6 +814,60 @@ function useIsMobile() {
   return isMobile;
 }
 
+/**
+ * Durée d'inactivité au bout de laquelle la session se ferme (en minutes).
+ * Le compte à rebours ne repart qu'à une vraie action de l'agent : clic, frappe, toucher,
+ * défilement. Changer d'onglet, revenir sur l'application ou recharger la page ne déconnecte
+ * PAS — auparavant la session n'était pas conservée du tout, si bien qu'un simple retour sur
+ * l'onglet (fréquent sur téléphone, où le navigateur décharge les pages en arrière-plan)
+ * ramenait à l'écran de connexion.
+ */
+const MINUTES_INACTIVITE = 10;
+const CLE_SESSION_CLIENT = "bde-session-client";
+const CLE_SESSION = "bde-session";
+
+function lireSessionEnregistree() {
+  try {
+    const brut = window.localStorage.getItem(CLE_SESSION);
+    if (!brut) return null;
+    const { userId, derniereActivite } = JSON.parse(brut);
+    if (!userId || !derniereActivite) return null;
+    if (Date.now() - derniereActivite > MINUTES_INACTIVITE * 60000) {
+      window.localStorage.removeItem(CLE_SESSION);
+      return null;
+    }
+    return userId;
+  } catch (e) { return null; }
+}
+
+function lireSessionClient() {
+  try {
+    const brut = window.localStorage.getItem(CLE_SESSION_CLIENT);
+    if (!brut) return null;
+    const { compteId, derniereActivite } = JSON.parse(brut);
+    if (!compteId || !derniereActivite) return null;
+    if (Date.now() - derniereActivite > MINUTES_INACTIVITE * 60000) {
+      window.localStorage.removeItem(CLE_SESSION_CLIENT);
+      return null;
+    }
+    return compteId;
+  } catch (e) { return null; }
+}
+
+function ecrireSessionClient(compteId) {
+  try {
+    if (!compteId) window.localStorage.removeItem(CLE_SESSION_CLIENT);
+    else window.localStorage.setItem(CLE_SESSION_CLIENT, JSON.stringify({ compteId, derniereActivite: Date.now() }));
+  } catch (e) {}
+}
+
+function ecrireSessionEnregistree(userId) {
+  try {
+    if (!userId) window.localStorage.removeItem(CLE_SESSION);
+    else window.localStorage.setItem(CLE_SESSION, JSON.stringify({ userId, derniereActivite: Date.now() }));
+  } catch (e) {}
+}
+
 function App() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -745,6 +877,49 @@ function App() {
   const [syncing, setSyncing] = useState(false);
   const [showLogin, setShowLogin] = useState(() => typeof window !== "undefined" && new URLSearchParams(window.location.search).has("connexion"));
   const [session, setSession] = useState(null);
+  const [sessionRestauree, setSessionRestauree] = useState(false);
+
+  // Restauration : on ne conserve QUE l'identifiant du compte, jamais le mot de passe ni son
+  // empreinte. Le compte est relu depuis les données à chaque ouverture, donc une révocation
+  // ou un changement de rôle prend effet immédiatement.
+  useEffect(() => {
+    if (sessionRestauree || !data || session) return;
+    const userId = lireSessionEnregistree();
+    if (userId) {
+      const u = (data.users || []).find((x) => x.id === userId);
+      if (u) setSession({ prenom: "", nom: "", email: "", telephone: "", twoFA: false, ...u });
+    }
+    setSessionRestauree(true);
+  }, [data, session, sessionRestauree]);
+
+  // Suivi d'activité : chaque action réelle repousse l'échéance. L'écriture est limitée à une
+  // fois toutes les 20 secondes pour ne pas solliciter le stockage à chaque mouvement.
+  useEffect(() => {
+    if (!session) return;
+    let derniereEcriture = 0;
+    const marquerActivite = () => {
+      const maintenant = Date.now();
+      if (maintenant - derniereEcriture < 20000) return;
+      derniereEcriture = maintenant;
+      ecrireSessionEnregistree(session.id);
+    };
+    const evenements = ["click", "keydown", "touchstart", "scroll", "pointerdown"];
+    evenements.forEach((e) => window.addEventListener(e, marquerActivite, { passive: true }));
+    marquerActivite();
+
+    // Contrôle périodique : au-delà du délai sans action, la session se ferme.
+    const minuteur = setInterval(() => {
+      if (!lireSessionEnregistree()) {
+        setSession(null);
+        setView("dashboard");
+      }
+    }, 30000);
+
+    return () => {
+      evenements.forEach((e) => window.removeEventListener(e, marquerActivite));
+      clearInterval(minuteur);
+    };
+  }, [session]);
   const [view, setView] = useState("dashboard");
   const [toast, setToast] = useState(null);
   const [lang, setLang] = useState("fr");
@@ -843,6 +1018,7 @@ function App() {
     return <Shell rtl={false} theme={theme}><Login users={data.users} onLogin={(u) => {
       const normalized = { prenom: "", nom: "", email: "", telephone: "", twoFA: false, ...u };
       setSession(normalized);
+      ecrireSessionEnregistree(normalized.id);
       setView("dashboard");
       try { persist({ ...data, users: (data.users || []).map((x) => (x.id === u.id ? normalized : x)) }); }
       catch (ex) { console.error("Migration du compte impossible :", ex); }
@@ -857,14 +1033,16 @@ function App() {
   const preAlertesEnAttente = (data.preAlertes || []).filter((p) => p.statut === "En attente").length;
   const declarationsEnAttente = data.colis.reduce((s, c) => s + (c.declarationsPaiement || []).filter((d) => d.statut === "En attente").length, 0);
   const signalementsOuvertsCount = data.colis.reduce((s, c) => s + (c.signalements || []).filter((sig) => sig.statut === "Ouvert").length, 0);
+  const expressEnAttenteCount = data.colis.filter((c) => c.demandeExpress && c.demandeExpress.statut === "En attente").length;
   const centreClientsEnAttente = (data.clientAccounts || []).filter((c) => (c.messages || []).some((m) => m.expediteur === "client" && !m.lu)).length
     + preAlertesEnAttente
     + (data.demandesRegroupement || []).filter((r) => r.statut === "En attente").length
-    + signalementsOuvertsCount;
+    + signalementsOuvertsCount
+    + expressEnAttenteCount;
   const nav = [
     { key: "dashboard", label: t.dashboard, icon: LayoutDashboard, show: true },
     { key: "colis", label: t.colis, icon: Package, show: perm("colis.voir_propres") || perm("colis.voir_tous") },
-    { key: "centreclients", label: "Centre clients", icon: MessageCircle, show: perm("clients.consulter") || perm("colis.voir_propres") || perm("colis.voir_tous"), badge: centreClientsEnAttente },
+    { key: "centreclients", label: "Centre clients", icon: MessageCircle, show: perm("espaceclient.gerer"), badge: centreClientsEnAttente },
     { key: "clients", label: t.clients, icon: Users, show: perm("clients.consulter") },
     { key: "bordereaux", label: t.bordereaux, icon: FileStack, show: perm("bordereaux.consulter") },
     { key: "paiements", label: t.paiements, icon: Receipt, show: perm("factures.consulter"), badge: declarationsEnAttente },
@@ -910,7 +1088,7 @@ function App() {
                     {data.branding?.nom ? data.branding.nom : <>BA-DIABY <span style={{ color: "var(--brand-on-dark)" }}>EXPRESS</span></>}
                   </div>
                 </div>
-                <div style={{ fontSize: 11.5, color: "var(--nav-muted)", marginTop: 3, whiteSpace: "nowrap" }}>{data.branding?.tagline || "Gestion des colis · Conakry ⇄ Monde"}</div>
+                <div style={{ fontSize: 11.5, color: "var(--nav-muted)", marginTop: 3, whiteSpace: "nowrap" }}>{data.branding?.tagline || "Gestion des colis · Conakry - Monde"}</div>
               </>
             )}
           </div>
@@ -923,7 +1101,7 @@ function App() {
             {nav.map((n) => (
               <button key={n.key} onClick={() => { setView(n.key); if (n.key === "admin") setAdminResetKey((k) => k + 1); setMobileNavOpen(false); }} title={(collapsed && !isMobile) ? n.label : undefined} style={{
                 display: "flex", alignItems: "center", gap: 10, padding: (collapsed && !isMobile) ? "10px 0" : "10px 12px", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start",
-                borderRadius: 8, background: view === n.key ? "var(--brand-solid)" : "transparent", color: "#fff", border: "none", cursor: "pointer", fontSize: 14, fontWeight: 500, textAlign: "start", position: "relative",
+                borderRadius: 8, background: view === n.key ? "var(--brand-solid)" : "transparent", color: "#fff", border: "none", cursor: "pointer", fontSize: 14, fontWeight: 600, textAlign: "start", position: "relative",
               }}>
                 <n.icon size={17} /> {!(collapsed && !isMobile) && n.label}
                 {!!n.badge && (
@@ -955,7 +1133,7 @@ function App() {
                 <div style={{ fontSize: 11.5, color: "var(--nav-muted)", marginBottom: 10 }}>{session.role}</div>
               </>
             )}
-            <button onClick={() => { setSession(null); setView("dashboard"); setShowLogin(false); const url = new URL(window.location.href); url.searchParams.delete("connexion"); window.history.replaceState({}, "", url); }} title={(collapsed && !isMobile) ? t.logout : undefined} style={{ display: "flex", alignItems: "center", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", gap: 8, width: "100%", fontSize: 13, color: "var(--brand-on-dark)", background: "none", border: "none", cursor: "pointer" }}>
+            <button onClick={() => { ecrireSessionEnregistree(null); setSession(null); setView("dashboard"); setShowLogin(false); const url = new URL(window.location.href); url.searchParams.delete("connexion"); window.history.replaceState({}, "", url); }} title={(collapsed && !isMobile) ? t.logout : undefined} style={{ display: "flex", alignItems: "center", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", gap: 8, width: "100%", fontSize: 13, color: "var(--brand-on-dark)", background: "none", border: "none", cursor: "pointer" }}>
               <LogOut size={15} /> {!(collapsed && !isMobile) && t.logout}
             </button>
           </div>
@@ -977,7 +1155,11 @@ function App() {
           <main style={{ flex: 1, padding: isMobile ? "16px 14px" : "28px 32px", overflowY: "auto", minWidth: 0 }}>
             {view === "dashboard" && (session.role === "Partenaire" ? <PartnerDashboard data={data} session={session} /> : <Dashboard data={data} session={session} onNavigate={setView} onNouveauColis={() => { setView("colis"); setOuvrirFormulaireColis((n) => n + 1); }} />)}
             {view === "colis" && <ColisView data={data} persist={persist} session={session} notify={notify} t={t} initialQuery={colisInitialQuery} ouvrirFormulaire={ouvrirFormulaireColis} />}
-            {view === "centreclients" && <CentreClientsPage data={data} persist={persist} notify={notify} session={session} />}
+            {view === "centreclients" && (effectivePermission(session, "espaceclient.gerer")
+              ? <CentreClientsPage data={data} persist={persist} notify={notify} session={session} />
+              : <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>
+                  Vous n’êtes pas autorisé à traiter les demandes de l’Espace Client. Demandez l’accès à un administrateur.
+                </div>)}
             {view === "clients" && <Clients data={data} />}
             {view === "bordereaux" && <BordereauxPage data={data} persist={persist} session={session} notify={notify} />}
             {view === "paiements" && <PaiementsPage data={data} notify={notify} />}
@@ -989,14 +1171,14 @@ function App() {
       </div>
       {showGlobalSearch && <GlobalSearchModal data={data} onClose={() => setShowGlobalSearch(false)} onOpenColis={(tracking) => { setView("colis"); setShowGlobalSearch(false); setColisInitialQuery(tracking); }} onOpenClient={() => { setView("clients"); setShowGlobalSearch(false); }} onOpenPreAlerte={() => { setView("centreclients"); setShowGlobalSearch(false); }} />}
       {(!isOnline || pendingSync > 0) && (
-        <div style={{ position: "fixed", top: isMobile ? 60 : 14, insetInlineEnd: 14, zIndex: 70, background: isOnline ? "var(--warn-bg)" : "var(--danger-bg)", color: isOnline ? "var(--warn-fg)" : "var(--danger-fg)", padding: "9px 16px", borderRadius: 10, fontSize: 12.5, fontWeight: 600, boxShadow: "0 6px 20px rgba(0,0,0,0.3)", display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ position: "fixed", top: isMobile ? 60 : 14, insetInlineEnd: 14, zIndex: 70, background: isOnline ? "var(--warn-bg)" : "var(--danger-bg)", color: isOnline ? "var(--warn-fg)" : "var(--danger-fg)", padding: "9px 16px", borderRadius: 12, fontSize: 12.5, fontWeight: 600, boxShadow: "0 6px 20px rgba(0,0,0,0.3)", display: "flex", alignItems: "center", gap: 8 }}>
           {isOnline ? <RefreshCw size={14} /> : <AlertTriangle size={14} />}
           {!isOnline
             ? "Hors ligne — vos modifications seront synchronisées dès le retour de la connexion"
             : syncing ? "Synchronisation en cours…" : `${pendingSync} modification(s) en attente de synchronisation`}
         </div>
       )}
-      {toast && <div style={{ position: "fixed", bottom: 24, insetInlineEnd: 24, insetInlineStart: isMobile ? 24 : "auto", background: "#0A2647", color: "#fff", padding: "12px 18px", borderRadius: 10, fontSize: 13.5, boxShadow: "0 8px 24px rgba(10,38,71,0.3)", textAlign: "center" }}>{toast}</div>}
+      {toast && <div style={{ position: "fixed", bottom: 24, insetInlineEnd: 24, insetInlineStart: isMobile ? 24 : "auto", background: "#0A2647", color: "#fff", padding: "12px 18px", borderRadius: 12, fontSize: 13.5, boxShadow: "0 8px 24px rgba(10,38,71,0.3)", textAlign: "center" }}>{toast}</div>}
     </Shell>
   );
 }
@@ -1147,7 +1329,7 @@ function GlobalSearchModal({ data, onClose, onOpenColis, onOpenClient, onOpenPre
 
   return (
     <Modal onClose={onClose} title="Recherche globale" wide>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface2)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 14px", marginBottom: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface2)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "10px 14px", marginBottom: 18 }}>
         <Search size={16} color="var(--muted)" />
         <input value={q} onChange={(e) => setQ(e.target.value)} autoFocus placeholder="N° de suivi, nom du client, téléphone, référence de pré-alerte..." style={{ border: "none", outline: "none", flex: 1, fontSize: 14, background: "none", color: "var(--text)" }} />
       </div>
@@ -1165,7 +1347,7 @@ function GlobalSearchModal({ data, onClose, onOpenColis, onOpenClient, onOpenPre
                 {resultats.colis.map((c) => {
                   const st = STATUS_STYLE[c.status];
                   return (
-                    <button key={c.tracking} onClick={() => onOpenColis(c.tracking)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--surface2)", border: "none", borderRadius: 9, padding: "10px 14px", cursor: "pointer", textAlign: "start" }}>
+                    <button key={c.tracking} onClick={() => onOpenColis(c.tracking)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--surface2)", border: "none", borderRadius: 8, padding: "10px 14px", cursor: "pointer", textAlign: "start" }}>
                       <div>
                         <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{c.tracking} — {c.destinataire}</div>
                         <div style={{ fontSize: 11.5, color: "var(--muted)" }}>{routeLabel(c.pays, c.direction)}</div>
@@ -1182,7 +1364,7 @@ function GlobalSearchModal({ data, onClose, onOpenColis, onOpenClient, onOpenPre
               <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", marginBottom: 8 }}>CLIENTS ({resultats.clients.length})</div>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 {resultats.clients.map((c) => (
-                  <button key={c.id} onClick={() => onOpenClient(c)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--surface2)", border: "none", borderRadius: 9, padding: "10px 14px", cursor: "pointer", textAlign: "start" }}>
+                  <button key={c.id} onClick={() => onOpenClient(c)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--surface2)", border: "none", borderRadius: 8, padding: "10px 14px", cursor: "pointer", textAlign: "start" }}>
                     <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{c.prenom} {c.nom}</div>
                     <div style={{ fontSize: 11.5, color: "var(--muted)" }}>{c.telephone}</div>
                   </button>
@@ -1195,7 +1377,7 @@ function GlobalSearchModal({ data, onClose, onOpenColis, onOpenClient, onOpenPre
               <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", marginBottom: 8 }}>PRÉ-ALERTES ({resultats.preAlertes.length})</div>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 {resultats.preAlertes.map((p) => (
-                  <button key={p.id} onClick={() => onOpenPreAlerte(p)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--surface2)", border: "none", borderRadius: 9, padding: "10px 14px", cursor: "pointer", textAlign: "start" }}>
+                  <button key={p.id} onClick={() => onOpenPreAlerte(p)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--surface2)", border: "none", borderRadius: 8, padding: "10px 14px", cursor: "pointer", textAlign: "start" }}>
                     <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{p.trackingExterne}{p.description ? ` — ${p.description}` : ""}</div>
                     <span style={{ fontSize: 11, color: "var(--muted)" }}>{p.statut}</span>
                   </button>
@@ -1368,7 +1550,7 @@ function CguPage({ data }) {
         </>)}
 
         <div style={{ textAlign: "center", fontSize: 11, color: "var(--muted)", marginTop: 40, paddingTop: 20, borderTop: "1px solid var(--border)" }}>
-          Ba-Diaby Express — Transport de colis Conakry ⇄ Monde
+          Ba-Diaby Express — Transport de colis Conakry - Monde
         </div>
       </div>
     </div>
@@ -1385,7 +1567,7 @@ function CguPage({ data }) {
  */
 const CLIENT_I18N = {
   "Espace Client": { en: "Client Area", ar: "مساحة العميل" },
-  "Ba-Diaby Express — Transport de colis Conakry ⇄ Monde": { en: "Ba-Diaby Express — Parcel transport Conakry ⇄ Worldwide", ar: "با-ديابي إكسبريس — نقل الشحنات كوناكري ⇄ العالم" },
+  "Ba-Diaby Express — Transport de colis Conakry - Monde": { en: "Ba-Diaby Express — Parcel transport Conakry ⇄ Worldwide", ar: "با-ديابي إكسبريس — نقل الشحنات كوناكري ⇄ العالم" },
   "Suivi de colis": { en: "Parcel tracking", ar: "تتبع الشحنة" },
   "Se connecter": { en: "Sign in", ar: "تسجيل الدخول" },
   "Déconnexion": { en: "Sign out", ar: "تسجيل الخروج" },
@@ -1469,7 +1651,41 @@ const CLIENT_I18N = {
   "Aucune pré-alerte pour le moment.": { en: "No pre-alerts yet.", ar: "لا توجد إشعارات مسبقة بعد." },
   "Description (optionnel)": { en: "Description (optional)", ar: "الوصف (اختياري)" },
   "Nombre d’articles": { en: "Number of items", ar: "عدد القطع" },
-  "Poids estimé (kg)": { en: "Estimated weight (kg)", ar: "الوزن التقديري (كغ)" },
+  "Référence de la commande": { en: "Order reference", ar: "مرجع الطلب" },
+  "Afficher les montants en": { en: "Show amounts in", ar: "عرض المبالغ بـ" },
+  "Votre référence de commande": { en: "Your order reference", ar: "مرجع طلبك" },
+  "Votre colis vous attend": { en: "Your parcel is waiting for you", ar: "طردك في انتظارك" },
+  "Colis signalé perdu": { en: "Parcel reported lost", ar: "تم الإبلاغ عن فقدان الطرد" },
+  "Colis signalé endommagé": { en: "Parcel reported damaged", ar: "تم الإبلاغ عن تلف الطرد" },
+  "réglé": { en: "resolved", ar: "تمت التسوية" },
+  "Notre équipe traite votre dossier et vous recontacte.": { en: "Our team is handling your case and will get back to you.", ar: "فريقنا يعالج ملفك وسيتواصل معك." },
+  "J’ai payé": { en: "I have paid", ar: "لقد دفعت" },
+  "Paiement déclaré, en attente de vérification": { en: "Payment declared, awaiting verification", ar: "تم الإبلاغ عن الدفع، بانتظار التحقق" },
+  "Copier toute l’adresse": { en: "Copy the whole address", ar: "نسخ العنوان بالكامل" },
+  "Adresse copiée": { en: "Address copied", ar: "تم نسخ العنوان" },
+  "Aucun colis rattaché à votre compte pour le moment.": { en: "No parcel linked to your account yet.", ar: "لا يوجد طرد مرتبط بحسابك بعد." },
+  "Pour recevoir vos achats en ligne, indiquez notre adresse de Paris comme adresse de livraison au moment de commander.": { en: "To receive your online purchases, enter our Paris address as the delivery address when you order.", ar: "لاستلام مشترياتك عبر الإنترنت، أدخل عنواننا في باريس كعنوان للتسليم عند الطلب." },
+  "Voir l’adresse de livraison": { en: "See the delivery address", ar: "عرض عنوان التسليم" },
+  "Vous n’avez pas encore commandé ? Utilisez notre adresse de livraison à Paris.": { en: "Haven’t ordered yet? Use our Paris delivery address.", ar: "لم تطلب بعد؟ استخدم عنوان التسليم الخاص بنا في باريس." },
+  "Voir l’adresse": { en: "See the address", ar: "عرض العنوان" },
+  "Paiement accepté": { en: "Accepted payment", ar: "طرق الدفع المقبولة" },
+  "Comment commander": { en: "How to order", ar: "كيفية الطلب" },
+  "Quand vous commandez sur Shein, Amazon ou tout autre site, indiquez notre adresse à Paris comme adresse de livraison.": { en: "When ordering on Shein, Amazon or any other site, enter our Paris address as the delivery address.", ar: "عند الطلب من شي إن أو أمازون أو أي موقع آخر، أدخل عنواننا في باريس كعنوان للتسليم." },
+  "Recopiez chaque champ exactement comme ci-dessous.": { en: "Copy each field exactly as shown below.", ar: "انسخ كل حقل تمامًا كما هو موضح أدناه." },
+  "PRÉNOM": { en: "FIRST NAME", ar: "الاسم الأول" },
+  "NOM": { en: "LAST NAME", ar: "اسم العائلة" },
+  "ADRESSE": { en: "ADDRESS", ar: "العنوان" },
+  "CODE POSTAL ET VILLE": { en: "POSTCODE AND CITY", ar: "الرمز البريدي والمدينة" },
+  "PAYS": { en: "COUNTRY", ar: "البلد" },
+  "TÉLÉPHONE": { en: "PHONE", ar: "الهاتف" },
+  "Copier": { en: "Copy", ar: "نسخ" },
+  "Copié": { en: "Copied", ar: "تم النسخ" },
+  "Pourquoi votre identifiant dans le champ Prénom ?": { en: "Why your username in the First name field?", ar: "لماذا اسم المستخدم في خانة الاسم الأول؟" },
+  "C’est ce qui nous permet de reconnaître votre colis dès son arrivée à l’entrepôt. Sans lui, votre colis arrive anonyme parmi des dizaines d’autres et son traitement prend du retard.": { en: "It is what allows us to identify your parcel as soon as it reaches the warehouse. Without it, your parcel arrives unnamed among dozens of others and is delayed.", ar: "هذا ما يسمح لنا بالتعرف على طردك فور وصوله إلى المستودع. بدونه يصل طردك دون اسم بين عشرات الطرود ويتأخر." },
+  "Après avoir commandé": { en: "After ordering", ar: "بعد الطلب" },
+  "Déclarez votre commande ici, avec sa référence, depuis « Pré-alerte colis ». Cela nous permet de préparer votre expédition et de vous prévenir dès la réception.": { en: "Declare your order here with its reference, from “Parcel pre-alert”. This lets us prepare your shipment and notify you upon arrival.", ar: "سجّل طلبك هنا مع مرجعه من «الإشعار المسبق». هذا يتيح لنا تجهيز شحنتك وإبلاغك عند الاستلام." },
+  "Merci pour votre confiance.": { en: "Thank you for your trust.", ar: "شكرًا لثقتكم." },
+  "Vérifier une référence": { en: "Check a reference", ar: "التحقق من مرجع" },
   "Autre": { en: "Other", ar: "أخرى" },
   "Messages avec l’agence": { en: "Messages with the agency", ar: "الرسائل مع الوكالة" },
   "Aucun message pour le moment. Écrivez-nous ci-dessous.": { en: "No messages yet. Write to us below.", ar: "لا توجد رسائل بعد. اكتب لنا أدناه." },
@@ -1528,18 +1744,27 @@ function langueClientInitiale() {
   } catch (e) { /* localStorage indisponible (navigation privée) : on reste en français */ }
   return "fr";
 }
+/**
+ * Abonnés à la langue client. Quatre composants différents appellent useClientLang(), et chaque
+ * appel crée son PROPRE état React : changer la langue dans l'un ne mettait pas les autres à
+ * jour. Résultat, le sélecteur traduisait l'écran de connexion mais pas l'en-tête de l'espace
+ * client. On tient donc une liste des instances pour les notifier toutes ensemble.
+ */
+const ABONNES_LANGUE = new Set();
+
 function useClientLang() {
   // La langue est lue AVANT le premier affichage (initialiseur paresseux de useState) et non
-  // dans un useEffect. Auparavant, la page s'affichait d'abord en français puis basculait : les
-  // textes passant par tcx() (variable globale, mise à jour tout de suite) devenaient anglais
-  // alors que ceux passant par T() (état React, mis à jour au rendu suivant) restaient français
-  // — d'où un bref affichage mi-anglais mi-français à chaque chargement.
+  // dans un useEffect, sinon la page s'affiche brièvement en français avant de basculer.
   const [lang, setLang] = useState(langueClientInitiale);
+  useEffect(() => {
+    ABONNES_LANGUE.add(setLang);
+    return () => { ABONNES_LANGUE.delete(setLang); };
+  }, []);
   CLIENT_LANG_ACTIVE = lang;
   function choisir(l) {
-    setLang(l);
     CLIENT_LANG_ACTIVE = l;
     try { window.localStorage.setItem("bde-langue-client", l); } catch (e) {}
+    ABONNES_LANGUE.forEach((maj) => maj(l));
   }
   return [lang, choisir];
 }
@@ -1598,7 +1823,7 @@ function PublicTrackingPage({ data, loading }) {
 
       <form onSubmit={rechercher} style={{ display: "flex", gap: 8, width: "100%", maxWidth: 420, marginBottom: 24 }}>
         <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="Numéro de suivi (ex : BDE123456)" style={{ ...inputStyle, flex: 1, fontSize: 15, padding: "12px 14px" }} />
-        <button type="submit" style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "0 20px", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>{T("Suivre")}</button>
+        <button type="submit" style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "0 20px", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>{T("Suivre")}</button>
       </form>
 
       {loading && searched && <div style={{ color: "var(--muted)", fontSize: 13 }}>{T("Recherche en cours…")}</div>}
@@ -1655,7 +1880,7 @@ function PublicTrackingPage({ data, loading }) {
         </div>
       )}
 
-      <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 32 }}>{T("Ba-Diaby Express — Transport de colis Conakry ⇄ Monde")}</div>
+      <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 32 }}>{T("Ba-Diaby Express — Transport de colis Conakry - Monde")}</div>
     </div>
   );
 }
@@ -1755,7 +1980,7 @@ function ClientRegisterForm({ data, persist, onRegistered, onCancel }) {
         <Field label={tcx("Adresse (optionnel)")}><input value={adresse} onChange={(e) => setAdresse(e.target.value)} style={inputStyle} /></Field>
         <Field label={tcx("E-mail (optionnel)")}><input value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} /></Field>
         {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
-        <button type="submit" disabled={loading} style={{ width: "100%", marginTop: 4, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>{loading ? "Création…" : "Créer mon compte"}</button>
+        <button type="submit" disabled={loading} style={{ width: "100%", marginTop: 4, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>{loading ? "Création…" : "Créer mon compte"}</button>
         <button type="button" onClick={onCancel} style={{ width: "100%", marginTop: 8, background: "none", border: "none", color: "var(--muted)", fontSize: 12.5, cursor: "pointer" }}>{tcx("J’ai déjà un compte — me connecter")}</button>
         <div style={{ fontSize: 10.5, color: "var(--muted)", textAlign: "center", marginTop: 10 }}>
           En créant un compte, vous acceptez nos <a href="?cgu=1" style={{ color: "var(--muted)" }}>conditions générales et notre politique de confidentialité</a>.
@@ -1816,7 +2041,7 @@ function ClientResetPasswordForm({ data, persist, onDone, onCancel }) {
         </div>
       </Field>
       {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
-      <button type="submit" disabled={loading} style={{ width: "100%", marginTop: 4, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>{loading ? "…" : "Changer le mot de passe"}</button>
+      <button type="submit" disabled={loading} style={{ width: "100%", marginTop: 4, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>{loading ? "…" : "Changer le mot de passe"}</button>
       <button type="button" onClick={onCancel} style={{ width: "100%", marginTop: 8, background: "none", border: "none", color: "var(--muted)", fontSize: 12.5, cursor: "pointer" }}>{tcx("Retour à la connexion")}</button>
     </form>
   );
@@ -1843,7 +2068,7 @@ function ClientProfilModal({ compte, onSave, onClose }) {
         <Field label={tcx("Adresse")}><input value={adresse} onChange={(e) => setAdresse(e.target.value)} style={inputStyle} /></Field>
         <Field label={tcx("E-mail")}><input value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} /></Field>
         {saved && <div style={{ color: "var(--ok-fg)", fontSize: 12.5, marginBottom: 10 }}>✓ Profil mis à jour</div>}
-        <button type="submit" style={{ width: "100%", background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 9, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>{tcx("Enregistrer")}</button>
+        <button type="submit" style={{ width: "100%", background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>{tcx("Enregistrer")}</button>
       </form>
     </Modal>
   );
@@ -1873,7 +2098,7 @@ function ClientMessagesModal({ compte, onSend, onClose }) {
       </div>
       <div style={{ display: "flex", gap: 8 }}>
         <input value={texte} onChange={(e) => setTexte(e.target.value)} placeholder="Écrire un message..." style={{ ...inputStyle, flex: 1, marginBottom: 0 }} onKeyDown={(e) => { if (e.key === "Enter" && texte.trim()) { onSend(texte.trim()); setTexte(""); } }} />
-        <button onClick={() => { if (texte.trim()) { onSend(texte.trim()); setTexte(""); } }} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "0 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>{tcx("Envoyer")}</button>
+        <button onClick={() => { if (texte.trim()) { onSend(texte.trim()); setTexte(""); } }} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "0 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>{tcx("Envoyer")}</button>
       </div>
     </Modal>
   );
@@ -1897,14 +2122,14 @@ function RegroupementModal({ colisEligibles, onDemander, onClose }) {
         <>
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
             {colisEligibles.map((c) => (
-              <label key={c.tracking} style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--surface2)", borderRadius: 9, padding: "9px 12px", cursor: "pointer" }}>
+              <label key={c.tracking} style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--surface2)", borderRadius: 8, padding: "9px 12px", cursor: "pointer" }}>
                 <input type="checkbox" checked={selection.includes(c.tracking)} onChange={() => toggle(c.tracking)} />
                 <div style={{ fontSize: 12.5, color: "var(--text)" }}>{c.tracking} — {c.poids} kg{c.provenance ? ` · ${c.provenance}` : ""}</div>
               </label>
             ))}
           </div>
           <input value={note} onChange={(e) => setNote(e.target.value)} placeholder={tcx("Note pour l’agence (optionnel)")} style={{ ...inputStyle, marginBottom: 14 }} />
-          <button onClick={() => selection.length >= 2 && onDemander(selection, note.trim())} disabled={selection.length < 2} style={{ width: "100%", background: selection.length >= 2 ? "var(--brand-solid)" : "var(--surface2)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: selection.length >= 2 ? "pointer" : "default" }}>
+          <button onClick={() => selection.length >= 2 && onDemander(selection, note.trim())} disabled={selection.length < 2} style={{ width: "100%", background: selection.length >= 2 ? "var(--brand-solid)" : "var(--surface2)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: selection.length >= 2 ? "pointer" : "default" }}>
             Demander le regroupement ({selection.length} colis)
           </button>
         </>
@@ -1919,18 +2144,118 @@ function SignalerProblemeModal({ colis, onSignaler, onClose }) {
     <Modal onClose={onClose} title="Signaler un problème">
       <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>{tcx("Colis")}<strong style={{ color: "var(--text)" }}>{colis.tracking}</strong> — décrivez le problème rencontré, un agent vous répondra ici.</div>
       <textarea value={message} onChange={(e) => setMessage(e.target.value)} rows={5} placeholder="Ex : article manquant, colis endommagé, retard important..." style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit", marginBottom: 14 }} />
-      <button onClick={() => { if (message.trim()) onSignaler(message.trim()); }} disabled={!message.trim()} style={{ width: "100%", background: message.trim() ? "var(--brand-solid)" : "var(--surface2)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: message.trim() ? "pointer" : "default" }}>{tcx("Envoyer le signalement")}</button>
+      <button onClick={() => { if (message.trim()) onSignaler(message.trim()); }} disabled={!message.trim()} style={{ width: "100%", background: message.trim() ? "var(--brand-solid)" : "var(--surface2)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: message.trim() ? "pointer" : "default" }}>{tcx("Envoyer le signalement")}</button>
     </Modal>
   );
 }
 
-function ClientPreAlerteModal({ preAlertes, onAdd, onRemove, onClose }) {
+/**
+ * Guide de commande affiché dans l'Espace Client.
+ *
+ * C'est le mode d'emploi que le client doit suivre au moment de commander sur Shein, Amazon ou
+ * ailleurs : quelle adresse saisir, et surtout quoi mettre dans le champ « Prénom ». Cette
+ * dernière consigne est la plus importante : c'est elle qui permet de reconnaître le
+ * propriétaire d'un colis à son arrivée à l'entrepôt.
+ *
+ * Les coordonnées viennent de la base (Configuration → Agences), elles ne sont pas figées ici.
+ * Chaque champ dispose d'un bouton de copie : sur téléphone, recopier une adresse à la main
+ * dans un formulaire de commande est la principale source d'erreurs.
+ */
+function GuideCommandeModal({ compte, agence, onClose }) {
+  const [copie, setCopie] = useState("");
+  const adresse = agence?.adresse || "26 rue Saint Blaise, 75020 Paris";
+  const telephone = agence?.telephone || "+33767562963";
+  const morceaux = adresse.split(",").map((x) => x.trim());
+  const rue = morceaux[0] || adresse;
+  const cpVille = morceaux.slice(1).join(", ") || "75020 Paris";
+  /*
+   * Les sites marchands français attendent un numéro au format local (07 67 56 29 63) et
+   * refusent souvent le format international. On affiche donc le format local, en gardant
+   * l'international en second pour les sites étrangers.
+   */
+  const telLocal = telephone.startsWith("+33") ? "0" + telephone.slice(3) : telephone;
+  const telLisible = telLocal.length === 10
+    ? telLocal.replace(/(\d{2})(?=\d)/g, "$1 ").trim()
+    : telLocal;
+  const blocComplet = [compte?.identifiant || "", "Ba-Diaby Express", rue, cpVille, "France", telLisible].join("\n");
+
+  function copier(valeur, cle) {
+    try {
+      navigator.clipboard.writeText(valeur);
+      setCopie(cle);
+      setTimeout(() => setCopie(""), 1800);
+    } catch (e) { /* presse-papiers indisponible : le client peut sélectionner le texte */ }
+  }
+
+  const Ligne = ({ etiquette, valeur, cle, souligne }) => (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "9px 0", borderTop: "1px solid var(--border)" }}>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.3 }}>{etiquette}</div>
+        <div style={{ fontSize: 13.5, color: souligne ? "var(--ok-fg)" : "var(--text)", fontWeight: souligne ? 700 : 600, wordBreak: "break-word" }}>{valeur}</div>
+      </div>
+      <button onClick={() => copier(valeur, cle)} style={{ flexShrink: 0, background: copie === cle ? "var(--ok-bg)" : "var(--surface2)", border: "1px solid " + (copie === cle ? "var(--ok-border)" : "var(--border)"), color: copie === cle ? "var(--ok-fg)" : "var(--muted)", borderRadius: 6, padding: "5px 11px", fontSize: 11.5, fontWeight: 600, cursor: "pointer" }}>
+        {copie === cle ? tcx("Copié") : tcx("Copier")}
+      </button>
+    </div>
+  );
+
+  return (
+    <Modal onClose={onClose} title={tcx("Comment commander")} wide>
+      <div style={{ fontSize: 13, color: "var(--text)", marginBottom: 6 }}>
+        {tcx("Quand vous commandez sur Shein, Amazon ou tout autre site, indiquez notre adresse à Paris comme adresse de livraison.")}
+      </div>
+      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16 }}>
+        {tcx("Recopiez chaque champ exactement comme ci-dessous.")}
+      </div>
+
+      <button onClick={() => copier(blocComplet, "tout")}
+        style={{ width: "100%", marginBottom: 10, background: copie === "tout" ? "var(--ok-bg)" : "var(--brand-solid)",
+                 border: "1px solid " + (copie === "tout" ? "var(--ok-border)" : "transparent"),
+                 color: copie === "tout" ? "var(--ok-fg)" : "#fff", borderRadius: 8, padding: "11px 0",
+                 fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+        {copie === "tout" ? tcx("Adresse copiée") : tcx("Copier toute l’adresse")}
+      </button>
+
+      <div style={{ background: "var(--surface2)", borderRadius: 12, padding: "4px 14px 12px" }}>
+        <Ligne etiquette={tcx("PRÉNOM")} valeur={compte?.identifiant || ""} cle="prenom" souligne />
+        <Ligne etiquette={tcx("NOM")} valeur="Ba-Diaby Express" cle="nom" />
+        <Ligne etiquette={tcx("ADRESSE")} valeur={rue} cle="rue" />
+        <Ligne etiquette={tcx("CODE POSTAL ET VILLE")} valeur={cpVille} cle="cp" />
+        <Ligne etiquette={tcx("PAYS")} valeur="France" cle="pays" />
+        <Ligne etiquette={tcx("TÉLÉPHONE")} valeur={telLisible} cle="tel" />
+      </div>
+
+      <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 14px", marginTop: 16 }}>
+        <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--info-fg)", marginBottom: 4 }}>
+          {tcx("Pourquoi votre identifiant dans le champ Prénom ?")}
+        </div>
+        <div style={{ fontSize: 12, color: "var(--text)", lineHeight: 1.5 }}>
+          {tcx("C’est ce qui nous permet de reconnaître votre colis dès son arrivée à l’entrepôt. Sans lui, votre colis arrive anonyme parmi des dizaines d’autres et son traitement prend du retard.")}
+        </div>
+      </div>
+
+      <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 12, padding: "12px 14px", marginTop: 12 }}>
+        <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--warn-fg)", marginBottom: 4 }}>
+          {tcx("Après avoir commandé")}
+        </div>
+        <div style={{ fontSize: 12, color: "var(--text)", lineHeight: 1.5 }}>
+          {tcx("Déclarez votre commande ici, avec sa référence, depuis « Pré-alerte colis ». Cela nous permet de préparer votre expédition et de vous prévenir dès la réception.")}
+        </div>
+      </div>
+
+      <div style={{ fontSize: 12, color: "var(--muted)", textAlign: "center", marginTop: 16 }}>
+        {tcx("Merci pour votre confiance.")}
+      </div>
+    </Modal>
+  );
+}
+
+function ClientPreAlerteModal({ preAlertes, onAdd, onRemove, onClose, onVoirGuide }) {
   const [trackingExterne, setTrackingExterne] = useState("");
   const [provenance, setProvenance] = useState("Shein");
   const [description, setDescription] = useState("");
   const [nbArticles, setNbArticles] = useState("");
   const [valeurCommande, setValeurCommande] = useState("");
-  const [poidsEstime, setPoidsEstime] = useState("");
   const { honeypotField, isSpam } = useAntiSpam();
 
   function submit(e) {
@@ -1940,13 +2265,25 @@ function ClientPreAlerteModal({ preAlertes, onAdd, onRemove, onClose }) {
     onAdd(trackingExterne.trim(), description.trim(), provenance, {
       nbArticles: nbArticles ? Number(nbArticles) : null,
       valeurCommande: valeurCommande ? Number(valeurCommande) : null,
-      poidsEstime: poidsEstime ? Number(poidsEstime) : null,
     });
-    setTrackingExterne(""); setDescription(""); setNbArticles(""); setValeurCommande(""); setPoidsEstime("");
+    setTrackingExterne(""); setDescription(""); setNbArticles(""); setValeurCommande("");
   }
 
   return (
     <Modal onClose={onClose} title="Pré-alerte de colis" wide>
+      {onVoirGuide && (
+        <button type="button" onClick={onVoirGuide}
+          style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
+                   background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12,
+                   padding: "10px 14px", marginBottom: 14, cursor: "pointer", textAlign: "start" }}>
+          <span style={{ fontSize: 12, color: "var(--text)" }}>
+            {tcx("Vous n’avez pas encore commandé ? Utilisez notre adresse de livraison à Paris.")}
+          </span>
+          <span style={{ fontSize: 12, fontWeight: 700, color: "var(--info-fg)", whiteSpace: "nowrap" }}>
+            {tcx("Voir l’adresse")}
+          </span>
+        </button>
+      )}
       <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 16 }}>Prévenez-nous d’un colis que vous attendez (ex : commande Shein), pour qu’on le retrouve plus vite à son arrivée.</div>
       <form onSubmit={submit} style={{ marginBottom: 18 }}>
         {honeypotField}
@@ -1954,15 +2291,14 @@ function ClientPreAlerteModal({ preAlertes, onAdd, onRemove, onClose }) {
           <select value={provenance} onChange={(e) => setProvenance(e.target.value)} style={{ ...inputStyle, width: 130, marginBottom: 0 }}>
             {VENDEURS_EN_LIGNE.map((v) => <option key={v} value={v}>{v}</option>)}
           </select>
-          <input value={trackingExterne} onChange={(e) => setTrackingExterne(e.target.value)} placeholder="N° de suivi du vendeur" style={{ ...inputStyle, flex: 1, minWidth: 160, marginBottom: 0 }} />
+          <input value={trackingExterne} onChange={(e) => setTrackingExterne(e.target.value)} placeholder={tcx("Référence de la commande")} style={{ ...inputStyle, flex: 1, minWidth: 160, marginBottom: 0 }} />
           <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder={tcx("Description (optionnel)")} style={{ ...inputStyle, flex: 1, minWidth: 160, marginBottom: 0 }} />
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
           <input type="number" min="1" value={nbArticles} onChange={(e) => setNbArticles(e.target.value)} placeholder={tcx("Nombre d’articles")} style={{ ...inputStyle, flex: 1, minWidth: 140, marginBottom: 0 }} />
           <input type="number" step="0.01" min="0" value={valeurCommande} onChange={(e) => setValeurCommande(e.target.value)} placeholder="Valeur de la commande (€)" style={{ ...inputStyle, flex: 1, minWidth: 140, marginBottom: 0 }} />
-          <input type="number" step="0.1" min="0" value={poidsEstime} onChange={(e) => setPoidsEstime(e.target.value)} placeholder={tcx("Poids estimé (kg)")} style={{ ...inputStyle, flex: 1, minWidth: 140, marginBottom: 0 }} />
         </div>
-        <button type="submit" style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>{tcx("Ajouter la pré-alerte")}</button>
+        <button type="submit" style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>{tcx("Ajouter la pré-alerte")}</button>
       </form>
 
       <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text)", marginBottom: 8 }}>Mes pré-alertes ({preAlertes.length})</div>
@@ -1971,7 +2307,7 @@ function ClientPreAlerteModal({ preAlertes, onAdd, onRemove, onClose }) {
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {preAlertes.map((p) => (
-            <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--surface2)", borderRadius: 9, padding: "9px 12px" }}>
+            <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--surface2)", borderRadius: 8, padding: "9px 12px" }}>
               <div>
                 <div style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>
                   <span style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6, padding: "1px 7px", fontSize: 10.5, marginInlineEnd: 6 }}>{p.provenance || "Autre"}</span>
@@ -1981,7 +2317,6 @@ function ClientPreAlerteModal({ preAlertes, onAdd, onRemove, onClose }) {
                   {p.statut} · {new Date(p.dateCreation).toLocaleDateString("fr-FR")}
                   {p.nbArticles ? ` · ${p.nbArticles} article${p.nbArticles > 1 ? "s" : ""}` : ""}
                   {p.valeurCommande ? ` · ${fmt(p.valeurCommande, "EUR")}` : ""}
-                  {p.poidsEstime ? ` · ~${p.poidsEstime} kg` : ""}
                 </div>
               </div>
               <button onClick={() => onRemove(p.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><X size={15} /></button>
@@ -2039,33 +2374,70 @@ function DeclarationPaiementModal({ colis, onDeclarer, onClose }) {
         <Field label="Référence de la transaction (reçue par SMS)"><input value={reference} onChange={(e) => setReference(e.target.value)} style={inputStyle} placeholder="ex : MP240729.1234.A56789" /></Field>
         {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
         <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 14 }}>Un agent vérifiera cette transaction avant que le paiement ne soit appliqué à votre colis.</div>
-        <button type="submit" style={{ width: "100%", background: "#5B8DEF", color: "#fff", border: "none", borderRadius: 9, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>{tcx("Envoyer ma déclaration")}</button>
+        <button type="submit" style={{ width: "100%", background: "#5B8DEF", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>{tcx("Envoyer ma déclaration")}</button>
       </form>
     </Modal>
   );
 }
 
-function ClientPaiementsModal({ colisListe, onClose }) {
-  const paiements = colisListe.flatMap((c) => (c.paiements || []).map((p) => ({ ...p, tracking: c.tracking }))).sort((a, b) => new Date(b.date) - new Date(a.date));
+function ClientPaiementsModal({ colisListe, onClose, devise = "GNF", onDeclarer }) {
+  const paiements = colisListe.flatMap((c) => (c.paiements || []).map((p) => ({ ...p, tracking: c.tracking })))
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
   const total = paiements.reduce((s, p) => s + (p.deviseSaisie ? p.montant / (LIVE_RATES[p.deviseSaisie] || 1) : p.montant), 0);
+  const aRegler = colisListe.filter((c) => c.reste > 0 && c.status !== "Annulé");
+  const totalDu = aRegler.reduce((s, c) => s + c.reste, 0);
 
   return (
     <Modal onClose={onClose} title={tcx("Mes paiements")} wide>
-      <div style={{ background: "var(--surface2)", borderRadius: 10, padding: 14, marginBottom: 16, display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+      {/*
+        Cette fenêtre n'affichait qu'un historique, sans aucune action : le client qui venait
+        pour payer repartait sans rien pouvoir faire, l'unique bouton se trouvant sur la carte
+        du colis. Le solde et l'action de déclaration sont désormais ici aussi.
+      */}
+      {aRegler.length > 0 && (
+        <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 12, padding: 14, marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, flexWrap: "wrap", gap: 8 }}>
+            <span style={{ fontSize: 12.5, color: "var(--muted)" }}>{tcx("Reste à payer")}</span>
+            <span style={{ fontSize: 17, fontWeight: 700, color: "var(--danger-fg)", fontFamily: "'Space Grotesk',sans-serif" }}>{fmt(totalDu, devise)}</span>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+            {aRegler.map((c) => {
+              const dejaDeclare = (c.declarationsPaiement || []).some((d) => d.statut === "En attente");
+              return (
+                <div key={c.tracking} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: "var(--surface)", borderRadius: 8, padding: "9px 12px", flexWrap: "wrap" }}>
+                  <div>
+                    <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>{c.tracking}</div>
+                    <div style={{ fontSize: 11.5, color: "var(--danger-fg)" }}>{fmt(c.reste, devise)}</div>
+                  </div>
+                  {dejaDeclare ? (
+                    <span style={{ fontSize: 11.5, color: "var(--info-fg)" }}>{tcx("Paiement déclaré, en attente de vérification")}</span>
+                  ) : onDeclarer ? (
+                    <button onClick={() => onDeclarer(c)} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                      {tcx("J’ai payé")}
+                    </button>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div style={{ background: "var(--surface2)", borderRadius: 12, padding: 14, marginBottom: 16, display: "flex", justifyContent: "space-between", fontSize: 12.5 }}>
         <span style={{ color: "var(--muted)" }}>{tcx("Total payé (tous colis)")}</span>
-        <span style={{ color: "var(--text)", fontWeight: 700 }}>{fmt(total, "EUR")}</span>
+        <span style={{ color: "var(--text)", fontWeight: 700 }}>{fmt(total, devise)}</span>
       </div>
       {paiements.length === 0 ? (
         <div style={{ fontSize: 12.5, color: "var(--muted)", textAlign: "center", padding: 20 }}>{tcx("Aucun paiement enregistré pour le moment.")}</div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {paiements.map((p) => (
-            <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--surface2)", borderRadius: 9, padding: "9px 12px" }}>
+            <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--surface2)", borderRadius: 8, padding: "10px 12px" }}>
               <div>
                 <div style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>{p.tracking} · {p.mode}</div>
                 <div style={{ fontSize: 11, color: "var(--muted)" }}>{new Date(p.date).toLocaleString("fr-FR")}</div>
               </div>
-              <div style={{ fontSize: 13, color: "var(--ok-fg)", fontWeight: 700 }}>{p.deviseSaisie ? fmt(p.montant, p.deviseSaisie) : fmt(p.montant, "EUR")}</div>
+              <div style={{ fontSize: 13, color: "var(--ok-fg)", fontWeight: 700 }}>{p.deviseSaisie ? fmt(p.montant, p.deviseSaisie) : fmt(p.montant, devise)}</div>
             </div>
           ))}
         </div>
@@ -2108,6 +2480,43 @@ function ClientTimeline({ status }) {
   );
 }
 
+/**
+ * Notifications à montrer au client : tout ce qui a bougé depuis sa dernière visite.
+ * Extraite ici pour être appliquée AUSSI à la restauration de session — sinon un client qui
+ * revient sans repasser par l'écran de connexion (session conservée) ne voyait plus aucune
+ * notification, alors que c'est justement le cas le plus fréquent.
+ */
+function calculerNotificationsClient(acc, data) {
+  if (!acc || !acc.derniereVisite || !data) return [];
+  const seuil = new Date(acc.derniereVisite);
+  const notifs = [];
+  data.colis.filter((c) => c.clientAccountId === acc.id).forEach((c) => {
+    (c.historique || []).forEach((h) => {
+      if (new Date(h.date) > seuil) notifs.push({ icone: "\ud83d\udce6", texte: `${c.tracking} — statut : ${clientStatusLabel(h.status)}`, date: h.date });
+    });
+    (c.signalements || []).forEach((sg) => {
+      if (sg.dateReponse && new Date(sg.dateReponse) > seuil) notifs.push({ icone: "\u26a0\ufe0f", texte: `${c.tracking} — réponse à votre signalement : ${sg.reponse}`, date: sg.dateReponse });
+    });
+    const ex = c.demandeExpress;
+    if (ex && ex.dateDecision && new Date(ex.dateDecision) > seuil) {
+      notifs.push({
+        icone: ex.statut === "Confirmée" ? "\u26a1" : "\u2716\ufe0f",
+        texte: ex.statut === "Confirmée"
+          ? `${c.tracking} — votre livraison express est acceptée (72 h)`
+          : `${c.tracking} — votre demande de livraison express n'a pas pu être acceptée`,
+        date: ex.dateDecision,
+      });
+    }
+  });
+  (acc.messages || []).forEach((m) => {
+    if (m.expediteur === "staff" && new Date(m.date) > seuil) notifs.push({ icone: "\ud83d\udcac", texte: `Nouveau message de l’agence : ${String(m.texte || "").slice(0, 60)}`, date: m.date });
+  });
+  (data.demandesRegroupement || []).filter((dm) => dm.clientAccountId === acc.id).forEach((dm) => {
+    if (dm.dateMaj && new Date(dm.dateMaj) > seuil && dm.statut !== "En attente") notifs.push({ icone: "\ud83d\udcec", texte: `Demande de regroupement : ${dm.statut}`, date: dm.dateMaj });
+  });
+  return notifs.sort((a, b) => new Date(b.date) - new Date(a.date));
+}
+
 function ClientPortalPage({ data, loading, persist }) {
   const [lang, setLang] = useClientLang();
   const T = (x) => tc(x, lang);
@@ -2117,6 +2526,45 @@ function ClientPortalPage({ data, loading, persist }) {
   const [showPw, setShowPw] = useState(false);
   const [err, setErr] = useState("");
   const [compte, setCompte] = useState(null);
+  const [sessionClientRestauree, setSessionClientRestauree] = useState(false);
+
+  // Même principe que pour les agents : la session survit à un rechargement et à un changement
+  // d'onglet, mais se ferme après 10 minutes sans action. Seul l'identifiant du compte est
+  // conservé sur l'appareil, jamais le mot de passe.
+  useEffect(() => {
+    if (sessionClientRestauree || !data || compte) return;
+    const id = lireSessionClient();
+    if (id) {
+      const acc = (data.clientAccounts || []).find((c) => c.id === id);
+      if (acc) {
+        // Mêmes notifications qu'à une connexion classique, puis la date de visite est mise à jour.
+        setNotifications(calculerNotificationsClient(acc, data));
+        const rafraichi = { ...acc, derniereVisite: new Date().toISOString() };
+        persist({ ...data, clientAccounts: (data.clientAccounts || []).map((c) => (c.id === acc.id ? rafraichi : c)) });
+        setCompte(rafraichi);
+      }
+    }
+    setSessionClientRestauree(true);
+  }, [data, compte, sessionClientRestauree]);
+
+  useEffect(() => {
+    if (!compte) return;
+    let derniereEcriture = 0;
+    const marquerActivite = () => {
+      const maintenant = Date.now();
+      if (maintenant - derniereEcriture < 20000) return;
+      derniereEcriture = maintenant;
+      ecrireSessionClient(compte.id);
+    };
+    const evenements = ["click", "keydown", "touchstart", "scroll", "pointerdown"];
+    evenements.forEach((e) => window.addEventListener(e, marquerActivite, { passive: true }));
+    marquerActivite();
+    const minuteur = setInterval(() => { if (!lireSessionClient()) setCompte(null); }, 30000);
+    return () => {
+      evenements.forEach((e) => window.removeEventListener(e, marquerActivite));
+      clearInterval(minuteur);
+    };
+  }, [compte]);
   const [filtreStatut, setFiltreStatut] = useState("tous");
   const [showProfil, setShowProfil] = useState(false);
   const [showPreAlerte, setShowPreAlerte] = useState(false);
@@ -2126,7 +2574,21 @@ function ClientPortalPage({ data, loading, persist }) {
   const [signalantPour, setSignalantPour] = useState(null);
   const [showMessages, setShowMessages] = useState(false);
   const [showRegroupement, setShowRegroupement] = useState(false);
+  const [showGuide, setShowGuide] = useState(false);
   const [showNotifs, setShowNotifs] = useState(false);
+  const [showVerif, setShowVerif] = useState(false);
+  /*
+   * Devise d'affichage côté client. Le franc guinéen est la valeur par défaut : c'est la monnaie
+   * dans laquelle le client paiera à l'agence. Il peut basculer vers n'importe quelle devise
+   * gérée par la plateforme, le choix étant mémorisé sur son appareil.
+   */
+  const [deviseClient, setDeviseClient] = useState(() => {
+    try { return window.localStorage.getItem("bde-devise-client") || "GNF"; } catch (e) { return "GNF"; }
+  });
+  function choisirDevise(d) {
+    setDeviseClient(d);
+    try { window.localStorage.setItem("bde-devise-client", d); } catch (e) {}
+  }
 
   if (loading || !data) return <BrandedLoader />;
 
@@ -2140,38 +2602,19 @@ function ClientPortalPage({ data, loading, persist }) {
     const { ok, migratedUser } = await verifyPassword(motdepasse, acc);
     if (!ok) { setErr("Identifiant ou mot de passe incorrect."); return; }
 
-    const previousVisite = acc.derniereVisite;
-    if (previousVisite) {
-      const seuil = new Date(previousVisite);
-      const theirColis = data.colis.filter((c) => c.clientAccountId === acc.id);
+    setNotifications(calculerNotificationsClient(acc, data));
 
-      const notifs = [];
-      theirColis.forEach((c) => {
-        (c.historique || []).forEach((h) => {
-          if (new Date(h.date) > seuil) notifs.push({ icone: "📦", texte: `${c.tracking} — statut : ${clientStatusLabel(h.status)}`, date: h.date });
-        });
-        (c.signalements || []).forEach((s) => {
-          if (s.dateReponse && new Date(s.dateReponse) > seuil) notifs.push({ icone: "⚠️", texte: `${c.tracking} — réponse à votre signalement : ${s.reponse}`, date: s.dateReponse });
-        });
-      });
-      (acc.messages || []).forEach((m) => {
-        if (m.expediteur === "staff" && new Date(m.date) > seuil) notifs.push({ icone: "💬", texte: `Nouveau message de l’agence : ${m.texte}`, date: m.date });
-      });
-      (data.demandesRegroupement || []).filter((d) => d.clientAccountId === acc.id).forEach((d) => {
-        if (d.dateMaj && new Date(d.dateMaj) > seuil && d.statut !== "En attente") notifs.push({ icone: "📬", texte: `Demande de regroupement : ${d.statut}`, date: d.dateMaj });
-      });
-      notifs.sort((a, b) => new Date(b.date) - new Date(a.date));
-      setNotifications(notifs);
-    }
     // Un SEUL enregistrement combinant la date de visite et, le cas échéant, la mise à niveau du
     // mot de passe vers PBKDF2. Deux persist() successifs se seraient écrasés l'un l'autre : le
     // second, construit à partir de `data` non rafraîchi, effaçait la migration.
     const updated = { ...acc, ...(migratedUser || {}), derniereVisite: new Date().toISOString() };
     persist({ ...data, clientAccounts: (data.clientAccounts || []).map((c) => (c.id === acc.id ? updated : c)) });
-    setCompte(updated);
+    ecrireSessionClient(updated.id); setCompte(updated);
   }
 
   const mesColis = compte && data ? data.colis.filter((c) => c.clientAccountId === compte.id) : [];
+  // Agence de retrait affichée au client, choisie par l'administrateur (Bambeto par défaut).
+  const agenceRetrait = data ? (data.sites || []).find((s) => s.id === (data.agenceRetraitClient || "site-bambeto")) || (data.sites || [])[0] : null;
 
   const enCours = mesColis.filter((c) => c.status !== "Livré" && c.status !== "Annulé");
   const livres = mesColis.filter((c) => c.status === "Livré");
@@ -2255,7 +2698,7 @@ function ClientPortalPage({ data, loading, persist }) {
         <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 28, textAlign: "center" }}>{T("Retrouvez tous vos colis, leurs statuts et vos paiements en un coup d'œil.")}</div>
 
         {mode === "inscription" ? (
-          <ClientRegisterForm data={data} persist={persist} onRegistered={(acc) => setCompte(acc)} onCancel={() => setMode("login")} />
+          <ClientRegisterForm data={data} persist={persist} onRegistered={(acc) => { ecrireSessionClient(acc.id); setCompte(acc); }} onCancel={() => setMode("login")} />
         ) : mode === "reset" ? (
           <ClientResetPasswordForm data={data} persist={persist} onDone={() => { setMode("login"); setErr(""); }} onCancel={() => setMode("login")} />
         ) : (
@@ -2270,9 +2713,9 @@ function ClientPortalPage({ data, loading, persist }) {
               </div>
             </Field>
             {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
-            <button type="submit" style={{ width: "100%", marginTop: 4, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>{T("Se connecter")}</button>
+            <button type="submit" style={{ width: "100%", marginTop: 4, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>{T("Se connecter")}</button>
             <button type="button" onClick={() => { setMode("reset"); setErr(""); }} style={{ width: "100%", marginTop: 10, background: "none", border: "none", color: "var(--muted)", fontSize: 12, cursor: "pointer" }}>{T("Mot de passe oublié ?")}</button>
-            <button type="button" onClick={() => { setMode("inscription"); setErr(""); }} style={{ width: "100%", marginTop: 6, background: "none", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 0", fontSize: 13, fontWeight: 600, color: "var(--text)", cursor: "pointer" }}>{T("Créer un compte")}</button>
+            <button type="button" onClick={() => { setMode("inscription"); setErr(""); }} style={{ width: "100%", marginTop: 6, background: "none", border: "1.5px solid var(--border)", borderRadius: 8, padding: "10px 0", fontSize: 13, fontWeight: 600, color: "var(--text)", cursor: "pointer" }}>{T("Créer un compte")}</button>
           </form>
         )}
       </div>
@@ -2285,7 +2728,9 @@ function ClientPortalPage({ data, loading, persist }) {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, flexWrap: "wrap", gap: 10 }}>
           <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 20, color: "var(--text)" }}>{T("Espace Client")}</div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={() => setShowGuide(true)} style={{ background: "var(--brand-solid)", border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "#fff", fontWeight: 600, cursor: "pointer" }}>{T("Comment commander")}</button>
             <button onClick={() => setShowPreAlerte(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>{T("Pré-alerte colis")}</button>
+            <button onClick={() => setShowVerif(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>{T("Vérifier une référence")}</button>
             <button onClick={() => {
               setShowMessages(true);
               if ((compte.messages || []).some((m) => m.expediteur === "staff" && !m.lu)) {
@@ -2300,9 +2745,9 @@ function ClientPortalPage({ data, loading, persist }) {
             {statsClient.recusEntrepot > 1 && <button onClick={() => setShowRegroupement(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>{T("Regrouper mes colis")}</button>}
             <button onClick={() => setShowPaiements(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>{T("Mes paiements")}</button>
             <button onClick={() => setShowProfil(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>{T("Mon profil")}</button>
-            {mesColis.length > 0 && <button onClick={() => downloadClientManifest(compte, mesColis)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>{T("Mon bordereau (PDF)")}</button>}
+            {mesColis.length > 0 && <button onClick={() => downloadClientManifest(compte, mesColis, deviseClient)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>{T("Mon bordereau (PDF)")}</button>}
             <ClientLangSwitch lang={lang} onChange={setLang} />
-            <button onClick={() => { setCompte(null); setIdentifiant(""); setMotdepasse(""); setMode("login"); }} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--muted)", cursor: "pointer" }}>{T("Déconnexion")}</button>
+            <button onClick={() => { ecrireSessionClient(null); setCompte(null); setIdentifiant(""); setMotdepasse(""); setMode("login"); }} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--muted)", cursor: "pointer" }}>{T("Déconnexion")}</button>
           </div>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 22 }}>
@@ -2311,6 +2756,13 @@ function ClientPortalPage({ data, loading, persist }) {
             <span style={{ fontSize: 12 }}>{remiseActuelle >= 12 ? "🥇" : remiseActuelle > 0 ? "🥈" : "🥉"}</span>
             <span style={{ fontSize: 11.5, color: "var(--text)", fontWeight: 700 }}>{nbEnvois} {T(nbEnvois > 1 ? "envois" : "envoi")}{remiseActuelle > 0 ? ` — ${remiseActuelle}% ${T("de réduction fidélité")}` : ""}</span>
             {prochainSeuil && <span style={{ fontSize: 10.5, color: "var(--muted)" }}>({prochainSeuil - nbEnvois} {T("avant")} {loyaltyDiscount(prochainSeuil)}%)</span>}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+            <span style={{ fontSize: 11.5, color: "var(--muted)" }}>{T("Afficher les montants en")}</span>
+            <select value={deviseClient} onChange={(e) => choisirDevise(e.target.value)}
+              style={{ ...inputStyle, width: "auto", marginBottom: 0, padding: "5px 10px", fontSize: 12, fontWeight: 600 }}>
+              {Object.keys(CURRENCIES).map((d) => <option key={d} value={d}>{d}</option>)}
+            </select>
           </div>
         </div>
 
@@ -2337,8 +2789,8 @@ function ClientPortalPage({ data, loading, persist }) {
         )}
 
         {showProfil && <ClientProfilModal compte={compte} onSave={majProfil} onClose={() => setShowProfil(false)} />}
-        {showPreAlerte && <ClientPreAlerteModal preAlertes={mesPreAlertes} onAdd={ajouterPreAlerte} onRemove={retirerPreAlerte} onClose={() => setShowPreAlerte(false)} />}
-        {showPaiements && <ClientPaiementsModal colisListe={mesColis} onClose={() => setShowPaiements(false)} />}
+        {showPreAlerte && <ClientPreAlerteModal preAlertes={mesPreAlertes} onAdd={ajouterPreAlerte} onRemove={retirerPreAlerte} onClose={() => setShowPreAlerte(false)} onVoirGuide={() => { setShowPreAlerte(false); setShowGuide(true); }} />}
+        {showPaiements && <ClientPaiementsModal colisListe={mesColis} onClose={() => setShowPaiements(false)} devise={deviseClient} onDeclarer={(c) => { setShowPaiements(false); setDeclarantPour(c); }} />}
         {declarantPour && <DeclarationPaiementModal colis={declarantPour} onDeclarer={(m, d, mo, r) => { declarerPaiement(declarantPour, m, d, mo, r); setDeclarantPour(null); }} onClose={() => setDeclarantPour(null)} />}
 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 12, marginBottom: 22 }}>
@@ -2349,20 +2801,24 @@ function ClientPortalPage({ data, loading, persist }) {
           <StatCard label={T("Arrivés en Guinée")} value={statsClient.arrivesGuinee} icon={MapPin} tint="#B8801C" />
           <StatCard label={T("Livrés")} value={statsClient.livres} icon={CheckCircle2} tint="#16A163" />
           <StatCard label={T("Poids total")} value={`${statsClient.poidsTotal.toFixed(1)} kg`} icon={FileStack} tint="#8B5CF6" />
-          <StatCard label={T("Montant payé")} value={fmt(statsClient.montantPaye, "EUR")} icon={DollarSign} tint="#16A163" />
-          <StatCard label={T("Reste à payer")} value={fmt(statsClient.montantRestant, "EUR")} icon={DollarSign} tint={statsClient.montantRestant > 0 ? "var(--brand-solid)" : "#3ECB84"} />
+          <StatCard label={T("Montant payé")} value={fmt(statsClient.montantPaye, deviseClient)} icon={DollarSign} tint="#16A163" />
+          <StatCard label={T("Reste à payer")} value={fmt(statsClient.montantRestant, deviseClient)} icon={DollarSign} tint={statsClient.montantRestant > 0 ? "var(--brand-solid)" : "#3ECB84"} />
         </div>
 
         {nonPayes.length > 0 && (
           <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 12, padding: 14, marginBottom: 22, display: "flex", alignItems: "center", gap: 10 }}>
             <AlertTriangle size={18} color="var(--danger-fg)" />
-            <div style={{ fontSize: 12.5, color: "var(--danger-fg-soft)" }}>{nonPayes.length} colis en attente de paiement — {fmt(totalRestant, "EUR")} au total.</div>
+            <div style={{ fontSize: 12.5, color: "var(--danger-fg-soft)" }}>{nonPayes.length} colis en attente de paiement — {fmt(totalRestant, deviseClient)} au total.</div>
           </div>
         )}
 
         {mesColis.length === 0 ? (
           <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>
-            Aucun colis rattaché à votre compte pour le moment. Dès qu’un agent enregistre un colis à votre nom, il apparaîtra ici automatiquement.
+            <div style={{ marginBottom: 14 }}>{T("Aucun colis rattaché à votre compte pour le moment.")}</div>
+            <div style={{ fontSize: 12.5, marginBottom: 14 }}>{T("Pour recevoir vos achats en ligne, indiquez notre adresse de Paris comme adresse de livraison au moment de commander.")}</div>
+            <button onClick={() => setShowGuide(true)} style={{ background: "var(--brand-solid)", border: "none", borderRadius: 8, padding: "11px 22px", fontSize: 13.5, color: "#fff", fontWeight: 700, cursor: "pointer" }}>
+              {T("Voir l’adresse de livraison")}
+            </button>
           </div>
         ) : (
           <>
@@ -2380,6 +2836,35 @@ function ClientPortalPage({ data, loading, persist }) {
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 8 }}>
                       <div>
                         <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{c.tracking}{c.provenance && <span style={{ marginInlineStart: 8, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 6, padding: "1px 7px", fontSize: 10, fontWeight: 600, color: "var(--muted)" }}>{c.provenance}</span>}</div>
+                        {c.litige && (
+                          <div style={{ background: c.litige.statut === "Ouvert" ? "var(--warn-bg)" : "var(--ok-bg)",
+                                        border: "1px solid " + (c.litige.statut === "Ouvert" ? "var(--warn-border)" : "var(--ok-border)"),
+                                        borderRadius: 8, padding: "9px 12px", marginTop: 10 }}>
+                            <div style={{ fontSize: 12, fontWeight: 700, color: c.litige.statut === "Ouvert" ? "var(--warn-fg)" : "var(--ok-fg)" }}>
+                              {c.litige.type === "perdu" ? T("Colis signalé perdu") : T("Colis signalé endommagé")}
+                              {c.litige.statut === "Résolu" ? ` — ${T("réglé")}` : ""}
+                            </div>
+                            <div style={{ fontSize: 11.5, color: "var(--text)", marginTop: 3 }}>
+                              {c.litige.statut === "Résolu" ? c.litige.resolution : T("Notre équipe traite votre dossier et vous recontacte.")}
+                            </div>
+                          </div>
+                        )}
+                        {["En douane", "En livraison"].includes(c.status) && agenceRetrait && (
+                          <div style={{ background: "var(--ok-bg)", border: "1px solid var(--ok-border)", borderRadius: 12, padding: "10px 12px", marginTop: 10 }}>
+                            <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ok-fg)" }}>{T("Votre colis vous attend")} — {agenceRetrait.nom}</div>
+                            <div style={{ fontSize: 11.5, color: "var(--text)", marginTop: 3 }}>{agenceRetrait.adresse}</div>
+                            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                              {agenceRetrait.horaires ? `${agenceRetrait.horaires} · ` : ""}{agenceRetrait.telephone}
+                            </div>
+                            {agenceRetrait.paiements && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{T("Paiement accepté")} : {agenceRetrait.paiements}</div>}
+                            {agenceRetrait.stockage && <div style={{ fontSize: 11, color: "var(--warn-fg)", marginTop: 3 }}>{agenceRetrait.stockage}</div>}
+                          </div>
+                        )}
+                        {c.referenceCommande && (
+                          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                            {T("Votre référence de commande")} : <strong style={{ color: "var(--text)" }}>{c.referenceCommande}</strong>
+                          </div>
+                        )}
                         <div style={{ fontSize: 11.5, color: "var(--muted)" }}>{routeLabel(c.pays, c.direction)} · {c.poids} kg · {new Date(c.createdAt).toLocaleDateString("fr-FR")}</div>
                         {c.status !== "Livré" && c.status !== "Annulé" && (() => {
                           const pays = COUNTRIES.find((x) => x.code === c.pays);
@@ -2393,7 +2878,7 @@ function ClientPortalPage({ data, loading, persist }) {
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                         <span style={{ background: st?.bg, color: st?.fg, padding: "4px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>{clientStatusLabel(c.status)}</span>
-                        <span style={{ fontSize: 11.5, fontWeight: 700, color: c.reste > 0 ? "var(--danger-fg)" : "var(--ok-fg)" }}>{c.reste > 0 ? `${fmt(c.reste, "EUR")} dû` : "Payé"}</span>
+                        <span style={{ fontSize: 11.5, fontWeight: 700, color: c.reste > 0 ? "var(--danger-fg)" : "var(--ok-fg)" }}>{c.reste > 0 ? `${fmt(c.reste, deviseClient)} dû` : "Payé"}</span>
                         <button onClick={() => downloadInvoice(c, data)} style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 10px", fontSize: 11, color: "var(--text)", cursor: "pointer" }}>{T("Facture")}</button>
                         <a href={`https://wa.me/224612479339?text=${encodeURIComponent(`Bonjour, j’ai une question concernant mon colis ${c.tracking}.`)}`} target="_blank" rel="noopener noreferrer" style={{ background: "var(--ok-bg-soft)", border: "1px solid var(--ok-border)", borderRadius: 8, padding: "6px 10px", fontSize: 11, color: "var(--ok-fg)", textDecoration: "none" }}>💬 Contacter (GN)</a>
                         <a href={`https://wa.me/33767562963?text=${encodeURIComponent(`Bonjour, j’ai une question concernant mon colis ${c.tracking}.`)}`} target="_blank" rel="noopener noreferrer" style={{ background: "var(--ok-bg-soft)", border: "1px solid var(--ok-border)", borderRadius: 8, padding: "6px 10px", fontSize: 11, color: "var(--ok-fg)", textDecoration: "none" }}>💬 Contacter (FR)</a>
@@ -2408,10 +2893,10 @@ function ClientPortalPage({ data, loading, persist }) {
                     {c.status !== "Livré" && c.status !== "Annulé" && (
                       <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
                         {c.demandeExpress ? (
-                          <div style={{ fontSize: 11.5, color: "var(--warn-fg)" }}>⚡ Livraison express demandée ({fmt(c.demandeExpress.montant, "EUR")}) — {c.demandeExpress.statut}</div>
+                          <div style={{ fontSize: 11.5, color: "var(--warn-fg)" }}>⚡ Livraison express demandée ({fmt(c.demandeExpress.montant, deviseClient)}) — {c.demandeExpress.statut}</div>
                         ) : (
                           <button onClick={() => demanderExpress(c)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "1px solid #E0A63A", borderRadius: 8, padding: "6px 12px", fontSize: 11.5, color: "var(--warn-fg)", fontWeight: 600, cursor: "pointer" }}>
-                            ⚡ Demander une livraison express (72h) — {fmt(c.poids * expressTarif, "EUR")}
+                            ⚡ Demander une livraison express (72h) — {fmt(c.poids * expressTarif, deviseClient)}
                           </button>
                         )}
                       </div>
@@ -2446,11 +2931,13 @@ function ClientPortalPage({ data, loading, persist }) {
         )}
 
         {signalantPour && <SignalerProblemeModal colis={signalantPour} onSignaler={(msg) => { signalerProbleme(signalantPour, msg); setSignalantPour(null); }} onClose={() => setSignalantPour(null)} />}
+        {showVerif && <VerifierReferenceModal data={data} compteClient={compte} onClose={() => setShowVerif(false)} />}
         {showMessages && <ClientMessagesModal compte={compte} onSend={envoyerMessage} onClose={() => setShowMessages(false)} />}
+        {showGuide && <GuideCommandeModal compte={compte} agence={(data.agencesReception || {}).FR} onClose={() => setShowGuide(false)} />}
         {showRegroupement && <RegroupementModal colisEligibles={mesColis.filter((c) => c.status === "Enregistré")} onDemander={(trackings, note) => { demanderRegroupement(trackings, note); setShowRegroupement(false); }} onClose={() => setShowRegroupement(false)} />}
 
 
-        <div style={{ textAlign: "center", fontSize: 11, color: "var(--muted)", marginTop: 30 }}>{T("Ba-Diaby Express — Transport de colis Conakry ⇄ Monde")}</div>
+        <div style={{ textAlign: "center", fontSize: 11, color: "var(--muted)", marginTop: 30 }}>{T("Ba-Diaby Express — Transport de colis Conakry - Monde")}</div>
       </div>
     </div>
   );
@@ -2501,7 +2988,7 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
             url.search = ""; url.searchParams.set("client", "1");
             window.location.href = url.toString();
           }} style={{ background: "none", border: "none", fontSize: 13, fontWeight: 600, color: "var(--text)", cursor: "pointer" }}>Espace Client</button>
-          <button onClick={onConnexionClick} style={{ background: "var(--surface)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 9, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Se connecter</button>
+          <button onClick={onConnexionClick} style={{ background: "var(--surface)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Se connecter</button>
         </div>
       </div>
 
@@ -2512,7 +2999,7 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
         {trackingActif && (
           <form onSubmit={suivre} style={{ display: "flex", gap: 8, maxWidth: 460, margin: "0 auto 40px", flexWrap: "wrap", justifyContent: "center" }}>
             <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="Entrez votre numéro de suivi (ex : BDE123456)" style={{ ...inputStyle, flex: 1, minWidth: 220, fontSize: 14.5, padding: "13px 16px" }} />
-            <button type="submit" style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "0 22px", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>Suivre mon colis</button>
+            <button type="submit" style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "0 22px", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>Suivre mon colis</button>
           </form>
         )}
       </div>
@@ -2568,7 +3055,7 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
               <div style={{ fontSize: 14, color: "var(--muted)", marginBottom: 4 }}>À confirmer — contactez-nous</div>
             )}
             {selectedDep.frequence && <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>{selectedDep.frequence}</div>}
-            <div style={{ background: "var(--surface2)", borderRadius: 10, padding: 14, marginTop: 10 }}>
+            <div style={{ background: "var(--surface2)", borderRadius: 12, padding: 14, marginTop: 10 }}>
               <div style={{ fontSize: 12, color: "var(--muted)" }}>Délai estimé (aérien)</div>
               <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{selectedCountry.delayAir} jours</div>
             </div>
@@ -2577,7 +3064,7 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
       )}
 
       <div style={{ textAlign: "center", padding: "20px 24px", borderTop: "1px solid var(--border)", fontSize: 11.5, color: "var(--muted)" }}>
-        {nomPublic} — Transport de colis Conakry ⇄ Monde
+        {nomPublic} — Transport de colis Conakry - Monde
         <span style={{ margin: "0 8px" }}>·</span>
         <button onClick={() => { window.location.href = "?cgu=1"; }} style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 11.5, textDecoration: "underline", cursor: "pointer", padding: 0 }}>Conditions générales & confidentialité</button>
       </div>
@@ -2621,14 +3108,14 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome }) 
   if (pending) {
     return (
       <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "linear-gradient(135deg,#0A2647 0%,#0A2647 55%,#C8102E 250%)" }}>
-        <div style={{ width: "min(92vw, 380px)", background: "var(--surface)", borderRadius: 16, padding: "34px 32px", boxShadow: "0 24px 60px rgba(10,38,71,0.35)" }}>
+        <div style={{ width: "min(92vw, 380px)", background: "var(--surface)", borderRadius: 14, padding: "34px 32px", boxShadow: "0 24px 60px rgba(10,38,71,0.35)" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}><ShieldCheck size={18} color="var(--brand-on-dark)" /><div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, color: "var(--text)" }}>Double authentification</div></div>
           <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>Démo : aucune passerelle SMS n’étant connectée, votre code de vérification est affiché ci-dessous.</div>
-          <div style={{ background: "var(--surface2)", borderRadius: 10, padding: "12px 16px", textAlign: "center", fontFamily: "'Space Grotesk',sans-serif", fontSize: 24, letterSpacing: 4, color: "var(--text)", marginBottom: 14 }}>{otp}</div>
+          <div style={{ background: "var(--surface2)", borderRadius: 12, padding: "12px 16px", textAlign: "center", fontFamily: "'Space Grotesk',sans-serif", fontSize: 24, letterSpacing: 4, color: "var(--text)", marginBottom: 14 }}>{otp}</div>
           <div>
             <input value={otpInput} onChange={(e) => setOtpInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && verifyOtp(e)} placeholder="Entrez le code à 6 chiffres" style={{ ...inputStyle, marginBottom: 10, textAlign: "center" }} />
             {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 8 }}>{err}</div>}
-            <button type="button" onClick={verifyOtp} style={{ width: "100%", background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 0", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>Vérifier</button>
+            <button type="button" onClick={verifyOtp} style={{ width: "100%", background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>Vérifier</button>
           </div>
         </div>
       </div>
@@ -2637,7 +3124,7 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome }) 
 
   return (
     <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "linear-gradient(135deg,#0A2647 0%,#0A2647 55%,#C8102E 250%)" }}>
-      <div style={{ width: "min(92vw, 380px)", background: "var(--surface)", borderRadius: 16, padding: "34px 32px", boxShadow: "0 24px 60px rgba(10,38,71,0.35)", position: "relative" }}>
+      <div style={{ width: "min(92vw, 380px)", background: "var(--surface)", borderRadius: 14, padding: "34px 32px", boxShadow: "0 24px 60px rgba(10,38,71,0.35)", position: "relative" }}>
         {onBackToHome && (
           <button onClick={onBackToHome} style={{ position: "absolute", top: 18, insetInlineStart: 18, display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 12 }}>
             <ChevronLeft size={14} /> Accueil
@@ -2654,12 +3141,12 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome }) 
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <label style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>Identifiant</label>
-          <div style={{ display: "flex", alignItems: "center", border: "1.5px solid var(--border)", borderRadius: 9, padding: "9px 12px", gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", border: "1.5px solid var(--border)", borderRadius: 8, padding: "9px 12px", gap: 8 }}>
             <User size={15} color="var(--muted)" />
             <input value={id} onChange={(e) => setId(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit(e)} placeholder="admin" style={{ border: "none", outline: "none", flex: 1, fontSize: 14, background: "none", color: "var(--text)" }} />
           </div>
           <label style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>Mot de passe</label>
-          <div style={{ display: "flex", alignItems: "center", border: "1.5px solid var(--border)", borderRadius: 9, padding: "9px 12px", gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", border: "1.5px solid var(--border)", borderRadius: 8, padding: "9px 12px", gap: 8 }}>
             <Lock size={15} color="var(--muted)" />
             <input type={showPw ? "text" : "password"} autoComplete="current-password" value={pw} onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit(e)} placeholder="••••••••" style={{ border: "none", outline: "none", flex: 1, fontSize: 14, background: "none", color: "var(--text)" }} />
             <button type="button" onClick={() => setShowPw((s) => !s)} title={showPw ? "Masquer le mot de passe" : "Afficher le mot de passe"} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", display: "flex", alignItems: "center" }}>
@@ -2667,7 +3154,7 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome }) 
             </button>
           </div>
           {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5 }}>{err}</div>}
-          <button type="button" onClick={submit} style={{ marginTop: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 0", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>Se connecter</button>
+          <button type="button" onClick={submit} style={{ marginTop: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>Se connecter</button>
         </div>
         {offline && (
           <div style={{ marginTop: 14, background: "var(--danger-bg)", color: "var(--danger-fg)", borderRadius: 8, padding: "9px 12px", fontSize: 11.5, textAlign: "center" }}>
@@ -2684,7 +3171,7 @@ const StatCard = memo(function StatCard({ label, value, icon: Icon, tint, trend,
     <div style={{ background: SURFACE, borderRadius: 14, padding: "18px 20px", flex: 1, minWidth: 180, border: `1.5px solid ${outline || BORDER}` }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div style={{ fontSize: 12.5, color: MUTED, fontWeight: 600 }}>{label}</div>
-        <div style={{ width: 32, height: 32, borderRadius: 9, background: tint, display: "grid", placeItems: "center" }}><Icon size={16} color="#fff" /></div>
+        <div style={{ width: 32, height: 32, borderRadius: 8, background: tint, display: "grid", placeItems: "center" }}><Icon size={16} color="#fff" /></div>
       </div>
       <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 26, fontWeight: 700, color: TEXT, marginTop: 10 }}>{value}</div>
       {trend && <div style={{ fontSize: 11.5, color: trendColor || "var(--ok-fg)", marginTop: 6, fontWeight: 600 }}>{trend}</div>}
@@ -2729,7 +3216,8 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
     const centreClientsEnAttente = (data.clientAccounts || []).filter((c) => (c.messages || []).some((m) => m.expediteur === "client" && !m.lu)).length
       + (data.preAlertes || []).filter((p) => p.statut === "En attente").length
       + (data.demandesRegroupement || []).filter((r) => r.statut === "En attente").length
-      + data.colis.reduce((s, c) => s + (c.signalements || []).filter((sig) => sig.statut === "Ouvert").length, 0);
+      + data.colis.reduce((s, c) => s + (c.signalements || []).filter((sig) => sig.statut === "Ouvert").length, 0)
+      + data.colis.filter((c) => c.demandeExpress && c.demandeExpress.statut === "En attente").length;
     return { colis, total, thisMonth, enTransit, aExpedier, ca, encaisse, parPays, recent, parAgence, oublies, parProvenance, parRoute, impayesARelancer, centreClientsEnAttente };
   }, [data.colis, data.sites, data.clientAccounts, data.preAlertes, data.demandesRegroupement, session.agence]);
   const { colis, total, thisMonth, enTransit, aExpedier, ca, encaisse, parPays, recent, parAgence, oublies, parProvenance, parRoute, impayesARelancer, centreClientsEnAttente } = stats;
@@ -2750,8 +3238,8 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
           <p style={{ color: "var(--muted)", fontSize: 12.5, margin: "4px 0 0" }}>📍 Envoi de GUINÉE vers plusieurs destinations 🇬🇳</p>
         </div>
         <div style={{ display: "flex", gap: 10 }}>
-          <button onClick={() => onNavigate("admin")} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "9px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}><Settings size={14} /> Configuration</button>
-          <button onClick={() => onNavigate("colis")} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}><Plus size={14} /> Nouveau Colis</button>
+          <button onClick={() => onNavigate("admin")} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}><Settings size={14} /> Configuration</button>
+          <button onClick={() => onNavigate("colis")} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}><Plus size={14} /> Nouveau Colis</button>
         </div>
       </div>
 
@@ -2815,7 +3303,7 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
           {quickActions.map((a) => (
             <button key={a.label} onClick={() => onNavigate(a.view)} style={{ display: "flex", alignItems: "center", gap: 12, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px", cursor: "pointer", textAlign: "start" }}>
-              <div style={{ width: 38, height: 38, borderRadius: 10, background: a.tint, display: "grid", placeItems: "center", flexShrink: 0 }}><a.icon size={17} color="#fff" /></div>
+              <div style={{ width: 38, height: 38, borderRadius: 12, background: a.tint, display: "grid", placeItems: "center", flexShrink: 0 }}><a.icon size={17} color="#fff" /></div>
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{a.label}</div>
                 <div style={{ fontSize: 11.5, color: "var(--muted)" }}>{a.desc}</div>
@@ -2831,7 +3319,7 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
         {parPays.map((p) => (
           <div key={p.code} style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
             <div style={{ width: 130, fontSize: 13, color: "var(--text)" }}>{FLAGS[p.code]} {p.name}</div>
-            <div style={{ flex: 1, height: 8, background: "var(--surface2)", borderRadius: 4, overflow: "hidden" }}>
+            <div style={{ flex: 1, height: 8, background: "var(--surface2)", borderRadius: 6, overflow: "hidden" }}>
               <div style={{ width: `${total ? (p.count / total) * 100 : 0}%`, height: "100%", background: "var(--brand-solid)" }} />
             </div>
             <div style={{ width: 24, textAlign: "right", fontSize: 13, color: "var(--muted)" }}>{p.count}</div>
@@ -2846,7 +3334,7 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
           {parProvenance.sort((a, b) => b.count - a.count).map((p) => (
             <div key={p.nom} style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
               <div style={{ width: 130, fontSize: 13, color: "var(--text)" }}>{p.nom}</div>
-              <div style={{ flex: 1, height: 8, background: "var(--surface2)", borderRadius: 4, overflow: "hidden" }}>
+              <div style={{ flex: 1, height: 8, background: "var(--surface2)", borderRadius: 6, overflow: "hidden" }}>
                 <div style={{ width: `${total ? (p.count / total) * 100 : 0}%`, height: "100%", background: "#5B8DEF" }} />
               </div>
               <div style={{ width: 24, textAlign: "right", fontSize: 13, color: "var(--muted)" }}>{p.count}</div>
@@ -2860,7 +3348,7 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
           <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14.5, marginBottom: 12 }}>Statistiques par agence</div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
             {parAgence.map((a) => (
-              <div key={a.nom} style={{ background: "var(--surface2)", borderRadius: 10, padding: 14 }}>
+              <div key={a.nom} style={{ background: "var(--surface2)", borderRadius: 12, padding: 14 }}>
                 <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{a.nom}</div>
                 <div style={{ fontSize: 20, fontWeight: 700, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif", marginTop: 4 }}>{a.count}</div>
                 <div style={{ fontSize: 11.5, color: "var(--muted)" }}>colis · {fmt(a.ca, "EUR")}</div>
@@ -3034,7 +3522,7 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
 
   const Card = ({ icon: Icon, tint, title, desc, onClick }) => (
     <button onClick={onClick} style={{ display: "flex", gap: 14, textAlign: "start", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 18, cursor: "pointer" }}>
-      <div style={{ width: 40, height: 40, borderRadius: 10, background: tint, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon size={18} color="#fff" /></div>
+      <div style={{ width: 40, height: 40, borderRadius: 12, background: tint, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon size={18} color="#fff" /></div>
       <div>
         <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{title}</div>
         <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4, lineHeight: 1.4 }}>{desc}</div>
@@ -3044,7 +3532,7 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
   const SectionLabel = ({ children, badge }) => (
     <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "22px 0 10px" }}>
       <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", letterSpacing: 0.5 }}>{children}</div>
-      {badge && <span style={{ background: "#3D63FF", color: "#fff", fontSize: 9.5, fontWeight: 700, padding: "2px 7px", borderRadius: 5 }}>{badge}</span>}
+      {badge && <span style={{ background: "#3D63FF", color: "#fff", fontSize: 9.5, fontWeight: 700, padding: "2px 7px", borderRadius: 6 }}>{badge}</span>}
     </div>
   );
 
@@ -3055,7 +3543,7 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
           <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: 0 }}>Configuration</h1>
           <p style={{ color: "var(--muted)", fontSize: 13.5, margin: "4px 0 0" }}>Gérez les paramètres globaux de votre plateforme logistique.</p>
         </div>
-        <button onClick={() => onNavigateApp("dashboard")} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "9px 14px", color: "var(--text)", fontSize: 12.5, cursor: "pointer", flexShrink: 0 }}>
+        <button onClick={() => onNavigateApp("dashboard")} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "9px 14px", color: "var(--text)", fontSize: 12.5, cursor: "pointer", flexShrink: 0 }}>
           <LayoutDashboard size={14} /> Retour Dashboard
         </button>
       </div>
@@ -3096,7 +3584,7 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
 function ConfigPageHeader({ title, desc, onBack }) {
   return (
     <div style={{ display: "flex", alignItems: "flex-start", gap: 14, marginBottom: 22 }}>
-      <button onClick={onBack} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 12px", color: "var(--text)", fontSize: 12.5, cursor: "pointer", flexShrink: 0, marginTop: 2 }}>
+      <button onClick={onBack} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 12px", color: "var(--text)", fontSize: 12.5, cursor: "pointer", flexShrink: 0, marginTop: 2 }}>
         <ChevronLeft size={14} /> Configuration
       </button>
       <div>
@@ -3260,7 +3748,7 @@ function AgencesConfigPage({ data, persist, notify, onBack }) {
           {COUNTRIES.filter((c) => c.code !== "GN").map((c) => {
             const a = agences[c.code] || {};
             return (
-              <div key={c.code} style={{ background: "var(--surface2)", borderRadius: 10, padding: 14 }}>
+              <div key={c.code} style={{ background: "var(--surface2)", borderRadius: 12, padding: 14 }}>
                 <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>{FLAGS[c.code]} {c.name} — {c.city}</div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 8 }}>
                   <input value={a.adresse || ""} onChange={(e) => updateAgence(c.code, "adresse", e.target.value)} placeholder="Adresse de l’agence" style={{ ...inputStyle, marginBottom: 0 }} />
@@ -3273,7 +3761,7 @@ function AgencesConfigPage({ data, persist, notify, onBack }) {
         </div>
       </div>
 
-      <button onClick={save} style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 9, padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
+      <button onClick={save} style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
     </div>
   );
 }
@@ -3313,7 +3801,7 @@ function ReceptionTarifsPage({ data, persist, notify, onBack }) {
           {paliers.map((p, i) => {
             const min = i === 0 ? 1 : (sortedPreview[sortedPreview.indexOf(p)] ? sortedPreview[Math.max(0, sortedPreview.indexOf(p) - 1)]?.max + 1 : "");
             return (
-              <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface2)", borderRadius: 9, padding: "9px 12px" }}>
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface2)", borderRadius: 8, padding: "9px 12px" }}>
                 <span style={{ fontSize: 12, color: "var(--muted)", width: 60, flexShrink: 0 }}>Jusqu’à</span>
                 <input type="number" value={p.max} onChange={(e) => updatePalier(i, "max", e.target.value)} style={{ ...inputStyle, width: 80, marginBottom: 0 }} />
                 <span style={{ fontSize: 12, color: "var(--muted)" }}>kg →</span>
@@ -3340,7 +3828,7 @@ function ReceptionTarifsPage({ data, persist, notify, onBack }) {
         <Field label="Tarif (€ / kg)"><input type="number" step="0.5" value={expressTarifEurKg} onChange={(e) => setExpressTarifEurKg(e.target.value)} style={inputStyle} /></Field>
       </div>
 
-      <button onClick={save} style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 9, padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
+      <button onClick={save} style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
     </div>
   );
 }
@@ -3581,7 +4069,7 @@ function GestionDevisesPage({ data, persist, session, notify, onBack }) {
           <div style={{ background: "var(--surface)", borderRadius: 14, padding: 20, border: "1px solid var(--border)", width: "min(92vw, 320px)" }}>
             <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 8 }}>Synchronisation</div>
             <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14 }}>Recalcule immédiatement les prix de catégories, frais d’expédition et montants affichés selon les taux actuels.</div>
-            <button onClick={synchroniser} disabled={syncing} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: "#3D63FF", color: "#fff", border: "none", borderRadius: 9, padding: "11px 0", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+            <button onClick={synchroniser} disabled={syncing} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
               {syncing ? <RefreshCw size={15} /> : <RefreshCw size={15} />} {syncing ? "Synchronisation…" : "Synchroniser toutes les données"}
             </button>
             {syncMsg && <div style={{ marginTop: 12, background: "var(--ok-bg-soft)", color: "var(--ok-fg)", borderRadius: 8, padding: "10px 12px", fontSize: 12 }}>✓ {syncMsg}</div>}
@@ -3649,11 +4137,11 @@ function CategoriesProduitsPage({ data, persist, session, notify, onBack }) {
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
         <ConfigPageHeader title="Gestion des Catégories de Produits" desc="Configurez les catégories et leurs tarifs pour votre entreprise." onBack={onBack} />
-        {isAdmin && !form && <button onClick={openNew} style={{ display: "flex", alignItems: "center", gap: 6, background: "#3D63FF", color: "#fff", border: "none", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}><Plus size={16} /> Nouvelle Catégorie</button>}
+        {isAdmin && !form && <button onClick={openNew} style={{ display: "flex", alignItems: "center", gap: 6, background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}><Plus size={16} /> Nouvelle Catégorie</button>}
       </div>
 
       {!form && (
-        <div style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 12px", marginBottom: 18, maxWidth: 420 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 12px", marginBottom: 18, maxWidth: 420 }}>
           <Search size={15} color="var(--muted)" />
           <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher par nom, description ou mots-clés..." style={{ border: "none", outline: "none", background: "none", flex: 1, fontSize: 13.5, color: "var(--text)" }} />
         </div>
@@ -3668,7 +4156,7 @@ function CategoriesProduitsPage({ data, persist, session, notify, onBack }) {
 
           <div style={{ padding: "18px 20px" }}>
             <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", letterSpacing: 0.5, marginBottom: 10 }}>INFORMATIONS DE BASE</div>
-            <Field label="Nom de la catégorie *"><input value={form.nom} onChange={(e) => setForm({ ...form, nom: e.target.value })} style={inputStyle} placeholder="ex: Électronique Premium" /></Field>
+            <Field label="Nom de la catégorie *"><input value={form.nom} onChange={(e) => setForm({ ...form, nom: e.target.value })} style={inputStyle} placeholder="ex : Électronique Premium" /></Field>
             <Field label="Description"><input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} style={inputStyle} placeholder="Description détaillée" /></Field>
             <Field label="Emoji"><input value={form.emoji} onChange={(e) => setForm({ ...form, emoji: e.target.value })} style={{ ...inputStyle, width: 70 }} /></Field>
 
@@ -3721,7 +4209,7 @@ function CategoriesProduitsPage({ data, persist, session, notify, onBack }) {
             <div style={{ fontSize: 11, color: "var(--muted)", margin: "6px 0 14px" }}>Séparez les mots-clés par des virgules pour la détection automatique.</div>
 
             <Field label="Test de détection"><input value={testInput} onChange={(e) => setTestInput(e.target.value)} style={inputStyle} placeholder="ex: iPhone 15 Pro Max" /></Field>
-            <button onClick={testDetection} style={{ width: "100%", background: "#3D63FF", color: "#fff", border: "none", borderRadius: 9, padding: "10px 0", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Tester</button>
+            <button onClick={testDetection} style={{ width: "100%", background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "10px 0", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Tester</button>
             {testResult && <div style={{ marginTop: 10, fontSize: 12.5, color: testResult === "Aucune catégorie détectée" ? "var(--warn-fg)" : "var(--ok-fg)" }}>{testResult === "Aucune catégorie détectée" ? testResult : `Catégorie détectée : ${testResult}`}</div>}
           </div>
 
@@ -3790,6 +4278,196 @@ const Field = memo(function Field({ label, children }) {
  * ouvrant chaque colis un par un, sans vue d’ensemble) — ils sont maintenant réunis avec un
  * seul badge de notification combiné dans le menu.
  */
+/**
+ * Traitement d'une pré-alerte par l'agence.
+ *
+ * Le client annonce une commande (référence, boutique, nombre d'articles, valeur) sans
+ * indiquer de poids : il ne peut pas le connaître. À l'arrivée du colis, l'agent corrige si
+ * besoin les informations, pèse le colis, et le prix se calcule automatiquement selon les
+ * paliers de réception (Configuration → Tarifs de réception). La validation crée un vrai colis
+ * rattaché au compte du client, qui le voit alors apparaître dans son espace.
+ */
+/**
+ * Vérification d'une référence — utilisable par un agent comme par un client.
+ *
+ * On cherche sur tous les identifiants possibles : numéro de suivi Ba-Diaby, référence de la
+ * commande chez le vendeur, nom ou téléphone du destinataire. Trois réponses possibles :
+ * le colis existe (avec la date de chaque étape franchie), la commande est annoncée mais pas
+ * encore reçue, ou la référence est introuvable.
+ *
+ * Côté client, la recherche est volontairement limitée à SES propres colis : sans cela,
+ * n'importe qui pourrait consulter les envois des autres en devinant une référence.
+ */
+function VerifierReferenceModal({ data, compteClient, onClose }) {
+  const [requete, setRequete] = useState("");
+  const [recherche, setRecherche] = useState(false);
+
+  const q = requete.trim().toLowerCase();
+  const colisSource = compteClient ? data.colis.filter((c) => c.clientAccountId === compteClient.id) : data.colis;
+  const preAlertesSource = compteClient
+    ? (data.preAlertes || []).filter((p) => p.clientAccountId === compteClient.id)
+    : (data.preAlertes || []);
+
+  const correspond = (c) => [c.tracking, c.referenceCommande, c.destinataire, c.telephone, c.notesInternes]
+    .filter(Boolean).some((v) => String(v).toLowerCase().includes(q));
+
+  const colisTrouves = q ? colisSource.filter(correspond) : [];
+  const preAlertesTrouvees = q ? preAlertesSource.filter((p) =>
+    [p.trackingExterne, p.description, p.provenance].filter(Boolean).some((v) => String(v).toLowerCase().includes(q))
+    && !colisTrouves.some((c) => c.tracking === p.colisTracking)) : [];
+
+  const dateEtape = (colis, statut) => {
+    const e = (colis.historique || []).find((h) => h.status === statut);
+    return e ? new Date(e.date).toLocaleDateString("fr-FR") : null;
+  };
+
+  return (
+    <Modal onClose={onClose} title="Vérifier une référence" wide>
+      <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 12 }}>
+        Numéro de suivi, référence de la commande{compteClient ? "" : ", nom ou téléphone du destinataire"} — saisissez ce que vous avez.
+      </div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+        <input value={requete} autoFocus onChange={(e) => { setRequete(e.target.value); setRecherche(true); }}
+          placeholder="Ex : BDE123456 ou SHEIN-98213" style={{ ...inputStyle, flex: 1, marginBottom: 0 }} />
+      </div>
+
+      {!q && <div style={{ fontSize: 12.5, color: "var(--muted)", textAlign: "center", padding: "20px 0" }}>Saisissez une référence pour lancer la recherche.</div>}
+
+      {q && colisTrouves.length === 0 && preAlertesTrouvees.length === 0 && recherche && (
+        <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 12, padding: 18, textAlign: "center" }}>
+          <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--danger-fg)" }}>Référence introuvable</div>
+          <div style={{ fontSize: 12.5, color: "var(--danger-fg-soft)", marginTop: 5 }}>
+            « {requete.trim()} » ne correspond à aucun colis ni à aucune commande annoncée{compteClient ? " sur votre compte" : " dans la base"}.
+          </div>
+        </div>
+      )}
+
+      {colisTrouves.map((c) => (
+        <div key={c.tracking} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 10 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{c.tracking}</div>
+              <div style={{ fontSize: 11.5, color: "var(--muted)" }}>
+                {c.destinataire}{c.referenceCommande ? ` · réf. ${c.referenceCommande}` : ""} · {c.poids} kg
+              </div>
+            </div>
+            <span style={{ background: STATUS_STYLE[c.status]?.bg, color: STATUS_STYLE[c.status]?.fg, padding: "4px 11px", borderRadius: 20, fontSize: 11.5, fontWeight: 700 }}>
+              {clientStatusLabel(c.status)}
+            </span>
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 14 }}>
+            {CLIENT_TIMELINE.filter((e) => e.statuses.length).map((etape) => {
+              const d = etape.statuses.map((st) => dateEtape(c, st)).find(Boolean);
+              return (
+                <div key={etape.key} style={{ fontSize: 11.5 }}>
+                  <div style={{ color: "var(--muted)" }}>{etape.label}</div>
+                  <div style={{ color: d ? "var(--ok-fg)" : "var(--muted)", fontWeight: d ? 700 : 400 }}>{d || "—"}</div>
+                </div>
+              );
+            })}
+          </div>
+          {c.reste > 0 && (
+            <div style={{ marginTop: 10, fontSize: 12, color: "var(--danger-fg)", fontWeight: 600 }}>
+              Reste à payer : {fmtGNF(c.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}
+            </div>
+          )}
+        </div>
+      ))}
+
+      {preAlertesTrouvees.map((p) => (
+        <div key={p.id} style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 12, padding: 16, marginBottom: 10 }}>
+          <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--warn-fg)" }}>Commande annoncée — pas encore reçue</div>
+          <div style={{ fontSize: 12.5, color: "var(--text)", marginTop: 5 }}>
+            {p.provenance} · réf. {p.trackingExterne}{p.description ? ` — ${p.description}` : ""}
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3 }}>
+            Annoncée le {new Date(p.dateCreation).toLocaleDateString("fr-FR")} · en attente d'arrivée à l'entrepôt
+          </div>
+        </div>
+      ))}
+    </Modal>
+  );
+}
+
+function TraiterPreAlerteModal({ preAlerte, client, tarifs, onValider, onClose }) {
+  const [reference, setReference] = useState(preAlerte.trackingExterne || "");
+  const [provenance, setProvenance] = useState(preAlerte.provenance || "Autre");
+  const [description, setDescription] = useState(preAlerte.description || "");
+  const [nbArticles, setNbArticles] = useState(preAlerte.nbArticles ? String(preAlerte.nbArticles) : "1");
+  const [valeurCommande, setValeurCommande] = useState(preAlerte.valeurCommande ? String(preAlerte.valeurCommande) : "");
+  const [poids, setPoids] = useState("");
+  // Pays de l'entrepôt où le colis est réceptionné : c'est lui qui détermine la route du
+  // bordereau (ex. Paris → Conakry). Sans cette information le colis ne pourrait entrer dans
+  // aucun bordereau d'expédition.
+  const [paysOrigine, setPaysOrigine] = useState("FR");
+  const [erreur, setErreur] = useState("");
+
+  const poidsNum = Number(poids) || 0;
+  const calcul = poidsNum > 0 ? calcReceptionFee(poidsNum, tarifs) : null;
+
+  function valider() {
+    if (!(poidsNum > 0)) { setErreur("Indiquez le poids réel du colis pour calculer le prix."); return; }
+    onValider({
+      reference: reference.trim(), provenance, description: description.trim(),
+      nbArticles: Number(nbArticles) || 1,
+      valeurCommande: valeurCommande ? Number(valeurCommande) : null,
+      poids: poidsNum, prixGNF: calcul.total, tauxParKg: calcul.tauxParKg,
+      paysOrigine,
+    });
+  }
+
+  return (
+    <Modal onClose={onClose} title="Réception du colis annoncé" wide>
+      <div style={{ background: "var(--surface2)", borderRadius: 12, padding: "10px 14px", marginBottom: 16 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{client ? `${client.prenom} ${client.nom}` : "Compte inconnu"}</div>
+        <div style={{ fontSize: 11.5, color: "var(--muted)" }}>{client?.telephone} · annoncé le {new Date(preAlerte.dateCreation).toLocaleDateString("fr-FR")}</div>
+      </div>
+
+      <div style={{ fontSize: 11.5, color: "var(--muted)", fontWeight: 700, marginBottom: 8 }}>INFORMATIONS ANNONCÉES PAR LE CLIENT (modifiables)</div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+        <select value={provenance} onChange={(e) => setProvenance(e.target.value)} style={{ ...inputStyle, width: 140, marginBottom: 0 }}>
+          {VENDEURS_EN_LIGNE.map((v) => <option key={v} value={v}>{v}</option>)}
+        </select>
+        <input value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Référence de la commande" style={{ ...inputStyle, flex: 1, minWidth: 150, marginBottom: 0 }} />
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+        <span style={{ fontSize: 12, color: "var(--muted)" }}>Réceptionné à l’entrepôt de</span>
+        <select value={paysOrigine} onChange={(e) => setPaysOrigine(e.target.value)} style={{ ...inputStyle, width: 210, marginBottom: 0 }}>
+          {COUNTRIES.filter((c) => c.code !== "GN").map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code] || ""} {c.name} — {c.city}</option>)}
+        </select>
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+        <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Description du contenu" style={{ ...inputStyle, flex: 1, minWidth: 160, marginBottom: 0 }} />
+        <input type="number" min="1" value={nbArticles} onChange={(e) => setNbArticles(e.target.value)} placeholder="Nombre d'articles" style={{ ...inputStyle, width: 130, marginBottom: 0 }} />
+        <input type="number" step="0.01" min="0" value={valeurCommande} onChange={(e) => setValeurCommande(e.target.value)} placeholder="Valeur commande (€)" style={{ ...inputStyle, width: 150, marginBottom: 0 }} />
+      </div>
+
+      <div style={{ fontSize: 11.5, color: "var(--muted)", fontWeight: 700, margin: "18px 0 8px" }}>PESÉE ET TARIFICATION</div>
+      <div style={{ display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
+        <input type="number" step="0.1" min="0" value={poids} onChange={(e) => { setPoids(e.target.value); setErreur(""); }} placeholder="Poids réel (kg)" autoFocus style={{ ...inputStyle, width: 150, marginBottom: 0 }} />
+        <div style={{ flex: 1, minWidth: 220, background: calcul ? "var(--ok-bg)" : "var(--surface2)", border: "1px solid " + (calcul ? "var(--ok-border)" : "var(--border)"), borderRadius: 12, padding: "10px 14px" }}>
+          {calcul ? (
+            <>
+              <div style={{ fontSize: 11.5, color: "var(--muted)" }}>Palier {calcul.palier.max <= 10 ? "1 à 10 kg" : calcul.palier.max <= 40 ? "11 à 40 kg" : "41 à 100 kg"} · {fmtGNF(calcul.tauxParKg)}/kg</div>
+              <div style={{ fontSize: 19, fontWeight: 700, color: "var(--ok-fg)", fontFamily: "'Space Grotesk',sans-serif" }}>{fmtGNF(calcul.total)}</div>
+            </>
+          ) : (
+            <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Saisissez le poids : le prix se calcule automatiquement selon vos paliers de réception.</div>
+          )}
+        </div>
+      </div>
+      {erreur && <div style={{ fontSize: 12, color: "var(--danger-fg)", marginTop: 10 }}>{erreur}</div>}
+
+      <button onClick={valider} style={{ width: "100%", marginTop: 18, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "12px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
+        Valider — Reçu à l'entrepôt
+      </button>
+      <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", marginTop: 8 }}>
+        Un colis sera créé au nom du client et apparaîtra aussitôt dans son espace.
+      </div>
+    </Modal>
+  );
+}
+
 function CentreClientsPage({ data, persist, notify, session }) {
   const [ongletActif, setOngletActif] = useState("messages");
   const [clientOuvert, setClientOuvert] = useState(null);
@@ -3807,10 +4485,27 @@ function CentreClientsPage({ data, persist, notify, session }) {
   const preAlertes = data.preAlertes || [];
   const signalementsOuverts = data.colis.flatMap((c) => (c.signalements || []).filter((s) => s.statut === "Ouvert").map((s) => ({ ...s, colis: c })))
     .sort((a, b) => new Date(b.dateCreation) - new Date(a.dateCreation));
+  // Demandes de livraison express en attente de décision — auparavant visibles uniquement en
+  // ouvrant chaque colis une par une, donc facilement oubliées.
+  const demandesExpress = data.colis.filter((c) => c.demandeExpress && c.demandeExpress.statut === "En attente")
+    .sort((a, b) => new Date(b.demandeExpress.date || 0) - new Date(a.demandeExpress.date || 0));
+
+  function deciderExpress(colis, accepte) {
+    const maintenant = new Date().toISOString();
+    persist({
+      ...data,
+      colis: data.colis.map((c) => (c.tracking === colis.tracking
+        ? { ...c, demandeExpress: { ...c.demandeExpress, statut: accepte ? "Confirmée" : "Refusée", dateDecision: maintenant, traitePar: `${session.prenom} ${session.nom}`.trim() } }
+        : c)),
+      activityLog: pushActivity(data, session, accepte ? "Livraison express acceptée" : "Livraison express refusée", colis.tracking),
+    });
+    notify?.(accepte ? `Express accepté pour ${colis.tracking} — le client est informé` : `Express refusé pour ${colis.tracking}`);
+  }
 
   const messagesNonLus = clients.filter((c) => (c.messages || []).some((m) => m.expediteur === "client" && !m.lu)).length;
   const regroupementsEnAttente = demandes.filter((d) => d.statut === "En attente").length;
   const preAlertesEnAttente = preAlertes.filter((p) => p.statut === "En attente").length;
+  const expressEnAttente = demandesExpress.length;
 
   function envoyerReponse(client) {
     if (!reponse.trim()) return;
@@ -3851,6 +4546,56 @@ function CentreClientsPage({ data, persist, notify, session }) {
     persist({ ...data, demandesRegroupement: demandes.map((d) => (d.id === id ? { ...d, statut, dateMaj: new Date().toISOString() } : d)) });
     notify?.(statut === "Acceptée" ? "Demande de regroupement acceptée" : "Demande refusée");
   }
+  const [preAlerteEnCours, setPreAlerteEnCours] = useState(null);
+  const [showVerifAgent, setShowVerifAgent] = useState(false);
+
+  /**
+   * Transforme une pré-alerte en colis réel rattaché au compte du client.
+   * Le prix vient des paliers de réception, calculé à partir du poids pesé par l'agent.
+   */
+  function validerPreAlerte(preAlerte, saisie) {
+    const client = clientsById[preAlerte.clientAccountId];
+    if (!client) { notify?.("Compte client introuvable"); return; }
+    const maintenant = new Date().toISOString();
+    const tracking = genTracking((data.colis || []).map((c) => c.tracking));
+    const prixEUR = saisie.prixGNF / (LIVE_RATES.GNF || CURRENCIES.GNF);
+    const colis = {
+      tracking,
+      expediteur: saisie.provenance || "Achat en ligne", expediteurTelephone: "", expediteurEmail: "", expediteurAdresse: "", expediteurPays: "GN",
+      destinataire: `${client.prenom} ${client.nom}`, telephone: client.telephone,
+      destinataireEmail: client.email || "", destinataireAdresse: client.adresse || "",
+      destinatairePays: "GN", destinataireVille: "", destinataireCodePostal: "",
+      pays: saisie.paysOrigine || "FR", direction: "import", mode: "air",
+      produits: [{ id: `p${Date.now()}`, nom: saisie.description || saisie.reference || "Commande en ligne",
+                   quantite: String(saisie.nbArticles || 1), poids: String(saisie.poids), categorie: "" }],
+      poids: saisie.poids, volume: 0, valeurDeclaree: saisie.valeurCommande || 0, site: session?.agence || "Bambeto",
+      prixBrut: prixEUR, discountLoyalty: 0, rabaisMontant: 0, rabaisDevise: "GNF", rabaisEUR: 0,
+      prix: prixEUR, paye: 0, reste: prixEUR, photos: [], paiements: [],
+      notesInternes: `Pré-alerte ${saisie.provenance}${saisie.reference ? ` — réf. ${saisie.reference}` : ""} · ${saisie.poids} kg à ${fmtGNF(saisie.tauxParKg)}/kg`,
+      // Base de tarification mémorisée : ce colis est facturé aux paliers de réception, pas au
+      // barème export. Sans cette information, une simple modification recalculait le prix avec
+      // la mauvaise formule et l'écrasait silencieusement.
+      tarification: "reception",
+      clientAccountId: client.id, provenance: saisie.provenance,
+      referenceCommande: saisie.reference || null,
+      status: "Enregistré", historique: [{ status: "Enregistré", date: maintenant }],
+      agentCreation: session ? `${session.prenom} ${session.nom}`.trim() || session.identifiant : "",
+      createdAt: maintenant, pod: null, signature: null, driverLoc: null,
+    };
+    persist({
+      ...data,
+      colis: [colis, ...data.colis],
+      preAlertes: preAlertes.map((x) => (x.id === preAlerte.id
+        ? { ...x, statut: "Rapproché", trackingExterne: saisie.reference, provenance: saisie.provenance,
+            description: saisie.description, nbArticles: saisie.nbArticles, valeurCommande: saisie.valeurCommande,
+            colisTracking: tracking, dateRapprochement: maintenant }
+        : x)),
+      activityLog: pushActivity(data, session, "Pré-alerte reçue à l'entrepôt", `${tracking} — ${client.prenom} ${client.nom} · ${saisie.poids} kg`),
+    });
+    notify?.(`Colis ${tracking} créé — ${fmtGNF(saisie.prixGNF)}`);
+    setPreAlerteEnCours(null);
+  }
+
   function marquerRapproche(id) {
     persist({ ...data, preAlertes: preAlertes.map((p) => (p.id === id ? { ...p, statut: "Rapproché" } : p)) });
     notify?.("Pré-alerte marquée comme rapprochée");
@@ -3876,12 +4621,18 @@ function CentreClientsPage({ data, persist, notify, session }) {
     ["prealertes", "Pré-alertes", preAlertesEnAttente],
     ["regroupements", "Regroupements", regroupementsEnAttente],
     ["signalements", "Signalements", signalementsOuverts.length],
+    ["express", "Livraison express", expressEnAttente],
   ];
 
   return (
     <div>
       <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: "0 0 4px" }}>Centre clients</h1>
-      <p style={{ color: "var(--muted)", fontSize: 13.5, margin: "4px 0 18px" }}>Tout ce qui vient de l’Espace Client et attend une réponse : messages, pré-alertes, regroupements, signalements.</p>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap", margin: "4px 0 18px" }}>
+      <p style={{ color: "var(--muted)", fontSize: 13.5, margin: 0 }}>Tout ce qui vient de l’Espace Client et attend une réponse : messages, pré-alertes, regroupements, signalements.</p>
+        <button onClick={() => setShowVerifAgent(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", flexShrink: 0 }}>
+          <Search size={14} /> Vérifier une référence
+        </button>
+      </div>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" }}>
         {onglets.map(([k, label, count]) => (
@@ -3915,7 +4666,7 @@ function CentreClientsPage({ data, persist, notify, session }) {
               <div style={{ margin: "auto", fontSize: 12.5, color: "var(--muted)" }}>Sélectionnez un client pour voir la conversation.</div>
             ) : (
               <>
-                <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)", marginBottom: 10 }}>{clientActif.prenom} {clientActif.nom} <span style={{ fontWeight: 400, color: "var(--muted)" }}>· {clientActif.telephone}</span></div>
+                <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)", marginBottom: 10 }}>{clientActif.prenom} {clientActif.nom} <span style={{ fontWeight: 600, color: "var(--muted)" }}>· {clientActif.telephone}</span></div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, maxHeight: 320, overflowY: "auto", marginBottom: 12 }}>
                   {(clientActif.messages || []).map((m) => (
                     <div key={m.id} style={{ alignSelf: m.expediteur === "staff" ? "flex-end" : "flex-start", maxWidth: "80%", background: m.expediteur === "staff" ? "var(--brand-solid)" : "var(--surface2)", color: m.expediteur === "staff" ? "#fff" : "var(--text)", borderRadius: 12, padding: "8px 12px" }}>
@@ -3926,7 +4677,7 @@ function CentreClientsPage({ data, persist, notify, session }) {
                 </div>
                 <div style={{ display: "flex", gap: 8 }}>
                   <input value={reponse} onChange={(e) => setReponse(e.target.value)} placeholder="Répondre..." style={{ ...inputStyle, flex: 1, marginBottom: 0 }} onKeyDown={(e) => { if (e.key === "Enter") envoyerReponse(clientActif); }} />
-                  <button onClick={() => envoyerReponse(clientActif)} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "0 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Envoyer</button>
+                  <button onClick={() => envoyerReponse(clientActif)} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "0 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Envoyer</button>
                 </div>
               </>
             )}
@@ -3956,12 +4707,14 @@ function CentreClientsPage({ data, persist, notify, session }) {
                       </div>
                       <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
                         Client : <strong style={{ color: "var(--text)" }}>{client ? `${client.prenom} ${client.nom}` : "Compte inconnu"}</strong> · {client?.telephone} · {new Date(p.dateCreation).toLocaleDateString("fr-FR")}
-                        {p.nbArticles ? ` · ${p.nbArticles} article${p.nbArticles > 1 ? "s" : ""}` : ""}{p.valeurCommande ? ` · ${fmt(p.valeurCommande, "EUR")}` : ""}{p.poidsEstime ? ` · ~${p.poidsEstime} kg` : ""}
+                        {p.nbArticles ? ` · ${p.nbArticles} article${p.nbArticles > 1 ? "s" : ""}` : ""}{p.valeurCommande ? ` · ${fmt(p.valeurCommande, "EUR")}` : ""}
+                        {p.colisTracking ? <span style={{ color: "var(--ok-fg)", fontWeight: 600 }}>{` · colis ${p.colisTracking} créé`}</span> : null}{p.poidsEstime ? ` · ~${p.poidsEstime} kg` : ""}
                       </div>
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                       <span style={{ background: p.statut === "En attente" ? "var(--warn-bg)" : "var(--ok-bg)", color: p.statut === "En attente" ? "var(--warn-fg)" : "var(--ok-fg)", padding: "4px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>{p.statut}</span>
-                      {p.statut === "En attente" && <button onClick={() => marquerRapproche(p.id)} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 7, padding: "6px 12px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Marquer rapprochée</button>}
+                      {p.statut === "En attente" && <button onClick={() => setPreAlerteEnCours(p)} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 6, padding: "6px 12px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Réceptionner & peser</button>}
+                      {p.statut === "En attente" && <button onClick={() => marquerRapproche(p.id)} title="Marquer traitée sans créer de colis" style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 6, padding: "6px 10px", fontSize: 11.5, cursor: "pointer" }}>Classer</button>}
                       <button onClick={() => supprimerPreAlerte(p.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><X size={15} /></button>
                     </div>
                   </div>
@@ -3992,8 +4745,8 @@ function CentreClientsPage({ data, persist, notify, session }) {
                   </div>
                   {d.statut === "En attente" && (
                     <div style={{ display: "flex", gap: 8 }}>
-                      <button onClick={() => majDemande(d.id, "Acceptée")} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 7, padding: "6px 14px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Accepter</button>
-                      <button onClick={() => majDemande(d.id, "Refusée")} style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 7, padding: "6px 14px", fontSize: 11.5, cursor: "pointer" }}>Refuser</button>
+                      <button onClick={() => majDemande(d.id, "Acceptée")} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 6, padding: "6px 14px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Accepter</button>
+                      <button onClick={() => majDemande(d.id, "Refusée")} style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 6, padding: "6px 14px", fontSize: 11.5, cursor: "pointer" }}>Refuser</button>
                     </div>
                   )}
                 </div>
@@ -4001,6 +4754,50 @@ function CentreClientsPage({ data, persist, notify, session }) {
             })}
           </div>
         )
+      )}
+
+      {showVerifAgent && <VerifierReferenceModal data={data} compteClient={null} onClose={() => setShowVerifAgent(false)} />}
+
+      {ongletActif === "express" && (
+        demandesExpress.length === 0 ? (
+          <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>Aucune demande de livraison express en attente.</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            {demandesExpress.map((c) => {
+              const client = clientsById[c.clientAccountId];
+              return (
+                <div key={c.tracking} style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 12, padding: "14px 16px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 10, marginBottom: 10 }}>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>⚡ {c.tracking} — {client ? `${client.prenom} ${client.nom}` : c.destinataire}</div>
+                      <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                        Livraison express 72 h · {fmtGNF((c.demandeExpress.montant || 0) * (LIVE_RATES.GNF || CURRENCIES.GNF))} · {c.poids} kg
+                        {c.demandeExpress.date ? ` · demandé le ${new Date(c.demandeExpress.date).toLocaleDateString("fr-FR")}` : ""}
+                      </div>
+                      {c.demandeExpress.adresse && <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>Adresse : {c.demandeExpress.adresse}</div>}
+                    </div>
+                    <span style={{ background: "var(--surface2)", color: "var(--warn-fg)", padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>En attente</span>
+                  </div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={() => deciderExpress(c, true)} style={{ background: "#16A163", color: "#fff", border: "none", borderRadius: 6, padding: "7px 16px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Accepter</button>
+                    <button onClick={() => deciderExpress(c, false)} style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 6, padding: "7px 14px", fontSize: 12, cursor: "pointer" }}>Refuser</button>
+                  </div>
+                  <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 8 }}>Le client reçoit une notification dans son espace dès votre décision.</div>
+                </div>
+              );
+            })}
+          </div>
+        )
+      )}
+
+      {preAlerteEnCours && (
+        <TraiterPreAlerteModal
+          preAlerte={preAlerteEnCours}
+          client={clientsById[preAlerteEnCours.clientAccountId]}
+          tarifs={data.receptionTarifs}
+          onValider={(saisie) => validerPreAlerte(preAlerteEnCours, saisie)}
+          onClose={() => setPreAlerteEnCours(null)}
+        />
       )}
 
       {ongletActif === "signalements" && (
@@ -4016,7 +4813,7 @@ function CentreClientsPage({ data, persist, notify, session }) {
                 </div>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   <input value={reponsesSignalement[s.id] || ""} onChange={(e) => setReponsesSignalement((r) => ({ ...r, [s.id]: e.target.value }))} placeholder="Votre réponse au client..." style={{ ...inputStyle, flex: 1, minWidth: 180, marginBottom: 0 }} />
-                  <button onClick={() => repondreSignalement(s.colis, s.id)} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 7, padding: "0 14px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Répondre & clore</button>
+                  <button onClick={() => repondreSignalement(s.colis, s.id)} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 6, padding: "0 14px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Répondre & clore</button>
                 </div>
               </div>
             ))}
@@ -4032,6 +4829,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
   const [showAi, setShowAi] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [showReception, setShowReception] = useState(false);
+  const [showEncaisseGroupe, setShowEncaisseGroupe] = useState(false);
   const [query, setQuery] = useState(initialQuery || "");
   useEffect(() => { if (initialQuery) setQuery(initialQuery); }, [initialQuery]);
   useEffect(() => { if (ouvrirFormulaire) setShowForm(true); }, [ouvrirFormulaire]);
@@ -4048,7 +4846,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     return data.colis
       .filter((c) => (isChauffeur ? c.status === "En livraison" : true))
       .filter((c) => !session.agence || (c.site || "Bambeto") === session.agence)
-      .filter((c) => !q || c.tracking.toLowerCase().includes(q) || c.destinataire.toLowerCase().includes(q));
+      .filter((c) => !q || c.tracking.toLowerCase().includes(q) || c.destinataire.toLowerCase().includes(q) || (c.referenceCommande || "").toLowerCase().includes(q));
   }, [data.colis, isChauffeur, session.agence, deferredQuery]);
   // Affichage progressif : la recherche porte toujours sur TOUS les colis, seul le nombre de
   // cartes rendues d'un coup est limité, pour que la page reste rapide même avec des milliers
@@ -4056,6 +4854,61 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
   const [nbColisAffiches, setNbColisAffiches] = useState(TAILLE_PAGE);
   useEffect(() => { setNbColisAffiches(TAILLE_PAGE); }, [deferredQuery]);
   const listeVisible = useMemo(() => list.slice(0, nbColisAffiches), [list, nbColisAffiches]);
+
+  /*
+   * Colis disponibles au retrait que le client n'est pas venu chercher.
+   *
+   * Différent des « colis oubliés » du tableau de bord, qui concernent ceux pas encore expédiés.
+   * Ici il s'agit du bout de la chaîne : le colis est à Conakry, le client est prévenu, mais il
+   * ne vient pas. Chaque jour qui passe occupe de la place à l'agence et retarde l'encaissement —
+   * et le délai de stockage annoncé au client (7 jours par défaut) court déjà.
+   */
+  const agenceRetraitColis = (data.sites || []).find((s) => s.id === (data.agenceRetraitClient || "site-bambeto")) || (data.sites || [])[0];
+  const delaiRetraitJours = (() => {
+    const m = String(agenceRetraitColis?.stockage || "").match(/(\d+)/);
+    return m ? Number(m[1]) : 7;
+  })();
+
+  const aRelancer = useMemo(() => {
+    const maintenant = Date.now();
+    return (data.colis || [])
+      .filter((c) => ["En douane", "En livraison"].includes(c.status))
+      .map((c) => {
+        const etape = [...(c.historique || [])].reverse().find((h) => ["En douane", "En livraison"].includes(h.status));
+        const depuis = etape ? new Date(etape.date).getTime() : new Date(c.createdAt).getTime();
+        return { ...c, joursAttente: Math.floor((maintenant - depuis) / 86400000) };
+      })
+      .filter((c) => c.joursAttente >= delaiRetraitJours)
+      .sort((a, b) => b.joursAttente - a.joursAttente);
+  }, [data.colis, delaiRetraitJours]);
+
+  const [relanceEnCours, setRelanceEnCours] = useState(null);
+
+  /** Relance groupée : un rappel court, avec l'adresse et la somme due. */
+  async function relancerRetraits() {
+    setRelanceEnCours({ total: aRelancer.length, faits: 0, envoyes: 0, echecs: [] });
+    let envoyes = 0;
+    const echecs = [];
+    for (let i = 0; i < aRelancer.length; i++) {
+      const c = aRelancer[i];
+      const ag = agenceRetraitColis;
+      const du = c.reste > 0 ? ` Reste à régler : ${fmtGNF(c.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}.` : "";
+      const message = `Bonjour ${c.destinataire}, votre colis Ba-Diaby Express ${c.tracking} vous attend depuis ${c.joursAttente} jours`
+        + (ag ? ` à notre agence ${ag.nom} — ${ag.adresse}${ag.horaires ? ` (${ag.horaires})` : ""}.` : ".")
+        + du + " Merci de venir le récupérer.";
+      if (!c.telephone) echecs.push({ tracking: c.tracking, raison: "pas de numéro" });
+      else {
+        const { envoye, raison } = await envoyerWhatsApp(c.telephone, message);
+        if (envoye) envoyes++;
+        else echecs.push({ tracking: c.tracking, raison: raison || "envoi automatique indisponible" });
+      }
+      setRelanceEnCours({ total: aRelancer.length, faits: i + 1, envoyes, echecs: [...echecs] });
+    }
+    if (envoyes === 0 && echecs.every((e) => e.raison === "envoi automatique indisponible")) {
+      setRelanceEnCours(null);
+      notify("Envoi automatique indisponible — contactez les clients depuis leur fiche");
+    }
+  }
 
   function logActivity(action, detail) { return pushActivity(data, session, action, detail); }
   function toggleSelectionLot(tracking) {
@@ -4118,6 +4971,44 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     }
     setSelected(next.colis.find((c) => c.tracking === tracking));
   }
+  /*
+   * Litiges : colis endommagé ou perdu.
+   *
+   * Volontairement séparé du statut de livraison. Un colis abîmé peut tout de même être remis au
+   * client (avec un geste commercial), et un colis perdu doit garder sa trace plutôt que d'être
+   * « annulé » — ce qui aurait effacé la vente et faussé la comptabilité. Le litige est donc une
+   * information supplémentaire, avec sa propre résolution et son éventuelle indemnité.
+   */
+  function declarerLitige(tracking, type, description) {
+    const maintenant = new Date().toISOString();
+    const next = { ...data, colis: data.colis.map((c) => (c.tracking !== tracking ? c : {
+      ...c,
+      litige: { type, description, date: maintenant, statut: "Ouvert",
+                par: `${session.prenom} ${session.nom}`.trim() || session.identifiant },
+      historique: [...(c.historique || []), { status: c.status, date: maintenant,
+        utilisateur: `${session.prenom} ${session.nom}`.trim(), agence: c.site || "Bambeto",
+        motif: `Litige déclaré : ${type === "perdu" ? "colis perdu" : "colis endommagé"}${description ? ` — ${description}` : ""}` }],
+    })) };
+    next.activityLog = logActivity(type === "perdu" ? "Colis déclaré perdu" : "Colis déclaré endommagé", `${tracking}${description ? ` — ${description}` : ""}`);
+    persist(next);
+    notify(type === "perdu" ? "Colis déclaré perdu" : "Colis déclaré endommagé");
+    setSelected(next.colis.find((c) => c.tracking === tracking));
+  }
+
+  function resoudreLitige(tracking, resolution, indemniteEUR) {
+    const maintenant = new Date().toISOString();
+    const next = { ...data, colis: data.colis.map((c) => (c.tracking !== tracking ? c : {
+      ...c,
+      litige: { ...c.litige, statut: "Résolu", resolution, indemnite: Number(indemniteEUR) || 0,
+                dateResolution: maintenant,
+                resoluPar: `${session.prenom} ${session.nom}`.trim() || session.identifiant },
+    })) };
+    next.activityLog = logActivity("Litige résolu", `${tracking} — ${resolution}${indemniteEUR > 0 ? ` · indemnité ${fmt(indemniteEUR, "EUR")}` : ""}`);
+    persist(next);
+    notify("Litige résolu");
+    setSelected(next.colis.find((c) => c.tracking === tracking));
+  }
+
   function annuler(tracking, motif) {
     const next = { ...data, colis: data.colis.map((c) => {
       if (c.tracking !== tracking) return c;
@@ -4151,6 +5042,55 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     setSelected(next.colis.find((c) => c.tracking === tracking));
   }
   function remove(tracking) { persist({ ...data, colis: data.colis.filter((c) => c.tracking !== tracking), activityLog: logActivity("Colis supprimé", tracking) }); setSelected(null); }
+  /**
+   * Encaissement groupé : le client se présente au comptoir avec plusieurs colis et règle une
+   * seule somme. Elle est répartie automatiquement sur les colis sélectionnés, du plus ancien au
+   * plus récent, jusqu'à épuisement. Chaque colis reçoit sa propre ligne de paiement, si bien que
+   * la comptabilité et les reçus restent exacts colis par colis.
+   */
+  function encaisserGroupe(trackings, montantEUR, mode, montantSaisi, deviseSaisie, details) {
+    const cibles = data.colis
+      .filter((c) => trackings.includes(c.tracking))
+      .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+    const duTotal = cibles.reduce((s, c) => s + Math.max(+(c.prix - c.paye).toFixed(2), 0), 0);
+    let restant = Math.min(Math.max(montantEUR, 0), duTotal);
+    const ajuste = Math.abs(restant - montantEUR) > 0.005;
+    const horodatage = new Date().toISOString();
+    const repartition = {};
+
+    cibles.forEach((c) => {
+      if (restant <= 0.005) return;
+      const du = Math.max(+(c.prix - c.paye).toFixed(2), 0);
+      const part = Math.min(du, restant);
+      if (part <= 0.005) return;
+      repartition[c.tracking] = +part.toFixed(2);
+      restant = +(restant - part).toFixed(2);
+    });
+
+    const nbColis = Object.keys(repartition).length;
+    if (nbColis === 0) { notify("Aucun montant à encaisser sur ces colis"); return; }
+
+    const next = { ...data, colis: data.colis.map((c) => {
+      const part = repartition[c.tracking];
+      if (!part) return c;
+      const paye = +(c.paye + part).toFixed(2);
+      const reste = Math.max(+(c.prix - paye).toFixed(2), 0);
+      const paiement = {
+        id: `pay${Date.now()}-${c.tracking}`, montant: part,
+        montantSaisi: +(part * (LIVE_RATES[deviseSaisie] || CURRENCIES[deviseSaisie] || 1)).toFixed(2),
+        deviseSaisie, mode, date: horodatage,
+        par: `${session.prenom} ${session.nom}`.trim() || session.identifiant,
+        ...(details || {}), groupe: true,
+      };
+      return { ...c, paye, reste, paiements: [...(c.paiements || []), paiement] };
+    }) };
+    next.activityLog = logActivity("Encaissement groupé", `${nbColis} colis — ${montantSaisi} ${deviseSaisie} (${mode})`);
+    persist(next);
+    notify(ajuste
+      ? `Réparti sur ${nbColis} colis — limité au solde dû, pensez à rendre la monnaie`
+      : `Réparti sur ${nbColis} colis`);
+  }
+
   function encaisser(tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId) {
     // Un encaissement ne peut jamais être négatif, ni dépasser le montant restant dû : sinon une
     // faute de frappe (un zéro de trop) gonflerait le chiffre d’affaires, car la comptabilité
@@ -4185,27 +5125,79 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
         </div>
         {peutCreer && (
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button onClick={() => setShowImport(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><Download size={16} color="var(--info-fg)" style={{ transform: "rotate(180deg)" }} /> Importer Excel</button>
-            <button onClick={() => setShowReception(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={16} color="var(--ok-fg)" /> Bordereau de réception</button>
-            <button onClick={() => setShowAi(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><Sparkles size={16} color="#8B5CF6" /> Créer par IA</button>
-            <button onClick={() => setShowForm(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><Plus size={16} /> {t.newColis}</button>
+            <button onClick={() => setShowImport(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><Download size={16} color="var(--info-fg)" style={{ transform: "rotate(180deg)" }} /> Importer Excel</button>
+            <button onClick={() => setShowReception(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={16} color="var(--ok-fg)" /> Bordereau de réception</button>
+            <button onClick={() => setShowEncaisseGroupe(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}><DollarSign size={15} color="var(--ok-fg)" /> Règlement groupé</button>
+            <button onClick={() => setShowAi(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><Sparkles size={16} color="#8B5CF6" /> Créer par IA</button>
+            <button onClick={() => setShowForm(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><Plus size={16} /> {t.newColis}</button>
           </div>
         )}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "8px 12px", maxWidth: 380, flex: 1 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "8px 12px", maxWidth: 380, flex: 1 }}>
           <Search size={15} color="var(--muted)" />
           <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`${t.search}...`} style={{ border: "none", outline: "none", flex: 1, fontSize: 13.5, background: "none", color: "var(--text)" }} />
         </div>
         {peutCreer && (
-          <button onClick={() => { setModeSelection((m) => !m); setSelectionLot([]); }} style={{ background: modeSelection ? "var(--brand-solid)" : "var(--surface)", color: modeSelection ? "#fff" : "var(--text)", border: "1.5px solid " + (modeSelection ? "var(--brand-solid)" : "var(--border)"), borderRadius: 9, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
+          <button onClick={() => { setModeSelection((m) => !m); setSelectionLot([]); }} style={{ background: modeSelection ? "var(--brand-solid)" : "var(--surface)", color: modeSelection ? "#fff" : "var(--text)", border: "1.5px solid " + (modeSelection ? "var(--brand-solid)" : "var(--border)"), borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
             {modeSelection ? "Annuler la sélection" : "Sélectionner plusieurs"}
           </button>
         )}
-        <button onClick={() => setShowScanner(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
+        <button onClick={() => setShowScanner(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
           <Camera size={14} /> Scanner
         </button>
       </div>
+      {aRelancer.length > 0 && (
+        <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 12, padding: "14px 16px", marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+            <div>
+              <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--warn-fg)" }}>
+                {aRelancer.length} colis non retiré{aRelancer.length > 1 ? "s" : ""}
+              </div>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                Disponibles depuis plus de {delaiRetraitJours} jours à {agenceRetraitColis?.nom || "l’agence"}. Ils occupent de la place et retardent l’encaissement.
+              </div>
+            </div>
+            <button onClick={relancerRetraits} disabled={!!relanceEnCours}
+              style={{ display: "flex", alignItems: "center", gap: 6, background: relanceEnCours ? "var(--surface2)" : "#16A163",
+                       color: relanceEnCours ? "var(--muted)" : "#fff", border: "none", borderRadius: 8, padding: "9px 16px",
+                       fontSize: 12.5, fontWeight: 700, cursor: relanceEnCours ? "default" : "pointer" }}>
+              <MessageCircle size={14} /> {relanceEnCours ? `${relanceEnCours.faits}/${relanceEnCours.total}…` : "Relancer par WhatsApp"}
+            </button>
+          </div>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 5, maxHeight: 190, overflowY: "auto" }}>
+            {aRelancer.slice(0, 20).map((c) => (
+              <button key={c.tracking} onClick={() => setSelected(c)}
+                style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap",
+                         background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8,
+                         padding: "8px 12px", cursor: "pointer", textAlign: "start" }}>
+                <span style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>
+                  {c.tracking} <span style={{ color: "var(--muted)", fontWeight: 600 }}>· {c.destinataire}</span>
+                </span>
+                <span style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                  {c.reste > 0 && <span style={{ fontSize: 11.5, color: "var(--danger-fg)", fontWeight: 700 }}>{fmtGNF(c.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}</span>}
+                  <span style={{ fontSize: 11.5, fontWeight: 700, color: c.joursAttente >= delaiRetraitJours * 2 ? "var(--danger-fg)" : "var(--warn-fg)" }}>
+                    {c.joursAttente} j
+                  </span>
+                </span>
+              </button>
+            ))}
+            {aRelancer.length > 20 && (
+              <div style={{ fontSize: 11.5, color: "var(--muted)", padding: "4px 2px" }}>et {aRelancer.length - 20} autres…</div>
+            )}
+          </div>
+
+          {relanceEnCours && relanceEnCours.faits === relanceEnCours.total && (
+            <div style={{ marginTop: 10, fontSize: 12, color: "var(--text)" }}>
+              <strong style={{ color: "var(--ok-fg)" }}>{relanceEnCours.envoyes} relancé{relanceEnCours.envoyes > 1 ? "s" : ""}</strong>
+              {relanceEnCours.echecs.length > 0 && <> · <strong style={{ color: "var(--warn-fg)" }}>{relanceEnCours.echecs.length} à contacter autrement</strong></>}
+              <button onClick={() => setRelanceEnCours(null)} style={{ marginInlineStart: 10, background: "none", border: "none", color: "var(--info-fg)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Fermer</button>
+            </div>
+          )}
+        </div>
+      )}
+
       {showScanner && (
         <ScannerModal onClose={() => setShowScanner(false)} onScan={(raw) => {
           const tracking = extractTrackingFromScan(raw);
@@ -4241,8 +5233,9 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
       {showForm && <ColisForm onClose={() => setShowForm(false)} onSave={addColis} existingColis={data.colis} categories={data.categories || []} session={session} sites={data.sites} partenaires={(data.users || []).filter((u) => u.role === "Partenaire")} clientAccounts={data.clientAccounts || []} preAlertes={data.preAlertes || []} />}
       {showAi && <AiColisModal onClose={() => setShowAi(false)} onCreate={addColis} data={data} session={session} />}
       {showImport && <ImportExcelModal onClose={() => setShowImport(false)} onImportMany={importerColisMany} data={data} session={session} />}
+      {showEncaisseGroupe && <EncaisserGroupeModal data={data} onEncaisser={encaisserGroupe} onClose={() => setShowEncaisseGroupe(false)} />}
       {showReception && <ReceptionBordereauModal onClose={() => setShowReception(false)} data={data} persist={persist} notify={notify} session={session} />}
-      {selected && <ColisDetail colis={selected} onClose={() => setSelected(null)} onAdvance={() => advance(selected.tracking)} onDelete={() => remove(selected.tracking)} onCancel={(motif) => annuler(selected.tracking, motif)} onRefuser={(motif) => refuser(selected.tracking, motif)} onMajRetour={(statutRetour) => majRetour(selected.tracking, statutRetour)} onUpdate={(patch) => updateColis(selected.tracking, patch)} onEncaisser={(montant, mode, montantSaisi, deviseSaisie, details, declarationId) => encaisser(selected.tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId)} canManage={!isChauffeur} isAdmin={session.role === "Administrateur"} isChauffeur={isChauffeur} data={data} session={session} />}
+      {selected && <ColisDetail colis={selected} onClose={() => setSelected(null)} onAdvance={() => advance(selected.tracking)} onDelete={() => remove(selected.tracking)} onCancel={(motif) => annuler(selected.tracking, motif)} onRefuser={(motif) => refuser(selected.tracking, motif)} onDeclarerLitige={(t, d) => declarerLitige(selected.tracking, t, d)} onResoudreLitige={(r, i) => resoudreLitige(selected.tracking, r, i)} onMajRetour={(statutRetour) => majRetour(selected.tracking, statutRetour)} onUpdate={(patch) => updateColis(selected.tracking, patch)} onEncaisser={(montant, mode, montantSaisi, deviseSaisie, details, declarationId) => encaisser(selected.tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId)} canManage={!isChauffeur} isAdmin={session.role === "Administrateur"} isChauffeur={isChauffeur} data={data} session={session} />}
     </div>
   );
 }
@@ -4260,6 +5253,39 @@ function BordereauxPage({ data, persist, session, notify }) {
   const [mode, setMode] = useState("liste"); // liste | creation | detail
   const [selectedId, setSelectedId] = useState(null);
   const bordereaux = data.bordereaux || [];
+
+  /*
+   * Stock en attente d'expédition, par entrepôt.
+   *
+   * Un colis « Enregistré » est physiquement dans un entrepôt et n'est pas encore parti :
+   *   - à l'import (achat en ligne), il attend dans le pays d'origine (France, Maroc…) ;
+   *   - à l'export, il attend à Conakry.
+   * C'est cette information qui dit quand affréter : partir trop tôt coûte en marge, partir trop
+   * tard coûte en clients. L'ancienneté du plus vieux colis est le signal le plus parlant.
+   */
+  const stockEntrepots = useMemo(() => {
+    const maintenant = Date.now();
+    const parEntrepot = {};
+    (data.colis || []).forEach((c) => {
+      if (c.status !== "Enregistré") return;
+      const cle = c.direction === "import" ? (c.pays || "FR") : "GN";
+      const pays = COUNTRIES.find((x) => x.code === cle);
+      if (!parEntrepot[cle]) {
+        parEntrepot[cle] = { code: cle, nom: pays ? pays.city : cle, colis: 0, poids: 0, valeur: 0,
+                             plusAncienJours: 0, tranches: { recent: 0, moyen: 0, vieux: 0 } };
+      }
+      const e = parEntrepot[cle];
+      const jours = Math.floor((maintenant - new Date(c.createdAt).getTime()) / 86400000);
+      e.colis += 1;
+      e.poids += Number(c.poids) || 0;
+      e.valeur += Number(c.prix) || 0;
+      e.plusAncienJours = Math.max(e.plusAncienJours, jours);
+      if (jours <= 7) e.tranches.recent += 1;
+      else if (jours <= 15) e.tranches.moyen += 1;
+      else e.tranches.vieux += 1;
+    });
+    return Object.values(parEntrepot).sort((a, b) => b.plusAncienJours - a.plusAncienJours);
+  }, [data.colis]);
   const selected = bordereaux.find((b) => b.id === selectedId);
 
   function openDetail(id) { setSelectedId(id); setMode("detail"); }
@@ -4297,8 +5323,57 @@ function BordereauxPage({ data, persist, session, notify }) {
           <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: 0 }}>Bordereaux</h1>
           <p style={{ color: "var(--muted)", fontSize: 13.5, margin: "4px 0 0" }}>Choisissez précisément quels colis expédier dans chaque bordereau.</p>
         </div>
-        {effectivePermission(session, "bordereaux.creer") && <button onClick={() => setMode("creation")} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}><Plus size={16} /> Nouveau bordereau</button>}
+        {effectivePermission(session, "bordereaux.creer") && <button onClick={() => setMode("creation")} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}><Plus size={16} /> Nouveau bordereau</button>}
       </div>
+
+      {stockEntrepots.length > 0 && (
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>En attente d’expédition</div>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 10 }}>
+            Colis reçus en entrepôt et pas encore partis. L’ancienneté du plus vieux colis indique s’il est temps d’affréter.
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(230px,1fr))", gap: 12 }}>
+            {stockEntrepots.map((e) => {
+              const alerte = e.plusAncienJours >= 30 ? "danger" : e.plusAncienJours >= 15 ? "warn" : "ok";
+              const fond = alerte === "danger" ? "var(--danger-bg)" : alerte === "warn" ? "var(--warn-bg)" : "var(--surface)";
+              const bord = alerte === "danger" ? "var(--danger-border)" : alerte === "warn" ? "var(--warn-border)" : "var(--border)";
+              const teinte = alerte === "danger" ? "var(--danger-fg)" : alerte === "warn" ? "var(--warn-fg)" : "var(--ok-fg)";
+              return (
+                <div key={e.code} style={{ background: fond, border: "1px solid " + bord, borderRadius: 12, padding: "14px 16px" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{FLAGS[e.code] || ""} {e.nom}</span>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: teinte }}>
+                      {e.plusAncienJours === 0 ? "aujourd’hui" : `${e.plusAncienJours} j`}
+                    </span>
+                  </div>
+                  <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 22, fontWeight: 700, color: "var(--text)" }}>
+                    {e.colis} colis
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
+                    {e.poids.toFixed(1)} kg · {fmtGNF(e.valeur * (LIVE_RATES.GNF || CURRENCIES.GNF))}
+                  </div>
+                  <div style={{ display: "flex", gap: 5, marginTop: 10, flexWrap: "wrap" }}>
+                    {[["≤ 7 j", e.tranches.recent, "var(--ok-fg)"],
+                      ["8–15 j", e.tranches.moyen, "var(--warn-fg)"],
+                      ["> 15 j", e.tranches.vieux, "var(--danger-fg)"]].map(([label, n, coul]) => (
+                      n > 0 ? (
+                        <span key={label} style={{ background: "var(--surface2)", color: coul, borderRadius: 20, padding: "2px 9px", fontSize: 10.5, fontWeight: 700 }}>
+                          {n} · {label}
+                        </span>
+                      ) : null
+                    ))}
+                  </div>
+                  {alerte !== "ok" && (
+                    <div style={{ fontSize: 10.5, color: teinte, marginTop: 9, fontWeight: 600 }}>
+                      {alerte === "danger" ? "Des colis attendent depuis plus d’un mois." : "Certains colis attendent depuis plus de deux semaines."}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {bordereaux.map((b) => {
@@ -4383,7 +5458,7 @@ function BordereauCreation({ data, session, onCancel, onCreate }) {
         ))}
       </div>
 
-      <button onClick={creer} disabled={selectedTrackings.length === 0} style={{ background: selectedTrackings.length ? "var(--brand-solid)" : "var(--surface2)", color: selectedTrackings.length ? "#fff" : "var(--muted)", border: "none", borderRadius: 9, padding: "11px 22px", fontSize: 13.5, fontWeight: 700, cursor: selectedTrackings.length ? "pointer" : "not-allowed" }}>
+      <button onClick={creer} disabled={selectedTrackings.length === 0} style={{ background: selectedTrackings.length ? "var(--brand-solid)" : "var(--surface2)", color: selectedTrackings.length ? "#fff" : "var(--muted)", border: "none", borderRadius: 8, padding: "11px 22px", fontSize: 13.5, fontWeight: 700, cursor: selectedTrackings.length ? "pointer" : "not-allowed" }}>
         Créer le bordereau ({selectedTrackings.length} colis)
       </button>
     </div>
@@ -4396,7 +5471,16 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
   const [depenseForm, setDepenseForm] = useState(null);
   const [devise, setDevise] = useState("GNF");
   const country = COUNTRIES.find((c) => c.code === bordereau.pays);
-  const colisInclus = data.colis.filter((c) => bordereau.colisTrackings.includes(c.tracking));
+  const colisDuBordereau = data.colis.filter((c) => bordereau.colisTrackings.includes(c.tracking));
+  /*
+   * Les colis livrés sortent de la vue courante du bordereau : leur acheminement est terminé,
+   * ils n'ont plus à encombrer la liste de travail de l'agent. Ils restent rattachés au
+   * bordereau (l'historique et les documents demeurent complets) et peuvent être réaffichés
+   * d'un clic.
+   */
+  const colisLivres = colisDuBordereau.filter((c) => c.status === "Livré");
+  const [voirLivres, setVoirLivres] = useState(false);
+  const colisInclus = voirLivres ? colisDuBordereau : colisDuBordereau.filter((c) => c.status !== "Livré");
   const poids = colisInclus.reduce((s, c) => s + c.poids, 0);
   const montant = colisInclus.reduce((s, c) => s + c.prix, 0);
   const statutActuel = normalizeBordereauStatut(bordereau.statut);
@@ -4405,6 +5489,108 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
 
   const dejaInclusAilleurs = new Set((data.bordereaux || []).filter((b) => b.id !== bordereau.id && normalizeBordereauStatut(b.statut) !== "Livré").flatMap((b) => b.colisTrackings));
   const ajoutables = data.colis.filter((c) => c.pays === bordereau.pays && (c.direction || "export") === bordereau.direction && c.status !== "Livré" && c.status !== "Annulé" && !bordereau.colisTrackings.includes(c.tracking) && !dejaInclusAilleurs.has(c.tracking));
+
+  /*
+   * Avancement des colis du bordereau.
+   *
+   * Rien ne change tout seul : un colis enregistré reste « Reçu à l'entrepôt » tant qu'un agent
+   * n'a pas confirmé l'étape suivante. L'agent choisit les colis concernés (tous par défaut,
+   * car un bordereau part généralement en entier) et confirme explicitement — ce qui met à jour
+   * l'espace client immédiatement.
+   */
+  const [selectionAvance, setSelectionAvance] = useState([]);
+  const [confirmation, setConfirmation] = useState(null);
+  const [prevenir, setPrevenir] = useState(true);
+  const [envoiWa, setEnvoiWa] = useState(null);
+  const agenceRetrait = (data.sites || []).find((s) => s.id === (data.agenceRetraitClient || "site-bambeto")) || (data.sites || [])[0];
+
+  const ETAPES_COLIS = [
+    { cle: "En transit", bouton: "Marquer expédiés", vuClient: "Expédié", depuis: ["Enregistré"] },
+    { cle: "Arrivé", bouton: "Marquer arrivés en Guinée", vuClient: "Arrivé en Guinée", depuis: ["Enregistré", "En transit"] },
+    { cle: "En livraison", bouton: "Marquer disponibles au retrait", vuClient: "Disponible pour retrait", depuis: ["Arrivé", "En douane"] },
+  ];
+
+  function basculerSelection(tracking) {
+    setSelectionAvance((s) => (s.includes(tracking) ? s.filter((t) => t !== tracking) : [...s, tracking]));
+  }
+
+  /**
+   * Message envoyé au client selon l'étape. Court et utile : le client doit comprendre en une
+   * ligne où en est son colis, et savoir quoi faire s'il peut venir le chercher.
+   */
+  function messagePourEtape(colis, etape) {
+    const base = `Bonjour ${colis.destinataire}, votre colis Ba-Diaby Express ${colis.tracking}`;
+    if (etape.cle === "En transit") return `${base} vient de quitter notre entrepôt. Nous vous préviendrons dès son arrivée en Guinée.`;
+    if (etape.cle === "Arrivé") return `${base} est arrivé en Guinée. Il sera bientôt disponible au retrait.`;
+    const ag = agenceRetrait;
+    const ou = ag ? ` Retrait à notre agence ${ag.nom} — ${ag.adresse}${ag.horaires ? ` (${ag.horaires})` : ""}.` : "";
+    const du = colis.reste > 0 ? ` Reste à régler : ${fmtGNF(colis.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}.` : "";
+    return `${base} est disponible au retrait.${ou}${du}`;
+  }
+
+  /**
+   * Prévenir les clients par WhatsApp après un changement d'étape.
+   *
+   * Sans cela, l'agent devait ouvrir chaque colis un par un : sur un bordereau de trente colis,
+   * personne ne le fait, et le service ne rend pas le bénéfice attendu. L'envoi est séquentiel
+   * pour ne pas saturer Twilio, et le résultat est détaillé (envoyés / non joignables) plutôt
+   * que masqué derrière un message vague.
+   */
+  async function prevenirClients(colisConcernes, etape) {
+    setEnvoiWa({ total: colisConcernes.length, faits: 0, envoyes: 0, echecs: [] });
+    let envoyes = 0;
+    const echecs = [];
+    for (let i = 0; i < colisConcernes.length; i++) {
+      const c = colisConcernes[i];
+      if (!c.telephone) { echecs.push({ tracking: c.tracking, raison: "pas de numéro" }); }
+      else {
+        const { envoye, raison } = await envoyerWhatsApp(c.telephone, messagePourEtape(c, etape));
+        if (envoye) envoyes++;
+        else echecs.push({ tracking: c.tracking, raison: raison || "envoi automatique indisponible" });
+      }
+      setEnvoiWa({ total: colisConcernes.length, faits: i + 1, envoyes, echecs: [...echecs] });
+    }
+    return { envoyes, echecs };
+  }
+
+  async function appliquerEtape(etape) {
+    const cibles = selectionAvance.length ? selectionAvance : colisInclus.map((c) => c.tracking);
+    const maintenant = new Date().toISOString();
+    let modifies = 0;
+    const concernes = [];
+    const colisMaj = data.colis.map((c) => {
+      if (!cibles.includes(c.tracking) || c.status === etape.cle) return c;
+      if (["Annulé", "Refusé", "Livré"].includes(c.status)) return c;
+      modifies++;
+      concernes.push(c);
+      return { ...c, status: etape.cle, historique: [...(c.historique || []), { status: etape.cle, date: maintenant }] };
+    });
+    if (modifies === 0) { notify?.("Aucun colis à mettre à jour"); setConfirmation(null); return; }
+    persist({
+      ...data, colis: colisMaj,
+      activityLog: pushActivity(data, session, `Colis passés à « ${etape.cle} »`, `${bordereau.numero} — ${modifies} colis`),
+    });
+    notify?.(`${modifies} colis : ${etape.vuClient}`);
+    setSelectionAvance([]);
+
+    if (prevenir) {
+      const { envoyes, echecs } = await prevenirClients(concernes, etape);
+      // Si RIEN n'est parti et qu'aucun échec n'a de cause précise, c'est que l'envoi automatique
+      // n'est pas disponible (Twilio non configuré, ou hors ligne). Inutile d'alarmer l'agent avec
+      // une liste d'« échecs » : on referme discrètement, le changement de statut a bien eu lieu.
+      const indisponible = envoyes === 0 && echecs.every((e) => e.raison === "envoi automatique indisponible");
+      if (indisponible) {
+        setEnvoiWa(null);
+        setConfirmation(null);
+        return;
+      }
+      notify?.(echecs.length === 0
+        ? `${envoyes} client${envoyes > 1 ? "s" : ""} prévenu${envoyes > 1 ? "s" : ""} par WhatsApp`
+        : `${envoyes} prévenu(s), ${echecs.length} à contacter autrement`);
+      return;   // le résultat détaillé reste affiché, l'agent ferme lui-même
+    }
+    setConfirmation(null);
+  }
 
   function retirer(tracking) { onUpdate({ colisTrackings: bordereau.colisTrackings.filter((t) => t !== tracking) }); }
   function ajouter(tracking) { onUpdate({ colisTrackings: [...bordereau.colisTrackings, tracking] }); }
@@ -4448,14 +5634,14 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
 
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 18 }}>
         {!estFinal && effectivePermission(session, "bordereaux.valider") && (
-          <button onClick={onAvancerStatut} style={{ display: "flex", alignItems: "center", gap: 6, background: "#3D63FF", color: "#fff", border: "none", borderRadius: 9, padding: "10px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+          <button onClick={onAvancerStatut} style={{ display: "flex", alignItems: "center", gap: 6, background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
             Statut suivant : {BORDEREAU_STATUSES[stIdx + 1]} <ChevronRight size={14} />
           </button>
         )}
-        <button onClick={telechargerPdf} disabled={genPdf} style={{ background: "var(--surface2)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>{genPdf ? "Génération…" : "Télécharger PDF"}</button>
-        <button onClick={envoyerMail} style={{ background: "var(--surface2)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>Envoyer un mail</button>
-        <button onClick={() => setDepenseForm({ nom: "", montant: "" })} style={{ background: "var(--surface2)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>Ajouter une dépense</button>
-        {effectivePermission(session, "bordereaux.modifier") && <button onClick={() => setModification((m) => !m)} style={{ background: "var(--surface2)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>{modification ? "Terminer la modification" : "Modifier"}</button>}
+        <button onClick={telechargerPdf} disabled={genPdf} style={{ background: "var(--surface2)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>{genPdf ? "Génération…" : "Télécharger PDF"}</button>
+        <button onClick={envoyerMail} style={{ background: "var(--surface2)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>Envoyer un mail</button>
+        <button onClick={() => setDepenseForm({ nom: "", montant: "" })} style={{ background: "var(--surface2)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>Ajouter une dépense</button>
+        {effectivePermission(session, "bordereaux.modifier") && <button onClick={() => setModification((m) => !m)} style={{ background: "var(--surface2)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>{modification ? "Terminer la modification" : "Modifier"}</button>}
       </div>
 
       <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8, marginBottom: 10 }}>
@@ -4472,7 +5658,124 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
         <StatCard label="Statut" value={statutActuel} icon={CheckCircle2} tint={BORDEREAU_STATUS_STYLE[statutActuel]?.fg || "#5B8DEF"} />
       </div>
 
-      <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 10 }}>Colis inclus ({colisInclus.length})</div>
+      {colisInclus.length > 0 && (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 16, marginBottom: 18 }}>
+          <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Faire avancer les colis</div>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 12 }}>
+            Chaque étape doit être confirmée par un agent. Le client voit la mise à jour immédiatement.
+            {selectionAvance.length === 0
+              ? " Aucun colis coché : l'action portera sur les " + colisInclus.length + " colis du bordereau."
+              : ` ${selectionAvance.length} colis sélectionné${selectionAvance.length > 1 ? "s" : ""}.`}
+          </div>
+
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+            {colisInclus.map((c) => {
+              const coche = selectionAvance.includes(c.tracking);
+              return (
+                <button key={c.tracking} onClick={() => basculerSelection(c.tracking)}
+                  style={{ display: "flex", alignItems: "center", gap: 6, background: coche ? "var(--info-bg)" : "var(--surface2)",
+                           border: "1px solid " + (coche ? "var(--info-border)" : "var(--border)"), borderRadius: 20,
+                           padding: "5px 11px", fontSize: 11.5, color: "var(--text)", cursor: "pointer" }}>
+                  {coche && <Check size={11} color="var(--info-fg)" />}
+                  {c.tracking}
+                  <span style={{ color: "var(--muted)" }}>· {clientStatusLabel(c.status)}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {ETAPES_COLIS.map((e) => (
+              <button key={e.cle} onClick={() => setConfirmation(e)}
+                style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)",
+                         borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
+                {e.bouton}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {confirmation && (
+        <Modal onClose={() => { setConfirmation(null); setEnvoiWa(null); }} title={envoiWa ? "Envoi aux clients" : "Confirmer l’étape"}>
+          {envoiWa ? (
+            <>
+              <div style={{ fontSize: 13.5, color: "var(--text)", marginBottom: 10 }}>
+                {envoiWa.faits} / {envoiWa.total} traités · <strong style={{ color: "var(--ok-fg)" }}>{envoiWa.envoyes} prévenus</strong>
+                {envoiWa.echecs.length > 0 && <> · <strong style={{ color: "var(--warn-fg)" }}>{envoiWa.echecs.length} à contacter autrement</strong></>}
+              </div>
+              <div style={{ height: 6, background: "var(--surface2)", borderRadius: 20, overflow: "hidden", marginBottom: 14 }}>
+                <div style={{ width: `${envoiWa.total ? (envoiWa.faits / envoiWa.total) * 100 : 0}%`, height: "100%", background: "var(--ok-fg)", transition: "width .2s" }} />
+              </div>
+              {envoiWa.echecs.length > 0 && (
+                <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "10px 12px", maxHeight: 180, overflowY: "auto" }}>
+                  <div style={{ fontSize: 11.5, fontWeight: 700, color: "var(--warn-fg)", marginBottom: 6 }}>À prévenir manuellement</div>
+                  {envoiWa.echecs.map((e) => (
+                    <div key={e.tracking} style={{ fontSize: 11.5, color: "var(--text)", marginBottom: 3 }}>
+                      {e.tracking} — <span style={{ color: "var(--muted)" }}>{e.raison}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {envoiWa.faits === envoiWa.total && (
+                <button onClick={() => { setConfirmation(null); setEnvoiWa(null); }}
+                  style={{ width: "100%", marginTop: 14, background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 600, cursor: "pointer" }}>
+                  Fermer
+                </button>
+              )}
+            </>
+          ) : (
+            <>
+              <div style={{ fontSize: 13.5, color: "var(--text)", marginBottom: 8 }}>
+                {(selectionAvance.length || colisInclus.length)} colis vont passer à <strong>« {confirmation.vuClient} »</strong>.
+              </div>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14 }}>
+                Le changement est visible aussitôt par les clients concernés dans leur espace.
+              </div>
+
+              <button onClick={() => setPrevenir(!prevenir)}
+                style={{ width: "100%", display: "flex", alignItems: "center", gap: 10, background: prevenir ? "var(--ok-bg)" : "var(--surface2)",
+                         border: "1px solid " + (prevenir ? "var(--ok-border)" : "var(--border)"), borderRadius: 8, padding: "10px 12px",
+                         cursor: "pointer", textAlign: "start", marginBottom: 12 }}>
+                <span style={{ width: 18, height: 18, borderRadius: 6, flexShrink: 0, display: "grid", placeItems: "center",
+                               background: prevenir ? "var(--ok-fg)" : "transparent", border: "1.5px solid " + (prevenir ? "var(--ok-fg)" : "var(--border)") }}>
+                  {prevenir && <Check size={12} color="#fff" />}
+                </span>
+                <span style={{ fontSize: 12.5, color: "var(--text)" }}>Prévenir les clients par WhatsApp</span>
+              </button>
+
+              {prevenir && (
+                <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "10px 12px", marginBottom: 16 }}>
+                  <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700, marginBottom: 4 }}>APERÇU DU MESSAGE</div>
+                  <div style={{ fontSize: 11.5, color: "var(--text)", lineHeight: 1.5 }}>
+                    {colisInclus.length > 0 ? messagePourEtape(colisInclus[0], confirmation) : ""}
+                  </div>
+                </div>
+              )}
+
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => appliquerEtape(confirmation)}
+                  style={{ flex: 1, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+                  Confirmer
+                </button>
+                <button onClick={() => setConfirmation(null)}
+                  style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "11px 18px", fontSize: 13, cursor: "pointer" }}>
+                  Annuler
+                </button>
+              </div>
+            </>
+          )}
+        </Modal>
+      )}
+
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <span style={{ fontWeight: 700, color: "var(--text)", fontSize: 14 }}>Colis inclus ({colisInclus.length})</span>
+        {colisLivres.length > 0 && (
+          <button onClick={() => setVoirLivres((v) => !v)} style={{ background: "var(--ok-bg-soft)", border: "1px solid var(--ok-border)", color: "var(--ok-fg)", borderRadius: 20, padding: "4px 12px", fontSize: 11.5, fontWeight: 600, cursor: "pointer" }}>
+            {colisLivres.length} livré{colisLivres.length > 1 ? "s" : ""} · {voirLivres ? "masquer" : "afficher"}
+          </button>
+        )}
+      </div>
       <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", marginBottom: modification ? 18 : 0 }}>
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["ID Colis", "Destinataire", "Statut", "Poids", `Prix (${devise})`, modification ? "" : null].filter(Boolean).map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700 }}>{h}</th>)}</tr></thead>
@@ -4540,6 +5843,18 @@ function TicketCard({ colis, onOpen, selectionMode, checked }) {
       </div>
       <div style={{ padding: "14px 16px" }}>
         <div style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>{colis.destinataire}</div>
+        {colis.referenceCommande && (
+          <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 1 }}>réf. commande : <strong style={{ color: "var(--text)" }}>{colis.referenceCommande}</strong></div>
+        )}
+        {colis.litige && (
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 4, marginTop: 4,
+                        background: colis.litige.statut === "Ouvert" ? "var(--warn-bg)" : "var(--ok-bg)",
+                        border: "1px solid " + (colis.litige.statut === "Ouvert" ? "var(--warn-border)" : "var(--ok-border)"),
+                        color: colis.litige.statut === "Ouvert" ? "var(--warn-fg)" : "var(--ok-fg)",
+                        borderRadius: 20, padding: "2px 9px", fontSize: 10, fontWeight: 700 }}>
+            {colis.litige.type === "perdu" ? "Perdu" : "Endommagé"}{colis.litige.statut === "Résolu" ? " · réglé" : ""}
+          </div>
+        )}
         <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>{routeLabel(colis.pays, colis.direction)}</div>
         <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 10, background: st.bg, color: st.fg, padding: "5px 10px", borderRadius: 20, fontSize: 11.5, fontWeight: 600, width: "fit-content" }}><Icon size={13} /> {colis.status}</div>
       </div>
@@ -4770,14 +6085,14 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
                 </select>
               </Field>
             </div>
-            <div style={{ marginTop: 16, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px", display: "flex", alignItems: "center", justifyContent: "center", gap: 12, fontSize: 15, fontWeight: 700, color: "var(--text)" }}>
+            <div style={{ marginTop: 16, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px", display: "flex", alignItems: "center", justifyContent: "center", gap: 12, fontSize: 15, fontWeight: 700, color: "var(--text)" }}>
               {FLAGS[expPays]} {expCountry?.city} <ChevronRight size={16} color="var(--danger-fg)" /> {FLAGS[destPays]} {destCountry?.city}
             </div>
           </div>
         )}
         {step === 1 && (
           <div>
-            <div style={{ background: "var(--surface2)", borderRadius: 10, padding: "12px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ background: "var(--surface2)", borderRadius: 12, padding: "12px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 10 }}>
               <span style={{ fontSize: 20 }}>{FLAGS[expPays]}</span>
               <div><div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Expéditeur • {expCountry?.name.toUpperCase()}</div><div style={{ fontSize: 11.5, color: "var(--muted)" }}>Personne qui envoie le colis</div></div>
             </div>
@@ -4799,7 +6114,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
         )}
         {step === 2 && (
           <div>
-            <div style={{ background: "var(--ok-bg-soft)", borderRadius: 10, padding: "12px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ background: "var(--ok-bg-soft)", borderRadius: 12, padding: "12px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 10 }}>
               <span style={{ fontSize: 20 }}>{FLAGS[destPays]}</span>
               <div><div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Destinataire • {destCountry?.name.toUpperCase()}</div><div style={{ fontSize: 11.5, color: "var(--muted)" }}>Personne qui recevra le colis</div></div>
             </div>
@@ -4823,12 +6138,12 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
         )}
         {step === 3 && (
           <div>
-            <div style={{ background: "var(--warn-bg)", borderRadius: 10, padding: "12px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ background: "var(--warn-bg)", borderRadius: 12, padding: "12px 16px", marginBottom: 16, display: "flex", alignItems: "center", gap: 10 }}>
               <Package size={18} color="var(--warn-fg)" />
               <div><div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Contenu du colis</div><div style={{ fontSize: 11.5, color: "var(--muted)" }}>Détaillez chaque produit dans le colis</div></div>
             </div>
             {produits.map((p, idx) => (
-              <div key={p.id} style={{ border: "1px solid var(--border)", borderRadius: 10, padding: 16, marginBottom: 12 }}>
+              <div key={p.id} style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 12 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                   <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{idx + 1}. Produit</div>
                   {produits.length > 1 && <button type="button" onClick={() => removeProduit(p.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={14} /></button>}
@@ -4886,8 +6201,8 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
                 })()}
               </div>
             ))}
-            <button type="button" onClick={addProduit} style={{ width: "100%", border: "1.5px dashed var(--border)", borderRadius: 10, padding: "12px 0", background: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer", marginBottom: 14 }}>+ Ajouter un produit</button>
-            <div style={{ background: "var(--surface2)", borderRadius: 10, padding: "12px 16px", display: "flex", justifyContent: "space-between" }}>
+            <button type="button" onClick={addProduit} style={{ width: "100%", border: "1.5px dashed var(--border)", borderRadius: 12, padding: "12px 0", background: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer", marginBottom: 14 }}>+ Ajouter un produit</button>
+            <div style={{ background: "var(--surface2)", borderRadius: 12, padding: "12px 16px", display: "flex", justifyContent: "space-between" }}>
               <div style={{ fontSize: 13, color: "var(--text)" }}>Poids total : <strong>{poidsTotal.toFixed(1)} kg</strong></div>
               <div style={{ fontSize: 13, color: "var(--text)" }}>Valeur déclarée : <strong>{fmtGNF(valeurDeclaree)}</strong></div>
             </div>
@@ -4923,7 +6238,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
                   <Field label="Rattacher à un compte client (recherche par nom écrit sur le colis)">
                     {clientAccountId ? (
                       <div>
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--ok-bg)", border: "1px solid var(--ok-border)", borderRadius: 9, padding: "9px 12px" }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--ok-bg)", border: "1px solid var(--ok-border)", borderRadius: 8, padding: "9px 12px" }}>
                           <span style={{ fontSize: 12.5, color: "var(--ok-fg)", fontWeight: 600 }}>
                             ✓ Rattaché à {clientAccounts.find((c) => c.id === clientAccountId)?.prenom} {clientAccounts.find((c) => c.id === clientAccountId)?.nom}
                           </span>
@@ -4936,7 +6251,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
                               {preAlertes.filter((p) => p.clientAccountId === clientAccountId && p.statut === "En attente").map((p) => (
                                 <label key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface2)", borderRadius: 8, padding: "7px 10px", cursor: "pointer", fontSize: 12 }}>
                                   <input type="radio" name="preAlerte" checked={preAlerteRapprochee === p.id} onChange={() => setPreAlerteRapprochee(p.id)} />
-                                  <span style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 5, padding: "1px 6px", fontSize: 10 }}>{p.provenance || "Autre"}</span>
+                                  <span style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6, padding: "1px 6px", fontSize: 10 }}>{p.provenance || "Autre"}</span>
                                   {p.trackingExterne}{p.description ? ` — ${p.description}` : ""}
                                 </label>
                               ))}
@@ -4949,7 +6264,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
                       <>
                         <input value={rechercheClient} onChange={(e) => setRechercheClient(e.target.value)} style={inputStyle} placeholder="ex : Fatoumata Sirraye Ba-Diaby" />
                         {rechercheClient.trim().length >= 2 && (
-                          <div style={{ border: "1px solid var(--border)", borderRadius: 9, overflow: "hidden", marginTop: -6, marginBottom: 10, maxHeight: 160, overflowY: "auto" }}>
+                          <div style={{ border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden", marginTop: -6, marginBottom: 10, maxHeight: 160, overflowY: "auto" }}>
                             {clientAccounts.filter((c) => `${c.prenom} ${c.nom}`.toLowerCase().includes(rechercheClient.trim().toLowerCase())).slice(0, 6).map((c) => (
                               <button type="button" key={c.id} onClick={() => { setClientAccountId(c.id); setRechercheClient(""); }} style={{ display: "block", width: "100%", textAlign: "start", padding: "9px 12px", background: "var(--surface2)", border: "none", borderTop: "1px solid var(--border)", cursor: "pointer", fontSize: 12.5, color: "var(--text)" }}>
                                 {c.prenom} {c.nom} <span style={{ color: "var(--muted)" }}>· {c.telephone}</span>
@@ -4982,7 +6297,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
               <Field label="Montant payé à l’enregistrement (EUR)"><input value={paye} onChange={(e) => setPaye(e.target.value)} style={inputStyle} placeholder="0" /></Field>
             </div>
             {discountLoyalty > 0 && <div style={{ fontSize: 12, color: "var(--ok-fg)", marginBottom: 10 }}>Remise fidélité automatique : -{discountLoyalty}% ({previousCount} envois précédents)</div>}
-            <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px" }}>
+            <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px" }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", marginBottom: 10 }}>FRAIS D’EXPÉDITION</div>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "var(--text)", marginBottom: 6 }}><span>Valeur des produits ({poidsTotal.toFixed(1)} kg · {mode === "air" ? "Aérien" : "Maritime"})</span><span>{fmt(prixBrut, "GNF")}</span></div>
               {discountLoyalty > 0 && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "var(--ok-fg)", marginBottom: 6 }}><span>Remise fidélité (-{discountLoyalty}%)</span><span>-{fmt(prixBrut - prixApresFidelite, "GNF")}</span></div>}
@@ -4994,7 +6309,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
           </div>
         )}
         {step === 5 && (
-          <div style={{ border: "1px solid var(--border)", borderRadius: 16, overflow: "hidden" }}>
+          <div style={{ border: "1px solid var(--border)", borderRadius: 14, overflow: "hidden" }}>
             <div style={{ background: "linear-gradient(135deg, #0A2647, #131A6B)", padding: "20px 22px", color: "#fff" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
                 <CheckCircle2 size={18} color="var(--ok-fg)" />
@@ -5029,7 +6344,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
 
               <div style={{ marginBottom: 18 }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, fontWeight: 700, color: "var(--muted)", letterSpacing: 0.4, marginBottom: 10 }}><Package size={13} /> PRODUITS ({produits.length}) · {poidsTotal.toFixed(1)} kg au total</div>
-                <div style={{ border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden" }}>
+                <div style={{ border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden" }}>
                   {produits.map((p, i) => (
                     <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", borderTop: i > 0 ? "1px solid var(--border)" : "none" }}>
                       <div>
@@ -5090,15 +6405,15 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
         {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginTop: 12 }}>{err}</div>}
 
         <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 22 }}>
-          <button type="button" onClick={step === 0 ? onClose : prev} style={{ padding: "10px 18px", borderRadius: 9, border: "1.5px solid var(--border)", background: "var(--surface)", color: "var(--muted)", fontSize: 13.5, cursor: "pointer" }}>
+          <button type="button" onClick={step === 0 ? onClose : prev} style={{ padding: "10px 18px", borderRadius: 8, border: "1.5px solid var(--border)", background: "var(--surface)", color: "var(--muted)", fontSize: 13.5, cursor: "pointer" }}>
             {step === 0 ? "Annuler" : "Précédent"}
           </button>
           {step < WIZARD_STEPS.length - 1 ? (
-            <button type="button" onClick={next} style={{ display: "flex", alignItems: "center", gap: 6, padding: "10px 20px", borderRadius: 9, border: "none", background: "#3D63FF", color: "#fff", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+            <button type="button" onClick={next} style={{ display: "flex", alignItems: "center", gap: 6, padding: "10px 20px", borderRadius: 8, border: "none", background: "#3D63FF", color: "#fff", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
               Suivant <ChevronRight size={15} />
             </button>
           ) : (
-            <button type="button" onClick={submit} style={{ padding: "10px 20px", borderRadius: 9, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+            <button type="button" onClick={submit} style={{ padding: "10px 20px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
               Créer le colis
             </button>
           )}
@@ -5114,55 +6429,117 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
  * poids total du lot, avec le tarif dégressif au kg configuré (moins cher au-delà du seuil).
  */
 /** Bordereau personnel PDF pour un client — récapitulatif de tous ses colis, à télécharger depuis son espace. */
-async function downloadClientManifest(compte, colisListe) {
+async function downloadClientManifest(compte, colisListe, devise = "GNF") {
   const jspdf = await loadJsPDF();
-  const doc = new jspdf.jsPDF();
+  const doc = preparerDocPdf(new jspdf.jsPDF());
+  const W = 210, H = 297, M = 14;
+  const NAVY = [10, 38, 71], INK = [26, 30, 38], MUTED = [122, 130, 142], LINE = [225, 228, 234], TINT = [240, 245, 252];
 
-  doc.setFillColor(10, 38, 71); doc.rect(0, 0, 210, 32, "F");
-  doc.setFillColor(255, 255, 255); doc.roundedRect(14, 6, 22, 22, 3, 3, "F");
-  doc.addImage(DEFAULT_LOGO, "PNG", 15.3, 7.3, 19.4, 19.4);
+  /*
+   * Tableau dessiné directement, sans le module autoTable.
+   *
+   * Ce module était chargé depuis Internet : quand le chargement échouait — cas fréquent pour un
+   * client à l'étranger avec une connexion instable — le bordereau sortait avec l'en-tête et les
+   * totaux mais AUCUN colis, sans le moindre message. Et le pied de page, figé à 288 mm, venait
+   * se superposer au tableau dès que la liste était longue.
+   *
+   * Tout est désormais tracé ici : pagination gérée, pied de page sur chaque page, aucun risque
+   * de document vide.
+   */
+  const COLONNES = [
+    { titre: "N° de suivi", largeur: 30, cle: (c) => c.tracking },
+    { titre: "Votre référence", largeur: 34, cle: (c) => c.referenceCommande || "—" },
+    { titre: "Trajet", largeur: 42, cle: (c) => routeLabel(c.pays, c.direction) },
+    { titre: "Où en est-il", largeur: 40, cle: (c) => clientStatusLabel(c.status) },
+    { titre: "Poids", largeur: 18, cle: (c) => `${c.poids} kg`, droite: true },
+    { titre: "À régler", largeur: 18, cle: (c) => (c.reste > 0 ? fmt(c.reste, devise) : "Payé"), droite: true },
+  ];
+  const largeurTotale = COLONNES.reduce((s, c) => s + c.largeur, 0);
+
+  const piedDePage = (numPage, total) => {
+    doc.setDrawColor(...LINE); doc.setLineWidth(0.3); doc.line(M, H - 16, W - M, H - 16);
+    doc.setFontSize(7.3); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
+    doc.text("Ba-Diaby Express — Transport de colis Conakry - Monde · badiabyexpress.bde@gmail.com", M, H - 11);
+    doc.text(`Page ${numPage} / ${total}`, W - M, H - 11, { align: "right" });
+  };
+
+  const enTeteTableau = (y) => {
+    doc.setFillColor(...NAVY); doc.rect(M, y, largeurTotale, 8, "F");
+    doc.setFontSize(8); doc.setFont(undefined, "bold"); doc.setTextColor(255, 255, 255);
+    let x = M;
+    COLONNES.forEach((col) => {
+      doc.text(col.titre, col.droite ? x + col.largeur - 2 : x + 2, y + 5.4, col.droite ? { align: "right" } : undefined);
+      x += col.largeur;
+    });
+    return y + 8;
+  };
+
+  // ── En-tête ───────────────────────────────────────────────────────────────
+  doc.setFillColor(...NAVY); doc.rect(0, 0, W, 34, "F");
+  doc.addImage(DEFAULT_LOGO, "PNG", M, 7, 20, 20);
   doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold"); doc.setFontSize(15);
   doc.text("BA-DIABY EXPRESS", 41, 15);
-  doc.setFont(undefined, "normal"); doc.setFontSize(9.5); doc.setTextColor(180, 195, 220);
+  doc.setFontSize(9.5); doc.setFont(undefined, "normal"); doc.setTextColor(190, 205, 228);
   doc.text("Mon bordereau personnel", 41, 21.5);
-  doc.setFontSize(8); doc.text(`Généré le ${new Date().toLocaleDateString("fr-FR")}`, 41, 27);
+  doc.setFontSize(8);
+  doc.text(`Généré le ${new Date().toLocaleDateString("fr-FR")}`, 41, 27);
 
-  let y = 42;
-  doc.setTextColor(10, 38, 71); doc.setFont(undefined, "bold"); doc.setFontSize(12);
-  doc.text(`${compte.prenom} ${compte.nom}`, 14, y);
+  let y = 46;
+  doc.setTextColor(...INK); doc.setFont(undefined, "bold"); doc.setFontSize(13);
+  doc.text(`${compte.prenom} ${compte.nom}`, M, y);
   y += 5.5;
-  doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(100, 100, 100);
-  doc.text(compte.telephone || "—", 14, y);
+  doc.setFont(undefined, "normal"); doc.setFontSize(9.5); doc.setTextColor(...MUTED);
+  doc.text(compte.telephone || "—", M, y);
   y += 10;
 
+  // ── Bandeau de synthèse ───────────────────────────────────────────────────
   const totalPoids = colisListe.reduce((s, c) => s + (Number(c.poids) || 0), 0);
   const totalReste = colisListe.reduce((s, c) => s + (Number(c.reste) || 0), 0);
-  doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, 16, "F");
-  doc.setFontSize(9); doc.setTextColor(90, 90, 90);
-  doc.text(`${colisListe.length} colis · ${totalPoids.toFixed(1)} kg au total`, 20, y + 10);
-  doc.setFont(undefined, "bold"); doc.setTextColor(totalReste > 0 ? [226, 63, 82] : [62, 160, 90]);
-  doc.text(totalReste > 0 ? `Reste à payer : ${fmt(totalReste, "EUR")}` : "Tout est payé", 190, y + 10, { align: "right" });
+  doc.setFillColor(...TINT); doc.roundedRect(M, y, W - 2 * M, 16, 3, 3, "F");
+  doc.setFont(undefined, "bold"); doc.setFontSize(10); doc.setTextColor(...INK);
+  doc.text(`${colisListe.length} colis · ${totalPoids.toFixed(1)} kg au total`, M + 6, y + 10);
+  doc.setTextColor(...(totalReste > 0 ? [178, 36, 58] : [16, 116, 66]));
+  doc.text(totalReste > 0 ? `Reste à payer : ${fmt(totalReste, devise)}` : "Tout est payé", W - M - 6, y + 10, { align: "right" });
   y += 24;
 
-  const hasAutoTable = await ensureAutoTable();
-  const rows = colisListe.map((c) => [c.tracking, routeLabel(c.pays, c.direction), c.status, `${c.poids} kg`, c.reste > 0 ? fmt(c.reste, "EUR") : "Payé"]);
-  if (hasAutoTable && doc.autoTable) {
-    doc.autoTable({
-      startY: y, head: [["N° de suivi", "Route", "Statut", "Poids", "Paiement"]], body: rows,
-      theme: "grid", headStyles: { fillColor: [10, 38, 71], textColor: 255, fontSize: 8.5 }, styles: { fontSize: 8.5, textColor: [40, 40, 40] },
-      margin: { left: 14, right: 14 },
+  // ── Tableau des colis ─────────────────────────────────────────────────────
+  if (colisListe.length === 0) {
+    doc.setFont(undefined, "normal"); doc.setFontSize(10); doc.setTextColor(...MUTED);
+    doc.text("Aucun colis enregistré à votre nom pour le moment.", M, y + 6);
+  } else {
+    y = enTeteTableau(y);
+    doc.setFont(undefined, "normal"); doc.setFontSize(8.2);
+    colisListe.forEach((c, i) => {
+      if (y + 9 > H - 22) {            // place réservée au pied de page
+        doc.addPage();
+        y = enTeteTableau(20);
+        doc.setFont(undefined, "normal"); doc.setFontSize(8.2);
+      }
+      if (i % 2 === 1) { doc.setFillColor(248, 250, 253); doc.rect(M, y, largeurTotale, 8, "F"); }
+      let x = M;
+      COLONNES.forEach((col) => {
+        doc.setTextColor(...INK);
+        const brut = String(col.cle(c) ?? "");
+        let texte = brut;
+        while (texte.length > 3 && doc.getTextWidth(texte) > col.largeur - 4) texte = texte.slice(0, -1);
+        if (texte !== brut) texte = texte.slice(0, -1) + "\u2026";
+        doc.text(texte, col.droite ? x + col.largeur - 2 : x + 2, y + 5.4, col.droite ? { align: "right" } : undefined);
+        x += col.largeur;
+      });
+      doc.setDrawColor(...LINE); doc.setLineWidth(0.2); doc.line(M, y + 8, M + largeurTotale, y + 8);
+      y += 8;
     });
   }
 
-  doc.setFontSize(7.3); doc.setTextColor(140, 140, 140); doc.setFont(undefined, "normal");
-  doc.text("Ba-Diaby Express — Transport de colis Conakry ⇄ Monde · badiabyexpress.bde@gmail.com", 14, 288);
+  const total = doc.getNumberOfPages();
+  for (let p = 1; p <= total; p++) { doc.setPage(p); piedDePage(p, total); }
 
   openPdf(doc, `mon-bordereau-${compte.nom}.pdf`);
 }
 
 async function downloadReceptionBordereau(compte, colisSelectionnes, tarifs) {
   const jspdf = await loadJsPDF();
-  const doc = new jspdf.jsPDF();
+  const doc = preparerDocPdf(new jspdf.jsPDF());
   const poidsTotal = colisSelectionnes.reduce((s, c) => s + (Number(c.poids) || 0), 0);
   const { tauxParKg, total, palier: palierUtilise } = calcReceptionFee(poidsTotal, tarifs);
   const numero = `REC-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${String(Date.now()).slice(-4)}`;
@@ -5223,7 +6600,7 @@ async function downloadReceptionBordereau(compte, colisSelectionnes, tarifs) {
 
   doc.setFontSize(7.5); doc.setTextColor(140, 140, 140); doc.setFont(undefined, "normal");
   doc.text("Ce bordereau récapitule les colis disponibles à la récupération et le montant à régler à l’agence.", 14, y);
-  doc.text("Ba-Diaby Express — Transport de colis Conakry ⇄ Monde · badiabyexpress.bde@gmail.com", 14, y + 5);
+  doc.text("Ba-Diaby Express — Transport de colis Conakry - Monde · badiabyexpress.bde@gmail.com", 14, y + 5);
 
   openPdf(doc, `bordereau-reception-${compte.nom}-${numero}.pdf`);
 }
@@ -5231,7 +6608,7 @@ async function downloadReceptionBordereau(compte, colisSelectionnes, tarifs) {
 async function downloadRouteManifest(colisRoute, country, direction, bordereau, deviseAffichage) {
   const cur = deviseAffichage || country.currency;
   const jspdf = await loadJsPDF();
-  const doc = new jspdf.jsPDF();
+  const doc = preparerDocPdf(new jspdf.jsPDF());
   const label = direction === "import" ? `${country.city} → Conakry` : `Conakry → ${country.city}`;
   const poidsTotal = colisRoute.reduce((s, c) => s + c.poids, 0);
 
@@ -5318,14 +6695,14 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   doc.line(110, sigY + 14, 181, sigY + 14);
 
   doc.setFontSize(7.3); doc.setTextColor(150, 150, 150);
-  doc.text("Ba-Diaby Express — Transport de colis Conakry ⇄ Monde · badiabyexpress.bde@gmail.com", 14, 288);
+  doc.text("Ba-Diaby Express — Transport de colis Conakry - Monde · badiabyexpress.bde@gmail.com", 14, 288);
 
   openPdf(doc, `bordereau-${bordereau?.numero || `${country.code}-${direction}`}-${new Date().toISOString().slice(0, 10)}.pdf`);
 }
 
 async function downloadLabel(colis) {
   const jspdf = await loadJsPDF();
-  const doc = new jspdf.jsPDF({ unit: "mm", format: [100, 150] });
+  const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: [100, 150] }));
   const dest = COUNTRIES.find((c) => c.code === colis.pays);
   const trackingUrl = trackingUrlFor(colis.tracking);
   const [qrData, barcodeData] = await Promise.all([
@@ -5354,9 +6731,9 @@ async function downloadLabel(colis) {
     filetHaut: 21.5,     // trait rouge sous l'en-tête
     statut: 27.5,        // ligne "payé / non payé" + route
     sepStatut: 30.5,
-    destinataire: 30.5,  // zone destinataire : 30,5 → 79 mm
-    sepDest: 79,
-    qr: 80,              // bloc QR (23 mm)
+    destinataire: 30.5,  // début de la zone destinataire
+    destMax: 79,         // plafond : au-delà, le contenu est tronqué
+    qrMax: 79.5,         // le bloc QR ne descend jamais plus bas que ça
     sepQr: 104,
     codeBarres: 105,     // code-barres (11 mm) puis numéro
     sepCode: 120.5,
@@ -5402,7 +6779,7 @@ async function downloadLabel(colis) {
   doc.setTextColor(255, 255, 255);
   doc.text(pastille, M + pW / 2, Z.statut, { align: "center" });
   doc.setFont(undefined, "bold"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
-  doc.text(`GN \u2192 ${colis.pays}`, W - M, Z.statut, { align: "right" });
+  doc.text(`GN-${colis.pays}`, W - M, Z.statut, { align: "right" });
   hr(Z.sepStatut);
 
   // ── Destinataire (zone fixe : le texte s'adapte, la zone ne bouge pas) ─────
@@ -5431,20 +6808,33 @@ async function downloadLabel(colis) {
   const villeCp = [colis.destinataireCodePostal, colis.destinataireVille].filter(Boolean).join(" ");
   if (villeCp) { doc.text(ajuster(villeCp, W - 2 * M, 1), M, y); y += 3.7; }
   doc.setFont(undefined, "bold"); doc.setFontSize(9.5); doc.setTextColor(...NAVY);
-  doc.text(ajuster((dest?.name || "").toUpperCase(), W - 2 * M, 1), M, Math.min(y + 1, Z.sepDest - 2));
-  hr(Z.sepDest);
+  const yPays = Math.min(y + 1, Z.destMax - 2);
+  doc.text(ajuster((dest?.name || "").toUpperCase(), W - 2 * M, 1), M, yPays);
 
-  // ── QR (vers le suivi public — jamais de donnée financière) + n° de suivi ──
+  /*
+   * Le bloc QR suit immédiatement l'adresse au lieu d'être figé plus bas : avec une adresse
+   * courte, la zone fixe laissait un grand vide au milieu de l'étiquette. Il reste plafonné
+   * (Z.qrMax) pour qu'une adresse longue ne vienne jamais pousser le code-barres, dont la
+   * position doit rester constante pour un scan régulier en entrepôt.
+   */
+  const ySep = Math.min(yPays + 3, Z.destMax);
+  hr(ySep);
+  const yQr = Math.min(ySep + 3.5, Z.qrMax);
+
   const qrSize = 23;
-  doc.setDrawColor(...LINE); doc.setLineWidth(0.3); doc.rect(M, Z.qr, qrSize, qrSize);
-  doc.addImage(qrData, "PNG", M + 0.6, Z.qr + 0.6, qrSize - 1.2, qrSize - 1.2);
+  doc.setDrawColor(...LINE); doc.setLineWidth(0.3); doc.rect(M, yQr, qrSize, qrSize);
+  doc.addImage(qrData, "PNG", M + 0.6, yQr + 0.6, qrSize - 1.2, qrSize - 1.2);
   const txX = M + qrSize + 6;
-  eyebrow("Code de suivi", txX, Z.qr + 7);
+  eyebrow("Code de suivi", txX, yQr + 7);
   doc.setTextColor(...INK); doc.setFont(undefined, "bold"); doc.setFontSize(15);
-  doc.text(colis.tracking, txX, Z.qr + 15.5);
+  doc.text(colis.tracking, txX, yQr + 15.5);
+  if (colis.referenceCommande) {
+    doc.setFont(undefined, "bold"); doc.setFontSize(7); doc.setTextColor(...INK);
+    doc.text(ajuster(`Réf. commande : ${colis.referenceCommande}`, W - M - txX - 2, 1), txX, yQr + 19.5);
+  }
   doc.setFont(undefined, "normal"); doc.setFontSize(6.6); doc.setTextColor(...MUTED);
-  doc.text(ajuster("Scannez pour suivre le colis en direct", W - M - txX - 2, 2), txX, Z.qr + 20);
-  hr(Z.sepQr);
+  doc.text(ajuster("Scannez pour suivre le colis en direct", W - M - txX - 2, 1), txX, yQr + (colis.referenceCommande ? 23 : 20));
+  hr(Math.min(yQr + qrSize + 2.5, Z.sepQr));
 
   // ── Code-barres Code128 (position garantie pour un scan régulier) ──────────
   if (barcodeData) doc.addImage(barcodeData, "PNG", M, Z.codeBarres, W - 2 * M, 11);
@@ -5490,7 +6880,7 @@ async function downloadLabel(colis) {
 /** Reçu d’encaissement PDF pour un paiement précis — utile pour la comptabilité et le client. */
 async function downloadRecu(colis, paiement) {
   const jspdf = await loadJsPDF();
-  const doc = new jspdf.jsPDF({ unit: "mm", format: "a5" });
+  const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a5" }));
   const W = 148, H = 210, M = 10;
   const qrData = await generateQRDataUrl(`${colis.tracking}-${paiement.id}`, 200).catch(() => null);
 
@@ -5532,7 +6922,7 @@ async function downloadRecu(colis, paiement) {
   doc.text(paiement.deviseSaisie ? fmt(paiement.montant, paiement.deviseSaisie) : fmt(paiement.montant, "EUR"), M, Z.montant + 10);
   if (paiement.deviseSaisie && paiement.deviseSaisie !== "EUR") {
     doc.setFontSize(9); doc.setTextColor(120, 120, 120); doc.setFont(undefined, "normal");
-    doc.text(`≈ ${fmt(paiement.montant, "EUR")}`, M, Z.montant + 17);
+    doc.text(`Soit environ ${fmt(paiement.montant, "EUR")}`, M, Z.montant + 17);
   }
   if (qrData) doc.addImage(qrData, "PNG", W - 38, Z.montant - 6, 26, 26);
   doc.setDrawColor(220); doc.line(M, Z.sepMontant, W - M, Z.sepMontant);
@@ -5574,7 +6964,7 @@ async function downloadRecu(colis, paiement) {
 async function downloadBonSortie(colis) {
   if (!colis.bonSortie) return;
   const jspdf = await loadJsPDF();
-  const doc = new jspdf.jsPDF({ unit: "mm", format: "a5" });
+  const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a5" }));
   doc.setFillColor(10, 38, 71); doc.rect(0, 0, 148, 22, "F");
   doc.setFillColor(255, 255, 255); doc.roundedRect(8, 3.5, 16, 16, 2, 2, "F");
   doc.addImage(DEFAULT_LOGO, "PNG", 9, 4.5, 14, 14);
@@ -5630,7 +7020,7 @@ async function downloadBonSortie(colis) {
  */
 async function downloadInvoice(colis, data) {
   const jspdf = await loadJsPDF();
-  const doc = new jspdf.jsPDF();
+  const doc = preparerDocPdf(new jspdf.jsPDF());
   const dest = COUNTRIES.find((c) => c.code === colis.pays);
   const destCur = dest?.currency || "EUR";
   const statutPaiement = colis.reste <= 0 ? "PAYÉ" : (colis.paye > 0 ? "PAIEMENT PARTIEL" : "NON PAYÉ");
@@ -5742,28 +7132,63 @@ async function downloadInvoice(colis, data) {
   y += 38 + 4;
   doc.setFont(undefined, "normal"); doc.setFontSize(8); doc.setTextColor(...MUTED);
   doc.text(`Route : ${routeLabel(colis.pays, colis.direction)}`, M, y);
+  if (colis.referenceCommande) {
+    doc.setFont(undefined, "bold"); doc.setTextColor(...INK);
+    doc.text(`Référence de commande du client : ${colis.referenceCommande}`, W - M, y, { align: "right" });
+    doc.setFont(undefined, "normal"); doc.setTextColor(...MUTED);
+  }
   y += 10;
 
   // ── Paiement ─────────────────────────────────────────────────────────────
-  ensureRoom(50);
+  ensureRoom(64);  // hauteur du bloc de totaux, remise et rabais compris
   eyebrow("Paiement", M, y, SKY);
   y += 6;
+  /*
+   * Bloc de totaux façon facture : les montants sont regroupés dans un panneau à droite plutôt
+   * qu'étalés sur toute la largeur de la page. Auparavant le libellé était à 26 mm et le montant
+   * à 184 mm, soit 158 mm de vide entre les deux — d'où un rendu déstructuré et difficile à lire.
+   * Le total est mis en évidence sur un fond teinté, et le solde restant est coloré selon l'état.
+   */
+  const panL = W / 2 - 4;              // bord gauche du panneau
+  const panR = W - M;                  // bord droit
+  const padX = 8;
   const payBoxTop = y;
-  const finLine = (label, value, bold) => {
-    doc.setFont(undefined, bold ? "bold" : "normal"); doc.setFontSize(bold ? 11.5 : 9);
-    doc.setTextColor(...(bold ? INK : MUTED));
-    doc.text(label, M + 10, y); doc.text(String(value), W - M - 10, y, { align: "right" });
-    y += bold ? 8 : 6.5;
+
+  const ligneTotal = (label, valeur, opts = {}) => {
+    const { gras = false, couleur = MUTED, taille = 9 } = opts;
+    doc.setFont(undefined, gras ? "bold" : "normal"); doc.setFontSize(taille);
+    doc.setTextColor(...couleur);
+    doc.text(label, panL + padX, y);
+    doc.text(String(valeur), panR - padX, y, { align: "right" });
+    y += taille >= 11 ? 7.5 : 6;
   };
-  y += 8;
-  finLine(`Prix du transport (${destCur})`, fmt(colis.prixBrut || colis.prix, destCur));
-  if (colis.discountLoyalty > 0) finLine("Remise fidélité", `-${colis.discountLoyalty}%`);
-  if (colis.rabaisMontant > 0) finLine("Rabais", `-${colis.rabaisMontant.toLocaleString("fr-FR")} ${colis.rabaisDevise}`);
-  finLine("Montant total (GNF)", fmt(colis.prix, "GNF"), true);
-  finLine("Montant payé", fmt(colis.paye, "EUR"));
-  finLine("Reste à payer", fmt(colis.reste, "EUR"), colis.reste > 0);
+
+  y += 7;
+  ligneTotal(`Prix du transport (${destCur})`, fmt(colis.prixBrut || colis.prix, destCur));
+  if (colis.discountLoyalty > 0) ligneTotal("Remise fidélité", `-${colis.discountLoyalty} %`);
+  if (colis.rabaisMontant > 0) ligneTotal("Rabais", `-${colis.rabaisMontant.toLocaleString("fr-FR")} ${colis.rabaisDevise}`);
+
+  // Bandeau du montant total, mis en avant
+  y += 1.5;
+  doc.setFillColor(...SKYTINT);
+  doc.rect(panL, y - 5, panR - panL, 11, "F");
+  doc.setFont(undefined, "bold"); doc.setFontSize(11.5); doc.setTextColor(...INK);
+  doc.text("MONTANT TOTAL", panL + padX, y + 1.5);
+  doc.text(fmt(colis.prix, "GNF"), panR - padX, y + 1.5, { align: "right" });
+  y += 9;
+  doc.setFont(undefined, "normal"); doc.setFontSize(7.6); doc.setTextColor(...MUTED);
+  doc.text(`soit ${fmt(colis.prix, destCur)}`, panR - padX, y, { align: "right" });
+  y += 7;
+
+  doc.setDrawColor(...LINE); doc.setLineWidth(0.3);
+  doc.line(panL + padX, y - 3.5, panR - padX, y - 3.5);
+  ligneTotal("Déjà payé", fmt(colis.paye, destCur));
+  const solde = colis.reste > 0;
+  ligneTotal(solde ? "Reste à payer" : "Solde", solde ? fmt(colis.reste, destCur) : "PAYÉ EN TOTALITÉ",
+             { gras: true, taille: 10.5, couleur: solde ? RED : [22, 120, 70] });
   y += 3;
-  doc.setDrawColor(...LINE); doc.roundedRect(M, payBoxTop, W - 2 * M, y - payBoxTop, 3, 3);
+  doc.setDrawColor(...LINE); doc.setLineWidth(0.3);
+  doc.roundedRect(panL, payBoxTop, panR - panL, y - payBoxTop, 3, 3);
   y += 10;
 
   // ── Réseau des agences (base de données) ────────────────────────────────
@@ -5796,7 +7221,7 @@ async function downloadInvoice(colis, data) {
   doc.text("Merci de votre confiance. Conservez ce ticket jusqu’à la livraison de votre colis.", M, y);
   y += 6;
   doc.setFont(undefined, "normal"); doc.setFontSize(7); doc.setTextColor(...MUTED);
-  doc.text(`Ba-Diaby Express — Transport de colis Conakry ⇄ Monde · ${entreprise.siteWeb || ""}`, M, y);
+  doc.text(`Ba-Diaby Express — Transport de colis Conakry - Monde · ${entreprise.siteWeb || ""}`, M, y);
   y += 4;
   doc.text(`Document généré le ${new Date().toLocaleString("fr-FR")}`, M, y);
 
@@ -5936,17 +7361,211 @@ async function downloadTicketThermal(colis) {
   }
 
   // Passe 1 : page volontairement très haute, uniquement pour mesurer la hauteur finale nécessaire.
-  const measureDoc = new jspdf.jsPDF({ unit: "mm", format: [W, 400] });
+  const measureDoc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: [W, 400] }));
   const finalHeight = Math.ceil(draw(measureDoc) + 6);
 
   // Passe 2 : page ajustée pile à la bonne hauteur — c’est celle-ci qui est réellement livrée.
-  const doc = new jspdf.jsPDF({ unit: "mm", format: [W, finalHeight] });
+  const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: [W, finalHeight] }));
   draw(doc);
 
   openPdf(doc, `ticket-thermique-${colis.tracking}.pdf`);
 }
 
-function EditColisForm({ colis, onClose, onSave }) {
+/**
+ * Encaissement groupé au comptoir : on choisit un client, on coche ses colis impayés, on saisit
+ * la somme remise. Le montant se répartit du colis le plus ancien au plus récent.
+ */
+/** Déclaration ou résolution d'un litige sur un colis (endommagé ou perdu). */
+function LitigeModal({ colis, onDeclarer, onResoudre, onClose }) {
+  const ouvert = colis.litige && colis.litige.statut === "Ouvert";
+  const [type, setType] = useState(colis.litige?.type || "endommage");
+  const [description, setDescription] = useState("");
+  const [resolution, setResolution] = useState("");
+  const [indemnite, setIndemnite] = useState("");
+  const [devise, setDevise] = useState("GNF");
+  const taux = LIVE_RATES[devise] || CURRENCIES[devise] || 1;
+
+  return (
+    <Modal onClose={onClose} title={ouvert ? "Résoudre le litige" : "Déclarer un litige"} wide>
+      {ouvert ? (
+        <>
+          <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "10px 14px", marginBottom: 16 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--warn-fg)" }}>
+              {colis.litige.type === "perdu" ? "Colis perdu" : "Colis endommagé"} — déclaré le {new Date(colis.litige.date).toLocaleDateString("fr-FR")} par {colis.litige.par}
+            </div>
+            {colis.litige.description && <div style={{ fontSize: 12, color: "var(--text)", marginTop: 4 }}>{colis.litige.description}</div>}
+          </div>
+          <Field label="Comment le litige a-t-il été réglé ? *">
+            <textarea value={resolution} onChange={(e) => setResolution(e.target.value)} rows={3}
+              placeholder="Colis remis au client avec un geste commercial, remboursement, remplacement…"
+              style={{ ...inputStyle, resize: "vertical" }} />
+          </Field>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <Field label="Indemnité versée au client (facultatif)">
+              <input type="number" step="0.01" min="0" value={indemnite} onChange={(e) => setIndemnite(e.target.value)} placeholder="0" style={{ ...inputStyle, marginBottom: 0 }} />
+            </Field>
+            <Field label="Devise">
+              <select value={devise} onChange={(e) => setDevise(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }}>
+                {Object.keys(CURRENCIES).map((d) => <option key={d} value={d}>{d}</option>)}
+              </select>
+            </Field>
+          </div>
+          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 8 }}>
+            L’indemnité apparaîtra en Comptabilité, séparée des dépenses courantes.
+          </div>
+          <button onClick={() => { onResoudre(resolution.trim(), (Number(indemnite) || 0) / taux); onClose(); }}
+            disabled={!resolution.trim()}
+            style={{ width: "100%", marginTop: 16, background: resolution.trim() ? "#16A163" : "var(--surface2)",
+                     color: resolution.trim() ? "#fff" : "var(--muted)", border: "none", borderRadius: 8,
+                     padding: "12px 0", fontSize: 14, fontWeight: 700, cursor: resolution.trim() ? "pointer" : "not-allowed" }}>
+            Marquer le litige résolu
+          </button>
+        </>
+      ) : (
+        <>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>
+            Le colis garde son statut de livraison et son historique. Un litige n’efface jamais la vente :
+            il la documente, pour que votre comptabilité reste juste.
+          </div>
+          <Field label="Nature du litige">
+            <div style={{ display: "flex", gap: 8 }}>
+              {[["endommage", "Colis endommagé"], ["perdu", "Colis perdu"]].map(([k, label]) => (
+                <button key={k} onClick={() => setType(k)}
+                  style={{ flex: 1, background: type === k ? "var(--warn-bg)" : "var(--surface2)",
+                           border: "1.5px solid " + (type === k ? "var(--warn-border)" : "var(--border)"),
+                           color: type === k ? "var(--warn-fg)" : "var(--muted)", borderRadius: 8,
+                           padding: "10px 0", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          </Field>
+          <Field label="Description (ce que vous avez constaté)">
+            <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3}
+              placeholder="Emballage déchiré à l’arrivée, contenu manquant…" style={{ ...inputStyle, resize: "vertical" }} />
+          </Field>
+          <button onClick={() => { onDeclarer(type, description.trim()); onClose(); }}
+            style={{ width: "100%", marginTop: 8, background: "var(--brand-solid)", color: "#fff", border: "none",
+                     borderRadius: 8, padding: "12px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>
+            Déclarer le litige
+          </button>
+        </>
+      )}
+    </Modal>
+  );
+}
+
+function EncaisserGroupeModal({ data, onEncaisser, onClose }) {
+  const impayes = (data.colis || []).filter((c) => c.reste > 0.005 && !["Annulé", "Refusé"].includes(c.status));
+  const parClient = {};
+  impayes.forEach((c) => {
+    const cle = c.telephone || c.destinataire;
+    if (!parClient[cle]) parClient[cle] = { nom: c.destinataire, telephone: c.telephone, colis: [] };
+    parClient[cle].colis.push(c);
+  });
+  const clients = Object.entries(parClient)
+    .map(([cle, v]) => ({ cle, ...v, du: v.colis.reduce((s, c) => s + c.reste, 0) }))
+    .filter((c) => c.colis.length > 0)
+    .sort((a, b) => b.colis.length - a.colis.length);
+
+  const [clientCle, setClientCle] = useState(clients[0]?.cle || "");
+  const [selection, setSelection] = useState([]);
+  const [montant, setMontant] = useState("");
+  const [devise, setDevise] = useState("GNF");
+  const [mode, setMode] = useState("Espèces");
+
+  const client = clients.find((c) => c.cle === clientCle);
+  const colisClient = client ? client.colis : [];
+  const coches = selection.length ? colisClient.filter((c) => selection.includes(c.tracking)) : colisClient;
+  const duSelection = coches.reduce((s, c) => s + c.reste, 0);
+  const taux = LIVE_RATES[devise] || CURRENCIES[devise] || 1;
+  const montantEUR = (Number(montant) || 0) / taux;
+
+  useEffect(() => { setSelection([]); setMontant(""); }, [clientCle]);
+
+  function basculer(t) {
+    setSelection((s) => {
+      const base = s.length ? s : colisClient.map((c) => c.tracking);
+      return base.includes(t) ? base.filter((x) => x !== t) : [...base, t];
+    });
+  }
+
+  return (
+    <Modal onClose={onClose} title="Règlement groupé — plusieurs colis" wide>
+      {clients.length === 0 ? (
+        <div style={{ color: "var(--muted)", fontSize: 13.5, padding: "16px 0" }}>Aucun colis impayé pour le moment.</div>
+      ) : (
+        <>
+          <Field label="Client">
+            <select value={clientCle} onChange={(e) => setClientCle(e.target.value)} style={inputStyle}>
+              {clients.map((c) => (
+                <option key={c.cle} value={c.cle}>{c.nom} — {c.colis.length} colis · {fmtGNF(c.du * (LIVE_RATES.GNF || CURRENCIES.GNF))}</option>
+              ))}
+            </select>
+          </Field>
+
+          <div style={{ fontSize: 11.5, color: "var(--muted)", fontWeight: 700, margin: "6px 0 8px" }}>
+            COLIS À RÉGLER {selection.length === 0 ? `(tous — ${colisClient.length})` : `(${selection.length} sélectionné${selection.length > 1 ? "s" : ""})`}
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14, maxHeight: 200, overflowY: "auto" }}>
+            {colisClient.map((c) => {
+              const actif = coches.some((x) => x.tracking === c.tracking);
+              return (
+                <button key={c.tracking} onClick={() => basculer(c.tracking)}
+                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10,
+                           background: actif ? "var(--info-bg)" : "var(--surface2)",
+                           border: "1px solid " + (actif ? "var(--info-border)" : "var(--border)"),
+                           borderRadius: 8, padding: "8px 12px", cursor: "pointer", textAlign: "start" }}>
+                  <span style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>
+                    {actif && "\u2713 "}{c.tracking}
+                    <span style={{ color: "var(--muted)", fontWeight: 600 }}> · {new Date(c.createdAt).toLocaleDateString("fr-FR")}</span>
+                  </span>
+                  <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--danger-fg)" }}>{fmtGNF(c.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "10px 14px", marginBottom: 14, display: "flex", justifyContent: "space-between" }}>
+            <span style={{ fontSize: 12.5, color: "var(--muted)" }}>Total dû sur la sélection</span>
+            <span style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{fmtGNF(duSelection * (LIVE_RATES.GNF || CURRENCIES.GNF))}</span>
+          </div>
+
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <Field label="Montant reçu"><input type="number" step="0.01" min="0" value={montant} onChange={(e) => setMontant(e.target.value)} placeholder="0" autoFocus style={{ ...inputStyle, marginBottom: 0 }} /></Field>
+            <Field label="Devise">
+              <select value={devise} onChange={(e) => setDevise(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }}>
+                {Object.keys(CURRENCIES).map((d) => <option key={d} value={d}>{d}</option>)}
+              </select>
+            </Field>
+            <Field label="Mode de paiement">
+              <select value={mode} onChange={(e) => setMode(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }}>
+                {["Espèces", "Orange Money", "MTN Money", "Carte bancaire", "Virement"].map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+            </Field>
+          </div>
+
+          {montantEUR > duSelection + 0.005 && (
+            <div style={{ fontSize: 12, color: "var(--warn-fg)", marginTop: 10 }}>
+              Le montant dépasse le total dû : seule la somme due sera enregistrée, la différence est de la monnaie à rendre.
+            </div>
+          )}
+
+          <button
+            onClick={() => { onEncaisser(coches.map((c) => c.tracking), montantEUR, mode, Number(montant) || 0, devise); onClose(); }}
+            disabled={!(montantEUR > 0)}
+            style={{ width: "100%", marginTop: 16, background: montantEUR > 0 ? "var(--brand-solid)" : "var(--surface2)",
+                     color: montantEUR > 0 ? "#fff" : "var(--muted)", border: "none", borderRadius: 8,
+                     padding: "12px 0", fontSize: 14, fontWeight: 700, cursor: montantEUR > 0 ? "pointer" : "not-allowed" }}>
+            Encaisser sur {coches.length} colis
+          </button>
+        </>
+      )}
+    </Modal>
+  );
+}
+
+function EditColisForm({ colis, onClose, onSave, tarifsReception }) {
   const [expediteur, setExpediteur] = useState(colis.expediteur);
   const [destinataire, setDestinataire] = useState(colis.destinataire);
   const [telephone, setTelephone] = useState(colis.telephone);
@@ -5958,7 +7577,17 @@ function EditColisForm({ colis, onClose, onSave }) {
   const [paye, setPaye] = useState(String(colis.paye || ""));
   const [rabaisMontant, setRabaisMontant] = useState(String(colis.rabaisMontant || 0));
   const [rabaisDevise, setRabaisDevise] = useState(colis.rabaisDevise || "GNF");
-  const prixBrut = calcPrice(pays, poids, volume, mode);
+  /*
+   * Deux barèmes coexistent : le barème export (par pays et mode de transport) et les paliers
+   * de réception utilisés pour les colis annoncés depuis l'Espace Client. On applique celui
+   * avec lequel le colis a été créé — auparavant la modification appliquait toujours le barème
+   * export, ce qui écrasait le prix d'un colis de l'Espace Client dès qu'on ouvrait la fiche
+   * pour corriger un simple numéro de téléphone.
+   */
+  const auxPaliers = colis.tarification === "reception";
+  const prixBrut = auxPaliers
+    ? +(calcReceptionFee(Number(poids) || 0, tarifsReception).total / (LIVE_RATES.GNF || CURRENCIES.GNF)).toFixed(2)
+    : calcPrice(pays, poids, volume, mode);
   const discountLoyalty = colis.discountLoyalty || 0;
   const prixApresFidelite = +(prixBrut * (1 - discountLoyalty / 100)).toFixed(2);
   const rabaisEUR = +((Number(rabaisMontant) || 0) / (LIVE_RATES[rabaisDevise] || CURRENCIES[rabaisDevise] || 1)).toFixed(2);
@@ -6009,25 +7638,43 @@ function EditColisForm({ colis, onClose, onSave }) {
           </select>
         </Field>
         <Field label="Montant payé (EUR)"><input value={paye} onChange={(e) => setPaye(e.target.value)} style={inputStyle} /></Field>
-        <div style={{ gridColumn: "1 / -1", background: "var(--surface2)", borderRadius: 10, padding: "12px 16px", display: "flex", justifyContent: "space-between" }}>
+        <div style={{ gridColumn: "1 / -1", background: "var(--surface2)", borderRadius: 12, padding: "12px 16px", display: "flex", justifyContent: "space-between" }}>
           <div style={{ fontSize: 13, color: "var(--text)" }}>Total recalculé : <strong>{fmt(prix, "EUR")}</strong></div>
           <div style={{ fontSize: 13, color: reste > 0 ? "var(--danger-fg)" : "var(--ok-fg)" }}>Reste à payer : <strong>{fmt(reste, "EUR")}</strong></div>
         </div>
         <div style={{ gridColumn: "1 / -1", display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 4 }}>
-          <button type="button" onClick={onClose} style={{ padding: "10px 18px", borderRadius: 9, border: "1.5px solid var(--border)", background: "var(--surface)", color: "var(--muted)", fontSize: 13.5, cursor: "pointer" }}>Annuler</button>
-          <button type="submit" style={{ padding: "10px 18px", borderRadius: 9, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>Enregistrer les modifications</button>
+          <button type="button" onClick={onClose} style={{ padding: "10px 18px", borderRadius: 8, border: "1.5px solid var(--border)", background: "var(--surface)", color: "var(--muted)", fontSize: 13.5, cursor: "pointer" }}>Annuler</button>
+          <button type="submit" style={{ padding: "10px 18px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>Enregistrer les modifications</button>
         </div>
       </form>
     </Modal>
   );
 }
 
-function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser, onMajRetour, onUpdate, onEncaisser, canManage, isAdmin, isChauffeur, data, session }) {
+function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser, onDeclarerLitige, onResoudreLitige, onMajRetour, onUpdate, onEncaisser, canManage, isAdmin, isChauffeur, data, session }) {
   const [cancelling, setCancelling] = useState(false);
   const [refusing, setRefusing] = useState(false);
   const [motifRefus, setMotifRefus] = useState("");
   const [motif, setMotif] = useState("");
   const [editing, setEditing] = useState(false);
+  const [showLitige, setShowLitige] = useState(false);
+  const [waState, setWaState] = useState("");
+  const [waErreur, setWaErreur] = useState("");
+
+  /*
+   * Notification WhatsApp : on tente l'envoi automatique via Twilio, et si ce n'est pas possible
+   * (Twilio non configuré, hors ligne, fenêtre de 24 h dépassée) on ouvre le brouillon WhatsApp
+   * comme avant. L'agent n'est jamais bloqué : dans le pire des cas il appuie sur Envoyer.
+   */
+  async function notifierWhatsApp() {
+    const message = `Bonjour ${colis.destinataire}, votre colis Ba-Diaby Express (${colis.tracking}) est actuellement : ${clientStatusLabel(colis.status)}. Suivez-le à tout moment sur notre plateforme.`;
+    setWaErreur(""); setWaState("envoi");
+    const { envoye, raison } = await envoyerWhatsApp(colis.telephone, message);
+    if (envoye) { setWaState("envoye"); return; }
+    if (raison) setWaErreur(raison);
+    setWaState("brouillon");
+    window.open(waLink(colis.telephone, message), "_blank", "noreferrer");
+  }
   const [payerOuvert, setPayerOuvert] = useState(false);
   const [montantPaye, setMontantPaye] = useState(String(colis.reste || ""));
   const [devisePaiement, setDevisePaiement] = useState("EUR");
@@ -6148,8 +7795,8 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
           <div style={{ fontSize: 12.5, color: "var(--warn-fg)" }}>⚡ Livraison express demandée par le client — {fmt(colis.demandeExpress.montant, "EUR")} · statut : <strong>{colis.demandeExpress.statut}</strong></div>
           {canManage && colis.demandeExpress.statut === "En attente" && (
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => onUpdate({ demandeExpress: { ...colis.demandeExpress, statut: "Confirmée" } })} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 7, padding: "5px 12px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Confirmer</button>
-              <button onClick={() => onUpdate({ demandeExpress: { ...colis.demandeExpress, statut: "Refusée" } })} style={{ background: "none", border: "1px solid var(--warn-border)", color: "var(--warn-fg)", borderRadius: 7, padding: "5px 12px", fontSize: 11.5, cursor: "pointer" }}>Refuser</button>
+              <button onClick={() => onUpdate({ demandeExpress: { ...colis.demandeExpress, statut: "Confirmée", dateDecision: new Date().toISOString(), traitePar: `${session.prenom} ${session.nom}`.trim() } })} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Confirmer</button>
+              <button onClick={() => onUpdate({ demandeExpress: { ...colis.demandeExpress, statut: "Refusée", dateDecision: new Date().toISOString(), traitePar: `${session.prenom} ${session.nom}`.trim() } })} style={{ background: "none", border: "1px solid var(--warn-border)", color: "var(--warn-fg)", borderRadius: 6, padding: "5px 12px", fontSize: 11.5, cursor: "pointer" }}>Refuser</button>
             </div>
           )}
         </div>
@@ -6164,8 +7811,8 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
               <button onClick={() => {
                 const montantEUR = +(d.montant / (LIVE_RATES[d.devise] || CURRENCIES[d.devise] || 1)).toFixed(2);
                 onEncaisser(montantEUR, d.mode, d.montant, d.devise, { reference: d.reference }, d.id);
-              }} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 7, padding: "5px 12px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Vérifié — confirmer</button>
-              <button onClick={() => onUpdate({ declarationsPaiement: (colis.declarationsPaiement || []).map((x) => (x.id === d.id ? { ...x, statut: "Rejeté" } : x)) })} style={{ background: "none", border: "1px solid var(--info-border)", color: "var(--info-fg)", borderRadius: 7, padding: "5px 12px", fontSize: 11.5, cursor: "pointer" }}>Rejeter</button>
+              }} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Vérifié — confirmer</button>
+              <button onClick={() => onUpdate({ declarationsPaiement: (colis.declarationsPaiement || []).map((x) => (x.id === d.id ? { ...x, statut: "Rejeté" } : x)) })} style={{ background: "none", border: "1px solid var(--info-border)", color: "var(--info-fg)", borderRadius: 6, padding: "5px 12px", fontSize: 11.5, cursor: "pointer" }}>Rejeter</button>
             </div>
           )}
         </div>
@@ -6182,7 +7829,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
               <button onClick={() => {
                 const rep = (reponses[s.id] || "").trim();
                 onUpdate({ signalements: (colis.signalements || []).map((x) => (x.id === s.id ? { ...x, statut: "Résolu", reponse: rep || "Résolu par l’agence.", dateReponse: new Date().toISOString() } : x)) });
-              }} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 7, padding: "0 14px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Répondre & clore</button>
+              }} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 6, padding: "0 14px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Répondre & clore</button>
             </div>
           )}
         </div>
@@ -6273,7 +7920,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
 
         {colis.reste > 0 && effectivePermission(session, "colis.enregistrer_paiement") && (
           payerOuvert ? (
-            <div style={{ background: "var(--surface2)", borderRadius: 10, padding: 14 }}>
+            <div style={{ background: "var(--surface2)", borderRadius: 12, padding: 14 }}>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 10, marginBottom: 6 }}>
                 <Field label="Montant reçu">
                   <input value={montantPaye} onChange={(e) => setMontantPaye(e.target.value)} style={inputStyle} />
@@ -6314,7 +7961,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
               </div>
             </div>
           ) : (
-            <button onClick={() => { setDevisePaiement("EUR"); setMontantPaye(String(colis.reste)); setPayerOuvert(true); }} style={{ width: "100%", background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 9, padding: "10px 0", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Encaisser</button>
+            <button onClick={() => { setDevisePaiement("EUR"); setMontantPaye(String(colis.reste)); setPayerOuvert(true); }} style={{ width: "100%", background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 8, padding: "10px 0", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Encaisser</button>
           )
         )}
 
@@ -6402,6 +8049,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
         <div style={{ display: "flex", gap: 14 }}>
+          {canManage && <button onClick={() => setShowLitige(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "1px solid var(--warn-border)", color: "var(--warn-fg)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}><AlertTriangle size={14} /> {colis.litige?.statut === "Ouvert" ? "Résoudre le litige" : "Signaler un litige"}</button>}
           {isAdmin && <button onClick={() => setEditing(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--text)", fontSize: 13, cursor: "pointer" }}><Settings size={14} /> Modifier</button>}
           {effectivePermission(session, "colis.supprimer") && <button onClick={onDelete} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--danger-fg)", fontSize: 13, cursor: "pointer" }}><Trash2 size={14} /> Supprimer</button>}
           {effectivePermission(session, "colis.annuler") && colis.status !== "Annulé" && colis.status !== "Livré" && colis.status !== "Refusé" && <button onClick={() => setCancelling(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--warn-fg)", fontSize: 13, cursor: "pointer" }}><AlertTriangle size={14} /> Annuler le colis</button>}
@@ -6422,17 +8070,21 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
           )}
         </div>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <a href={waLink(colis.telephone, `Bonjour ${colis.destinataire}, votre colis Ba-Diaby Express (${colis.tracking}) est actuellement : ${colis.status}. Suivez-le à tout moment en nous contactant.`)} target="_blank" rel="noreferrer" style={{ ...smallBtn, textDecoration: "none", background: "#3ECB84", color: "#fff", borderColor: "#3ECB84" }}><MessageCircle size={13} /> Notifier WhatsApp</a>
+          <button onClick={notifierWhatsApp} disabled={waState === "envoi"} style={{ ...smallBtn, background: "#16A163", color: "#fff", borderColor: "#16A163" }}>
+            <MessageCircle size={13} /> {waState === "envoi" ? "Envoi…" : waState === "envoye" ? "Message envoyé" : "Notifier WhatsApp"}
+          </button>
+          {waState === "brouillon" && <span style={{ fontSize: 11, color: "var(--muted)", alignSelf: "center" }}>Brouillon WhatsApp ouvert — appuyez sur Envoyer</span>}
+          {waErreur && <span style={{ fontSize: 11, color: "var(--warn-fg)", alignSelf: "center" }}>{waErreur}</span>}
           <button onClick={handleDownloadLabel} disabled={labelState === "loading"} style={smallBtn}><Printer size={13} /> {labelState === "loading" ? "Génération…" : "Étiquette QR"}</button>
           {labelState === "error" && <span style={{ fontSize: 11, color: "var(--danger-fg)", alignSelf: "center" }}>Échec — réessayez</span>}
           <button onClick={handleDownloadInvoice} disabled={invoiceState === "loading"} style={smallBtn}><Download size={13} /> {invoiceState === "loading" ? "Génération…" : "Facture PDF"}</button>
           <button onClick={handleDownloadTicketThermal} disabled={ticketThermalState === "loading"} style={smallBtn}><Receipt size={13} /> {ticketThermalState === "loading" ? "Génération…" : "Ticket thermique 80mm"}</button>
           {invoiceState === "error" && <span style={{ fontSize: 11, color: "var(--danger-fg)", alignSelf: "center" }}>Échec — réessayez</span>}
-          {canManage && !isLast && colis.status !== "Annulé" && colis.status !== "Refusé" && <button onClick={onAdvance} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 9, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Statut suivant <ChevronRight size={14} /></button>}
+          {canManage && !isLast && colis.status !== "Annulé" && colis.status !== "Refusé" && <button onClick={onAdvance} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Statut suivant <ChevronRight size={14} /></button>}
         </div>
       </div>
       {cancelling && (
-        <div style={{ marginTop: 14, background: "var(--danger-bg)", borderRadius: 10, padding: 14 }}>
+        <div style={{ marginTop: 14, background: "var(--danger-bg)", borderRadius: 12, padding: 14 }}>
           <div style={{ fontSize: 12.5, color: "var(--danger-fg)", fontWeight: 700, marginBottom: 8 }}>Confirmer l’annulation du colis</div>
           <input value={motif} onChange={(e) => setMotif(e.target.value)} placeholder="Motif de l’annulation" style={{ ...inputStyle, marginBottom: 10 }} />
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
@@ -6442,7 +8094,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
         </div>
       )}
       {refusing && (
-        <div style={{ marginTop: 14, background: "var(--danger-bg)", borderRadius: 10, padding: 14 }}>
+        <div style={{ marginTop: 14, background: "var(--danger-bg)", borderRadius: 12, padding: 14 }}>
           <div style={{ fontSize: 12.5, color: "var(--danger-fg)", fontWeight: 700, marginBottom: 8 }}>Le destinataire a refusé le colis</div>
           <input value={motifRefus} onChange={(e) => setMotifRefus(e.target.value)} placeholder="Motif du refus (ex : article non conforme, absent...)" style={{ ...inputStyle, marginBottom: 10 }} />
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
@@ -6454,11 +8106,11 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
       {colis.photoEntrepot && (
         <div style={{ marginTop: 14 }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", marginBottom: 6 }}>Photo à l’entrepôt</div>
-          <img src={colis.photoEntrepot} alt="Photo du colis" style={{ maxWidth: 260, borderRadius: 10, border: "1px solid var(--border)" }} />
+          <img src={colis.photoEntrepot} alt="Photo du colis" style={{ maxWidth: 260, borderRadius: 12, border: "1px solid var(--border)" }} />
         </div>
       )}
       {colis.status === "Refusé" && colis.retour && (
-        <div style={{ marginTop: 14, background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 10, padding: 14 }}>
+        <div style={{ marginTop: 14, background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 12, padding: 14 }}>
           <div style={{ fontSize: 12.5, color: "var(--warn-fg)", fontWeight: 700, marginBottom: 6 }}>Suivi du retour</div>
           {colis.retour.motif && <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 8 }}>Motif : {colis.retour.motif}</div>}
           {canManage ? (
@@ -6474,7 +8126,8 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
           )}
         </div>
       )}
-      {editing && <EditColisForm colis={colis} onClose={() => setEditing(false)} onSave={(patch) => { onUpdate(patch); setEditing(false); }} />}
+      {showLitige && <LitigeModal colis={colis} onDeclarer={onDeclarerLitige} onResoudre={onResoudreLitige} onClose={() => setShowLitige(false)} />}
+      {editing && <EditColisForm colis={colis} tarifsReception={data?.receptionTarifs} onClose={() => setEditing(false)} onSave={(patch) => { onUpdate(patch); setEditing(false); }} />}
       {bonSortieOuvert && (
         <Modal onClose={() => setBonSortieOuvert(false)} title="Enregistrer la remise du colis">
           <Field label="Nom de la personne qui récupère le colis *"><input value={recupNom} onChange={(e) => setRecupNom(e.target.value)} style={inputStyle} /></Field>
@@ -6482,21 +8135,71 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
           <Field label="Numéro de pièce d’identité (facultatif)"><input value={recupPiece} onChange={(e) => setRecupPiece(e.target.value)} style={inputStyle} placeholder="CNI, passeport..." /></Field>
           <Field label="Date (facultatif)"><input type="date" value={recupDate} onChange={(e) => setRecupDate(e.target.value)} style={inputStyle} /></Field>
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 8 }}>
-            <button onClick={() => setBonSortieOuvert(false)} style={{ padding: "10px 18px", borderRadius: 9, border: "1.5px solid var(--border)", background: "var(--surface)", color: "var(--muted)", fontSize: 13.5, cursor: "pointer" }}>Annuler</button>
-            <button onClick={validerBonSortie} style={{ padding: "10px 18px", borderRadius: 9, border: "none", background: "#3D63FF", color: "#fff", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
+            <button onClick={() => setBonSortieOuvert(false)} style={{ padding: "10px 18px", borderRadius: 8, border: "1.5px solid var(--border)", background: "var(--surface)", color: "var(--muted)", fontSize: 13.5, cursor: "pointer" }}>Annuler</button>
+            <button onClick={validerBonSortie} style={{ padding: "10px 18px", borderRadius: 8, border: "none", background: "#3D63FF", color: "#fff", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
           </div>
         </Modal>
       )}
     </Modal>
   );
 }
-const smallBtn = { display: "flex", alignItems: "center", gap: 6, padding: "9px 14px", borderRadius: 9, border: `1.5px solid ${BORDER}`, background: SURFACE2, color: MUTED, fontSize: 12.5, cursor: "pointer" };
+const smallBtn = { display: "flex", alignItems: "center", gap: 6, padding: "9px 14px", borderRadius: 8, border: `1.5px solid ${BORDER}`, background: SURFACE2, color: MUTED, fontSize: 12.5, cursor: "pointer" };
 
 const Info = memo(function Info({ label, value, accent }) {
   return <div><div style={{ fontSize: 11, color: MUTED }}>{label}</div><div style={{ fontSize: 14, color: accent ? RED : TEXT, fontWeight: 600 }}>{value}</div></div>;
 });
 
 /** Construit un annuaire client unique (téléphone) à partir de l’historique des colis, côté expéditeur ET destinataire. */
+/** Ne garde que les chiffres significatifs d'un numéro : « +224 622 11 11 11 » et
+ *  « 622111111 » désignent la même personne, mais créaient deux fiches distinctes. */
+function normaliserTelephone(tel) {
+  const chiffres = String(tel || "").replace(/\D/g, "");
+  return chiffres.length > 9 ? chiffres.slice(-9) : chiffres;
+}
+
+/** Compare deux noms en ignorant accents, casse et ordre des mots (« Diallo Mariama »
+ *  et « mariama diallo » sont la même personne). */
+function normaliserNom(nom) {
+  return String(nom || "")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase().replace(/[^a-z ]/g, " ")
+    .split(/\s+/).filter(Boolean).sort().join(" ");
+}
+
+/**
+ * Repère les fiches clients qui désignent probablement la même personne.
+ *
+ * Deux cas fréquents, tous deux invisibles jusqu'ici :
+ *   - le même numéro noté différemment (avec ou sans indicatif, avec des espaces) : deux fiches
+ *     séparées, donc un historique d'envois coupé en deux et une remise fidélité jamais atteinte ;
+ *   - le même numéro avec des orthographes de nom différentes : une seule fiche, mais le nom
+ *     change au gré du dernier colis enregistré.
+ */
+function detecterDoublonsClients(clients) {
+  const parTelephone = {};
+  const parNom = {};
+  clients.forEach((c) => {
+    const tel = normaliserTelephone(c.telephone);
+    if (tel) (parTelephone[tel] = parTelephone[tel] || []).push(c);
+    const nom = normaliserNom(c.nomComplet);
+    if (nom) (parNom[nom] = parNom[nom] || []).push(c);
+  });
+
+  const groupes = [];
+  Object.entries(parTelephone).forEach(([tel, liste]) => {
+    if (liste.length > 1) {
+      groupes.push({ cle: `tel-${tel}`, motif: "Même numéro noté différemment", fiches: liste });
+    }
+  });
+  Object.entries(parNom).forEach(([nom, liste]) => {
+    const tels = [...new Set(liste.map((c) => normaliserTelephone(c.telephone)).filter(Boolean))];
+    if (liste.length > 1 && tels.length > 1) {
+      groupes.push({ cle: `nom-${nom}`, motif: "Même nom, numéros différents", fiches: liste });
+    }
+  });
+  return groupes;
+}
+
 function buildClientDirectory(colisList) {
   const map = {};
   colisList.forEach((c) => {
@@ -6538,7 +8241,8 @@ function Clients({ data }) {
   }
   if (query) filtered = filtered.filter((c) => c.nomComplet?.toLowerCase().includes(query.toLowerCase()) || c.telephone?.includes(query));
 
-  const tabs = [["tous", "Tous"], ["meilleurs", "Meilleurs clients"], ["nouveaux", "Nouveaux clients"], ["reguliers", "Clients réguliers"], ["proche_palier", "Proches du palier suivant"]];
+  const doublons = useMemo(() => detecterDoublonsClients(clients), [clients]);
+  const tabs = [["tous", "Tous"], ["meilleurs", "Meilleurs clients"], ["nouveaux", "Nouveaux clients"], ["reguliers", "Clients réguliers"], ["proche_palier", "Proches du palier suivant"], ["doublons", `Doublons possibles${doublons.length ? ` (${doublons.length})` : ""}`]];
   // Affichage progressif : la recherche et les filtres portent sur tout l'annuaire, seul le
   // nombre de lignes rendues d'un coup est limité (mesuré : 1,1 s pour 3 000 clients d'un bloc).
   const [nbClientsAffiches, setNbClientsAffiches] = useState(TAILLE_PAGE);
@@ -6574,11 +8278,47 @@ function Clients({ data }) {
         )}
       </div>
 
-      <div style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 12px", marginBottom: 18, maxWidth: 420 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 12px", marginBottom: 18, maxWidth: 420 }}>
         <Search size={15} color="var(--muted)" />
         <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher un client par nom ou téléphone..." style={{ border: "none", outline: "none", background: "none", flex: 1, fontSize: 13.5, color: "var(--text)" }} />
       </div>
 
+      {filtre === "doublons" ? (
+        doublons.length === 0 ? (
+          <div style={{ background: "var(--ok-bg)", border: "1px solid var(--ok-border)", borderRadius: 14, padding: 30, textAlign: "center", color: "var(--ok-fg)", fontSize: 13.5, fontWeight: 600 }}>
+            Aucun doublon détecté — votre annuaire est propre.
+          </div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
+              Ces fiches désignent probablement la même personne. Un client réparti sur deux fiches
+              n’atteint jamais ses paliers de remise, et son historique d’envois apparaît coupé en deux.
+              Pour les fusionner, corrigez le numéro sur les colis concernés (fiche colis → Modifier).
+            </div>
+            {doublons.map((g) => (
+              <div key={g.cle} style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 12, padding: "14px 16px" }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "var(--warn-fg)", marginBottom: 10 }}>{g.motif}</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {g.fiches.map((f) => (
+                    <div key={f.telephone} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", background: "var(--surface)", borderRadius: 8, padding: "9px 12px" }}>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{f.nomComplet}</div>
+                        <div style={{ fontSize: 11.5, color: "var(--muted)" }}>{f.telephone}</div>
+                      </div>
+                      <div style={{ fontSize: 11.5, color: "var(--muted)", textAlign: "end" }}>
+                        {f.count} envoi{f.count > 1 ? "s" : ""} · {fmtGNF((f.total || 0) * (LIVE_RATES.GNF || CURRENCIES.GNF))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 8 }}>
+                  Total combiné : {g.fiches.reduce((s, f) => s + (f.count || 0), 0)} envois — remise fidélité applicable : {loyaltyDiscount(g.fiches.reduce((s, f) => s + (f.count || 0), 0))} %
+                </div>
+              </div>
+            ))}
+          </div>
+        )
+      ) : (
       <div style={{ background: "var(--surface)", borderRadius: 14, boxShadow: "0 2px 10px rgba(10,38,71,0.06)", overflow: "hidden" }}>
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["Client", "Contact", "Expéditions", "Total dépensé", "Prochain palier", "Remise applicable"].map((h) => <th key={h} style={{ padding: "12px 16px", fontSize: 11.5, color: "var(--muted)", fontWeight: 700 }}>{h}</th>)}</tr></thead>
@@ -6587,7 +8327,7 @@ function Clients({ data }) {
               <tr key={c.telephone} style={{ borderTop: "1px solid var(--surface2)" }}>
                 <td style={{ padding: "12px 16px", fontSize: 13.5, color: "var(--text)", fontWeight: 600 }}>
                   {c.nomComplet}
-                  {new Date(c.date).getTime() > trenteJours && <span style={{ marginLeft: 8, background: "var(--info-bg)", color: "var(--info-fg)", padding: "2px 7px", borderRadius: 10, fontSize: 10 }}>nouveau</span>}
+                  {new Date(c.date).getTime() > trenteJours && <span style={{ marginLeft: 8, background: "var(--info-bg)", color: "var(--info-fg)", padding: "2px 7px", borderRadius: 12, fontSize: 10 }}>nouveau</span>}
                 </td>
                 <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{c.telephone}{c.email ? ` · ${c.email}` : ""}</td>
                 <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{c.count}</td>
@@ -6617,6 +8357,7 @@ function Clients({ data }) {
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }
@@ -6677,7 +8418,7 @@ function PaiementsPage({ data, notify }) {
       <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: "0 0 4px" }}>Paiements & Factures</h1>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 10, marginBottom: 22 }}>
         <p style={{ color: "var(--muted)", fontSize: 13.5, margin: 0 }}>Suivi des règlements et téléchargement des factures commerciales</p>
-        <button onClick={exportPaiementsExcel} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}><Download size={14} /> Exporter (Excel)</button>
+        <button onClick={exportPaiementsExcel} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}><Download size={14} /> Exporter (Excel)</button>
       </div>
 
       {declarationsEnAttente.length > 0 && (
@@ -6777,7 +8518,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
   const {
     colisPeriode, recettes, facture, depensesPeriode, totalDepenses, totalSalaires, commissionsManuelles,
     commissionsAuto, gnfRate, totalCommissions, commissionsParAgence, partenaires, commissionsParPartenaire,
-    benefice, resteAEncaisser, parMode, joursTries, paiementsPeriode,
+    benefice, resteAEncaisser, totalIndemnites, litigesOuverts, parMode, joursTries, paiementsPeriode,
   } = useMemo(() => {
     const now = new Date();
     const inPeriod = (dateStr) => {
@@ -6811,7 +8552,12 @@ function ComptabilitePage({ data, persist, session, notify }) {
     // est comparé aux charges de cette même période. Auparavant on soustrayait les commissions
     // dues sur TOUS les colis créés au seul argent déjà encaissé — ce qui affichait une perte
     // artificielle dès qu’un colis restait impayé. L’encaissement est suivi séparément.
-    const benefice = facture - (totalDepenses / gnfRate) - (totalSalaires / gnfRate) - totalCommissions;
+    // Indemnités versées aux clients pour des colis perdus ou endommagés : ce sont de vraies
+    // sorties d'argent, distinctes des dépenses courantes pour rester lisibles.
+    const totalIndemnites = colisPeriode.reduce((sum, c) =>
+      sum + ((c.litige && c.litige.statut === "Résolu" && c.litige.indemnite) ? Number(c.litige.indemnite) : 0), 0);
+    const litigesOuverts = colisPeriode.filter((c) => c.litige && c.litige.statut === "Ouvert").length;
+    const benefice = facture - (totalDepenses / gnfRate) - (totalSalaires / gnfRate) - totalCommissions - totalIndemnites;
     const resteAEncaisser = facture - recettes;
 
     // Encaissements réels (date du paiement, pas de la création du colis), par mode et par jour
@@ -6826,7 +8572,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
     return {
       colisPeriode, recettes, facture, depensesPeriode, totalDepenses, totalSalaires, commissionsManuelles,
       commissionsAuto, gnfRate, totalCommissions, commissionsParAgence, partenaires, commissionsParPartenaire,
-      benefice, resteAEncaisser, parMode, joursTries, paiementsPeriode,
+      benefice, resteAEncaisser, totalIndemnites, litigesOuverts, parMode, joursTries, paiementsPeriode,
     };
   }, [data.colis, depenses, data.sites, data.users, data.commissionConfig, data.categories, periode]);
 
@@ -6859,7 +8605,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
     setPdfState("loading");
     try {
       const jspdf = await loadJsPDF();
-      const doc = new jspdf.jsPDF();
+      const doc = preparerDocPdf(new jspdf.jsPDF());
       const INK = [26, 30, 38], MUTED = [122, 130, 142], RED = [214, 39, 63];
       let y = 20;
       doc.addImage(DEFAULT_LOGO, "PNG", 14, y - 6, 16, 16);
@@ -6881,6 +8627,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
         ["Commissions", fmt(totalCommissions, "EUR")],
         ["Résultat de la période (sur le facturé)", fmt(benefice, "EUR")],
         ["Reste à encaisser", fmt(resteAEncaisser, "EUR")],
+        ["Indemnités de litige", fmt(totalIndemnites, "EUR")],
       ];
       const hasAutoTable = await ensureAutoTable();
       if (hasAutoTable && doc.autoTable) {
@@ -6921,10 +8668,10 @@ function ComptabilitePage({ data, persist, session, notify }) {
           <p style={{ color: "var(--muted)", fontSize: 13.5, margin: "4px 0 0" }}>Recettes, dépenses, salaires, commissions et bénéfices</p>
         </div>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <button onClick={exportRapport} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "9px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}><Download size={14} /> Rapport CSV</button>
-          <button onClick={exportRapportPDF} disabled={pdfState === "loading"} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "9px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={14} /> {pdfState === "loading" ? "Génération…" : "Récapitulatif PDF"}</button>
+          <button onClick={exportRapport} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "9px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}><Download size={14} /> Rapport CSV</button>
+          <button onClick={exportRapportPDF} disabled={pdfState === "loading"} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "9px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={14} /> {pdfState === "loading" ? "Génération…" : "Récapitulatif PDF"}</button>
           {pdfState === "error" && <span style={{ fontSize: 11, color: "var(--danger-fg)", alignSelf: "center" }}>Échec — réessayez</span>}
-          {effectivePermission(session, "compta.gerer_depenses") && <button onClick={() => setForm({ type: "Dépense", nom: "", montant: "", date: new Date().toISOString().slice(0,10) })} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "9px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}><Plus size={14} /> Ajouter</button>}
+          {effectivePermission(session, "compta.gerer_depenses") && <button onClick={() => setForm({ type: "Dépense", nom: "", montant: "", date: new Date().toISOString().slice(0,10) })} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "9px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}><Plus size={14} /> Ajouter</button>}
         </div>
       </div>
 
@@ -6944,7 +8691,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
       <div style={{ background: benefice >= 0 ? "var(--ok-bg)" : "var(--danger-bg)", borderRadius: 14, padding: 20, marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div>
           <div style={{ fontSize: 13, color: "var(--text)", fontWeight: 700 }}>Résultat de la période</div>
-          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3 }}>Sur le chiffre d’affaires facturé, charges et commissions déduites{resteAEncaisser > 0.005 ? ` · ${fmt(resteAEncaisser, "EUR")} encore à encaisser` : ""}</div>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3 }}>Sur le chiffre d’affaires facturé, charges, commissions{totalIndemnites > 0.005 ? " et indemnités de litige" : ""} déduites{resteAEncaisser > 0.005 ? ` · ${fmt(resteAEncaisser, "EUR")} encore à encaisser` : ""}</div>
         </div>
         <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 22, fontWeight: 700, color: benefice >= 0 ? "var(--ok-fg)" : "var(--danger-fg)" }}>{fmt(benefice, "EUR")}</div>
       </div>
@@ -6978,7 +8725,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
           <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14 }}>Calculées selon les taux définis dans Configuration → Commissions par Agence.</div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12 }}>
             {commissionsParAgence.map((a) => (
-              <div key={a.nom} style={{ background: "var(--surface2)", borderRadius: 10, padding: 14 }}>
+              <div key={a.nom} style={{ background: "var(--surface2)", borderRadius: 12, padding: 14 }}>
                 <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{a.nom}</div>
                 <div style={{ fontSize: 18, fontWeight: 700, color: "var(--ok-fg)", fontFamily: "'Space Grotesk',sans-serif", marginTop: 4 }}>{fmt(a.montant, "EUR")}</div>
               </div>
@@ -6993,7 +8740,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
           <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14 }}>Basées sur les colis rattachés à chaque partenaire lors de leur enregistrement.</div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12 }}>
             {commissionsParPartenaire.map((p) => (
-              <div key={p.nom} style={{ background: "var(--surface2)", borderRadius: 10, padding: 14 }}>
+              <div key={p.nom} style={{ background: "var(--surface2)", borderRadius: 12, padding: 14 }}>
                 <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{p.nom}</div>
                 <div style={{ fontSize: 18, fontWeight: 700, color: "#8B5CF6", fontFamily: "'Space Grotesk',sans-serif", marginTop: 4 }}>{fmt(p.montant, "EUR")}</div>
               </div>
@@ -7102,21 +8849,29 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
     const poids = Number(poidsAjout) || 0;
     if (poids <= 0) return;
     const tracking = genTracking((data.colis || []).map((c) => c.tracking));
+    const tarification = calcReceptionFee(poids, data.receptionTarifs);
+    const prixEUR = tarification.total / (LIVE_RATES.GNF || CURRENCIES.GNF);
     const nouveauColis = {
       tracking, expediteur: "Réception directe", expediteurTelephone: "", expediteurEmail: "", expediteurAdresse: "", expediteurPays: "GN",
       destinataire: `${compte.prenom} ${compte.nom}`, telephone: compte.telephone, destinataireEmail: compte.email || "", destinataireAdresse: compte.adresse || "", destinataireVille: "", destinataireCodePostal: "", destinatairePays: "GN",
       pays: "GN", direction: "import", mode: "air",
       produits: [{ id: `p${Date.now()}`, nom: refColis || "Colis reçu", quantite: String(Number(articlesAjout) || 1), poids: String(poids), categorie: "", personnalise: false, montant: "", devise: "GNF", typePrix: "unitaire" }],
       poids, volume: 0, valeurDeclaree: 0, site: "Bambeto",
-      prixBrut: 0, discountLoyalty: 0, rabaisMontant: 0, rabaisDevise: "GNF", rabaisEUR: 0, prix: 0, paye: 0, reste: 0, photos: [],
-      paiements: [], notesInternes: refColis ? `Référence sur le colis : ${refColis}` : "",
+      // Le prix est calculé dès l'enregistrement, à partir du poids et des paliers de réception.
+      // Auparavant il restait à 0 : le client voyait « Reste à payer 0,00 » alors qu'il devait payer.
+      prixBrut: prixEUR, discountLoyalty: 0, rabaisMontant: 0, rabaisDevise: "GNF", rabaisEUR: 0,
+      prix: prixEUR, paye: 0, reste: prixEUR, photos: [],
+      paiements: [], referenceCommande: refColis || null,
+      notesInternes: `${refColis ? `Référence : ${refColis} · ` : ""}${poids} kg à ${fmtGNF(tarification.tauxParKg)}/kg`,
       clientAccountId: compte.id, provenance: null,
-      status: "Arrivé", historique: [{ status: "Enregistré", date: new Date().toISOString() }, { status: "Arrivé", date: new Date().toISOString() }],
+      // Le colis démarre à "Enregistré" (vu du client : « Reçu à l'entrepôt »). Il ne passera aux
+      // étapes suivantes que sur action explicite d'un agent, via le bordereau.
+      status: "Enregistré", historique: [{ status: "Enregistré", date: new Date().toISOString() }],
       agentCreation: session ? `${session.prenom} ${session.nom}`.trim() || session.identifiant : "",
       createdAt: new Date().toISOString(), pod: null, signature: null, driverLoc: null,
     };
     persist({ ...data, colis: [nouveauColis, ...data.colis], activityLog: pushActivity(data, session, "Colis reçu enregistré", `${tracking} — ${compte.prenom} ${compte.nom}`) });
-    notify?.(`Colis ${tracking} enregistré et rattaché à ${compte.prenom} ${compte.nom}`);
+    notify?.(`Colis ${tracking} — ${fmtGNF(tarification.total)} à payer`);
     setSelection((s) => [...s, tracking]);
     setRefColis(""); setPoidsAjout(""); setArticlesAjout("1"); setShowAjout(false);
   }
@@ -7135,7 +8890,7 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
           <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>Recherchez le client dont les colis sont disponibles à la récupération.</div>
           <input value={recherche} onChange={(e) => setRecherche(e.target.value)} style={inputStyle} placeholder="Nom du client..." autoFocus />
           {comptesTrouves.length > 0 && (
-            <div style={{ border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden", marginTop: 10 }}>
+            <div style={{ border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden", marginTop: 10 }}>
               {comptesTrouves.map((c) => (
                 <button key={c.id} onClick={() => setCompte(c)} style={{ display: "block", width: "100%", textAlign: "start", padding: "10px 14px", background: "var(--surface2)", border: "none", borderTop: "1px solid var(--border)", cursor: "pointer", fontSize: 13, color: "var(--text)" }}>
                   {c.prenom} {c.nom} <span style={{ color: "var(--muted)" }}>· {c.telephone}</span>
@@ -7162,7 +8917,7 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
           </div>
 
           {showAjout && (
-            <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: 14, marginBottom: 16 }}>
+            <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: 14, marginBottom: 16 }}>
               <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 10 }}>Pour un colis arrivé physiquement, identifié par le nom ou une référence inscrite dessus — pas besoin de repasser par le formulaire complet.</div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 10, marginBottom: 10 }}>
                 <Field label="Référence sur le colis (optionnel)"><input value={refColis} onChange={(e) => setRefColis(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }} placeholder="ex: SHEIN-XYZ" /></Field>
@@ -7174,10 +8929,10 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
           )}
 
           {colisDisponibles.length === 0 ? (
-            <div style={{ background: "var(--surface2)", borderRadius: 10, padding: 20, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>Aucun colis disponible (statut "Arrivé") pour ce client actuellement.</div>
+            <div style={{ background: "var(--surface2)", borderRadius: 12, padding: 20, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>Aucun colis disponible (statut "Arrivé") pour ce client actuellement.</div>
           ) : (
             <>
-              <div style={{ border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden", marginBottom: 18 }}>
+              <div style={{ border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden", marginBottom: 18 }}>
                 {colisDisponibles.map((c) => (
                   <label key={c.tracking} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", borderTop: "1px solid var(--border)", cursor: "pointer" }}>
                     <input type="checkbox" checked={selection.includes(c.tracking)} onChange={() => toggle(c.tracking)} />
@@ -7205,7 +8960,7 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
                 </div>
               )}
 
-              <button onClick={generer} disabled={selection.length === 0 || generation} style={{ width: "100%", background: selection.length ? "#3ECB84" : "var(--surface2)", color: selection.length ? "#0A2647" : "var(--muted)", border: "none", borderRadius: 9, padding: "12px 0", fontSize: 14, fontWeight: 700, cursor: selection.length ? "pointer" : "not-allowed" }}>
+              <button onClick={generer} disabled={selection.length === 0 || generation} style={{ width: "100%", background: selection.length ? "#3ECB84" : "var(--surface2)", color: selection.length ? "#0A2647" : "var(--muted)", border: "none", borderRadius: 8, padding: "12px 0", fontSize: 14, fontWeight: 700, cursor: selection.length ? "pointer" : "not-allowed" }}>
                 {generation ? "Génération…" : `Générer le bordereau de réception (${selection.length} colis)`}
               </button>
             </>
@@ -7298,12 +9053,12 @@ function ImportExcelModal({ onClose, onImportMany, data, session }) {
       <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>
         Téléchargez le modèle, remplissez une ligne par colis, puis importez le fichier rempli. Les colonnes obligatoires sont Destinataire, Destinataire Téléphone, Pays Destination et Poids.
       </div>
-      <button onClick={downloadImportTemplate} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "9px 16px", fontSize: 12.5, fontWeight: 700, color: "var(--text)", cursor: "pointer", marginBottom: 16 }}>
+      <button onClick={downloadImportTemplate} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "9px 16px", fontSize: 12.5, fontWeight: 700, color: "var(--text)", cursor: "pointer", marginBottom: 16 }}>
         <Download size={14} /> Télécharger le modèle Excel
       </button>
 
       <div style={{ marginBottom: 14 }}>
-        <label style={{ display: "inline-flex", alignItems: "center", gap: 8, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 8, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
           Choisir un fichier Excel (.xlsx)
           <input type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} style={{ display: "none" }} />
         </label>
@@ -7313,7 +9068,7 @@ function ImportExcelModal({ onClose, onImportMany, data, session }) {
       {rows && (
         <div>
           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", marginBottom: 10 }}>{validRows.length} / {rows.length} lignes valides</div>
-          <div style={{ background: "var(--surface2)", borderRadius: 10, border: "1px solid var(--border)", overflow: "hidden", marginBottom: 16, maxHeight: 260, overflowY: "auto" }}>
+          <div style={{ background: "var(--surface2)", borderRadius: 12, border: "1px solid var(--border)", overflow: "hidden", marginBottom: 16, maxHeight: 260, overflowY: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead><tr style={{ textAlign: "left" }}>{["", "Destinataire", "Téléphone", "Pays", "Poids", "Prix"].map((h) => <th key={h} style={{ padding: "8px 12px", fontSize: 10.5, color: "var(--muted)" }}>{h}</th>)}</tr></thead>
               <tbody>
@@ -7331,7 +9086,7 @@ function ImportExcelModal({ onClose, onImportMany, data, session }) {
             </table>
           </div>
           <Field label="Agence d’enregistrement"><select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>{(data?.sites || [{ nom: "Bambeto" }]).map((s) => <option key={s.nom} value={s.nom}>{s.nom}</option>)}</select></Field>
-          <button onClick={importer} disabled={validRows.length === 0 || importing} style={{ background: validRows.length ? "#3ECB84" : "var(--surface2)", color: validRows.length ? "#0A2647" : "var(--muted)", border: "none", borderRadius: 9, padding: "11px 22px", fontSize: 13.5, fontWeight: 700, cursor: validRows.length ? "pointer" : "not-allowed", marginTop: 8 }}>
+          <button onClick={importer} disabled={validRows.length === 0 || importing} style={{ background: validRows.length ? "#3ECB84" : "var(--surface2)", color: validRows.length ? "#0A2647" : "var(--muted)", border: "none", borderRadius: 8, padding: "11px 22px", fontSize: 13.5, fontWeight: 700, cursor: validRows.length ? "pointer" : "not-allowed", marginTop: 8 }}>
             {importing ? "Import en cours…" : `Importer ${validRows.length} colis`}
           </button>
         </div>
@@ -7395,13 +9150,13 @@ Réponds UNIQUEMENT en JSON strict, sans texte autour, avec ces clés (mets null
     <Modal onClose={onClose} title="Créer un colis par IA" wide>
       <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>Décrivez le colis en une phrase, l’IA remplit le formulaire à votre place. Exemple : "Colis de Paris vers Conakry, expéditeur Mamadou Diallo au +33612345678, destinataire Ibrahima Bah au +224620000000, poids 12 kg, prix 120 euros."</div>
       <textarea value={texte} onChange={(e) => setTexte(e.target.value)} rows={4} style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit", marginBottom: 12 }} placeholder="Créer un colis de Paris vers Conakry..." />
-      <button onClick={analyser} disabled={loading || !texte.trim()} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, width: "100%", background: "#8B5CF6", color: "#fff", border: "none", borderRadius: 9, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer", marginBottom: 14 }}>
+      <button onClick={analyser} disabled={loading || !texte.trim()} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, width: "100%", background: "#8B5CF6", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer", marginBottom: 14 }}>
         {loading ? <RefreshCw size={15} /> : <Sparkles size={15} />} {loading ? "Analyse en cours…" : "Analyser la phrase"}
       </button>
       {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 12 }}>{err}</div>}
 
       {extracted && (
-        <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: 16, marginBottom: 14 }}>
+        <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 14 }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", marginBottom: 10 }}>APERÇU — VÉRIFIEZ AVANT DE CONFIRMER</div>
           <Info label="Expéditeur" value={`${extracted.expediteur_prenom || "?"} ${extracted.expediteur_nom || ""} · ${extracted.expediteur_telephone || "non précisé"}`} />
           <div style={{ height: 10 }} />
@@ -7416,8 +9171,8 @@ Réponds UNIQUEMENT en JSON strict, sans texte autour, avec ces clés (mets null
       )}
 
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
-        <button onClick={onClose} style={{ padding: "10px 18px", borderRadius: 9, border: "1.5px solid var(--border)", background: "var(--surface)", color: "var(--muted)", fontSize: 13.5, cursor: "pointer" }}>Annuler</button>
-        {extracted && <button onClick={confirmer} style={{ padding: "10px 20px", borderRadius: 9, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>Confirmer et enregistrer le colis</button>}
+        <button onClick={onClose} style={{ padding: "10px 18px", borderRadius: 8, border: "1.5px solid var(--border)", background: "var(--surface)", color: "var(--muted)", fontSize: 13.5, cursor: "pointer" }}>Annuler</button>
+        {extracted && <button onClick={confirmer} style={{ padding: "10px 20px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>Confirmer et enregistrer le colis</button>}
       </div>
     </Modal>
   );
@@ -7466,7 +9221,7 @@ function AiAssistant({ data }) {
               <button disabled title="Voie maritime temporairement indisponible" style={{ ...toggleBtn, opacity: 0.4, cursor: "not-allowed" }}><Ship size={14} /> Maritime</button>
             </div></Field>
             <Field label="Poids (kg)"><input value={poids} onChange={(e) => setPoids(e.target.value)} style={inputStyle} /></Field>
-            <button onClick={generate} disabled={loading} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 0", fontWeight: 700, fontSize: 13.5, cursor: "pointer" }}>
+            <button onClick={generate} disabled={loading} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontWeight: 700, fontSize: 13.5, cursor: "pointer" }}>
               {loading ? <RefreshCw size={15} className="spin" /> : <Sparkles size={15} />} {loading ? "Analyse en cours…" : "Générer l’analyse IA"}
             </button>
           </div>
@@ -7532,7 +9287,7 @@ Réponds en français, de façon concise (2-4 phrases maximum), en te basant UNI
     <div style={{ maxWidth: 640 }}>
       <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
         <input value={question} onChange={(e) => setQuestion(e.target.value)} onKeyDown={(e) => e.key === "Enter" && poser()} style={{ ...inputStyle, flex: 1 }} placeholder="Posez une question sur votre activité..." />
-        <button onClick={() => poser()} disabled={loading || !question.trim()} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "0 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+        <button onClick={() => poser()} disabled={loading || !question.trim()} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "0 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
           {loading ? <RefreshCw size={15} /> : <Sparkles size={15} />}
         </button>
       </div>
@@ -7592,7 +9347,7 @@ function SiteVitrinePage({ data, persist, notify, onBack }) {
           {COUNTRIES.filter((c) => c.code !== "GN").map((c) => {
             const dep = departures[c.code] || {};
             return (
-              <div key={c.code} style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--surface2)", borderRadius: 10, padding: "10px 12px", flexWrap: "wrap" }}>
+              <div key={c.code} style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--surface2)", borderRadius: 12, padding: "10px 12px", flexWrap: "wrap" }}>
                 <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", width: 130, flexShrink: 0 }}>{FLAGS[c.code]} {c.name}</div>
                 <input type="date" value={dep.prochaine || ""} onChange={(e) => updateDeparture(c.code, { prochaine: e.target.value })} style={{ ...inputStyle, width: 150, marginBottom: 0 }} />
                 <input value={dep.frequence || ""} onChange={(e) => updateDeparture(c.code, { frequence: e.target.value })} placeholder="ex: Tous les mardis et vendredis" style={{ ...inputStyle, flex: 1, minWidth: 180, marginBottom: 0 }} />
@@ -7602,7 +9357,7 @@ function SiteVitrinePage({ data, persist, notify, onBack }) {
         </div>
       </div>
 
-      <button onClick={save} style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 9, padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
+      <button onClick={save} style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
     </div>
   );
 }
@@ -7625,8 +9380,20 @@ function SitesOperationPage({ data, persist, notify, onBack }) {
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
         <ConfigPageHeader title="Sites d’opération" desc="Gérez vos points d’enregistrement et de retrait, et les informations affichées sur le ticket d’envoi." onBack={onBack} />
-        <button onClick={() => setForm({ nom: "", adresse: "", telephone: "", horaires: "", paiements: "", stockage: "" })} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}><Plus size={16} /> Ajouter un site</button>
+        <button onClick={() => setForm({ nom: "", adresse: "", telephone: "", horaires: "", paiements: "", stockage: "" })} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}><Plus size={16} /> Ajouter un site</button>
       </div>
+      <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "14px 16px", marginBottom: 16 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>Agence de retrait de l’Espace Client</div>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 10 }}>
+          Adresse communiquée aux clients de l’Espace Client dès que leur colis est disponible. Une seule agence, pour éviter toute confusion.
+        </div>
+        <select value={data.agenceRetraitClient || "site-bambeto"}
+          onChange={(e) => { persist({ ...data, agenceRetraitClient: e.target.value }); notify?.("Agence de retrait mise à jour"); }}
+          style={{ ...inputStyle, maxWidth: 320, marginBottom: 0 }}>
+          {sites.map((s) => <option key={s.id} value={s.id}>{s.nom} — {s.adresse}</option>)}
+        </select>
+      </div>
+
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 14 }}>
         {sites.map((s) => (
           <div key={s.id} style={{ background: "var(--surface)", borderRadius: 14, padding: 18, border: "1px solid var(--border)" }}>
@@ -7720,7 +9487,7 @@ function MiraKnowledgePage({ data, persist, notify, onBack }) {
           <textarea value={texte} onChange={(e) => setTexte(e.target.value)} rows={10} style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }}
             placeholder="Ex : Les départs vers la France se font tous les mardis et vendredis. Le dédouanement prend en moyenne 3 jours. Nous n’acceptons pas les produits périssables..." />
         </Field>
-        <button onClick={save} style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 9, padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
+        <button onClick={save} style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
       </div>
     </div>
   );
@@ -7745,7 +9512,7 @@ function PaiementConfigPage({ data, persist, notify, onBack }) {
         <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "10px 12px", fontSize: 11.5, color: "var(--muted)", marginBottom: 16 }}>
           Le paiement en ligne par carte nécessite un compte Stripe ou une passerelle Mobile Money connectée côté serveur — voir le cahier des charges technique. Ces numéros sont pour l’instant affichés à titre informatif à vos agents.
         </div>
-        <button onClick={save} style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 9, padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
+        <button onClick={save} style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
       </div>
     </div>
   );
@@ -7779,7 +9546,7 @@ function BrandingPage({ data, persist, notify, onBack }) {
             <label style={{ ...smallBtn, cursor: "pointer" }}>Choisir un fichier<input type="file" accept="image/*" onChange={onLogoChange} style={{ display: "none" }} /></label>
           </div>
         </Field>
-        <button onClick={save} style={{ marginTop: 8, background: "#3D63FF", color: "#fff", border: "none", borderRadius: 9, padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
+        <button onClick={save} style={{ marginTop: 8, background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
       </div>
     </div>
   );
@@ -7793,7 +9560,7 @@ function JournalActivitePage({ data, onBack }) {
   return (
     <div>
       <ConfigPageHeader title="Journal d’activité" desc="Historique complet des actions effectuées par les utilisateurs (les 500 dernières)." onBack={onBack} />
-      <div style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 12px", marginBottom: 18, maxWidth: 420 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 12px", marginBottom: 18, maxWidth: 420 }}>
         <Search size={15} color="var(--muted)" />
         <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher une action, un utilisateur..." style={{ border: "none", outline: "none", background: "none", flex: 1, fontSize: 13.5, color: "var(--text)" }} />
       </div>
@@ -8109,7 +9876,7 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 18, gap: 12 }}>
         <ConfigPageHeader title="Gestion Utilisateurs" desc="Accès, rôles et permissions de l’équipe." onBack={onBack} />
-        {effectivePermission(session, "users.gerer") && <button onClick={() => setShowForm(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}><Plus size={16} /> Créer un compte</button>}
+        {effectivePermission(session, "users.gerer") && <button onClick={() => setShowForm(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}><Plus size={16} /> Créer un compte</button>}
       </div>
       <div style={{ background: "var(--surface)", borderRadius: 14, boxShadow: "0 2px 10px rgba(10,38,71,0.06)", overflow: "hidden" }}>
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -8170,7 +9937,7 @@ function UserProfilePage({ user, onSave, onBack, sites }) {
     <div>
       <ConfigPageHeader title="Profil utilisateur" desc="Gérez les employés, rôles et permissions de votre entreprise." onBack={onBack} />
       <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 20 }}>
-        <div style={{ width: 48, height: 48, borderRadius: 10, background: "var(--surface2)", display: "grid", placeItems: "center", fontSize: 11, color: "var(--muted)", fontWeight: 700 }}>ID</div>
+        <div style={{ width: 48, height: 48, borderRadius: 12, background: "var(--surface2)", display: "grid", placeItems: "center", fontSize: 11, color: "var(--muted)", fontWeight: 700 }}>ID</div>
         <div>
           <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 18, fontWeight: 700, color: "var(--text)" }}>{prenom.toUpperCase()} {nom.toUpperCase()}</div>
           <div style={{ fontSize: 12.5, color: "var(--muted)" }}>@{user.identifiant} · {email}</div>
@@ -8179,7 +9946,7 @@ function UserProfilePage({ user, onSave, onBack, sites }) {
 
       <div style={{ display: "flex", gap: 24, borderBottom: "1px solid var(--border)", marginBottom: 22 }}>
         <button onClick={() => setTab("profil")} style={{ background: "none", border: "none", padding: "0 0 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 6, color: tab === "profil" ? "var(--info-fg)" : "var(--muted)", borderBottom: tab === "profil" ? "2px solid #5B8DEF" : "2px solid transparent", fontSize: 13.5, fontWeight: 600 }}><User size={14} /> Profil</button>
-        <button onClick={() => setTab("permissions")} style={{ background: "none", border: "none", padding: "0 0 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 6, color: tab === "permissions" ? "var(--info-fg)" : "var(--muted)", borderBottom: tab === "permissions" ? "2px solid #5B8DEF" : "2px solid transparent", fontSize: 13.5, fontWeight: 600 }}><Lock size={14} /> Permissions <span style={{ background: "var(--surface2)", color: "var(--muted)", borderRadius: 10, padding: "1px 7px", fontSize: 11 }}>{totalPermCount}</span></button>
+        <button onClick={() => setTab("permissions")} style={{ background: "none", border: "none", padding: "0 0 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 6, color: tab === "permissions" ? "var(--info-fg)" : "var(--muted)", borderBottom: tab === "permissions" ? "2px solid #5B8DEF" : "2px solid transparent", fontSize: 13.5, fontWeight: 600 }}><Lock size={14} /> Permissions <span style={{ background: "var(--surface2)", color: "var(--muted)", borderRadius: 12, padding: "1px 7px", fontSize: 11 }}>{totalPermCount}</span></button>
       </div>
 
       {tab === "profil" ? (
@@ -8218,7 +9985,7 @@ function UserProfilePage({ user, onSave, onBack, sites }) {
           )}
           {!isAdmin && paysAutorises.length === 0 && <div style={{ fontSize: 11.5, color: "var(--warn-fg)", marginBottom: 8 }}>Aucun pays coché = accès à tous les pays par défaut.</div>}
 
-          <button onClick={save} style={{ marginTop: 18, display: "flex", alignItems: "center", gap: 8, background: "#3D63FF", color: "#fff", border: "none", borderRadius: 9, padding: "11px 22px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+          <button onClick={save} style={{ marginTop: 18, display: "flex", alignItems: "center", gap: 8, background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "11px 22px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
             Enregistrer
           </button>
         </div>
@@ -8262,7 +10029,7 @@ function UserProfilePage({ user, onSave, onBack, sites }) {
             );
           })}
           {!isAdmin && (
-            <button onClick={save} style={{ display: "flex", alignItems: "center", gap: 8, background: "#3D63FF", color: "#fff", border: "none", borderRadius: 9, padding: "11px 22px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+            <button onClick={save} style={{ display: "flex", alignItems: "center", gap: 8, background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "11px 22px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
               Enregistrer
             </button>
           )}
@@ -8348,8 +10115,8 @@ function UserForm({ onClose, onSave, existing, sites }) {
         </label>
         {err && <div style={{ gridColumn: "1 / -1", color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 4 }}>{err}</div>}
         <div style={{ gridColumn: "1 / -1", display: "flex", justifyContent: "flex-end", gap: 10 }}>
-          <button type="button" onClick={onClose} style={{ padding: "10px 18px", borderRadius: 9, border: "1.5px solid var(--border)", background: "var(--surface)", color: "var(--muted)", fontSize: 13.5, cursor: "pointer" }}>Annuler</button>
-          <button type="submit" style={{ padding: "10px 18px", borderRadius: 9, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>Créer le compte</button>
+          <button type="button" onClick={onClose} style={{ padding: "10px 18px", borderRadius: 8, border: "1.5px solid var(--border)", background: "var(--surface)", color: "var(--muted)", fontSize: 13.5, cursor: "pointer" }}>Annuler</button>
+          <button type="submit" style={{ padding: "10px 18px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>Créer le compte</button>
         </div>
       </form>
     </Modal>
@@ -8359,7 +10126,7 @@ function UserForm({ onClose, onSave, existing, sites }) {
 function Modal({ title, children, onClose, wide }) {
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(4,7,14,0.65)", display: "grid", placeItems: "center", zIndex: 50, padding: 12 }} onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 16, padding: 20, width: wide ? "min(94vw, 620px)" : "min(94vw, 420px)", maxHeight: "90vh", overflowY: "auto", boxShadow: "0 24px 60px rgba(0,0,0,0.5)" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 14, padding: 20, width: wide ? "min(94vw, 620px)" : "min(94vw, 420px)", maxHeight: "90vh", overflowY: "auto", boxShadow: "0 24px 60px rgba(0,0,0,0.5)" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
           <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 17, color: TEXT }}>{title}</div>
           <button onClick={onClose} style={{ background: SURFACE2, border: "none", borderRadius: 8, width: 28, height: 28, cursor: "pointer", display: "grid", placeItems: "center", flexShrink: 0 }}><X size={15} color={MUTED} /></button>
@@ -8373,16 +10140,16 @@ function Modal({ title, children, onClose, wide }) {
 class ErrorBoundary extends React.Component {
   constructor(props) { super(props); this.state = { error: null }; }
   static getDerivedStateFromError(error) { return { error }; }
-  componentDidCatch(error, info) { console.error("Ba-Diaby Express — erreur interceptée:", error, info); }
+  componentDidCatch(error, info) { console.error("Ba-Diaby Express — erreur interceptée :", error, info); }
   render() {
     if (this.state.error) {
       return (
         <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "var(--surface2)", fontFamily: "'Inter',sans-serif", padding: 24 }}>
-          <div style={{ background: "var(--surface)", borderRadius: 16, padding: 28, maxWidth: 420, boxShadow: "0 24px 60px rgba(10,38,71,0.2)" }}>
+          <div style={{ background: "var(--surface)", borderRadius: 14, padding: 28, maxWidth: 420, boxShadow: "0 24px 60px rgba(10,38,71,0.2)" }}>
             <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 18, color: "var(--danger-fg)", marginBottom: 8 }}>Une erreur est survenue</div>
             <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 16 }}>L’application a rencontré un problème inattendu. Détail technique :</div>
             <div style={{ background: "var(--surface2)", borderRadius: 8, padding: 12, fontSize: 12, color: "var(--text)", fontFamily: "monospace", marginBottom: 16, wordBreak: "break-word" }}>{String(this.state.error?.message || this.state.error)}</div>
-            <button onClick={() => this.setState({ error: null })} style={{ width: "100%", background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 0", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>Réessayer</button>
+            <button onClick={() => this.setState({ error: null })} style={{ width: "100%", background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>Réessayer</button>
           </div>
         </div>
       );

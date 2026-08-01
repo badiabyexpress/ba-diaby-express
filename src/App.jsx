@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue, memo } from "react";
-import { Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell } from "lucide-react";
+import { Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell } from "lucide-react";
 import { storage, subscribeToChanges, flushOutbox, pendingSyncCount } from "./lib/storage.js";
 
 /* ---------- design tokens ----------
@@ -440,11 +440,52 @@ async function verifyPassword(password, user) {
   if (!legacyOk) return { ok: false, migratedUser: null };
   return { ok: true, migratedUser: { ...user, ...(await creerIdentifiantsMotDePasse(password)) } };
 }
-function genTracking(existingTrackings) {
+/**
+ * Numéro de suivi : BDE + jour + mois + ordre d'arrivée dans la journée.
+ *
+ * Exemple : le 3e colis déposé le 15 août donne BDE150803.
+ * L'agent lit immédiatement la date de dépôt sans ouvrir la fiche, et le rang indique combien de
+ * colis sont passés ce jour-là.
+ *
+ * Deux chiffres d'ordre suffisent jusqu'à 99 colis par jour. Au-delà, plutôt que de refuser
+ * l'enregistrement ou de créer un doublon, on passe à trois chiffres (BDE1508100). Le numéro reste
+ * lisible et le dépôt n'est jamais bloqué — ce serait le pire moment pour perdre un colis.
+ */
+/**
+ * Salutation adaptée à l'heure locale de la personne connectée.
+ *
+ * L'heure vient de l'appareil, pas du serveur : un client à Paris et un agent à Conakry voient
+ * chacun la salutation qui correspond à SON moment de la journée.
+ *
+ *   05h–11h59 : Bonjour        12h–17h59 : Bon après-midi        18h–04h59 : Bonsoir
+ *
+ * La nuit est rattachée au soir : à 2 h du matin, « Bonsoir » est plus naturel que « Bonjour ».
+ */
+function salutationSelonHeure() {
+  const h = new Date().getHours();
+  if (h >= 5 && h < 12) return "Bonjour";
+  if (h >= 12 && h < 18) return "Bon après-midi";
+  return "Bonsoir";
+}
+
+function genTracking(existingTrackings, dateDepot) {
   const taken = new Set(existingTrackings || []);
-  let code;
-  do { code = `BDE${String(Math.floor(100000 + Math.random() * 900000))}`; } while (taken.has(code));
-  return code;
+  const d = dateDepot ? new Date(dateDepot) : new Date();
+  const jour = String(d.getDate()).padStart(2, "0");
+  const mois = String(d.getMonth() + 1).padStart(2, "0");
+  const prefixe = `BDE${jour}${mois}`;
+
+  for (let ordre = 1; ordre <= 99; ordre++) {
+    const code = `${prefixe}${String(ordre).padStart(2, "0")}`;
+    if (!taken.has(code)) return code;
+  }
+  // Journée exceptionnelle : on élargit à trois chiffres.
+  for (let ordre = 100; ordre <= 999; ordre++) {
+    const code = `${prefixe}${ordre}`;
+    if (!taken.has(code)) return code;
+  }
+  // Dernier recours, pour ne jamais empêcher un enregistrement.
+  return `${prefixe}${Date.now().toString().slice(-4)}`;
 }
 function genOtp() { return String(Math.floor(100000 + Math.random() * 900000)); }
 let LIVE_RATES = { ...CURRENCIES };
@@ -537,6 +578,45 @@ function waLink(phone, msg) { return `https://wa.me/${(phone || "").replace(/[^\
  *
  * Retourne { envoye, raison } — `raison` est un message lisible à afficher à l'agent.
  */
+/**
+ * Catalogue des événements pouvant déclencher une notification WhatsApp.
+ * Sert à la fois à construire l'écran de réglages et à retrouver le libellé d'un événement.
+ */
+const EVENEMENTS_WHATSAPP = [
+  { cle: "enregistrement", label: "À l’enregistrement du colis" },
+  { cle: "expedie",        label: "Quand le colis est expédié" },
+  { cle: "arrivee",        label: "À l’arrivée en Guinée" },
+  { cle: "retrait",        label: "Quand le colis est disponible au retrait" },
+  { cle: "livre",          label: "Quand le colis est remis au client" },
+  { cle: "paiement",       label: "À la réception d’un paiement" },
+  { cle: "modification",   label: "Après modification du colis" },
+  { cle: "relanceRetrait", label: "Rappel d’un colis non retiré" },
+];
+
+/**
+ * Envoie une notification pour un événement donné, en respectant les préférences de l'agence.
+ *
+ * Rien n'est envoyé si l'événement est désactivé, ou si le numéro concerné est absent. Les envois
+ * sont silencieux : ils ne doivent jamais interrompre le travail de l'agent ni faire échouer
+ * l'action principale (créer un colis, encaisser…). Si WhatsApp est indisponible, le colis est
+ * quand même enregistré.
+ */
+async function notifierEvenement(data, evenement, colis, message) {
+  const prefs = (data?.notifWhatsApp || {})[evenement];
+  if (!prefs) return { envoyes: 0 };
+  let envoyes = 0;
+  const destinations = [];
+  if (prefs.destinataire && colis.telephone) destinations.push(colis.telephone);
+  if (prefs.expediteur && colis.expediteurTelephone) destinations.push(colis.expediteurTelephone);
+  for (const tel of destinations) {
+    try {
+      const { envoye } = await envoyerWhatsApp(tel, message);
+      if (envoye) envoyes++;
+    } catch (e) { /* une notification ne doit jamais bloquer l'action en cours */ }
+  }
+  return { envoyes };
+}
+
 async function envoyerWhatsApp(telephone, message) {
   try {
     const reponse = await fetch("/api/whatsapp", {
@@ -704,6 +784,24 @@ function defaultSeed() {
     preAlertes: [],
     // Agence où les clients de l'Espace Client viennent retirer leurs colis. Affichée dans leur
     // espace dès que le colis est disponible. Modifiable par l'administrateur.
+    /*
+     * Notifications WhatsApp automatiques.
+     *
+     * Chaque événement peut prévenir l'expéditeur, le destinataire, ou les deux. Les valeurs par
+     * défaut suivent le bon sens : le destinataire est informé de tout ce qui le concerne, tandis
+     * que l'expéditeur n'est prévenu que des étapes qui l'intéressent vraiment (enregistrement,
+     * remise, paiement) — pour ne pas le noyer sous les messages.
+     */
+    notifWhatsApp: {
+      enregistrement:  { expediteur: true,  destinataire: true },
+      expedie:         { expediteur: false, destinataire: true },
+      arrivee:         { expediteur: false, destinataire: true },
+      retrait:         { expediteur: false, destinataire: true },
+      livre:           { expediteur: true,  destinataire: true },
+      paiement:        { expediteur: true,  destinataire: true },
+      modification:    { expediteur: false, destinataire: false },
+      relanceRetrait:  { expediteur: false, destinataire: true },
+    },
     agenceRetraitClient: "site-bambeto",
     receptionTarifs: { paliers: [{ max: 10, tarif: 100000 }, { max: 40, tarif: 95000 }, { max: 100, tarif: 92000 }] },
     expressTarifEurKg: 12,
@@ -1579,6 +1677,19 @@ const CLIENT_I18N = {
   "Retour à la connexion": { en: "Back to sign in", ar: "العودة إلى تسجيل الدخول" },
   "Mot de passe oublié": { en: "Forgot password", ar: "نسيت كلمة المرور" },
   "Mot de passe oublié ?": { en: "Forgot your password?", ar: "هل نسيت كلمة المرور؟" },
+  "Saisissez votre identifiant : nous enverrons un code de vérification sur le WhatsApp associé à votre compte.": { en: "Enter your username: we will send a verification code to the WhatsApp linked to your account.", ar: "أدخل اسم المستخدم: سنرسل رمز تحقق إلى واتساب المرتبط بحسابك." },
+  "Recevoir le code": { en: "Send me the code", ar: "أرسل لي الرمز" },
+  "Code de vérification": { en: "Verification code", ar: "رمز التحقق" },
+  "Nous avons envoyé un code à 6 chiffres sur le WhatsApp du": { en: "We sent a 6-digit code to the WhatsApp of", ar: "أرسلنا رمزًا من 6 أرقام إلى واتساب" },
+  "Il expire dans 10 minutes.": { en: "It expires in 10 minutes.", ar: "تنتهي صلاحيته خلال 10 دقائق." },
+  "Code reçu": { en: "Code received", ar: "الرمز المستلم" },
+  "Changer mon mot de passe": { en: "Change my password", ar: "تغيير كلمة المرور" },
+  "Recommencer": { en: "Start over", ar: "إعادة المحاولة" },
+  "Mot de passe modifié": { en: "Password changed", ar: "تم تغيير كلمة المرور" },
+  "Vous pouvez maintenant vous connecter.": { en: "You can now sign in.", ar: "يمكنك الآن تسجيل الدخول." },
+  "Patientez…": { en: "Please wait…", ar: "يرجى الانتظار…" },
+  "Envoi…": { en: "Sending…", ar: "جارٍ الإرسال…" },
+  "Retour": { en: "Back", ar: "رجوع" },
   "Enregistrer": { en: "Save", ar: "حفظ" },
   "Envoyer": { en: "Send", ar: "إرسال" },
   "Suivre": { en: "Track", ar: "تتبع" },
@@ -1615,7 +1726,9 @@ const CLIENT_I18N = {
   "Arrivé en Guinée": { en: "Arrived in Guinea", ar: "وصل إلى غينيا" },
   "Disponible pour retrait": { en: "Ready for pickup", ar: "جاهز للاستلام" },
   "Total colis": { en: "Total parcels", ar: "إجمالي الشحنات" },
-  "Bonjour": { en: "Hello", ar: "مرحبا" },
+  "Bonjour": { en: "Good morning", ar: "صباح الخير" },
+  "Bon après-midi": { en: "Good afternoon", ar: "مساء الخير" },
+  "Bonsoir": { en: "Good evening", ar: "مساء الخير" },
   "envoi": { en: "shipment", ar: "إرسال" },
   "envois": { en: "shipments", ar: "إرساليات" },
   "de réduction fidélité": { en: "loyalty discount", ar: "خصم الولاء" },
@@ -1768,18 +1881,29 @@ function useClientLang() {
   }
   return [lang, choisir];
 }
-/** Sélecteur de langue compact affiché sur les surfaces clients. */
+/**
+ * Sélecteur de langue des surfaces clients.
+ *
+ * Un menu déroulant plutôt que trois boutons côte à côte : sur téléphone, FR / EN / AR occupaient
+ * une ligne entière alors qu'un seul choix est actif à la fois. Le menu tient dans la largeur d'un
+ * bouton et affiche le nom complet de la langue, plus clair qu'un code à deux lettres.
+ */
 function ClientLangSwitch({ lang, onChange }) {
+  const actuelle = CLIENT_LANGS.find((l) => l.code === lang) || CLIENT_LANGS[0];
   return (
-    <div style={{ display: "flex", gap: 6 }}>
-      {CLIENT_LANGS.map((l) => (
-        <button key={l.code} onClick={() => onChange(l.code)} aria-label={l.label} style={{
-          minHeight: 34, padding: "6px 12px", borderRadius: 8, cursor: "pointer", fontSize: 12.5, fontWeight: 600,
-          border: "1px solid " + (lang === l.code ? "var(--brand-solid)" : "var(--border)"),
-          background: lang === l.code ? "var(--brand-solid)" : "var(--surface)",
-          color: lang === l.code ? "#fff" : "var(--muted)",
-        }}>{l.code.toUpperCase()}</button>
-      ))}
+    <div style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
+      <Globe size={13} color="var(--muted)" style={{ position: "absolute", insetInlineStart: 9, pointerEvents: "none" }} />
+      <select
+        value={lang}
+        onChange={(e) => onChange(e.target.value)}
+        aria-label={`Langue : ${actuelle.label}`}
+        style={{
+          minHeight: 34, padding: "6px 10px 6px 27px", borderRadius: 8, cursor: "pointer",
+          fontSize: 12.5, fontWeight: 600, border: "1px solid var(--border)",
+          background: "var(--surface)", color: "var(--text)", appearance: "none",
+        }}>
+        {CLIENT_LANGS.map((l) => <option key={l.code} value={l.code}>{l.label}</option>)}
+      </select>
     </div>
   );
 }
@@ -2003,46 +2127,141 @@ function ClientRegisterForm({ data, persist, onRegistered, onCancel }) {
  * Moins robuste qu’un vrai lien de réinitialisation par e-mail, mais reste self-service.
  */
 function ClientResetPasswordForm({ data, persist, onDone, onCancel }) {
+  /*
+   * Réinitialisation en deux temps, avec un code envoyé sur WhatsApp.
+   *
+   * L'ancienne version se contentait de l'identifiant et du numéro de téléphone pour autoriser
+   * un changement de mot de passe. Or ce numéro figure sur les étiquettes, les factures et les
+   * bordereaux : toute personne ayant vu un colis pouvait prendre le contrôle du compte.
+   *
+   * Désormais un code à 6 chiffres est envoyé sur le WhatsApp du titulaire — seul celui qui a le
+   * téléphone en main peut aller au bout. Le code expire au bout de 10 minutes et le nombre
+   * d'essais est limité, pour qu'il ne puisse pas être deviné.
+   *
+   * Si l'envoi automatique n'est pas disponible, le code n'est jamais affiché à l'écran : ce
+   * serait contourner toute la protection. Le client est invité à contacter l'agence, qui peut
+   * réinitialiser depuis le Centre clients après avoir vérifié son identité.
+   */
+  const [etape, setEtape] = useState("demande");   // demande → code → succes
   const [identifiant, setIdentifiant] = useState("");
-  const [telephone, setTelephone] = useState("");
+  const [code, setCode] = useState("");
   const [motdepasse, setMotdepasse] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
+  const [compte, setCompte] = useState(null);
+  const [codeAttendu, setCodeAttendu] = useState(null);
+  const [expire, setExpire] = useState(0);
+  const [essais, setEssais] = useState(0);
+  const [masque, setMasque] = useState("");
 
-  async function submit(e) {
+  /** Affiche 62•••••99 : assez pour se reconnaître, pas assez pour deviner le numéro. */
+  function masquerNumero(tel) {
+    const n = String(tel || "").replace(/\D/g, "");
+    if (n.length < 4) return "votre numéro";
+    return n.slice(0, 2) + "•".repeat(Math.max(n.length - 4, 3)) + n.slice(-2);
+  }
+
+  async function envoyerCode(e) {
     e.preventDefault();
     setErr("");
     const acc = (data.clientAccounts || []).find((c) => c.identifiant.toLowerCase() === identifiant.trim().toLowerCase());
-    if (!acc || (acc.telephone || "").replace(/\s/g, "") !== telephone.replace(/\s/g, "")) {
-      setErr("Identifiant ou numéro de téléphone incorrect.");
+    // Message identique que le compte existe ou non : sinon on révélerait quels identifiants
+    // sont valides, ce qui aiderait quelqu'un à en chercher.
+    if (!acc || !acc.telephone) {
+      setErr("Si ce compte existe, un code vient d’être envoyé sur son WhatsApp.");
       return;
     }
-    if (!motdepasse || motdepasse.length < 4) { setErr("Choisissez un nouveau mot de passe (4 caractères minimum)."); return; }
+    setLoading(true);
+    const genere = genOtp();
+    const { envoye } = await envoyerWhatsApp(acc.telephone,
+      `Ba-Diaby Express — votre code de réinitialisation est ${genere}. Il expire dans 10 minutes. Si vous n’avez rien demandé, ignorez ce message.`);
+    setLoading(false);
+    if (!envoye) {
+      setErr("Nous ne parvenons pas à envoyer le code pour le moment. Contactez notre agence, qui pourra réinitialiser votre mot de passe.");
+      return;
+    }
+    setCompte(acc);
+    setCodeAttendu(genere);
+    setExpire(Date.now() + 10 * 60000);
+    setMasque(masquerNumero(acc.telephone));
+    setEssais(0);
+    setEtape("code");
+  }
+
+  async function valider(e) {
+    e.preventDefault();
+    setErr("");
+    if (Date.now() > expire) { setErr("Ce code a expiré. Recommencez la demande."); setEtape("demande"); return; }
+    if (essais >= 5) { setErr("Trop d’essais. Recommencez la demande."); setEtape("demande"); return; }
+    if (code.trim() !== codeAttendu) { setEssais((n) => n + 1); setErr("Code incorrect."); return; }
+    if (!motdepasse || motdepasse.length < 8) { setErr("Choisissez un mot de passe d’au moins 8 caractères."); return; }
     setLoading(true);
     const identifiants = await creerIdentifiantsMotDePasse(motdepasse);
-    persist({ ...data, clientAccounts: (data.clientAccounts || []).map((c) => (c.id === acc.id ? { ...c, ...identifiants } : c)) });
+    persist({ ...data, clientAccounts: (data.clientAccounts || []).map((c) => (c.id === compte.id ? { ...c, ...identifiants } : c)) });
     setLoading(false);
-    onDone();
+    setEtape("succes");
+    setTimeout(onDone, 1400);
+  }
+
+  const cadre = { width: "100%", maxWidth: 380, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 22 };
+
+  if (etape === "succes") {
+    return (
+      <div style={{ ...cadre, textAlign: "center" }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: "var(--ok-fg)", marginBottom: 6 }}>✓ {tcx("Mot de passe modifié")}</div>
+        <div style={{ fontSize: 12.5, color: "var(--muted)" }}>{tcx("Vous pouvez maintenant vous connecter.")}</div>
+      </div>
+    );
+  }
+
+  if (etape === "code") {
+    return (
+      <form onSubmit={valider} style={cadre}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>{tcx("Code de vérification")}</div>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16 }}>
+          {tcx("Nous avons envoyé un code à 6 chiffres sur le WhatsApp du")} {masque}. {tcx("Il expire dans 10 minutes.")}
+        </div>
+        <Field label={tcx("Code reçu")}>
+          <input value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+            inputMode="numeric" autoFocus placeholder="000000"
+            style={{ ...inputStyle, letterSpacing: 6, fontSize: 18, fontWeight: 700, textAlign: "center" }} />
+        </Field>
+        <Field label={tcx("Nouveau mot de passe")}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <input type={showPw ? "text" : "password"} value={motdepasse} onChange={(e) => setMotdepasse(e.target.value)} style={{ ...inputStyle, flex: 1 }} />
+            <button type="button" onClick={() => setShowPw((s) => !s)} style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "9px 10px", cursor: "pointer" }}>
+              {showPw ? <EyeOff size={14} color="var(--muted)" /> : <Eye size={14} color="var(--muted)" />}
+            </button>
+          </div>
+        </Field>
+        {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
+        <button type="submit" disabled={loading} style={{ width: "100%", marginTop: 4, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+          {loading ? tcx("Patientez…") : tcx("Changer mon mot de passe")}
+        </button>
+        <button type="button" onClick={() => { setEtape("demande"); setErr(""); setCode(""); }} style={{ width: "100%", marginTop: 8, background: "none", border: "none", color: "var(--muted)", fontSize: 12.5, cursor: "pointer" }}>
+          {tcx("Recommencer")}
+        </button>
+      </form>
+    );
   }
 
   return (
-    <form onSubmit={submit} style={{ width: "100%", maxWidth: 380, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 24 }}>
+    <form onSubmit={envoyerCode} style={cadre}>
       <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>{tcx("Mot de passe oublié")}</div>
-      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16 }}>Confirmez votre identifiant et votre téléphone pour choisir un nouveau mot de passe.</div>
-      <Field label={tcx("Identifiant")}><input value={identifiant} onChange={(e) => setIdentifiant(e.target.value)} style={inputStyle} /></Field>
-      <Field label={tcx("Téléphone associé au compte")}><PhoneInput value={telephone} onChange={setTelephone} /></Field>
-      <Field label={tcx("Nouveau mot de passe")}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <input type={showPw ? "text" : "password"} value={motdepasse} onChange={(e) => setMotdepasse(e.target.value)} style={{ ...inputStyle, flex: 1 }} />
-          <button type="button" onClick={() => setShowPw((s) => !s)} style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, width: 34, height: 34, cursor: "pointer", display: "grid", placeItems: "center", flexShrink: 0 }}>
-            {showPw ? <EyeOff size={14} color="var(--muted)" /> : <Eye size={14} color="var(--muted)" />}
-          </button>
-        </div>
+      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16 }}>
+        {tcx("Saisissez votre identifiant : nous enverrons un code de vérification sur le WhatsApp associé à votre compte.")}
+      </div>
+      <Field label={tcx("Identifiant")}>
+        <input value={identifiant} onChange={(e) => setIdentifiant(e.target.value)} autoFocus style={inputStyle} />
       </Field>
-      {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
-      <button type="submit" disabled={loading} style={{ width: "100%", marginTop: 4, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>{loading ? "…" : "Changer le mot de passe"}</button>
-      <button type="button" onClick={onCancel} style={{ width: "100%", marginTop: 8, background: "none", border: "none", color: "var(--muted)", fontSize: 12.5, cursor: "pointer" }}>{tcx("Retour à la connexion")}</button>
+      {err && <div style={{ color: "var(--warn-fg)", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
+      <button type="submit" disabled={loading || !identifiant.trim()} style={{ width: "100%", marginTop: 4, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+        {loading ? tcx("Envoi…") : tcx("Recevoir le code")}
+      </button>
+      <button type="button" onClick={onCancel} style={{ width: "100%", marginTop: 8, background: "none", border: "none", color: "var(--muted)", fontSize: 12.5, cursor: "pointer" }}>
+        {tcx("Retour")}
+      </button>
     </form>
   );
 }
@@ -2751,7 +2970,7 @@ function ClientPortalPage({ data, loading, persist }) {
           </div>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 22 }}>
-          <div style={{ fontSize: 13, color: "var(--muted)" }}>{T("Bonjour")} {compte.prenom} {compte.nom}</div>
+          <div style={{ fontSize: 13, color: "var(--muted)" }}>{T(salutationSelonHeure())} {compte.prenom} {compte.nom}</div>
           <div style={{ display: "flex", alignItems: "center", gap: 8, background: remiseActuelle >= 12 ? "var(--warn-bg)" : remiseActuelle > 0 ? "var(--surface2)" : "var(--bronze-bg)", border: "1px solid " + (remiseActuelle >= 12 ? "var(--warn-border)" : "var(--border)"), borderRadius: 20, padding: "5px 12px" }}>
             <span style={{ fontSize: 12 }}>{remiseActuelle >= 12 ? "🥇" : remiseActuelle > 0 ? "🥈" : "🥉"}</span>
             <span style={{ fontSize: 11.5, color: "var(--text)", fontWeight: 700 }}>{nbEnvois} {T(nbEnvois > 1 ? "envois" : "envoi")}{remiseActuelle > 0 ? ` — ${remiseActuelle}% ${T("de réduction fidélité")}` : ""}</span>
@@ -3233,7 +3452,7 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12, marginBottom: 22 }}>
         <div>
-          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: 0 }}>Bonjour, {(session?.prenom || "").toUpperCase() || "—"}</h1>
+          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: 0 }}>{salutationSelonHeure()}, {(session?.prenom || "").toUpperCase() || "—"}</h1>
           <p style={{ color: "var(--muted)", fontSize: 13.5, margin: "4px 0 0" }}>Voici un aperçu de votre activité logistique</p>
           <p style={{ color: "var(--muted)", fontSize: 12.5, margin: "4px 0 0" }}>📍 Envoi de GUINÉE vers plusieurs destinations 🇬🇳</p>
         </div>
@@ -3243,24 +3462,30 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
         </div>
       </div>
 
+      // Le fond était en bleu marine codé en dur : sur un thème sombre il se confondait avec la page,
+      // et les pastilles translucides posées dessus perdaient toute lisibilité. Le bandeau utilise
+      // désormais les surfaces du thème, avec un liseré rouge à gauche pour attirer l'œil sans
+      // écraser l'information.
       {(oublies.length > 0 || impayesARelancer > 0 || centreClientsEnAttente > 0) && (
-        <div style={{ background: "#0A2647", borderRadius: 14, padding: "16px 20px", marginBottom: 20, display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, color: "#fff", fontWeight: 700, fontSize: 13.5, flexShrink: 0 }}>
-            <Bell size={16} /> À faire aujourd’hui
+        <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderInlineStart: "4px solid var(--brand-solid)",
+                      borderRadius: 14, padding: "16px 20px", marginBottom: 20, display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap",
+                      boxShadow: "0 2px 10px rgba(0,0,0,0.10)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text)", fontWeight: 700, fontSize: 13.5, flexShrink: 0 }}>
+            <Bell size={16} color="var(--brand-on-dark)" /> À faire aujourd’hui
           </div>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             {oublies.length > 0 && (
-              <button onClick={() => onNavigate("colis")} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(226,63,82,0.18)", border: "1px solid rgba(226,63,82,0.4)", borderRadius: 20, padding: "5px 12px", color: "var(--danger-fg-soft)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+              <button onClick={() => onNavigate("colis")} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 20, padding: "6px 13px", color: "var(--danger-fg)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
                 <AlertTriangle size={12} /> {oublies.length} colis oublié{oublies.length > 1 ? "s" : ""}
               </button>
             )}
             {impayesARelancer > 0 && (
-              <button onClick={() => onNavigate("paiements")} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(224,166,58,0.18)", border: "1px solid rgba(224,166,58,0.4)", borderRadius: 20, padding: "5px 12px", color: "var(--warn-fg-soft)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+              <button onClick={() => onNavigate("paiements")} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 20, padding: "6px 13px", color: "var(--warn-fg)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
                 <DollarSign size={12} /> {impayesARelancer} impayé{impayesARelancer > 1 ? "s" : ""} à relancer
               </button>
             )}
             {centreClientsEnAttente > 0 && (
-              <button onClick={() => onNavigate("centreclients")} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(91,141,239,0.18)", border: "1px solid rgba(91,141,239,0.4)", borderRadius: 20, padding: "5px 12px", color: "var(--info-fg-soft)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+              <button onClick={() => onNavigate("centreclients")} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 20, padding: "6px 13px", color: "var(--info-fg)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
                 <MessageCircle size={12} /> {centreClientsEnAttente} demande{centreClientsEnAttente > 1 ? "s" : ""} client{centreClientsEnAttente > 1 ? "s" : ""}
               </button>
             )}
@@ -3511,8 +3736,7 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
   if (sub === "guide") return <GuidePage onBack={back} />;
   if (sub === "categories") return <CategoriesProduitsPage data={data} persist={persist} session={session} notify={notify} onBack={back} />;
   if (sub === "sites") return <SitesOperationPage data={data} persist={persist} notify={notify} onBack={back} />;
-  if (sub === "notifications") return <NotificationsPage data={data} persist={persist} notify={notify} onBack={back} />;
-  if (sub === "mira") return <MiraKnowledgePage data={data} persist={persist} notify={notify} onBack={back} />;
+  if (sub === "notifwa") return <NotificationsWhatsAppPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "paiement") return <PaiementConfigPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "branding") return <BrandingPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "users") return <UtilisateursPage data={data} persist={persist} notify={notify} onBack={back} session={session} />;
@@ -3562,9 +3786,8 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
         <Card icon={MapPin} tint="#5B8DEF" title="Siège & agences de réception" desc="Coordonnées de l’entreprise et des agences à l’étranger, affichées automatiquement sur le ticket d’envoi." onClick={() => setSub("agences")} />
         <Card icon={Sparkles} tint="#8B5CF6" title="Guide d’utilisation" desc="Explications des fonctionnalités récentes : comptes clients, pré-alertes, bordereau de réception, tarifs par palier..." onClick={() => setSub("guide")} />
         <Card icon={Receipt} tint="#E0794E" title="Catégories de Produits" desc="Configuration des types de marchandises et taxes." onClick={() => setSub("categories")} />
+        <Card icon={MessageCircle} tint="#16A163" title="Notifications WhatsApp" desc="Choisissez qui est prévenu automatiquement : expéditeur, destinataire, et pour quel événement." onClick={() => setSub("notifwa")} />
         <Card icon={MapPin} tint="#16A163" title="Sites d’opération" desc="Gérez vos points d’enregistrement et de retrait, et les informations affichées sur le ticket d’envoi (horaires, paiements, stockage...)." onClick={() => setSub("sites")} />
-        <Card icon={AlertTriangle} tint="#16A163" title="Notifications" desc="Gérez les notifications WhatsApp automatiques et contrôlez les évènements." onClick={() => setSub("notifications")} />
-        <Card icon={Sparkles} tint="#6366F1" title="Connaissances de Mira" desc="Donnez à l’IA les infos de votre entreprise pour des réponses plus utiles à vos clients." onClick={() => setSub("mira")} />
         <Card icon={Receipt} tint="#5B8DEF" title="Paiement" desc="Configurez vos numéros pour accepter les paiements de vos clients." onClick={() => setSub("paiement")} />
       </div>
 
@@ -3653,9 +3876,9 @@ function GuidePage({ onBack }) {
     {
       titre: "Pré-alertes",
       contenu: [
-        "Un client peut annoncer à l’avance un colis qu’il attend (ex : commande Shein), avec le numéro de suivi du vendeur.",
-        "Consultez toutes les pré-alertes en attente dans le menu \"Pré-alertes\" (badge orange = nombre en attente).",
-        "Quand vous enregistrez le colis correspondant pour ce client, une case à cocher vous propose de \"rapprocher\" automatiquement la pré-alerte.",
+          "Un client peut annoncer à l’avance une commande qu’il attend (ex : Shein), avec sa référence de commande. Il n’indique pas de poids : c’est vous qui pesez à l’arrivée.",
+          "Retrouvez toutes les annonces dans Centre clients → Pré-alertes (le badge indique le nombre en attente).",
+          "À l’arrivée du colis, cliquez sur \"Réceptionner & peser\" : vous corrigez les informations si besoin, vous saisissez le poids réel, et le prix se calcule automatiquement selon vos paliers. La validation crée le colis au nom du client, qui le voit aussitôt dans son espace.",
       ],
     },
     {
@@ -4490,16 +4713,47 @@ function CentreClientsPage({ data, persist, notify, session }) {
   const demandesExpress = data.colis.filter((c) => c.demandeExpress && c.demandeExpress.statut === "En attente")
     .sort((a, b) => new Date(b.demandeExpress.date || 0) - new Date(a.demandeExpress.date || 0));
 
+  /**
+   * Décision de l'agence sur une demande de livraison express.
+   *
+   * Une acceptation FACTURE réellement le supplément : le montant est ajouté au prix du colis et
+   * au reste à payer. Auparavant seul le statut changeait — le client voyait « Confirmée » mais sa
+   * facture restait identique, et l'agence perdait la recette. Un refus, ou une annulation après
+   * acceptation, retire le supplément pour que la facture reste juste.
+   */
   function deciderExpress(colis, accepte) {
     const maintenant = new Date().toISOString();
+    const dejaFacture = !!colis.demandeExpress?.facture;
+    const montant = Number(colis.demandeExpress?.montant) || 0;
+    // On n'ajoute le supplément qu'une seule fois, même si l'agent clique deux fois.
+    const ajout = accepte && !dejaFacture ? montant : 0;
+    const retrait = !accepte && dejaFacture ? montant : 0;
+
     persist({
       ...data,
-      colis: data.colis.map((c) => (c.tracking === colis.tracking
-        ? { ...c, demandeExpress: { ...c.demandeExpress, statut: accepte ? "Confirmée" : "Refusée", dateDecision: maintenant, traitePar: `${session.prenom} ${session.nom}`.trim() } }
-        : c)),
-      activityLog: pushActivity(data, session, accepte ? "Livraison express acceptée" : "Livraison express refusée", colis.tracking),
+      colis: data.colis.map((c) => {
+        if (c.tracking !== colis.tracking) return c;
+        const prix = Math.max(+((c.prix || 0) + ajout - retrait).toFixed(2), 0);
+        return {
+          ...c,
+          prix,
+          reste: Math.max(+(prix - (c.paye || 0)).toFixed(2), 0),
+          demandeExpress: {
+            ...c.demandeExpress,
+            statut: accepte ? "Confirmée" : "Refusée",
+            dateDecision: maintenant,
+            traitePar: `${session.prenom} ${session.nom}`.trim() || session.identifiant,
+            facture: accepte,
+          },
+        };
+      }),
+      activityLog: pushActivity(data, session,
+        accepte ? "Livraison express acceptée" : "Livraison express refusée",
+        `${colis.tracking}${ajout > 0 ? ` — supplément ${fmtGNF(ajout * (LIVE_RATES.GNF || CURRENCIES.GNF))} facturé` : ""}`),
     });
-    notify?.(accepte ? `Express accepté pour ${colis.tracking} — le client est informé` : `Express refusé pour ${colis.tracking}`);
+    notify?.(accepte
+      ? `Express accepté — ${fmtGNF(montant * (LIVE_RATES.GNF || CURRENCIES.GNF))} ajoutés à la facture`
+      : `Express refusé pour ${colis.tracking}`);
   }
 
   const messagesNonLus = clients.filter((c) => (c.messages || []).some((m) => m.expediteur === "client" && !m.lu)).length;
@@ -4896,11 +5150,11 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
       const message = `Bonjour ${c.destinataire}, votre colis Ba-Diaby Express ${c.tracking} vous attend depuis ${c.joursAttente} jours`
         + (ag ? ` à notre agence ${ag.nom} — ${ag.adresse}${ag.horaires ? ` (${ag.horaires})` : ""}.` : ".")
         + du + " Merci de venir le récupérer.";
-      if (!c.telephone) echecs.push({ tracking: c.tracking, raison: "pas de numéro" });
+      if (!c.telephone && !c.expediteurTelephone) echecs.push({ tracking: c.tracking, raison: "pas de numéro" });
       else {
-        const { envoye, raison } = await envoyerWhatsApp(c.telephone, message);
-        if (envoye) envoyes++;
-        else echecs.push({ tracking: c.tracking, raison: raison || "envoi automatique indisponible" });
+        const { envoyes: n } = await notifierEvenement(data, "relanceRetrait", c, message);
+        if (n > 0) envoyes++;
+        else echecs.push({ tracking: c.tracking, raison: "envoi automatique indisponible" });
       }
       setRelanceEnCours({ total: aRelancer.length, faits: i + 1, envoyes, echecs: [...echecs] });
     }
@@ -4937,6 +5191,10 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
       : data.preAlertes;
     persist({ ...data, colis: [colisPropre, ...data.colis], preAlertes, activityLog: logActivity("Colis créé", `${colis.tracking} — ${colis.destinataire}`) });
     notify(`Colis ${colis.tracking} enregistré`);
+    // Notification automatique selon les préférences (Configuration → Notifications WhatsApp).
+    notifierEvenement(data, "enregistrement", colis,
+      `Bonjour ${colis.destinataire}, votre colis Ba-Diaby Express ${colis.tracking} a bien été enregistré`
+      + `${colis.poids ? ` (${colis.poids} kg)` : ""}. Suivez-le à tout moment sur notre plateforme.`);
     setShowForm(false);
   }
   function importerColisMany(nouveaux) {
@@ -4944,9 +5202,24 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     notify(`${nouveaux.length} colis importés avec succès`);
   }
   function updateColis(tracking, patch) {
+    const avant = data.colis.find((c) => c.tracking === tracking);
     const next = { ...data, colis: data.colis.map((c) => (c.tracking === tracking ? { ...c, ...patch } : c)) };
     persist(next);
-    setSelected(next.colis.find((c) => c.tracking === tracking));
+    const apres = next.colis.find((c) => c.tracking === tracking);
+    setSelected(apres);
+
+    // On ne prévient que si quelque chose de visible pour le client a changé : le prix ou le
+    // poids. Corriger un numéro de téléphone ou une note interne ne justifie pas un message.
+    const prixChange = avant && Math.abs((avant.prix || 0) - (apres.prix || 0)) > 0.005;
+    const poidsChange = avant && Number(avant.poids) !== Number(apres.poids);
+    if (prixChange || poidsChange) {
+      const details = [
+        poidsChange ? `poids : ${apres.poids} kg` : null,
+        prixChange ? `montant : ${fmtGNF((apres.prix || 0) * (LIVE_RATES.GNF || CURRENCIES.GNF))}` : null,
+      ].filter(Boolean).join(", ");
+      notifierEvenement(next, "modification", apres,
+        `Bonjour ${apres.destinataire}, les informations de votre colis Ba-Diaby Express ${tracking} ont été mises à jour — ${details}.`);
+    }
   }
   function advance(tracking) {
     const current = data.colis.find((c) => c.tracking === tracking);
@@ -4962,6 +5235,24 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     }) };
     next.activityLog = logActivity("Changement de statut", `${tracking} → ${nextStatus}`);
     persist(next);
+
+    // Notification automatique selon les préférences. Chaque statut a son événement ; les statuts
+    // sans événement déclaré (Enregistré, En douane) ne déclenchent rien.
+    const colisMaj = next.colis.find((c) => c.tracking === tracking);
+    const evenementParStatut = { "En transit": "expedie", "Arrivé": "arrivee", "En livraison": "retrait", "Livré": "livre" };
+    const evt = evenementParStatut[nextStatus];
+    if (evt && colisMaj) {
+      const ag = (data.sites || []).find((x) => x.id === (data.agenceRetraitClient || "site-bambeto")) || (data.sites || [])[0];
+      const messages = {
+        expedie: `Bonjour ${colisMaj.destinataire}, votre colis Ba-Diaby Express ${tracking} vient de quitter notre entrepôt.`,
+        arrivee: `Bonjour ${colisMaj.destinataire}, votre colis Ba-Diaby Express ${tracking} est arrivé en Guinée.`,
+        retrait: `Bonjour ${colisMaj.destinataire}, votre colis Ba-Diaby Express ${tracking} est disponible au retrait.`
+          + (ag ? ` Retrait à notre agence ${ag.nom} — ${ag.adresse}${ag.horaires ? ` (${ag.horaires})` : ""}.` : "")
+          + (colisMaj.reste > 0 ? ` Reste à régler : ${fmtGNF(colisMaj.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}.` : ""),
+        livre: `Bonjour ${colisMaj.destinataire}, votre colis Ba-Diaby Express ${tracking} vous a bien été remis. Merci de votre confiance !`,
+      };
+      notifierEvenement(next, evt, colisMaj, messages[evt]);
+    }
     if (data.notificationSettings?.ouvertureAutoWhatsApp && current.telephone) {
       const msg = `Bonjour ${current.destinataire}, votre colis Ba-Diaby Express (${tracking}) est maintenant : ${nextStatus}. Merci de votre confiance.`;
       window.open(waLink(current.telephone, msg), "_blank");
@@ -5113,6 +5404,15 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     next.activityLog = logActivity("Paiement encaissé", `${tracking} — ${montantSaisi} ${deviseSaisie} (${mode})${details?.reference ? ` réf. ${details.reference}` : ""}`);
     persist(next);
     notify(ajuste ? `Encaissement limité au solde dû (${fmt(applique, "EUR")}) — pensez à rendre la monnaie` : "Paiement encaissé");
+    const colisPaye = next.colis.find((c) => c.tracking === tracking);
+    if (colisPaye) {
+      notifierEvenement(next, "paiement", colisPaye,
+        `Bonjour ${colisPaye.destinataire}, nous avons bien reçu votre paiement de `
+        + `${fmtGNF(applique * (LIVE_RATES.GNF || CURRENCIES.GNF))} pour le colis ${tracking}.`
+        + (colisPaye.reste > 0
+            ? ` Reste à régler : ${fmtGNF(colisPaye.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}.`
+            : " Votre colis est entièrement réglé. Merci !"));
+    }
     setSelected(next.colis.find((c) => c.tracking === tracking));
   }
 
@@ -5542,11 +5842,15 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
     const echecs = [];
     for (let i = 0; i < colisConcernes.length; i++) {
       const c = colisConcernes[i];
-      if (!c.telephone) { echecs.push({ tracking: c.tracking, raison: "pas de numéro" }); }
+      // On passe par notifierEvenement pour que les réglages (Configuration → Notifications
+      // WhatsApp) soient respectés : l'agence peut choisir de prévenir aussi l'expéditeur,
+      // ou de désactiver complètement une étape.
+      const evt = { "En transit": "expedie", "Arrivé": "arrivee", "En livraison": "retrait" }[etape.cle] || "arrivee";
+      if (!c.telephone && !c.expediteurTelephone) { echecs.push({ tracking: c.tracking, raison: "pas de numéro" }); }
       else {
-        const { envoye, raison } = await envoyerWhatsApp(c.telephone, messagePourEtape(c, etape));
-        if (envoye) envoyes++;
-        else echecs.push({ tracking: c.tracking, raison: raison || "envoi automatique indisponible" });
+        const { envoyes: n } = await notifierEvenement(data, evt, c, messagePourEtape(c, etape));
+        if (n > 0) envoyes++;
+        else echecs.push({ tracking: c.tracking, raison: "envoi automatique indisponible" });
       }
       setEnvoiWa({ total: colisConcernes.length, faits: i + 1, envoyes, echecs: [...echecs] });
     }
@@ -5937,9 +6241,21 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
   const [mode, setMode] = useState("air");
   const [produits, setProduits] = useState([emptyProduit()]);
   const [paye, setPaye] = useState("");
+  // Devise dans laquelle l'agent saisit l'acompte. Le franc guinéen par défaut : c'est ce que le
+  // client remet au comptoir. Le montant est converti pour être stocké dans la devise de référence.
+  const [payeDevise, setPayeDevise] = useState("GNF");
   const [rabaisMontant, setRabaisMontant] = useState("0");
   const [rabaisDevise, setRabaisDevise] = useState("GNF");
-  const [agence, setAgence] = useState(sites?.[0]?.nom || "Bambeto");
+  /*
+   * Agence d'enregistrement : déduite du compte de l'agent, plus saisie à la main.
+   *
+   * Chaque utilisateur a déjà son site d'affectation (Configuration → Gestion Utilisateurs).
+   * Demander à nouveau l'agence à chaque colis était une source d'erreur — un agent pressé
+   * pouvait laisser la valeur par défaut et fausser les statistiques par site. Un administrateur
+   * sans affectation garde le choix, puisqu'il peut enregistrer pour n'importe quelle agence.
+   */
+  const agenceImposee = session?.agence || "";
+  const [agence, setAgence] = useState(agenceImposee || sites?.[0]?.nom || "Bambeto");
   const [partenaireId, setPartenaireId] = useState("");
   const [clientAccountId, setClientAccountId] = useState("");
   const [preAlerteRapprochee, setPreAlerteRapprochee] = useState("");
@@ -5983,7 +6299,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
   const prixApresFidelite = +(prixBrut * (1 - discountLoyalty / 100)).toFixed(2);
   const rabaisEUR = +((Number(rabaisMontant) || 0) / (LIVE_RATES[rabaisDevise] || CURRENCIES[rabaisDevise] || 1)).toFixed(2);
   const prix = Math.max(+(prixApresFidelite - rabaisEUR).toFixed(2), 0);
-  const payeNum = Number(paye) || 0;
+  const payeNum = (Number(paye) || 0) / (LIVE_RATES[payeDevise] || CURRENCIES[payeDevise] || 1);
   const reste = Math.max(prix - payeNum, 0);
   const destCurrency = dest?.currency || "EUR";
 
@@ -6228,73 +6544,25 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
                   {[...new Set(["GNF", "EUR", expCountry?.currency, destCountry?.currency].filter(Boolean))].map((c) => <option key={c} value={c}>{c}</option>)}
                 </select>
               </Field>
-              <Field label="Agence d’enregistrement">
+              {!agenceImposee && <Field label="Agence d’enregistrement">
                 <select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>
                   {(sites && sites.length > 0 ? sites : [{ id: "x", nom: "Bambeto" }]).map((s) => <option key={s.id} value={s.nom}>{s.nom}</option>)}
                 </select>
-              </Field>
-              {clientAccounts && clientAccounts.length > 0 && (
-                <div style={{ gridColumn: "1 / -1" }}>
-                  <Field label="Rattacher à un compte client (recherche par nom écrit sur le colis)">
-                    {clientAccountId ? (
-                      <div>
-                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: "var(--ok-bg)", border: "1px solid var(--ok-border)", borderRadius: 8, padding: "9px 12px" }}>
-                          <span style={{ fontSize: 12.5, color: "var(--ok-fg)", fontWeight: 600 }}>
-                            ✓ Rattaché à {clientAccounts.find((c) => c.id === clientAccountId)?.prenom} {clientAccounts.find((c) => c.id === clientAccountId)?.nom}
-                          </span>
-                          <button type="button" onClick={() => { setClientAccountId(""); setRechercheClient(""); }} style={{ background: "none", border: "none", color: "var(--ok-fg)", cursor: "pointer", fontSize: 12 }}>Retirer</button>
-                        </div>
-                        {preAlertes && preAlertes.filter((p) => p.clientAccountId === clientAccountId && p.statut === "En attente").length > 0 && (
-                          <div style={{ marginTop: 8 }}>
-                            <div style={{ fontSize: 11.5, color: "var(--warn-fg)", marginBottom: 6 }}>⚡ Ce colis correspond-il à l’une de ses pré-alertes ?</div>
-                            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                              {preAlertes.filter((p) => p.clientAccountId === clientAccountId && p.statut === "En attente").map((p) => (
-                                <label key={p.id} style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface2)", borderRadius: 8, padding: "7px 10px", cursor: "pointer", fontSize: 12 }}>
-                                  <input type="radio" name="preAlerte" checked={preAlerteRapprochee === p.id} onChange={() => setPreAlerteRapprochee(p.id)} />
-                                  <span style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 6, padding: "1px 6px", fontSize: 10 }}>{p.provenance || "Autre"}</span>
-                                  {p.trackingExterne}{p.description ? ` — ${p.description}` : ""}
-                                </label>
-                              ))}
-                              {preAlerteRapprochee && <button type="button" onClick={() => setPreAlerteRapprochee("")} style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 11, cursor: "pointer", textAlign: "start" }}>Aucune correspondance</button>}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    ) : (
-                      <>
-                        <input value={rechercheClient} onChange={(e) => setRechercheClient(e.target.value)} style={inputStyle} placeholder="ex : Fatoumata Sirraye Ba-Diaby" />
-                        {rechercheClient.trim().length >= 2 && (
-                          <div style={{ border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden", marginTop: -6, marginBottom: 10, maxHeight: 160, overflowY: "auto" }}>
-                            {clientAccounts.filter((c) => `${c.prenom} ${c.nom}`.toLowerCase().includes(rechercheClient.trim().toLowerCase())).slice(0, 6).map((c) => (
-                              <button type="button" key={c.id} onClick={() => { setClientAccountId(c.id); setRechercheClient(""); }} style={{ display: "block", width: "100%", textAlign: "start", padding: "9px 12px", background: "var(--surface2)", border: "none", borderTop: "1px solid var(--border)", cursor: "pointer", fontSize: 12.5, color: "var(--text)" }}>
-                                {c.prenom} {c.nom} <span style={{ color: "var(--muted)" }}>· {c.telephone}</span>
-                              </button>
-                            ))}
-                            {clientAccounts.filter((c) => `${c.prenom} ${c.nom}`.toLowerCase().includes(rechercheClient.trim().toLowerCase())).length === 0 && (
-                              <div style={{ padding: "9px 12px", fontSize: 12, color: "var(--muted)", background: "var(--surface2)" }}>Aucun compte trouvé — le client n’a peut-être pas encore de compte.</div>
-                            )}
-                          </div>
-                        )}
-                      </>
-                    )}
-                  </Field>
-                </div>
-              )}
-              <Field label="Provenance / site d’achat (optionnel)">
-                <select value={provenance} onChange={(e) => setProvenance(e.target.value)} style={inputStyle}>
-                  <option value="">Non renseigné</option>
-                  {VENDEURS_EN_LIGNE.map((v) => <option key={v} value={v}>{v}</option>)}
-                </select>
-              </Field>
-              {partenaires && partenaires.length > 0 && (
-                <Field label="Partenaire apporteur (optionnel)">
-                  <select value={partenaireId} onChange={(e) => setPartenaireId(e.target.value)} style={inputStyle}>
-                    <option value="">Aucun</option>
-                    {partenaires.map((p) => <option key={p.id} value={p.id}>{p.prenom} {p.nom}</option>)}
+              </Field>}
+      {/*
+        Le rattachement à un compte client a été retiré de cet écran : il encombrait la création
+        d'un colis, geste le plus fréquent des agents. Le rattachement se fait là où il a du sens —
+        Centre clients → Pré-alertes → « Réceptionner & peser » — où le colis part justement d'une
+        commande annoncée par un client identifié.
+      */}
+              <Field label="Montant payé à l’enregistrement">
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input type="number" step="0.01" min="0" value={paye} onChange={(e) => setPaye(e.target.value)} style={{ ...inputStyle, flex: 1, marginBottom: 0 }} placeholder="0" />
+                  <select value={payeDevise} onChange={(e) => setPayeDevise(e.target.value)} style={{ ...inputStyle, width: 100, marginBottom: 0 }}>
+                    {Object.keys(CURRENCIES).map((d) => <option key={d} value={d}>{d}</option>)}
                   </select>
-                </Field>
-              )}
-              <Field label="Montant payé à l’enregistrement (EUR)"><input value={paye} onChange={(e) => setPaye(e.target.value)} style={inputStyle} placeholder="0" /></Field>
+                </div>
+              </Field>
             </div>
             {discountLoyalty > 0 && <div style={{ fontSize: 12, color: "var(--ok-fg)", marginBottom: 10 }}>Remise fidélité automatique : -{discountLoyalty}% ({previousCount} envois précédents)</div>}
             <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px" }}>
@@ -7116,7 +7384,7 @@ async function downloadInvoice(colis, data) {
   doc.setDrawColor(...LINE); doc.roundedRect(M, y, W - 2 * M, 38, 3, 3);
   const champs = [
     ["N° de suivi", colis.tracking], ["Articles", String(articles)], ["Poids total", `${colis.poids} kg`],
-    ["Catégorie", categories], ["Valeur déclarée", fmt(colis.valeurDeclaree || 0, "EUR")], ["Mode de transport", colis.mode === "air" ? "Aérien" : "Maritime"],
+    ["Catégorie", categories], ["Valeur déclarée", colis.valeurDeclaree > 0 ? fmtGNF(colis.valeurDeclaree) : "Non déclarée"], ["Mode de transport", colis.mode === "air" ? "Aérien" : "Maritime"],
     ["Statut actuel", colis.status], ["Enregistré le", new Date(colis.createdAt).toLocaleDateString("fr-FR")],
     ["Arrivée prévue", (() => { const d = colis.mode === "air" ? dest?.delayAir : dest?.delaySea; if (!d) return "—"; const dt = new Date(colis.createdAt); dt.setDate(dt.getDate() + d); return dt.toLocaleDateString("fr-FR"); })()],
   ];
@@ -7140,7 +7408,7 @@ async function downloadInvoice(colis, data) {
   y += 10;
 
   // ── Paiement ─────────────────────────────────────────────────────────────
-  ensureRoom(64);  // hauteur du bloc de totaux, remise et rabais compris
+  ensureRoom(74);  // bloc de totaux : remise, rabais et supplément express compris
   eyebrow("Paiement", M, y, SKY);
   y += 6;
   /*
@@ -7167,6 +7435,18 @@ async function downloadInvoice(colis, data) {
   ligneTotal(`Prix du transport (${destCur})`, fmt(colis.prixBrut || colis.prix, destCur));
   if (colis.discountLoyalty > 0) ligneTotal("Remise fidélité", `-${colis.discountLoyalty} %`);
   if (colis.rabaisMontant > 0) ligneTotal("Rabais", `-${colis.rabaisMontant.toLocaleString("fr-FR")} ${colis.rabaisDevise}`);
+  // Supplément express : le client doit voir d'où vient la différence sur son total, et quand
+  // sa demande a été acceptée. Sans cette ligne, le montant paraîtrait avoir augmenté sans raison.
+  const ex = colis.demandeExpress;
+  if (ex && ex.facture && ex.montant > 0) {
+    ligneTotal("Livraison express 72h", fmt(ex.montant, destCur));
+    if (ex.dateDecision) {
+      doc.setFont(undefined, "normal"); doc.setFontSize(7.2); doc.setTextColor(...MUTED);
+      doc.text(`demandée par le client, acceptée le ${new Date(ex.dateDecision).toLocaleDateString("fr-FR")}`
+        + (ex.traitePar ? ` par ${ex.traitePar}` : ""), panL + padX, y - 1.5);
+      y += 3.5;
+    }
+  }
 
   // Bandeau du montant total, mis en avant
   y += 1.5;
@@ -7795,8 +8075,8 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
           <div style={{ fontSize: 12.5, color: "var(--warn-fg)" }}>⚡ Livraison express demandée par le client — {fmt(colis.demandeExpress.montant, "EUR")} · statut : <strong>{colis.demandeExpress.statut}</strong></div>
           {canManage && colis.demandeExpress.statut === "En attente" && (
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => onUpdate({ demandeExpress: { ...colis.demandeExpress, statut: "Confirmée", dateDecision: new Date().toISOString(), traitePar: `${session.prenom} ${session.nom}`.trim() } })} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Confirmer</button>
-              <button onClick={() => onUpdate({ demandeExpress: { ...colis.demandeExpress, statut: "Refusée", dateDecision: new Date().toISOString(), traitePar: `${session.prenom} ${session.nom}`.trim() } })} style={{ background: "none", border: "1px solid var(--warn-border)", color: "var(--warn-fg)", borderRadius: 6, padding: "5px 12px", fontSize: 11.5, cursor: "pointer" }}>Refuser</button>
+              <button onClick={() => onUpdate((() => { const m = Number(colis.demandeExpress?.montant) || 0; const deja = !!colis.demandeExpress?.facture; const ajout = m && !deja ? m : 0; const retrait = 0; const prix = Math.max(+((colis.prix || 0) + ajout - retrait).toFixed(2), 0); return { prix, reste: Math.max(+(prix - (colis.paye || 0)).toFixed(2), 0), demandeExpress: { ...colis.demandeExpress, statut: "Confirmée", dateDecision: new Date().toISOString(), traitePar: `${session.prenom} ${session.nom}`.trim(), facture: true } }; })())} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Confirmer</button>
+              <button onClick={() => onUpdate((() => { const m = Number(colis.demandeExpress?.montant) || 0; const deja = !!colis.demandeExpress?.facture; const ajout = 0; const retrait = deja ? m : 0; const prix = Math.max(+((colis.prix || 0) + ajout - retrait).toFixed(2), 0); return { prix, reste: Math.max(+(prix - (colis.paye || 0)).toFixed(2), 0), demandeExpress: { ...colis.demandeExpress, statut: "Refusée", dateDecision: new Date().toISOString(), traitePar: `${session.prenom} ${session.nom}`.trim(), facture: false } }; })())} style={{ background: "none", border: "1px solid var(--warn-border)", color: "var(--warn-fg)", borderRadius: 6, padding: "5px 12px", fontSize: 11.5, cursor: "pointer" }}>Refuser</button>
             </div>
           )}
         </div>
@@ -7870,7 +8150,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
         <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 12 }}>Détails généraux</div>
         {[
           ["Poids / Volume", `${colis.poids} kg${colis.volume ? ` · ${colis.volume} m³` : ""}`],
-          ["Valeur déclarée", `${fmtGNF(colis.valeurDeclaree || 0)}  ~ ${fmt(colis.valeurDeclaree ? colis.valeurDeclaree / (LIVE_RATES.GNF || 9500) : 0, "EUR")}`],
+          ["Valeur déclarée", colis.valeurDeclaree > 0 ? `${fmtGNF(colis.valeurDeclaree)}  ~ ${fmt(colis.valeurDeclaree / (LIVE_RATES.GNF || 9500), "EUR")}` : "Non déclarée"],
           ["Prix total", `${fmt(colis.prix, "GNF")}  ~ ${fmt(colis.prix, "EUR")}`],
         ].map(([label, value]) => (
           <div key={label} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: "1px solid var(--border)" }}>
@@ -9362,6 +9642,107 @@ function SiteVitrinePage({ data, persist, notify, onBack }) {
   );
 }
 
+/**
+ * Réglages des notifications WhatsApp : quel événement prévient qui.
+ * Un tableau simple — une ligne par événement, une colonne par destinataire.
+ */
+function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
+  const prefs = data.notifWhatsApp || {};
+  const [brouillon, setBrouillon] = useState(prefs);
+  const modifie = JSON.stringify(brouillon) !== JSON.stringify(prefs);
+
+  function basculer(cle, qui) {
+    setBrouillon((p) => ({ ...p, [cle]: { ...(p[cle] || {}), [qui]: !(p[cle] || {})[qui] } }));
+  }
+
+  const Interrupteur = ({ actif, onClick }) => (
+    <button onClick={onClick} aria-pressed={actif}
+      style={{ width: 44, height: 24, borderRadius: 20, border: "none", padding: 2, cursor: "pointer",
+               background: actif ? "var(--ok-fg)" : "var(--surface2)", display: "flex",
+               justifyContent: actif ? "flex-end" : "flex-start", transition: "background .15s" }}>
+      <span style={{ width: 20, height: 20, borderRadius: 20, background: "#fff", display: "block" }} />
+    </button>
+  );
+
+  return (
+    <div>
+      <ConfigPageHeader title="Notifications WhatsApp" desc="Choisissez qui est prévenu automatiquement, et pour quel événement." onBack={onBack} />
+
+      <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 16px", marginBottom: 16 }}>
+        <div style={{ fontSize: 12.5, color: "var(--text)" }}>
+          Les messages partent automatiquement dès qu’un agent effectue l’action correspondante.
+          Si l’envoi automatique n’est pas disponible, l’action se déroule normalement et le message
+          peut être envoyé à la main depuis la fiche du colis.
+        </div>
+      </div>
+
+      <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, overflow: "hidden" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr style={{ background: "var(--surface2)", textAlign: "left" }}>
+              <th style={{ padding: "12px 16px", fontSize: 11, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.5 }}>ÉVÉNEMENT</th>
+              <th style={{ padding: "12px 16px", fontSize: 11, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.5, textAlign: "center", width: 120 }}>EXPÉDITEUR</th>
+              <th style={{ padding: "12px 16px", fontSize: 11, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.5, textAlign: "center", width: 120 }}>DESTINATAIRE</th>
+            </tr>
+          </thead>
+          <tbody>
+            {EVENEMENTS_WHATSAPP.map((e) => (
+              <tr key={e.cle} style={{ borderTop: "1px solid var(--surface2)" }}>
+                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--text)" }}>{e.label}</td>
+                <td style={{ padding: "12px 16px", textAlign: "center" }}>
+                  <div style={{ display: "flex", justifyContent: "center" }}>
+                    <Interrupteur actif={!!(brouillon[e.cle] || {}).expediteur} onClick={() => basculer(e.cle, "expediteur")} />
+                  </div>
+                </td>
+                <td style={{ padding: "12px 16px", textAlign: "center" }}>
+                  <div style={{ display: "flex", justifyContent: "center" }}>
+                    <Interrupteur actif={!!(brouillon[e.cle] || {}).destinataire} onClick={() => basculer(e.cle, "destinataire")} />
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/*
+        Repris de l'ancienne page « Notifications », supprimée car elle faisait double emploi.
+        Utile quand l'envoi automatique n'est pas disponible : l'application ouvre alors un
+        brouillon WhatsApp que l'agent n'a plus qu'à envoyer.
+      */}
+      <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: "16px 18px", marginTop: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 220 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Ouvrir un brouillon si l’envoi automatique échoue</div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 }}>
+              À chaque changement de statut fait à la main, WhatsApp s’ouvre avec le message pré-rempli.
+              L’agent n’a plus qu’à appuyer sur Envoyer.
+            </div>
+          </div>
+          <Interrupteur
+            actif={!!data.notificationSettings?.ouvertureAutoWhatsApp}
+            onClick={() => {
+              const s = data.notificationSettings || {};
+              persist({ ...data, notificationSettings: { ...s, ouvertureAutoWhatsApp: !s.ouvertureAutoWhatsApp } });
+              notify?.("Préférence enregistrée");
+            }}
+          />
+        </div>
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
+        <button onClick={() => { persist({ ...data, notifWhatsApp: brouillon }); notify?.("Préférences enregistrées"); }}
+          disabled={!modifie}
+          style={{ background: modifie ? "var(--brand-solid)" : "var(--surface2)", color: modifie ? "#fff" : "var(--muted)",
+                   border: "none", borderRadius: 8, padding: "11px 24px", fontSize: 13.5, fontWeight: 700,
+                   cursor: modifie ? "pointer" : "not-allowed" }}>
+          Enregistrer les préférences
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function SitesOperationPage({ data, persist, notify, onBack }) {
   const sites = data.sites || [];
   const [form, setForm] = useState(null);
@@ -9431,67 +9812,7 @@ function SitesOperationPage({ data, persist, notify, onBack }) {
   );
 }
 
-function NotificationsPage({ data, persist, notify, onBack }) {
-  const settings = data.notificationSettings || { confirmation: true, statut: true, livraison: true, rappel: true, ouvertureAutoWhatsApp: false };
-  function toggle(key) {
-    const next = { ...settings, [key]: !settings[key] };
-    persist({ ...data, notificationSettings: next });
-    notify?.("Préférences de notification mises à jour");
-  }
-  const items = [
-    { key: "confirmation", label: "Confirmation d’enregistrement", desc: "Envoyée dès qu’un colis est créé" },
-    { key: "statut", label: "Changement de statut", desc: "À chaque étape du suivi" },
-    { key: "livraison", label: "Confirmation de livraison", desc: "Quand le colis est marqué livré" },
-    { key: "rappel", label: "Rappel de paiement", desc: "Pour le reste à payer" },
-  ];
-  return (
-    <div>
-      <ConfigPageHeader title="Notifications" desc="Gérez les notifications WhatsApp automatiques et contrôlez les évènements déclencheurs." onBack={onBack} />
-      <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, maxWidth: 460, border: "1px solid var(--border)" }}>
-        {items.map((it) => (
-          <div key={it.key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 0", borderTop: "1px solid var(--border)" }}>
-            <div><div style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>{it.label}</div><div style={{ fontSize: 11.5, color: "var(--muted)" }}>{it.desc}</div></div>
-            <button onClick={() => toggle(it.key)} style={{ width: 42, height: 24, borderRadius: 20, border: "none", background: settings[it.key] ? "#3ECB84" : "var(--surface2)", position: "relative", cursor: "pointer", flexShrink: 0 }}>
-              <div style={{ width: 18, height: 18, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: settings[it.key] ? 21 : 3, transition: "left 0.15s" }} />
-            </button>
-          </div>
-        ))}
-        <div style={{ marginTop: 16, fontSize: 11.5, color: "var(--muted)" }}>Envoi réel et silencieux via WhatsApp : voir le cahier des charges technique pour l’intégration Twilio.</div>
-      </div>
 
-      <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, maxWidth: 460, border: "1px solid var(--border)", marginTop: 16 }}>
-        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Ouverture automatique de WhatsApp</div>
-        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>WhatsApp ne permet pas d’envoyer un message sans intervention humaine (sauf via un compte professionnel payant). En activant ceci, un onglet WhatsApp pré-rempli s’ouvre automatiquement dès qu’un agent fait avancer le statut d’un colis — il ne reste plus qu’à appuyer sur "Envoyer".</div>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <div style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>Activer l’ouverture automatique</div>
-          <button onClick={() => toggle("ouvertureAutoWhatsApp")} style={{ width: 42, height: 24, borderRadius: 20, border: "none", background: settings.ouvertureAutoWhatsApp ? "#3ECB84" : "var(--surface2)", position: "relative", cursor: "pointer", flexShrink: 0 }}>
-            <div style={{ width: 18, height: 18, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: settings.ouvertureAutoWhatsApp ? 21 : 3, transition: "left 0.15s" }} />
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function MiraKnowledgePage({ data, persist, notify, onBack }) {
-  const [texte, setTexte] = useState(data.miraKnowledge || "");
-  function save() {
-    persist({ ...data, miraKnowledge: texte });
-    notify?.("Connaissances de l’Assistant IA mises à jour");
-  }
-  return (
-    <div>
-      <ConfigPageHeader title="Connaissances de Mira" desc="Donnez à l’Assistant IA les infos de votre entreprise (départs, délais, règles) pour des réponses plus utiles à vos clients." onBack={onBack} />
-      <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, maxWidth: 560, border: "1px solid var(--border)" }}>
-        <Field label="Informations à transmettre à l’Assistant IA">
-          <textarea value={texte} onChange={(e) => setTexte(e.target.value)} rows={10} style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }}
-            placeholder="Ex : Les départs vers la France se font tous les mardis et vendredis. Le dédouanement prend en moyenne 3 jours. Nous n’acceptons pas les produits périssables..." />
-        </Field>
-        <button onClick={save} style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
-      </div>
-    </div>
-  );
-}
 
 function PaiementConfigPage({ data, persist, notify, onBack }) {
   const cfg = data.paymentConfig || {};
@@ -9870,6 +10191,30 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
     setEditingUser(null);
   }
 
+  /**
+   * Réinitialisation d'un mot de passe du personnel par l'administrateur.
+   *
+   * Les agents n'ont pas de procédure automatique : leur compte donne accès aux colis, aux
+   * paiements et à la comptabilité, et un code envoyé par message serait un point d'entrée de
+   * trop. La remise à zéro passe donc par l'administrateur, qui vérifie l'identité de la personne
+   * en face de lui. Le nouveau mot de passe est affiché une seule fois, puis n'est plus lisible.
+   */
+  const [mdpTemporaire, setMdpTemporaire] = useState(null);
+
+  async function reinitialiserMotDePasse(u) {
+    // Mot de passe provisoire lisible mais imprévisible : 8 caractères sans O/0/I/1 pour éviter
+    // les confusions quand l'administrateur le dicte à l'agent.
+    const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    const provisoire = Array.from({ length: 8 }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join("");
+    const identifiants = await creerIdentifiantsMotDePasse(provisoire);
+    persist({
+      ...data,
+      users: data.users.map((x) => (x.id === u.id ? { ...x, ...identifiants } : x)),
+      activityLog: pushActivity(data, session, "Mot de passe réinitialisé", `${u.prenom} ${u.nom} (${u.identifiant})`),
+    });
+    setMdpTemporaire({ identifiant: u.identifiant, nom: `${u.prenom} ${u.nom}`.trim(), motdepasse: provisoire });
+  }
+
   if (editingUser) return <UserProfilePage user={editingUser} onSave={saveUser} onBack={() => setEditingUser(null)} sites={data.sites} />;
 
   return (
@@ -9893,12 +10238,31 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
                 <td style={{ padding: "12px 16px", fontSize: 13 }}><span style={{ background: "var(--surface2)", color: "var(--text)", padding: "4px 10px", borderRadius: 20, fontSize: 11.5, fontWeight: 600 }}>{u.role}</span></td>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)" }}>{u.role === "Administrateur" ? "Tous les pays" : (u.paysAutorises?.length ? u.paysAutorises.map((c) => FLAGS[c]).join(" ") : "Tous les pays")}</td>
                 <td style={{ padding: "12px 16px", fontSize: 13 }}>{u.twoFA ? <ShieldCheck size={15} color="var(--ok-fg)" /> : "—"}</td>
-                <td style={{ padding: "12px 16px", textAlign: "right" }} onClick={(e) => e.stopPropagation()}>{u.identifiant !== "admin" && effectivePermission(session, "users.gerer") && <button onClick={() => removeUser(u.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={15} /></button>}</td>
+                <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>{effectivePermission(session, "users.gerer") && <button onClick={() => reinitialiserMotDePasse(u)} title="Réinitialiser le mot de passe" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><Key size={15} /></button>}{u.identifiant !== "admin" && effectivePermission(session, "users.gerer") && <button onClick={() => removeUser(u.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={15} /></button>}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      {mdpTemporaire && (
+        <Modal onClose={() => setMdpTemporaire(null)} title="Mot de passe réinitialisé">
+          <div style={{ fontSize: 13, color: "var(--text)", marginBottom: 12 }}>
+            Communiquez ces informations à <strong>{mdpTemporaire.nom}</strong>. Ce mot de passe ne sera plus affiché.
+          </div>
+          <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px", marginBottom: 12 }}>
+            <div style={{ fontSize: 11.5, color: "var(--muted)" }}>Identifiant</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)", marginBottom: 10 }}>{mdpTemporaire.identifiant}</div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)" }}>Mot de passe provisoire</div>
+            <div style={{ fontFamily: "monospace", fontSize: 20, fontWeight: 700, color: "var(--brand-on-dark)", letterSpacing: 2 }}>{mdpTemporaire.motdepasse}</div>
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--warn-fg)", marginBottom: 14 }}>
+            Demandez-lui de le changer dès sa première connexion.
+          </div>
+          <button onClick={() => setMdpTemporaire(null)} style={{ width: "100%", background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+            J’ai noté
+          </button>
+        </Modal>
+      )}
       {showForm && <UserForm onClose={() => setShowForm(false)} onSave={addUser} existing={data.users} sites={data.sites} />}
     </div>
   );

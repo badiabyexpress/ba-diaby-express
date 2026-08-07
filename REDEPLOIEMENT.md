@@ -203,3 +203,58 @@ l'explique à l'agent, qui bascule alors sur le brouillon.
 
 Prévoyez de faire valider quelques modèles courants : colis arrivé, colis prêt au
 retrait, rappel de paiement.
+
+---
+
+## 8. Activer l'envoi des factures par e-mail
+
+Facultatif. Tant que ce n'est pas configuré, le bouton « Envoyer par e-mail » ouvre
+simplement un brouillon que l'agent envoie lui-même.
+
+### Ce que ça change
+
+Quand un client a une adresse e-mail renseignée :
+
+- sa **facture part automatiquement** après chaque encaissement, en pièce jointe ;
+- un bouton **« Envoyer par e-mail »** apparaît sur sa fiche colis pour un envoi manuel.
+
+Les clients sans adresse e-mail ne sont pas concernés — rien ne change pour eux, et
+aucune erreur n'est affichée à l'agent.
+
+### Étape 1 — Créer un compte Resend
+
+Rendez-vous sur **resend.com**. Le forfait gratuit couvre **3 000 e-mails par mois**,
+largement suffisant pour votre volume.
+
+Récupérez la clé d'API (elle commence par `re_`).
+
+### Étape 2 — Choisir l'adresse expéditrice
+
+Resend n'envoie que depuis un domaine vérifié.
+
+- **Si vous avez un domaine** (ex. badiabyexpress.com) : ajoutez-le dans Resend et
+  suivez les instructions de vérification. Vous pourrez écrire à tous vos clients.
+- **Sans domaine** : utilisez l'adresse de test fournie par Resend. Les e-mails ne
+  partiront qu'à votre propre adresse — de quoi valider le circuit avant d'aller plus loin.
+
+### Étape 3 — Renseigner les variables dans Vercel
+
+**Project Settings → Environment Variables** :
+
+| Variable | Valeur |
+|---|---|
+| `RESEND_API_KEY` | votre clé — **à ne jamais partager** |
+| `EMAIL_FROM` | `Ba-Diaby Express <contact@votredomaine.com>` |
+
+Puis **redéployez** : Deployments → dernier déploiement → Redeploy.
+
+### Étape 4 — Essayer
+
+Ouvrez un colis dont le destinataire a une adresse e-mail, puis cliquez sur
+**Envoyer par e-mail**. Le bouton affiche « Facture envoyée » si tout va bien.
+
+### À savoir
+
+Sur vos 343 clients repris de l'ancienne plateforme, **14 seulement ont une adresse
+e-mail**. WhatsApp touche bien plus de monde chez vous — l'e-mail sert surtout pour
+vos clients en France, en Belgique et aux États-Unis.

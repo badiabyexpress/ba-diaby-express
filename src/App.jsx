@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue, memo } from "react";
-import { Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell } from "lucide-react";
+import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell } from "lucide-react";
 import { storage, subscribeToChanges, flushOutbox, pendingSyncCount } from "./lib/storage.js";
 
 /* ---------- design tokens ----------
@@ -149,7 +149,7 @@ function PhoneInput({ value, onChange, onBlur, placeholder, defaultDial }) {
     onChange(`+${dial}${newRest.replace(/[^\d]/g, "")}`);
   }
 
-  const filtered = search ? DIAL_CODES.filter((c) => c.name.toLowerCase().includes(search.toLowerCase())) : DIAL_CODES;
+  const filtered = search ? DIAL_CODES.filter((c) => pourRecherche(c.name).includes(pourRecherche(search))) : DIAL_CODES;
 
   return (
     <div ref={wrapRef} style={{ position: "relative" }}>
@@ -199,13 +199,20 @@ function loyaltyDiscount(previousCount) {
   if (previousCount >= 3) return 5;
   return 0;
 }
-const STATUSES = ["Enregistré", "En transit", "Arrivé", "En douane", "En livraison", "Livré"];
+/*
+ * Parcours d'un colis, en 5 étapes.
+ *
+ * « En douane » a été retiré : cette étape n'était jamais renseignée en pratique et allongeait
+ * le parcours sans rien apprendre au client. « En livraison » a été renommé « Disponible au
+ * retrait » : chez Ba-Diaby Express le colis ne part pas en tournée, c'est le client qui vient
+ * le chercher à l'agence. C'est aussi à cette étape que naît le code de retrait.
+ */
+const STATUSES = ["Enregistré", "En transit", "Arrivé", "Disponible au retrait", "Livré"];
 const STATUS_STYLE = {
   "Enregistré": { bg: "var(--surface2)", fg: "var(--neutral-fg)", icon: Package },
   "En transit": { bg: "var(--info-bg)", fg: "var(--info-fg)", icon: Plane },
   "Arrivé": { bg: "var(--warn-bg)", fg: "var(--warn-fg)", icon: MapPin },
-  "En douane": { bg: "var(--danger-bg)", fg: "var(--danger-fg)", icon: AlertTriangle },
-  "En livraison": { bg: "var(--ok-bg-soft)", fg: "var(--ok-fg-alt)", icon: Truck },
+  "Disponible au retrait": { bg: "var(--ok-bg-soft)", fg: "var(--ok-fg-alt)", icon: MapPin },
   "Livré": { bg: "var(--ok-bg)", fg: "var(--ok-fg)", icon: CheckCircle2 },
   "Annulé": { bg: "var(--danger-bg)", fg: "var(--danger-fg)", icon: X },
   "Refusé": { bg: "var(--warn-bg)", fg: "var(--warn-fg)", icon: AlertTriangle },
@@ -242,18 +249,19 @@ const TAILLE_PAGE = 100;
  * change jamais. Seul ce qui s’affiche DANS l’espace client (et sur la page de suivi public)
  * utilise ce vocabulaire plus détaillé.
  *
- * L’espace client demande 8 étapes (Colis annoncé → Reçu à l’entrepôt → En préparation →
- * Expédié → En transit → Arrivé en Guinée → Disponible pour retrait → Livré) mais le système
- * ne suit réellement que 6 statuts en interne, donc certaines étapes sont regroupées faute de
- * donnée distincte pour les séparer honnêtement (ex : rien ne distingue "en préparation" de
- * "reçu à l’entrepôt", donc elles partagent la même étape).
+ * Étapes montrées au client, alignées sur les 5 statuts internes.
+ *
+ * « Colis annoncé » est une étape virtuelle : elle correspond à une pré-alerte pas encore
+ * rapprochée d'un colis réel, donc sans statut associé. Les autres correspondent une à une aux
+ * statuts internes — chaque étape affichée reflète une information réellement suivie, plutôt
+ * qu'un jalon décoratif.
  */
 const CLIENT_TIMELINE = [
   { key: "annonce", label: "Colis annoncé", statuses: [] }, // étape virtuelle : pré-alerte pas encore rapprochée d’un vrai colis
   { key: "entrepot", label: "Reçu à l’entrepôt", statuses: ["Enregistré"] },
   { key: "expedie", label: "Expédié", statuses: ["En transit"] },
   { key: "guinee", label: "Arrivé en Guinée", statuses: ["Arrivé"] },
-  { key: "retrait", label: "Disponible pour retrait", statuses: ["En douane", "En livraison"] },
+  { key: "retrait", label: "Disponible pour retrait", statuses: ["Disponible au retrait"] },
   { key: "livre", label: "Livré", statuses: ["Livré"] },
 ];
 function clientStatusLabel(status) {
@@ -468,6 +476,19 @@ function salutationSelonHeure() {
   return "Bonsoir";
 }
 
+/**
+ * Départs encore ouverts au dépôt, triés du plus proche au plus lointain.
+ * Un départ dont la date limite est passée disparaît automatiquement : inutile d'annoncer
+ * une échéance que le client ne peut plus tenir.
+ */
+function departsAVenir(departs, pays = null) {
+  const maintenant = Date.now();
+  return (departs || [])
+    .filter((d) => d.dateLimite && new Date(d.dateLimite).getTime() >= maintenant)
+    .filter((d) => !pays || d.pays === pays)
+    .sort((a, b) => new Date(a.dateDepart) - new Date(b.dateDepart));
+}
+
 function genTracking(existingTrackings, dateDepot) {
   const taken = new Set(existingTrackings || []);
   const d = dateDepot ? new Date(dateDepot) : new Date();
@@ -488,6 +509,13 @@ function genTracking(existingTrackings, dateDepot) {
   return `${prefixe}${Date.now().toString().slice(-4)}`;
 }
 function genOtp() { return String(Math.floor(100000 + Math.random() * 900000)); }
+
+/**
+ * Code de retrait à 4 chiffres, envoyé au client dès que son colis devient disponible.
+ * Quatre chiffres suffisent : le code ne vaut que pour un colis précis, et l'agent le contrôle
+ * en face du client. Plus long, il serait pénible à dicter au comptoir.
+ */
+function genCodeRetrait() { return String(Math.floor(1000 + Math.random() * 9000)); }
 let LIVE_RATES = { ...CURRENCIES };
 function fmt(n, cur) {
   const v = n * (LIVE_RATES[cur] || CURRENCIES[cur] || 1);
@@ -544,9 +572,18 @@ function pushActivity(data, session, action, detail) {
   const entry = { id: `log${Date.now()}${Math.random().toString(36).slice(2,5)}`, action, detail, date: new Date().toISOString(), utilisateur: `${session.prenom} ${session.nom}`, role: session.role };
   return [entry, ...(data.activityLog || [])].slice(0, 500);
 }
-/** Redimensionne et compresse une photo côté navigateur avant de la stocker (en base64 dans
- * le colis) — évite de gonfler démesurément les données avec des photos en pleine résolution. */
-function resizeImageToDataUrl(file, maxWidth = 900, quality = 0.72) {
+/**
+ * Redimensionne et compresse une photo avant de la stocker.
+ *
+ * Les photos sont conservées en base64 dans les données du colis, et l'application réécrit
+ * l'ensemble des données à chaque modification. Une photo trop lourde ne pèse donc pas une
+ * fois : elle est retransmise à chaque création de colis, chaque encaissement, chaque
+ * changement de statut. Sur une connexion mobile, c'est ce qui rend une application lente.
+ *
+ * 720 px et une qualité de 0,6 suffisent largement à constater l'état d'un colis à l'arrivée
+ * — l'usage réel de ces photos. Cela divise leur poids par deux environ.
+ */
+function resizeImageToDataUrl(file, maxWidth = 720, quality = 0.6) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = reject;
@@ -605,6 +642,7 @@ async function notifierEvenement(data, evenement, colis, message) {
   const prefs = (data?.notifWhatsApp || {})[evenement];
   if (!prefs) return { envoyes: 0 };
   let envoyes = 0;
+
   const destinations = [];
   if (prefs.destinataire && colis.telephone) destinations.push(colis.telephone);
   if (prefs.expediteur && colis.expediteurTelephone) destinations.push(colis.expediteurTelephone);
@@ -614,7 +652,62 @@ async function notifierEvenement(data, evenement, colis, message) {
       if (envoye) envoyes++;
     } catch (e) { /* une notification ne doit jamais bloquer l'action en cours */ }
   }
+
+  /*
+   * Le même message part aussi par e-mail, quand une adresse est renseignée.
+   *
+   * Un client qui a donné son adresse suit ainsi son colis de l'enregistrement à la livraison,
+   * sans dépendre de WhatsApp — utile pour vos clients en France, en Belgique ou aux États-Unis,
+   * qui n'ont pas toujours WhatsApp mais consultent leur messagerie.
+   *
+   * Les préférences sont les mêmes que pour WhatsApp : désactiver une étape la désactive sur
+   * les deux canaux. Un seul réglage à comprendre pour vos agents.
+   */
+  const adresses = [];
+  if (prefs.destinataire && (colis.destinataireEmail || colis.email)) adresses.push(colis.destinataireEmail || colis.email);
+  if (prefs.expediteur && colis.expediteurEmail) adresses.push(colis.expediteurEmail);
+  for (const adresse of adresses) {
+    try {
+      await envoyerEmail(
+        adresse,
+        `Ba-Diaby Express — colis ${colis.tracking}`,
+        `<p>${message}</p>
+         <p style="color:#888;font-size:12px;margin-top:18px">
+           Ba-Diaby Express — Transport de colis Conakry - Monde<br>
+           Suivez votre colis à tout moment avec le numéro ${colis.tracking}.
+         </p>`
+      );
+    } catch (e) { /* idem : l'action principale prime sur la notification */ }
+  }
+
   return { envoyes };
+}
+
+/**
+ * Envoie un e-mail au client, avec ses documents en pièce jointe.
+ *
+ * Tente l'envoi automatique via la fonction serveur ; si le service n'est pas configuré ou si
+ * l'envoi échoue, retourne un échec silencieux plutôt que d'interrompre le travail de l'agent.
+ * L'appelant décide alors quoi faire — généralement ouvrir un brouillon.
+ *
+ * Retourne { envoye, raison } — `raison` est un message lisible, ou null si le service est
+ * simplement absent (cas normal tant qu'aucune clé n'est configurée).
+ */
+async function envoyerEmail(adresse, sujet, message, piecesJointes = []) {
+  if (!adresse) return { envoye: false, raison: null };
+  try {
+    const reponse = await fetch("/api/email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ to: adresse, sujet, message, piecesJointes }),
+    });
+    if (reponse.ok) return { envoye: true };
+    if (reponse.status === 501) return { envoye: false, raison: null };
+    const data = await reponse.json().catch(() => ({}));
+    return { envoye: false, raison: data.error || "L’envoi de l’e-mail a échoué." };
+  } catch (e) {
+    return { envoye: false, raison: null };
+  }
 }
 
 async function envoyerWhatsApp(telephone, message) {
@@ -777,7 +870,22 @@ async function generateQRDataUrl(text, size = 200) {
 function defaultSeed() {
   const emojis = { "Vêtements": "👕", "Électronique": "📱", "Documents": "📄", "Alimentaire": "🍎", "Cosmétiques": "💄", "Autre": "📦" };
   return {
-    users: [{ id: "u1", prenom: "Ibrahima", nom: "Ba-Diaby", email: "badiabyexpress.bde@gmail.com", telephone: "+224620000000", identifiant: "admin", motdepasse: hash("admin123"), role: "Administrateur", twoFA: false }],
+    /*
+     * Compte administrateur.
+     *
+     * Le compte de démonstration « admin / admin123 » a été supprimé : c'était une porte d'entrée
+     * connue de tous. Le mot de passe n'est jamais stocké en clair — seule son empreinte PBKDF2
+     * (150 000 itérations, sel unique) est enregistrée, et elle ne permet pas de le retrouver.
+     */
+    users: [{
+      id: "u1", prenom: "Ibrahima", nom: "Diallo",
+      email: "badiabyexpress.bde@gmail.com", telephone: "+224620000000",
+      identifiant: "Iboush", role: "Administrateur", twoFA: false,
+      motdepasseAlgo: "pbkdf2",
+      motdepasseIter: 150000,
+      motdepasseSalt: "05072796eb9b2fde046a1ea0c17cc70f",
+      motdepasseSecure: "eac54df03597bdaa3d0166a8ebda86f608707a0fc218419dfcf12efdd20f2d0a",
+    }],
     colis: [], lang: "fr", theme: "dark",
     branding: { logo: DEFAULT_LOGO },
     clientAccounts: [],
@@ -802,15 +910,75 @@ function defaultSeed() {
       modification:    { expediteur: false, destinataire: false },
       relanceRetrait:  { expediteur: false, destinataire: true },
     },
+    /*
+     * Remise sur le volume : un gros colis coûte proportionnellement moins cher à traiter (une
+     * seule étiquette, un seul passage en douane, une seule remise au client). Elle s'applique
+     * sur le poids TOTAL et se cumule avec la remise fidélité, qui récompense le nombre d'envois.
+     * Désactivée par défaut : à activer dans Configuration → Tarifs de réception.
+     */
+    remiseVolume: {
+      active: false,
+      paliers: [
+        { minKg: 20, remise: 5 },
+        { minKg: 50, remise: 10 },
+        { minKg: 100, remise: 15 },
+      ],
+    },
+    /*
+     * Calendrier des départs.
+     *
+     * « Quand part le prochain envoi pour Paris ? » est la question la plus posée aux agents.
+     * Y répondre au téléphone toute la journée coûte du temps ; l'afficher dans l'Espace Client
+     * et sur la page de suivi répond à leur place.
+     *
+     * Chaque départ porte une date limite de dépôt : c'est elle qui compte pour le client, pas
+     * la date de départ elle-même. Un départ dont la limite est passée n'est plus proposé.
+     */
+    departs: [],
     agenceRetraitClient: "site-bambeto",
     receptionTarifs: { paliers: [{ max: 10, tarif: 100000 }, { max: 40, tarif: 95000 }, { max: 100, tarif: 92000 }] },
     expressTarifEurKg: 12,
     exchangeRates: { ...CURRENCIES },
-    categories: ["Vêtements", "Électronique", "Documents", "Alimentaire", "Cosmétiques", "Autre"].map((nom, i) => ({
-      id: `cat-${i}`, nom, description: "", emoji: emojis[nom] || "📦", type: "kg",
-      montant: { "Vêtements": 15000, "Électronique": 25000, "Documents": 5000, "Alimentaire": 12000, "Cosmétiques": 18000, "Autre": 15000 }[nom],
-      deviseSaisie: "GNF", visibiliteColis: true, visibiliteFactures: true, paysLimite: null, parDefaut: nom === "Autre", ordre: i, motsCles: [],
-      commissionRate: null, // EUR/kg ou EUR/unité ; null = utilise le taux général
+    /*
+     * Catégories reprises de l'ancienne plateforme d'Ibrahima, avec leurs tarifs et mots-clés.
+     * Les prix en EUR sont convertis au taux du jour à l'affichage ; ceux saisis directement en
+     * GNF (Bateau, Shein/Temu, Vêtement USA, Petit Sipas) restent fixes.
+     * `parDefaut` désigne la catégorie appliquée quand aucune ne correspond.
+     */
+    categories: [
+      { nom: "Bateau", description: "Envoi par bateau", emoji: "🚢", type: "unite", montant: 250000, deviseSaisie: "GNF", paysLimite: null, motsCles: ["bateau"] },
+      { nom: "Beurre de karité (PARIS)", description: "BEURRE DE KARITÉ", emoji: "🧴", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: "GN", motsCles: ["Beurre de karité"] },
+      { nom: "CHAUSSURE MARQUE (PARIS)", description: "chaussures de marque nike, adidas", emoji: "👟", type: "unite", montant: 30, deviseSaisie: "EUR", paysLimite: null, motsCles: ["adidas", "Nike"] },
+      { nom: "Chaussures non marque ou traditionnel (PARIS)", description: "chaussure non marque ou traditionnel", emoji: "👞", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Chaussure non marque", "chaussure traditionnel"] },
+      { nom: "COLIS ITALIE", description: "COLIS ITALIE", emoji: "📦", type: "kg", montant: 13, deviseSaisie: "EUR", paysLimite: null, motsCles: ["italie"] },
+      { nom: "DOCUMENT B (PARIS)", description: "Passeport", emoji: "📄", type: "unite", montant: 50, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Passeport"] },
+      { nom: "DOCUMENT B PROVINCE Française", description: "Passeport", emoji: "📄", type: "unite", montant: 75, deviseSaisie: "EUR", paysLimite: "GN", motsCles: ["passeport"] },
+      { nom: "DOCUMENTS A (PARIS)", description: "Extrait de naissance, jugement supplétif, permis, diplôme, attestation, carte", emoji: "📑", type: "unite", montant: 30, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Extrait de naissance", "jugement supplétif", "permis", "diplôme", "attestation", "carte d’identité", "acte de mariage", "acte de divorce", "invitation"] },
+      { nom: "Drap (PARIS)", description: "Drap", emoji: "🛏️", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Drap-housse", "Drap plat", "Drap de dessus", "Drap de couverture", "Drap pour lit bébé"] },
+      { nom: "Habits 224 (PARIS)", description: "Vêtements de la marque 224 pour l’indépendant", emoji: "👕", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: "GN", motsCles: ["Pull 224", "casquette224", "T-shirt224"] },
+      { nom: "Habits traditionnel non cousu et cousu (PARIS)", description: "Les habits traditionnels africains", emoji: "🥻", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Pagne africaine", "wax", "bazin", "Robe", "complets", "boubou", "Macky sall", "grand boubou", "tissu"] },
+      { nom: "Huile rouge (PARIS)", description: "Huile rouge", emoji: "🫗", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: "GN", motsCles: ["Huile rouge"] },
+      { nom: "Médicaments liquide 1L et 1.5L", description: "Médicaments liquide", emoji: "💊", type: "unite", montant: 30, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Médicaments liquide 1L"] },
+      { nom: "Médicaments liquide Talisman 1 à 500ml (PARIS)", description: "Médicaments liquide petite bouteille", emoji: "💊", type: "unite", montant: 15, deviseSaisie: "EUR", paysLimite: "GN", motsCles: ["Talisman", "330cl", "petit bouteille", "liquide", "500ml"] },
+      { nom: "KARAMBA ALY TOMBOLIA", description: "Tarif partenaire", emoji: "🤝", type: "kg", montant: 10, deviseSaisie: "EUR", paysLimite: null, motsCles: ["KARAMBA ALY TOMBOLIA"] },
+      { nom: "PARTENAIRE NON YAWII", description: "Tarif partenaire", emoji: "🤝", type: "kg", montant: 8.69, deviseSaisie: "EUR", paysLimite: null, motsCles: ["PARTENAIRE NON YAWII"] },
+      { nom: "PARTENAITE THIANGUIL", description: "Tarif partenaire", emoji: "🤝", type: "kg", montant: 8.80, deviseSaisie: "EUR", paysLimite: null, motsCles: ["thianguil"] },
+      { nom: "Petit sipas USA", description: "Médicament liquide USA", emoji: "💊", type: "unite", montant: 220000, deviseSaisie: "GNF", paysLimite: null, motsCles: ["sipas"] },
+      { nom: "Poisson konkoe (PARIS)", description: "Poisson", emoji: "🐟", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: "GN", motsCles: ["Poisson", "konkoe"] },
+      { nom: "PRIX PARTENAIRE", description: "Seulement pour les partenaires", emoji: "🤝", type: "kg", montant: 8, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Partenaire"] },
+      { nom: "Produit cosmétique (PARIS)", description: "Produits cosmétiques visage et corporel", emoji: "💄", type: "kg", montant: 15, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Crème hydratante", "sérum", "lotion tonique", "gel nettoyant", "gommage", "masque visage", "crème anti-âge", "crème solaire", "Lait corporel", "huile corporelle", "crème éclaircissante", "gommage corporel", "beurre de karité", "gel douche", "savon", "Fond de teint", "poudre", "correcteur", "mascara", "rouge à lèvres", "gloss", "eyeliner", "fard à paupières", "blush", "Baume après-rasage", "mousse à raser", "crème hydratante homme", "huile barbe", "shampooing barbe", "Déodorant", "dentifrice", "bain de bouche", "savon liquide", "lingettes"] },
+      { nom: "Sac de marque (Paris)", description: "Sac avec des noms ou logo reconnus", emoji: "👜", type: "unite", montant: 12, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Louis Vuitton", "Gucci", "Bottega Veneta", "Saint Laurent", "Balenciaga", "Fendi", "Valentino", "Prada", "Dior", "Celine", "Hermès"] },
+      { nom: "Sac non marque", description: "Sac non reconnu", emoji: "👜", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Non marque"] },
+      { nom: "Savon noir (PARIS)", description: "Savon noir", emoji: "🧼", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: "GN", motsCles: ["Savon", "savon noir"] },
+      { nom: "SHEIN/TEMU", description: "les commandes shein et temu", emoji: "🛍️", type: "kg", montant: 100000, deviseSaisie: "GNF", paysLimite: null, motsCles: ["shein", "temu", "aliexpress"] },
+      { nom: "SHEIN /TEMU/ALIEXPRESS", description: "Les achats en ligne ou commande en ligne", emoji: "🛍️", type: "kg", montant: 10, deviseSaisie: "EUR", paysLimite: null, motsCles: ["shein", "temu", "aliexpress"] },
+      { nom: "Telephone neuf (PARIS)", description: "téléphone ou smartphone neuf", emoji: "📱", type: "unite", montant: 50, deviseSaisie: "EUR", paysLimite: null, motsCles: ["telephone", "iphone", "samsung", "tecno", "infinix", "smartphone"] },
+      { nom: "VETEMENT/HABITS (USA)", description: "pantalon, pull, t-shirt, culotte", emoji: "👕", type: "kg", montant: 250000, deviseSaisie: "GNF", paysLimite: null, motsCles: ["pantalon", "pull", "t-shirt", "culotte"] },
+      { nom: "Vêtements de marque (PARIS)", description: "Tous les vêtements de marque et maillots de marque", emoji: "👔", type: "unite", montant: 10, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Zara", "H&M", "Bershka", "Pull&Bear", "Stradivarius", "Uniqlo", "Mango", "Shein", "Primark", "Nike", "Adidas", "Puma", "Jordan", "Supreme", "Off-White", "Stüssy", "Carhartt", "The North Face", "Champion", "Lacoste", "Ralph Lauren", "Calvin Klein", "Tommy Hilfiger", "Gant", "Guess", "Hugo Boss", "Gucci", "Louis Vuitton", "Dior", "Balenciaga", "Chanel", "Fendi", "Versace", "Givenchy", "Sandro", "Maje", "A.P.C.", "Celio", "Kaporal", "Le Coq Sportif", "Okaïdi", "Tape à l’Œil", "Kiabi", "C&A", "DPAM"] },
+      { nom: "Autres articles", description: "Catégorie appliquée quand aucune autre ne correspond", emoji: "📦", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: null, motsCles: [], parDefaut: true },
+    ].map((c, i) => ({
+      id: `cat-${i}`, visibiliteColis: true, visibiliteFactures: true, ordre: i,
+      parDefaut: false, commissionRate: null, ...c,
     })),
     sites: [
       { id: "site-bambeto", nom: "Bambeto", adresse: "Bambeto, Conakry", telephone: "+224612479339", horaires: "Lun–Sam 8h–18h", paiements: "Espèces, Orange Money", stockage: "Retrait sous 7 jours" },
@@ -834,9 +1002,20 @@ async function loadData() {
     return seed;
   }
 }
+/**
+ * Enregistre les données.
+ *
+ * Retourne `{ queued: true }` si l'écriture n'a pas pu aboutir et attend dans la file : c'est
+ * cette information qui permet à l'appelant de prévenir l'agent. Avaler l'erreur ici laisserait
+ * croire qu'un encaissement est enregistré alors qu'il ne l'est pas encore.
+ */
 async function saveData(data) {
-  try { await storage.set("bde-data", JSON.stringify(data), true); } catch (e) { console.error(e); }
+  return storage.set("bde-data", JSON.stringify(data), true);
 }
+// Mode hors-ligne : dans l’artefact Claude, le stockage est toujours fiable, donc ces fonctions
+// ne font rien de particulier ici. Sur le site déployé (Supabase), src/lib/storage.js fournit de
+// vraies versions qui mettent les écritures en file d’attente hors-ligne et les rejouent au retour
+// de la connexion — remplacées automatiquement au déploiement (voir apply_deploy_patches.py).
 
 const BACKUP_PREFIX = "bde-backup-";
 const BACKUP_RETENTION_DAYS = 14;
@@ -1043,8 +1222,8 @@ function App() {
     return () => clearTimeout(timeout);
   }, []);
 
-  // Synchronisation en temps réel : si un autre appareil/utilisateur modifie les données,
-  // on les recharge automatiquement ici, sans que la personne ait besoin de rafraîchir la page.
+  // Synchronisation en temps réel : si un autre appareil modifie les données,
+  // on les recharge ici automatiquement, sans rafraîchir la page.
   useEffect(() => {
     const unsubscribe = subscribeToChanges("bde-data", (newValueString) => {
       try {
@@ -1074,14 +1253,61 @@ function App() {
     function handleOffline() { setIsOnline(false); }
     window.addEventListener("online", handleOnline);
     window.addEventListener("offline", handleOffline);
-    return () => { window.removeEventListener("online", handleOnline); window.removeEventListener("offline", handleOffline); };
+
+    /*
+     * Nouvelle tentative périodique.
+     *
+     * La file n'était rejouée qu'à l'événement "online". Or une écriture peut échouer alors que
+     * la connexion est présente — coupure d'une seconde, serveur momentanément indisponible. Dans
+     * ce cas l'événement "online" ne se déclenche jamais et la modification restait bloquée
+     * indéfiniment, avec un bandeau permanent à l'écran.
+     * On retente donc toutes les 20 secondes tant qu'il reste quelque chose en attente.
+     */
+    const minuteur = setInterval(async () => {
+      if (!navigator.onLine || pendingSyncCount() === 0) return;
+      try {
+        const { flushed } = await flushOutbox();
+        if (flushed > 0) setPendingSync(pendingSyncCount());
+      } catch (e) { /* on retentera au prochain passage */ }
+      setPendingSync(pendingSyncCount());
+    }, 20000);
+
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+      clearInterval(minuteur);
+    };
   }, []);
 
+  /*
+   * Enregistrement des données.
+   *
+   * L'écriture n'avait pas de gestion d'erreur : si elle échouait — serveur indisponible, quota
+   * dépassé, conflit — l'agent voyait « Paiement encaissé » et passait au client suivant. Le
+   * paiement disparaissait au rechargement suivant, sans que personne ne l'ait su.
+   *
+   * Un échec est désormais annoncé, et la modification reste dans la file d'attente : elle
+   * repartira à la prochaine tentative automatique. L'agent sait qu'il doit vérifier plutôt que
+   * de croire un travail enregistré alors qu'il ne l'est pas.
+   */
   const persist = useCallback((next) => {
     setData(next);
     if (next.exchangeRates) LIVE_RATES = { ...CURRENCIES, ...next.exchangeRates };
     if (!offline) {
-      saveData(next).then(() => setPendingSync(pendingSyncCount()));
+      saveData(next)
+        .then((r) => {
+          setPendingSync(pendingSyncCount());
+          if (r && r.queued) {
+            setToast("Enregistrement en attente — vérifiez votre connexion");
+            setTimeout(() => setToast(null), 5000);
+          }
+        })
+        .catch((e) => {
+          console.error("Échec de l'enregistrement", e);
+          setPendingSync(pendingSyncCount());
+          setToast("Enregistrement en attente — vérifiez votre connexion");
+          setTimeout(() => setToast(null), 5000);
+        });
     }
   }, [offline]);
   const notify = useCallback((msg) => { setToast(msg); setTimeout(() => setToast(null), 2800); }, []);
@@ -1268,12 +1494,28 @@ function App() {
         </div>
       </div>
       {showGlobalSearch && <GlobalSearchModal data={data} onClose={() => setShowGlobalSearch(false)} onOpenColis={(tracking) => { setView("colis"); setShowGlobalSearch(false); setColisInitialQuery(tracking); }} onOpenClient={() => { setView("clients"); setShowGlobalSearch(false); }} onOpenPreAlerte={() => { setView("centreclients"); setShowGlobalSearch(false); }} />}
+      {/*
+        Bandeau d'état de la connexion.
+
+        Il était affiché en haut, par-dessus le titre de la page : sur téléphone il masquait
+        « Bonsoir, Ibrahima » en permanence dès qu'une écriture attendait. Or une synchronisation
+        en attente n'est pas une erreur — le travail est enregistré, il partira tout seul. Le
+        bandeau est donc déplacé en bas de l'écran, discret, et ne s'affiche que si l'attente
+        dure : inutile de signaler une seconde de latence.
+        La perte de connexion, elle, reste bien visible : l'agent doit le savoir.
+      */}
       {(!isOnline || pendingSync > 0) && (
-        <div style={{ position: "fixed", top: isMobile ? 60 : 14, insetInlineEnd: 14, zIndex: 70, background: isOnline ? "var(--warn-bg)" : "var(--danger-bg)", color: isOnline ? "var(--warn-fg)" : "var(--danger-fg)", padding: "9px 16px", borderRadius: 12, fontSize: 12.5, fontWeight: 600, boxShadow: "0 6px 20px rgba(0,0,0,0.3)", display: "flex", alignItems: "center", gap: 8 }}>
-          {isOnline ? <RefreshCw size={14} /> : <AlertTriangle size={14} />}
+        <div style={{ position: "fixed", bottom: 18, insetInlineStart: "50%", transform: "translateX(-50%)", zIndex: 60,
+                      background: isOnline ? "var(--surface2)" : "var(--danger-bg)",
+                      border: "1px solid " + (isOnline ? "var(--border)" : "var(--danger-border)"),
+                      color: isOnline ? "var(--muted)" : "var(--danger-fg)",
+                      padding: "7px 14px", borderRadius: 20, fontSize: 11.5, fontWeight: 600,
+                      display: "flex", alignItems: "center", gap: 7, maxWidth: "92vw",
+                      boxShadow: "0 4px 14px rgba(0,0,0,0.18)" }}>
+          {isOnline ? <RefreshCw size={12} /> : <AlertTriangle size={12} />}
           {!isOnline
-            ? "Hors ligne — vos modifications seront synchronisées dès le retour de la connexion"
-            : syncing ? "Synchronisation en cours…" : `${pendingSync} modification(s) en attente de synchronisation`}
+            ? "Hors ligne — vos modifications partiront au retour de la connexion"
+            : syncing ? "Enregistrement…" : `${pendingSync} en attente d’enregistrement`}
         </div>
       )}
       {toast && <div style={{ position: "fixed", bottom: 24, insetInlineEnd: 24, insetInlineStart: isMobile ? 24 : "auto", background: "#0A2647", color: "#fff", padding: "12px 18px", borderRadius: 12, fontSize: 13.5, boxShadow: "0 8px 24px rgba(10,38,71,0.3)", textAlign: "center" }}>{toast}</div>}
@@ -1413,13 +1655,13 @@ function ScannerModal({ onClose, onScan }) {
 function GlobalSearchModal({ data, onClose, onOpenColis, onOpenClient, onOpenPreAlerte }) {
   const [q, setQ] = useState("");
   const deferredQ = useDeferredValue(q);
-  const query = deferredQ.trim().toLowerCase();
+  const query = pourRecherche(deferredQ.trim());
 
   const resultats = useMemo(() => {
     if (query.length < 2) return { colis: [], clients: [], preAlertes: [] };
-    const colis = data.colis.filter((c) => c.tracking.toLowerCase().includes(query) || c.destinataire.toLowerCase().includes(query) || (c.telephone || "").includes(query)).slice(0, 8);
-    const clients = (data.clientAccounts || []).filter((c) => `${c.prenom} ${c.nom}`.toLowerCase().includes(query) || (c.telephone || "").includes(query)).slice(0, 6);
-    const preAlertes = (data.preAlertes || []).filter((p) => p.trackingExterne.toLowerCase().includes(query)).slice(0, 6);
+    const colis = data.colis.filter((c) => pourRecherche(c.tracking).includes(query) || pourRecherche(c.destinataire).includes(query) || (c.telephone || "").includes(query)).slice(0, 8);
+    const clients = (data.clientAccounts || []).filter((c) => pourRecherche(`${c.prenom} ${c.nom}`).includes(query) || (c.telephone || "").includes(query)).slice(0, 6);
+    const preAlertes = (data.preAlertes || []).filter((p) => pourRecherche(p.trackingExterne).includes(query)).slice(0, 6);
     return { colis, clients, preAlertes };
   }, [data.colis, data.clientAccounts, data.preAlertes, query]);
 
@@ -1713,8 +1955,7 @@ const CLIENT_I18N = {
   "Enregistré": { en: "Registered", ar: "مُسجَّل" },
   "En transit": { en: "In transit", ar: "في الطريق" },
   "Arrivé": { en: "Arrived", ar: "وصل" },
-  "En douane": { en: "In customs", ar: "في الجمارك" },
-  "En livraison": { en: "Out for delivery", ar: "قيد التوصيل" },
+  "Disponible au retrait": { en: "Ready for pickup", ar: "جاهز للاستلام" },
   "Livré": { en: "Delivered", ar: "تم التوصيل" },
   "Annulé": { en: "Cancelled", ar: "ملغى" },
   "Refusé": { en: "Refused", ar: "مرفوض" },
@@ -1726,7 +1967,18 @@ const CLIENT_I18N = {
   "Arrivé en Guinée": { en: "Arrived in Guinea", ar: "وصل إلى غينيا" },
   "Disponible pour retrait": { en: "Ready for pickup", ar: "جاهز للاستلام" },
   "Total colis": { en: "Total parcels", ar: "إجمالي الشحنات" },
+  "Prochains départs": { en: "Next departures", ar: "الرحلات القادمة" },
+  "Dépôt jusqu’au": { en: "Drop-off until", ar: "الإيداع حتى" },
+  "Départ le": { en: "Departure on", ar: "المغادرة في" },
+  "Dernier jour": { en: "Last day", ar: "آخر يوم" },
+  "Aérien": { en: "Air", ar: "جوي" },
+  "Maritime": { en: "Sea", ar: "بحري" },
   "Bonjour": { en: "Good morning", ar: "صباح الخير" },
+  "Expéditeur": { en: "Sender", ar: "المُرسِل" },
+  "Destinataire": { en: "Recipient", ar: "المُستلِم" },
+  "Payé en totalité": { en: "Fully paid", ar: "مدفوع بالكامل" },
+  "Partiellement payé": { en: "Partially paid", ar: "مدفوع جزئيًا" },
+  "Non payé": { en: "Not paid", ar: "غير مدفوع" },
   "Bon après-midi": { en: "Good afternoon", ar: "مساء الخير" },
   "Bonsoir": { en: "Good evening", ar: "مساء الخير" },
   "envoi": { en: "shipment", ar: "إرسال" },
@@ -1927,7 +2179,7 @@ function PublicTrackingPage({ data, loading }) {
   }
 
   const dest = colis ? COUNTRIES.find((c) => c.code === colis.pays) : null;
-  const publicSteps = ["Enregistré", "En transit", "Arrivé", "En livraison", "Livré"];
+  const publicSteps = ["Enregistré", "En transit", "Arrivé", "Disponible au retrait", "Livré"];
   const curIdx = colis ? Math.max(publicSteps.indexOf(colis.status), 0) : 0;
   // La terminologie "espace client" (Reçu à l’entrepôt, Arrivé en Guinée...) ne concerne que
   // les colis liés à un compte Espace Client (achats Shein/Amazon/etc. suivis via pré-alerte).
@@ -1985,11 +2237,40 @@ function PublicTrackingPage({ data, loading }) {
             )
           )}
 
+          {/*
+            Expéditeur et destinataire : la personne qui scanne l'étiquette doit reconnaître son
+            colis d'un coup d'œil, surtout quand plusieurs colis se ressemblent à l'entrepôt.
+          */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12, marginBottom: 14 }}>
+            <Info label={T("Expéditeur")} value={colis.expediteur || "—"} />
+            <Info label={T("Destinataire")} value={colis.destinataire || "—"} />
+          </div>
+
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12, marginBottom: 18 }}>
             <Info label="Destination" value={`${FLAGS[colis.pays] || ""} ${dest?.name || "—"}`} />
             <Info label="Mode" value={colis.mode === "air" ? "Aérien" : "Maritime"} />
             <Info label="Poids" value={`${colis.poids} kg`} />
             <Info label="Enregistré le" value={new Date(colis.createdAt).toLocaleDateString("fr-FR")} />
+          </div>
+
+          {/*
+            État du paiement. Le reste dû est annoncé en GNF — c'est ce que le client remettra à
+            l'agence. Page publique : on annonce ce qui reste à régler, jamais l'historique des
+            versements ni le détail des prix.
+          */}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap",
+                        background: colis.reste <= 0.005 ? "var(--ok-bg)" : colis.paye > 0 ? "var(--warn-bg)" : "var(--danger-bg)",
+                        border: "1px solid " + (colis.reste <= 0.005 ? "var(--ok-border)" : colis.paye > 0 ? "var(--warn-border)" : "var(--danger-border)"),
+                        borderRadius: 10, padding: "11px 14px", marginBottom: 18 }}>
+            <span style={{ fontSize: 12.5, fontWeight: 700,
+                           color: colis.reste <= 0.005 ? "var(--ok-fg)" : colis.paye > 0 ? "var(--warn-fg)" : "var(--danger-fg)" }}>
+              {colis.reste <= 0.005 ? T("Payé en totalité") : colis.paye > 0 ? T("Partiellement payé") : T("Non payé")}
+            </span>
+            {colis.reste > 0.005 && (
+              <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>
+                {T("Reste à payer")} : {fmtGNF(colis.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}
+              </span>
+            )}
           </div>
 
           <div style={{ borderTop: "1px solid var(--border)", paddingTop: 14 }}>
@@ -2489,7 +2770,7 @@ function ClientPreAlerteModal({ preAlertes, onAdd, onRemove, onClose, onVoirGuid
   }
 
   return (
-    <Modal onClose={onClose} title="Pré-alerte de colis" wide>
+    <Modal onClose={onClose} title="Pré-alerte de colis" wide saisieEnCours={!!trackingExterne || !!description}>
       {onVoirGuide && (
         <button type="button" onClick={onVoirGuide}
           style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
@@ -2570,7 +2851,7 @@ function DeclarationPaiementModal({ colis, onDeclarer, onClose }) {
   }
 
   return (
-    <Modal onClose={onClose} title="Déclarer un paiement">
+    <Modal onClose={onClose} title="Déclarer un paiement" saisieEnCours={!!montant}>
       <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16 }}>
         Colis <strong style={{ color: "var(--text)" }}>{colis.tracking}</strong> — reste à payer : <strong style={{ color: "var(--danger-fg)" }}>{fmt(colis.reste, "EUR")}</strong>
       </div>
@@ -2885,7 +3166,7 @@ function ClientPortalPage({ data, loading, persist }) {
     enAttente: mesPreAlertesEnAttenteCount,
     recusEntrepot: mesColis.filter((c) => c.status === "Enregistré").length,
     expedies: mesColis.filter((c) => c.status === "En transit").length,
-    arrivesGuinee: mesColis.filter((c) => ["Arrivé", "En douane", "En livraison"].includes(c.status)).length,
+    arrivesGuinee: mesColis.filter((c) => ["Arrivé", "Disponible au retrait"].includes(c.status)).length,
     livres: mesColis.filter((c) => c.status === "Livré").length,
     poidsTotal: mesColis.reduce((s, c) => s + (c.poids || 0), 0),
     montantPaye: mesColis.reduce((s, c) => s + (c.paye || 0), 0),
@@ -3012,6 +3293,45 @@ function ClientPortalPage({ data, loading, persist }) {
         {showPaiements && <ClientPaiementsModal colisListe={mesColis} onClose={() => setShowPaiements(false)} devise={deviseClient} onDeclarer={(c) => { setShowPaiements(false); setDeclarantPour(c); }} />}
         {declarantPour && <DeclarationPaiementModal colis={declarantPour} onDeclarer={(m, d, mo, r) => { declarerPaiement(declarantPour, m, d, mo, r); setDeclarantPour(null); }} onClose={() => setDeclarantPour(null)} />}
 
+        {/*
+          Prochains départs. Placé avant les statistiques : c'est la question que le client se pose
+          en arrivant, avant même de regarder où en sont ses colis. Les départs dont la date limite
+          est dépassée ne sont pas affichés — annoncer une échéance intenable serait pire que rien.
+        */}
+        {departsAVenir(data.departs).length > 0 && (
+          <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderInlineStart: "4px solid var(--info-fg)", borderRadius: 12, padding: "14px 18px", marginBottom: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 10 }}>
+              <Plane size={15} color="var(--info-fg)" />
+              <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{T("Prochains départs")}</span>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {departsAVenir(data.departs).slice(0, 4).map((d) => {
+                const jours = Math.ceil((new Date(d.dateLimite).getTime() - Date.now()) / 86400000);
+                const urgent = jours <= 2;
+                const paysDep = COUNTRIES.find((c) => c.code === d.pays);
+                return (
+                  <div key={d.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", background: "var(--surface2)", borderRadius: 8, padding: "9px 12px" }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>
+                        {FLAGS[d.pays] || ""} {paysDep?.city || d.pays} · {d.mode === "air" ? T("Aérien") : T("Maritime")}
+                      </div>
+                      {d.note && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>{d.note}</div>}
+                    </div>
+                    <div style={{ textAlign: "end", flexShrink: 0 }}>
+                      <div style={{ fontSize: 11.5, fontWeight: 700, color: urgent ? "var(--warn-fg)" : "var(--ok-fg)" }}>
+                        {jours <= 0 ? T("Dernier jour") : `${T("Dépôt jusqu’au")} ${new Date(d.dateLimite).toLocaleDateString("fr-FR", { day: "numeric", month: "short" })}`}
+                      </div>
+                      <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 1 }}>
+                        {T("Départ le")} {new Date(d.dateDepart).toLocaleDateString("fr-FR", { day: "numeric", month: "short" })}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 12, marginBottom: 22 }}>
           <StatCard label={T("Total colis")} value={statsClient.total} icon={Package} tint="#3D63FF" />
           <StatCard label={T("En attente")} value={statsClient.enAttente} icon={Clock} tint="#6B7A99" />
@@ -3068,7 +3388,7 @@ function ClientPortalPage({ data, loading, persist }) {
                             </div>
                           </div>
                         )}
-                        {["En douane", "En livraison"].includes(c.status) && agenceRetrait && (
+                        {["Disponible au retrait"].includes(c.status) && agenceRetrait && (
                           <div style={{ background: "var(--ok-bg)", border: "1px solid var(--ok-border)", borderRadius: 12, padding: "10px 12px", marginTop: 10 }}>
                             <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ok-fg)" }}>{T("Votre colis vous attend")} — {agenceRetrait.nom}</div>
                             <div style={{ fontSize: 11.5, color: "var(--text)", marginTop: 3 }}>{agenceRetrait.adresse}</div>
@@ -3362,7 +3682,7 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome }) 
           <label style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>Identifiant</label>
           <div style={{ display: "flex", alignItems: "center", border: "1.5px solid var(--border)", borderRadius: 8, padding: "9px 12px", gap: 8 }}>
             <User size={15} color="var(--muted)" />
-            <input value={id} onChange={(e) => setId(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit(e)} placeholder="admin" style={{ border: "none", outline: "none", flex: 1, fontSize: 14, background: "none", color: "var(--text)" }} />
+            <input value={id} onChange={(e) => setId(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit(e)} placeholder="Votre identifiant" style={{ border: "none", outline: "none", flex: 1, fontSize: 14, background: "none", color: "var(--text)" }} />
           </div>
           <label style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>Mot de passe</label>
           <div style={{ display: "flex", alignItems: "center", border: "1.5px solid var(--border)", borderRadius: 8, padding: "9px 12px", gap: 8 }}>
@@ -3419,15 +3739,33 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
     const oublies = colis.filter((c) => c.status === "Enregistré" && (now - new Date(c.createdAt)) / 86400000 > 3)
       .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
     const parProvenance = VENDEURS_EN_LIGNE.map((v) => ({ nom: v, count: colis.filter((c) => c.provenance === v).length })).filter((p) => p.count > 0);
-    // Chiffre d’affaires par route (pays + sens) — pas de coûts de transport suivis dans
-    // l’app, donc c’est un CA par route, pas une vraie marge/rentabilité.
+    /*
+     * Rentabilité par route (pays + sens).
+     *
+     * La marge retenue est le chiffre d'affaires diminué des commissions d'agence, seul coût
+     * rattachable à un colis précis. Les frais de transport, de douane et les charges fixes ne
+     * sont pas suivis par colis dans l'application : ils sont donc ABSENTS de ce calcul.
+     * C'est une marge avant frais d'acheminement, utile pour comparer les routes entre elles —
+     * pas un résultat net. L'écran le précise, pour ne pas laisser croire à autre chose.
+     *
+     * Le prix au kilo est ce qui permet vraiment de comparer : une route qui rapporte beaucoup
+     * en volume peut être moins intéressante au kilo qu'une autre plus modeste.
+     */
     const routeMap = {};
     colis.forEach((c) => {
       const key = `${c.pays}|${c.direction}`;
-      if (!routeMap[key]) routeMap[key] = { pays: c.pays, direction: c.direction, count: 0, ca: 0, poids: 0 };
-      routeMap[key].count++; routeMap[key].ca += c.prix; routeMap[key].poids += c.poids;
+      if (!routeMap[key]) routeMap[key] = { pays: c.pays, direction: c.direction, count: 0, ca: 0, poids: 0, commissions: 0 };
+      routeMap[key].count++;
+      routeMap[key].ca += c.prix;
+      routeMap[key].poids += Number(c.poids) || 0;
+      routeMap[key].commissions += calcCommission(c, data.commissionConfig, data.categories);
     });
-    const parRoute = Object.values(routeMap).sort((a, b) => b.ca - a.ca);
+    const parRoute = Object.values(routeMap).map((r) => ({
+      ...r,
+      marge: +(r.ca - r.commissions).toFixed(2),
+      caParKg: r.poids > 0 ? +(r.ca / r.poids).toFixed(2) : 0,
+      margeParKg: r.poids > 0 ? +((r.ca - r.commissions) / r.poids).toFixed(2) : 0,
+    })).sort((a, b) => b.marge - a.marge);
     // Widget "À faire aujourd’hui" — regroupe en un seul endroit trois choses qui vivent sur
     // des pages différentes (colis oubliés ici, impayés dans Paiements, demandes dans le
     // Centre clients), pour ne plus avoir à vérifier trois pages séparément chaque matin.
@@ -3462,10 +3800,6 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
         </div>
       </div>
 
-      // Le fond était en bleu marine codé en dur : sur un thème sombre il se confondait avec la page,
-      // et les pastilles translucides posées dessus perdaient toute lisibilité. Le bandeau utilise
-      // désormais les surfaces du thème, avec un liseré rouge à gauche pour attirer l'œil sans
-      // écraser l'information.
       {(oublies.length > 0 || impayesARelancer > 0 || centreClientsEnAttente > 0) && (
         <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderInlineStart: "4px solid var(--brand-solid)",
                       borderRadius: 14, padding: "16px 20px", marginBottom: 20, display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap",
@@ -3497,7 +3831,7 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
         <StatCard label="Volume total" value={total} icon={Package} tint="#3D63FF" trend={`+${thisMonth} ce mois`} trendColor="var(--ok-fg)" />
         <StatCard label="Revenus" value={fmt(ca, "EUR")} icon={DollarSign} tint="#16A163" trend={`${fmt(encaisse, "EUR")} encaissés`} trendColor="var(--ok-fg)" outline="#1E4430" />
         <StatCard label="En transit" value={enTransit} icon={Plane} tint="#5B8DEF" trend="Actuellement en cours" trendColor="var(--muted)" />
-        <StatCard label="À expédier" value={aExpedier} icon={AlertTriangle} tint="var(--danger-fg)" trend={aExpedier > 0 ? "Nécessite action" : "Rien en attente"} trendColor={aExpedier > 0 ? "var(--brand-solid)" : "var(--muted)"} />
+        <StatCard label="À expédier" value={aExpedier} icon={AlertTriangle} tint="var(--danger-fg)" trend={aExpedier > 0 ? "Nécessite action" : "Rien en attente"} trendColor={aExpedier > 0 ? "var(--danger-fg)" : "var(--muted)"} />
       </div>
 
       {oublies.length > 0 && (
@@ -3511,7 +3845,7 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
               const jours = Math.floor((new Date() - new Date(c.createdAt)) / 86400000);
               return (
                 <button key={c.tracking} onClick={() => onNavigate?.("colis")} style={{ display: "flex", justifyContent: "space-between", background: "none", border: "none", cursor: "pointer", padding: "4px 0", textAlign: "start" }}>
-                  <span style={{ fontSize: 12.5, color: "#fff" }}>{c.tracking} — {c.destinataire}</span>
+                  <span style={{ fontSize: 12.5, color: "var(--text)" }}>{c.tracking} — {c.destinataire}</span>
                   <span style={{ fontSize: 11.5, color: "var(--danger-fg-soft)" }}>{jours} jours</span>
                 </button>
               );
@@ -3585,8 +3919,8 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
 
       {parRoute.length > 0 && (
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 20, marginBottom: 20 }}>
-          <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14.5, marginBottom: 2 }}>Chiffre d’affaires par route</div>
-          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 12 }}>Basé sur le prix facturé — les coûts de transport ne sont pas suivis dans l’application, donc ceci n’est pas une marge nette.</div>
+          <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14.5, marginBottom: 2 }}>Rentabilité par route</div>
+          <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 }}>Marge = prix facturé moins les commissions d’agence. Les frais de transport, de douane et les charges fixes ne sont pas suivis par colis : ce n’est donc pas un résultat net, mais une base fiable pour comparer les routes entre elles.</div>
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
               <thead>
@@ -3595,7 +3929,9 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
                   <th style={{ padding: "0 8px 8px 0", fontWeight: 600 }}>Colis</th>
                   <th style={{ padding: "0 8px 8px 0", fontWeight: 600 }}>Poids total</th>
                   <th style={{ padding: "0 8px 8px 0", fontWeight: 600 }}>CA</th>
-                  <th style={{ padding: "0 0 8px 0", fontWeight: 600 }}>CA / kg</th>
+                  <th style={{ padding: "0 8px 8px 0", fontWeight: 600 }}>Commissions</th>
+                    <th style={{ padding: "0 8px 8px 0", fontWeight: 600 }}>Marge</th>
+                    <th style={{ padding: "0 0 8px 0", fontWeight: 600 }}>Marge / kg</th>
                 </tr>
               </thead>
               <tbody>
@@ -3605,7 +3941,9 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
                     <td style={{ padding: "8px 8px 8px 0", color: "var(--text)" }}>{r.count}</td>
                     <td style={{ padding: "8px 8px 8px 0", color: "var(--text)" }}>{r.poids.toFixed(1)} kg</td>
                     <td style={{ padding: "8px 8px 8px 0", color: "var(--text)" }}>{fmt(r.ca, "EUR")}</td>
-                    <td style={{ padding: "8px 0", color: "var(--muted)" }}>{r.poids > 0 ? fmt(r.ca / r.poids, "EUR") : "—"}</td>
+                    <td style={{ padding: "8px 8px 8px 0", color: "var(--muted)" }}>-{fmt(r.commissions, "EUR")}</td>
+                      <td style={{ padding: "8px 8px 8px 0", fontWeight: 700, color: r.marge >= 0 ? "var(--ok-fg)" : "var(--danger-fg)" }}>{fmt(r.marge, "EUR")}</td>
+                      <td style={{ padding: "8px 0", fontWeight: 600, color: r.margeParKg >= 0 ? "var(--text)" : "var(--danger-fg)" }}>{r.poids > 0 ? fmt(r.margeParKg, "EUR") : "—"}</td>
                   </tr>
                 ))}
               </tbody>
@@ -3735,8 +4073,10 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
   if (sub === "agences") return <AgencesConfigPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "guide") return <GuidePage onBack={back} />;
   if (sub === "categories") return <CategoriesProduitsPage data={data} persist={persist} session={session} notify={notify} onBack={back} />;
+  if (sub === "sauvegarde") return <SauvegardePage data={data} persist={persist} notify={notify} session={session} onBack={back} />;
   if (sub === "sites") return <SitesOperationPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "notifwa") return <NotificationsWhatsAppPage data={data} persist={persist} notify={notify} onBack={back} />;
+  if (sub === "departs") return <DepartsPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "paiement") return <PaiementConfigPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "branding") return <BrandingPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "users") return <UtilisateursPage data={data} persist={persist} notify={notify} onBack={back} session={session} />;
@@ -3786,7 +4126,9 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
         <Card icon={MapPin} tint="#5B8DEF" title="Siège & agences de réception" desc="Coordonnées de l’entreprise et des agences à l’étranger, affichées automatiquement sur le ticket d’envoi." onClick={() => setSub("agences")} />
         <Card icon={Sparkles} tint="#8B5CF6" title="Guide d’utilisation" desc="Explications des fonctionnalités récentes : comptes clients, pré-alertes, bordereau de réception, tarifs par palier..." onClick={() => setSub("guide")} />
         <Card icon={Receipt} tint="#E0794E" title="Catégories de Produits" desc="Configuration des types de marchandises et taxes." onClick={() => setSub("categories")} />
-        <Card icon={MessageCircle} tint="#16A163" title="Notifications WhatsApp" desc="Choisissez qui est prévenu automatiquement : expéditeur, destinataire, et pour quel événement." onClick={() => setSub("notifwa")} />
+        <Card icon={Download} tint="var(--danger-fg)" title="Sauvegarde des données" desc="Téléchargez une copie complète de votre plateforme. Le seul filet en cas de perte." onClick={() => setSub("sauvegarde")} />
+        <Card icon={Plane} tint="#5B8DEF" title="Calendrier des départs" desc="Annoncez quand part le prochain envoi : vos clients cessent d’appeler pour le demander." onClick={() => setSub("departs")} />
+        <Card icon={MessageCircle} tint="#16A163" title="Notifications clients" desc="Qui est prévenu automatiquement, et pour quel événement — par WhatsApp et par e-mail." onClick={() => setSub("notifwa")} />
         <Card icon={MapPin} tint="#16A163" title="Sites d’opération" desc="Gérez vos points d’enregistrement et de retrait, et les informations affichées sur le ticket d’envoi (horaires, paiements, stockage...)." onClick={() => setSub("sites")} />
         <Card icon={Receipt} tint="#5B8DEF" title="Paiement" desc="Configurez vos numéros pour accepter les paiements de vos clients." onClick={() => setSub("paiement")} />
       </div>
@@ -3993,6 +4335,7 @@ function ReceptionTarifsPage({ data, persist, notify, onBack }) {
   const defautPaliers = [{ max: 10, tarif: 100000 }, { max: 40, tarif: 95000 }, { max: 100, tarif: 92000 }];
   const [paliers, setPaliers] = useState(data.receptionTarifs?.paliers || defautPaliers);
   const [expressTarifEurKg, setExpressTarifEurKg] = useState(data.expressTarifEurKg ?? 12);
+  const [remiseVol, setRemiseVol] = useState(data.remiseVolume || { active: false, paliers: [{ minKg: 20, remise: 5 }, { minKg: 50, remise: 10 }, { minKg: 100, remise: 15 }] });
 
   function updatePalier(i, key, value) {
     setPaliers((list) => list.map((p, idx) => (idx === i ? { ...p, [key]: Number(value) || 0 } : p)));
@@ -4007,7 +4350,8 @@ function ReceptionTarifsPage({ data, persist, notify, onBack }) {
 
   function save() {
     const sorted = [...paliers].sort((a, b) => a.max - b.max);
-    persist({ ...data, receptionTarifs: { paliers: sorted }, expressTarifEurKg: Number(expressTarifEurKg) || 0 });
+    const volTries = { ...remiseVol, paliers: [...(remiseVol.paliers || [])].sort((a, b) => a.minKg - b.minKg) };
+    persist({ ...data, receptionTarifs: { paliers: sorted }, expressTarifEurKg: Number(expressTarifEurKg) || 0, remiseVolume: volTries });
     notify?.("Tarifs mis à jour");
   }
 
@@ -4049,6 +4393,54 @@ function ReceptionTarifsPage({ data, persist, notify, onBack }) {
         <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Livraison express (72h)</div>
         <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14 }}>Tarif que les clients voient dans leur espace pour demander une livraison express sur un de leurs colis.</div>
         <Field label="Tarif (€ / kg)"><input type="number" step="0.5" value={expressTarifEurKg} onChange={(e) => setExpressTarifEurKg(e.target.value)} style={inputStyle} /></Field>
+      </div>
+
+      <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, maxWidth: 560, border: "1px solid var(--border)", marginBottom: 20 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 14, flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 220 }}>
+            <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14 }}>Remise sur le volume</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 }}>
+              Un gros colis coûte proportionnellement moins cher à traiter : une seule étiquette, un seul
+              passage en douane, une seule remise. Cette remise porte sur le poids total et se cumule avec
+              la remise fidélité.
+            </div>
+          </div>
+          <button onClick={() => setRemiseVol((r) => ({ ...r, active: !r.active }))} aria-pressed={remiseVol.active}
+            style={{ width: 44, height: 24, borderRadius: 20, border: "none", padding: 2, cursor: "pointer", flexShrink: 0,
+                     background: remiseVol.active ? "var(--ok-fg)" : "var(--surface2)", display: "flex",
+                     justifyContent: remiseVol.active ? "flex-end" : "flex-start" }}>
+            <span style={{ width: 20, height: 20, borderRadius: 20, background: "#fff", display: "block" }} />
+          </button>
+        </div>
+
+        {remiseVol.active && (
+          <div style={{ marginTop: 16 }}>
+            {(remiseVol.paliers || []).map((pal, idx) => (
+              <div key={idx} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 12.5, color: "var(--muted)" }}>À partir de</span>
+                <input type="number" min="1" value={pal.minKg}
+                  onChange={(e) => setRemiseVol((r) => ({ ...r, paliers: r.paliers.map((x, i) => (i === idx ? { ...x, minKg: Number(e.target.value) || 0 } : x)) }))}
+                  style={{ ...inputStyle, width: 90, marginBottom: 0 }} />
+                <span style={{ fontSize: 12.5, color: "var(--muted)" }}>kg →</span>
+                <input type="number" min="0" max="100" value={pal.remise}
+                  onChange={(e) => setRemiseVol((r) => ({ ...r, paliers: r.paliers.map((x, i) => (i === idx ? { ...x, remise: Number(e.target.value) || 0 } : x)) }))}
+                  style={{ ...inputStyle, width: 80, marginBottom: 0 }} />
+                <span style={{ fontSize: 12.5, color: "var(--muted)" }}>% de remise</span>
+                {remiseVol.paliers.length > 1 && (
+                  <button onClick={() => setRemiseVol((r) => ({ ...r, paliers: r.paliers.filter((_, i) => i !== idx) }))}
+                    style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={14} /></button>
+                )}
+              </div>
+            ))}
+            <button onClick={() => setRemiseVol((r) => ({ ...r, paliers: [...(r.paliers || []), { minKg: 0, remise: 0 }] }))}
+              style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "7px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", marginTop: 4 }}>
+              + Ajouter un palier
+            </button>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 12 }}>
+              Exemple : un colis de 60 kg à 12 €/kg passe de {fmt(720, "EUR")} à {fmt(720 * (1 - remiseVolumePourcent(60, remiseVol) / 100), "EUR")}.
+            </div>
+          </div>
+        )}
       </div>
 
       <button onClick={save} style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
@@ -4311,13 +4703,14 @@ function CategoriesProduitsPage({ data, persist, session, notify, onBack }) {
   const isAdmin = session?.role === "Administrateur";
   const categories = data?.categories || [];
   const [query, setQuery] = useState("");
-  const [form, setForm] = useState(null); // category being created/edited (raw form state)
+  const [form, setForm] = useState(null);
+  const [categorieASupprimer, setCategorieASupprimer] = useState(null); // category being created/edited (raw form state)
   const [motsClesText, setMotsClesText] = useState("");
   const [testInput, setTestInput] = useState("");
   const [testResult, setTestResult] = useState(null);
   const [saved, setSaved] = useState(false);
 
-  const filtered = categories.filter((c) => !query || c.nom.toLowerCase().includes(query.toLowerCase()) || c.description?.toLowerCase().includes(query.toLowerCase()) || c.motsCles?.some((k) => k.toLowerCase().includes(query.toLowerCase())));
+  const filtered = categories.filter((c) => !query || pourRecherche(c.nom).includes(pourRecherche(query)) || pourRecherche(c.description).includes(pourRecherche(query)) || c.motsCles?.some((k) => pourRecherche(k).includes(pourRecherche(query))));
 
   function openNew() {
     setForm(emptyCategory());
@@ -4368,6 +4761,16 @@ function CategoriesProduitsPage({ data, persist, session, notify, onBack }) {
           <Search size={15} color="var(--muted)" />
           <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher par nom, description ou mots-clés..." style={{ border: "none", outline: "none", background: "none", flex: 1, fontSize: 13.5, color: "var(--text)" }} />
         </div>
+      )}
+
+      {categorieASupprimer && (
+        <ConfirmerAction
+          titre="Supprimer cette catégorie ?"
+          message={`« ${categorieASupprimer.nom} » ne sera plus proposée à la création d’un colis.`}
+          consequence="Les colis déjà enregistrés avec cette catégorie gardent leur prix : rien n’est recalculé. Seule la saisie future est affectée."
+          onConfirmer={() => { removeCategory(categorieASupprimer.id); setCategorieASupprimer(null); }}
+          onAnnuler={() => setCategorieASupprimer(null)}
+        />
       )}
 
       {form ? (
@@ -4462,7 +4865,7 @@ function CategoriesProduitsPage({ data, persist, session, notify, onBack }) {
                 {isAdmin && (
                   <div style={{ display: "flex", gap: 6 }}>
                     <button onClick={() => openEdit(c)} style={{ background: "none", border: "none", color: "var(--info-fg)", cursor: "pointer" }}><Settings size={14} /></button>
-                    <button onClick={() => removeCategory(c.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={14} /></button>
+                    <button onClick={() => setCategorieASupprimer(c)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={14} /></button>
                   </div>
                 )}
               </div>
@@ -4525,18 +4928,18 @@ function VerifierReferenceModal({ data, compteClient, onClose }) {
   const [requete, setRequete] = useState("");
   const [recherche, setRecherche] = useState(false);
 
-  const q = requete.trim().toLowerCase();
+  const q = pourRecherche(requete.trim());
   const colisSource = compteClient ? data.colis.filter((c) => c.clientAccountId === compteClient.id) : data.colis;
   const preAlertesSource = compteClient
     ? (data.preAlertes || []).filter((p) => p.clientAccountId === compteClient.id)
     : (data.preAlertes || []);
 
   const correspond = (c) => [c.tracking, c.referenceCommande, c.destinataire, c.telephone, c.notesInternes]
-    .filter(Boolean).some((v) => String(v).toLowerCase().includes(q));
+    .filter(Boolean).some((v) => pourRecherche(v).includes(q));
 
   const colisTrouves = q ? colisSource.filter(correspond) : [];
   const preAlertesTrouvees = q ? preAlertesSource.filter((p) =>
-    [p.trackingExterne, p.description, p.provenance].filter(Boolean).some((v) => String(v).toLowerCase().includes(q))
+    [p.trackingExterne, p.description, p.provenance].filter(Boolean).some((v) => pourRecherche(v).includes(q))
     && !colisTrouves.some((c) => c.tracking === p.colisTracking)) : [];
 
   const dateEtape = (colis, statut) => {
@@ -4640,7 +5043,7 @@ function TraiterPreAlerteModal({ preAlerte, client, tarifs, onValider, onClose }
   }
 
   return (
-    <Modal onClose={onClose} title="Réception du colis annoncé" wide>
+    <Modal onClose={onClose} title="Réception du colis annoncé" wide saisieEnCours={!!poidsReel}>
       <div style={{ background: "var(--surface2)", borderRadius: 12, padding: "10px 14px", marginBottom: 16 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{client ? `${client.prenom} ${client.nom}` : "Compte inconnu"}</div>
         <div style={{ fontSize: 11.5, color: "var(--muted)" }}>{client?.telephone} · annoncé le {new Date(preAlerte.dateCreation).toLocaleDateString("fr-FR")}</div>
@@ -4697,6 +5100,29 @@ function CentreClientsPage({ data, persist, notify, session }) {
   const [reponse, setReponse] = useState("");
   const [reponsesSignalement, setReponsesSignalement] = useState({});
   const [filtrePreAlertes, setFiltrePreAlertes] = useState("en_attente");
+  const [rechercheCompte, setRechercheCompte] = useState("");
+  const [compteASupprimer, setCompteASupprimer] = useState(null);
+
+  /**
+   * Supprime un compte de l'Espace Client.
+   *
+   * Les colis ne sont PAS supprimés : ils restent dans l'historique de l'agence, simplement
+   * détachés du compte. Effacer un compte ne doit jamais faire disparaître une vente ni une
+   * trace comptable — seul l'accès en ligne du client est retiré.
+   */
+  function supprimerCompteClient(compte) {
+    const next = {
+      ...data,
+      clientAccounts: (data.clientAccounts || []).filter((c) => c.id !== compte.id),
+      colis: (data.colis || []).map((c) => (c.clientAccountId === compte.id ? { ...c, clientAccountId: null } : c)),
+      preAlertes: (data.preAlertes || []).filter((p) => p.clientAccountId !== compte.id),
+    };
+    next.activityLog = pushActivity(data, session, "Compte client supprimé",
+      `${compte.prenom} ${compte.nom} (${compte.identifiant})`);
+    persist(next);
+    setCompteASupprimer(null);
+    notify?.("Compte supprimé — les colis sont conservés");
+  }
   const clients = data.clientAccounts || [];
   const clientsAvecMessages = clients.filter((c) => (c.messages || []).length > 0).sort((a, b) => {
     const derA = a.messages[a.messages.length - 1]?.date || "";
@@ -4876,6 +5302,7 @@ function CentreClientsPage({ data, persist, notify, session }) {
     ["regroupements", "Regroupements", regroupementsEnAttente],
     ["signalements", "Signalements", signalementsOuverts.length],
     ["express", "Livraison express", expressEnAttente],
+    ["comptes", "Comptes inscrits", (data.clientAccounts || []).length],
   ];
 
   return (
@@ -4895,6 +5322,92 @@ function CentreClientsPage({ data, persist, notify, session }) {
           </button>
         ))}
       </div>
+
+      {ongletActif === "comptes" && (
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "0 12px", marginBottom: 16 }}>
+            <Search size={15} color="var(--muted)" />
+            <input value={rechercheCompte} onChange={(e) => setRechercheCompte(e.target.value)}
+              placeholder="Rechercher un compte par nom, identifiant ou téléphone…"
+              style={{ ...inputStyle, border: "none", background: "transparent", marginBottom: 0, flex: 1 }} />
+          </div>
+
+          {(() => {
+            const q = pourRecherche(rechercheCompte.trim());
+            const comptes = (data.clientAccounts || [])
+              .filter((c) => !q || pourRecherche(`${c.prenom} ${c.nom} ${c.identifiant} ${c.telephone || ""}`).includes(q))
+              .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+
+            if (comptes.length === 0) {
+              return (
+                <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>
+                  {(data.clientAccounts || []).length === 0
+                    ? "Aucun client n’a encore créé de compte sur l’Espace Client."
+                    : "Aucun compte ne correspond à cette recherche."}
+                </div>
+              );
+            }
+
+            return (
+              <>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 10 }}>
+                  {comptes.length} compte{comptes.length > 1 ? "s" : ""} inscrit{comptes.length > 1 ? "s" : ""}
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {comptes.map((c) => {
+                    const sesColis = (data.colis || []).filter((x) => x.clientAccountId === c.id);
+                    return (
+                      <div key={c.id} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: "12px 14px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>{c.prenom} {c.nom}</div>
+                          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                            {c.identifiant}{c.telephone ? ` · ${c.telephone}` : ""}{c.email ? ` · ${c.email}` : ""}
+                          </div>
+                          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>
+                            {sesColis.length} colis
+                            {c.createdAt ? ` · inscrit le ${new Date(c.createdAt).toLocaleDateString("fr-FR")}` : ""}
+                            {c.derniereVisite ? ` · vu le ${new Date(c.derniereVisite).toLocaleDateString("fr-FR")}` : " · jamais revenu"}
+                          </div>
+                        </div>
+                        <button onClick={() => setCompteASupprimer(c)} title="Supprimer ce compte"
+                          style={{ background: "none", border: "1px solid var(--danger-border)", color: "var(--danger-fg)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer", flexShrink: 0 }}>
+                          <Trash2 size={13} /> Supprimer
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            );
+          })()}
+        </div>
+      )}
+
+      {compteASupprimer && (
+        <Modal onClose={() => setCompteASupprimer(null)} title="Supprimer ce compte ?">
+          <div style={{ fontSize: 13.5, color: "var(--text)", marginBottom: 12 }}>
+            <strong>{compteASupprimer.prenom} {compteASupprimer.nom}</strong> ({compteASupprimer.identifiant})
+            perdra l’accès à son Espace Client.
+          </div>
+          <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 8, padding: "11px 13px", marginBottom: 16 }}>
+            <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
+              Ses <strong>{(data.colis || []).filter((x) => x.clientAccountId === compteASupprimer.id).length} colis sont conservés</strong> dans
+              l’historique de l’agence — ils sont simplement détachés du compte. Aucune vente ni trace
+              comptable n’est effacée.
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => supprimerCompteClient(compteASupprimer)}
+              style={{ flex: 1, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+              Supprimer le compte
+            </button>
+            <button onClick={() => setCompteASupprimer(null)}
+              style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "11px 18px", fontSize: 13, cursor: "pointer" }}>
+              Annuler
+            </button>
+          </div>
+        </Modal>
+      )}
 
       {ongletActif === "messages" && (
         <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
@@ -5096,11 +5609,11 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
   const isChauffeur = session.role === "Chauffeur";
   const peutCreer = effectivePermission(session, "colis.creer");
   const list = useMemo(() => {
-    const q = deferredQuery.toLowerCase();
+    const q = pourRecherche(deferredQuery);
     return data.colis
-      .filter((c) => (isChauffeur ? c.status === "En livraison" : true))
+      .filter((c) => (isChauffeur ? c.status === "Disponible au retrait" : true))
       .filter((c) => !session.agence || (c.site || "Bambeto") === session.agence)
-      .filter((c) => !q || c.tracking.toLowerCase().includes(q) || c.destinataire.toLowerCase().includes(q) || (c.referenceCommande || "").toLowerCase().includes(q));
+      .filter((c) => !q || pourRecherche(c.tracking).includes(q) || pourRecherche(c.destinataire).includes(q) || pourRecherche(c.referenceCommande).includes(q) || pourRecherche(c.emplacement).includes(q));
   }, [data.colis, isChauffeur, session.agence, deferredQuery]);
   // Affichage progressif : la recherche porte toujours sur TOUS les colis, seul le nombre de
   // cartes rendues d'un coup est limité, pour que la page reste rapide même avec des milliers
@@ -5126,9 +5639,9 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
   const aRelancer = useMemo(() => {
     const maintenant = Date.now();
     return (data.colis || [])
-      .filter((c) => ["En douane", "En livraison"].includes(c.status))
+      .filter((c) => ["Disponible au retrait"].includes(c.status))
       .map((c) => {
-        const etape = [...(c.historique || [])].reverse().find((h) => ["En douane", "En livraison"].includes(h.status));
+        const etape = [...(c.historique || [])].reverse().find((h) => ["Disponible au retrait"].includes(h.status));
         const depuis = etape ? new Date(etape.date).getTime() : new Date(c.createdAt).getTime();
         return { ...c, joursAttente: Math.floor((maintenant - depuis) / 86400000) };
       })
@@ -5221,14 +5734,56 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
         `Bonjour ${apres.destinataire}, les informations de votre colis Ba-Diaby Express ${tracking} ont été mises à jour — ${details}.`);
     }
   }
+  const [remiseEnCours, setRemiseEnCours] = useState(null);
+
+  /**
+   * Enregistre la remise puis passe le colis à « Livré ».
+   * Séparé de advance() car cette étape exige une saisie de l'agent.
+   */
+  function confirmerRemise(tracking, preuve) {
+    // Même précaution que pour l'encaissement : on relit l'état réel avant d'agir. Un colis déjà
+    // remis par un collègue ne doit pas recevoir une seconde preuve qui écraserait la première.
+    const actuel = data.colis.find((c) => c.tracking === tracking);
+    if (actuel && actuel.remise) {
+      notify?.(`Ce colis a déjà été remis à ${actuel.remise.nom}`);
+      setRemiseEnCours(null);
+      return;
+    }
+    const maintenant = new Date().toISOString();
+    const next = { ...data, colis: data.colis.map((c) => (c.tracking !== tracking ? c : {
+      ...c, status: "Livré", remise: preuve,
+      historique: [...(c.historique || []), {
+        status: "Livré", date: maintenant,
+        utilisateur: preuve.agent, agence: c.site || "Bambeto",
+        motif: `Remis à ${preuve.nom}${preuve.typePiece ? ` (${preuve.typePiece}${preuve.numeroPiece ? " " + preuve.numeroPiece : ""})` : ""}`,
+      }],
+    })) };
+    next.activityLog = logActivity("Colis remis", `${tracking} — remis à ${preuve.nom}`);
+    persist(next);
+    setSelected(next.colis.find((c) => c.tracking === tracking));
+    setRemiseEnCours(null);
+    notify?.(`Colis ${tracking} remis à ${preuve.nom}`);
+
+    const colisMaj = next.colis.find((c) => c.tracking === tracking);
+    if (colisMaj) {
+      notifierEvenement(next, "livre", colisMaj,
+        `Bonjour ${colisMaj.destinataire}, votre colis Ba-Diaby Express ${tracking} a bien été remis à ${preuve.nom}. Merci de votre confiance !`);
+    }
+  }
+
   function advance(tracking) {
     const current = data.colis.find((c) => c.tracking === tracking);
     if (!current) return;
     const idx = STATUSES.indexOf(current.status);
     const nextStatus = STATUSES[Math.min(idx + 1, STATUSES.length - 1)];
+    // La remise exige de savoir QUI est venu : on demande avant de marquer « Livré ».
+    if (nextStatus === "Livré") { setRemiseEnCours(current); return; }
     const next = { ...data, colis: data.colis.map((c) => {
       if (c.tracking !== tracking) return c;
-      return { ...c, status: nextStatus, historique: [...c.historique, {
+      // Le code naît quand le colis devient disponible et ne change plus : le client peut avoir
+      // reçu le message plusieurs jours avant de venir le chercher.
+      const codeRetrait = nextStatus === "Disponible au retrait" && !c.codeRetrait ? genCodeRetrait() : c.codeRetrait;
+      return { ...c, status: nextStatus, codeRetrait, historique: [...c.historique, {
         status: nextStatus, date: new Date().toISOString(),
         utilisateur: `${session.prenom} ${session.nom}`, agence: c.site || "Bambeto",
       }] };
@@ -5237,9 +5792,9 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     persist(next);
 
     // Notification automatique selon les préférences. Chaque statut a son événement ; les statuts
-    // sans événement déclaré (Enregistré, En douane) ne déclenchent rien.
+    // sans événement déclaré (Enregistré) ne déclenchent rien.
     const colisMaj = next.colis.find((c) => c.tracking === tracking);
-    const evenementParStatut = { "En transit": "expedie", "Arrivé": "arrivee", "En livraison": "retrait", "Livré": "livre" };
+    const evenementParStatut = { "En transit": "expedie", "Arrivé": "arrivee", "Disponible au retrait": "retrait", "Livré": "livre" };
     const evt = evenementParStatut[nextStatus];
     if (evt && colisMaj) {
       const ag = (data.sites || []).find((x) => x.id === (data.agenceRetraitClient || "site-bambeto")) || (data.sites || [])[0];
@@ -5248,7 +5803,8 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
         arrivee: `Bonjour ${colisMaj.destinataire}, votre colis Ba-Diaby Express ${tracking} est arrivé en Guinée.`,
         retrait: `Bonjour ${colisMaj.destinataire}, votre colis Ba-Diaby Express ${tracking} est disponible au retrait.`
           + (ag ? ` Retrait à notre agence ${ag.nom} — ${ag.adresse}${ag.horaires ? ` (${ag.horaires})` : ""}.` : "")
-          + (colisMaj.reste > 0 ? ` Reste à régler : ${fmtGNF(colisMaj.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}.` : ""),
+          + (colisMaj.reste > 0 ? ` Reste à régler : ${fmtGNF(colisMaj.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}.` : "")
+          + (colisMaj.codeRetrait ? ` Votre code de retrait : ${colisMaj.codeRetrait} — présentez-le à l’agence.` : ""),
         livre: `Bonjour ${colisMaj.destinataire}, votre colis Ba-Diaby Express ${tracking} vous a bien été remis. Merci de votre confiance !`,
       };
       notifierEvenement(next, evt, colisMaj, messages[evt]);
@@ -5389,6 +5945,22 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     // à lui rendre — pas une recette. On prévient l’agent quand le montant a été ajusté.
     const cible = data.colis.find((c) => c.tracking === tracking);
     const duRestant = cible ? Math.max(+(cible.prix - cible.paye).toFixed(2), 0) : 0;
+
+    /*
+     * Protection contre un double encaissement.
+     *
+     * Deux agents peuvent avoir la même fiche ouverte au comptoir. Si le premier encaisse pendant
+     * que le second a encore l'ancien montant à l'écran, le second créditerait une somme déjà
+     * reçue — le client paierait deux fois, ou la recette serait comptée en double.
+     *
+     * `duRestant` est relu ici dans les données à jour, pas dans la copie qu'affichait l'agent :
+     * si le colis est déjà soldé, l'opération est refusée et l'agent voit pourquoi.
+     */
+    if (duRestant <= 0.005) {
+      notify?.(`Ce colis est déjà soldé — un autre agent vient peut-être de l’encaisser`);
+      return;
+    }
+
     const applique = Math.min(Math.max(montant, 0), duRestant);
     const ajuste = Math.abs(applique - montant) > 0.005;
     const next = { ...data, colis: data.colis.map((c) => {
@@ -5406,6 +5978,31 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     notify(ajuste ? `Encaissement limité au solde dû (${fmt(applique, "EUR")}) — pensez à rendre la monnaie` : "Paiement encaissé");
     const colisPaye = next.colis.find((c) => c.tracking === tracking);
     if (colisPaye) {
+      /*
+       * Facture par e-mail, si le client en a fourni une adresse.
+       *
+       * Volontairement silencieux : la plupart de vos clients n'ont pas d'adresse e-mail, et
+       * afficher une erreur à chaque encaissement serait pénible. Ceux qui en ont une reçoivent
+       * leur facture ; pour les autres, rien ne change.
+       */
+      const adresse = colisPaye.destinataireEmail || colisPaye.email;
+      if (adresse) {
+        downloadInvoice(colisPaye, next, { retourner: true })
+          .then((piece) => envoyerEmail(
+            adresse,
+            `Votre facture Ba-Diaby Express — ${tracking}`,
+            `<p>Bonjour ${colisPaye.destinataire},</p>
+             <p>Nous avons bien reçu votre paiement de <strong>${fmtGNF(applique * (LIVE_RATES.GNF || CURRENCIES.GNF))}</strong>
+             pour le colis <strong>${tracking}</strong>.</p>
+             <p>${colisPaye.reste > 0
+                ? `Reste à régler : <strong>${fmtGNF(colisPaye.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}</strong>.`
+                : "Votre colis est entièrement réglé. Merci de votre confiance !"}</p>
+             <p>Votre facture est jointe à ce message.</p>
+             <p style="color:#888;font-size:12px">Ba-Diaby Express — Transport de colis Conakry - Monde</p>`,
+            piece ? [piece] : []
+          ))
+          .catch(() => { /* l'encaissement ne doit jamais échouer à cause d'un e-mail */ });
+      }
       notifierEvenement(next, "paiement", colisPaye,
         `Bonjour ${colisPaye.destinataire}, nous avons bien reçu votre paiement de `
         + `${fmtGNF(applique * (LIVE_RATES.GNF || CURRENCIES.GNF))} pour le colis ${tracking}.`
@@ -5530,9 +6127,17 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
           <button onClick={() => imprimerLot("facture")} disabled={impressionLot} style={{ background: "var(--surface2)", color: "#fff", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>{impressionLot ? "Génération…" : "Factures A4"}</button>
         </div>
       )}
-      {showForm && <ColisForm onClose={() => setShowForm(false)} onSave={addColis} existingColis={data.colis} categories={data.categories || []} session={session} sites={data.sites} partenaires={(data.users || []).filter((u) => u.role === "Partenaire")} clientAccounts={data.clientAccounts || []} preAlertes={data.preAlertes || []} />}
+      {showForm && <ColisForm remiseVolumeConfig={data.remiseVolume} onClose={() => setShowForm(false)} onSave={addColis} existingColis={data.colis} categories={data.categories || []} session={session} sites={data.sites} partenaires={(data.users || []).filter((u) => u.role === "Partenaire")} clientAccounts={data.clientAccounts || []} preAlertes={data.preAlertes || []} />}
       {showAi && <AiColisModal onClose={() => setShowAi(false)} onCreate={addColis} data={data} session={session} />}
       {showImport && <ImportExcelModal onClose={() => setShowImport(false)} onImportMany={importerColisMany} data={data} session={session} />}
+      {remiseEnCours && <RemiseColisModal colis={remiseEnCours} session={session}
+        onConfirmer={(preuve) => confirmerRemise(remiseEnCours.tracking, preuve)}
+        onRenvoyerCode={(c) => {
+          notifierEvenement(data, "retrait", c,
+            `Bonjour ${c.destinataire}, votre code de retrait pour le colis ${c.tracking} est ${c.codeRetrait}. Présentez-le à notre agence.`);
+          notify?.("Code renvoyé au client");
+        }}
+        onClose={() => setRemiseEnCours(null)} />}
       {showEncaisseGroupe && <EncaisserGroupeModal data={data} onEncaisser={encaisserGroupe} onClose={() => setShowEncaisseGroupe(false)} />}
       {showReception && <ReceptionBordereauModal onClose={() => setShowReception(false)} data={data} persist={persist} notify={notify} session={session} />}
       {selected && <ColisDetail colis={selected} onClose={() => setSelected(null)} onAdvance={() => advance(selected.tracking)} onDelete={() => remove(selected.tracking)} onCancel={(motif) => annuler(selected.tracking, motif)} onRefuser={(motif) => refuser(selected.tracking, motif)} onDeclarerLitige={(t, d) => declarerLitige(selected.tracking, t, d)} onResoudreLitige={(r, i) => resoudreLitige(selected.tracking, r, i)} onMajRetour={(statutRetour) => majRetour(selected.tracking, statutRetour)} onUpdate={(patch) => updateColis(selected.tracking, patch)} onEncaisser={(montant, mode, montantSaisi, deviseSaisie, details, declarationId) => encaisser(selected.tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId)} canManage={!isChauffeur} isAdmin={session.role === "Administrateur"} isChauffeur={isChauffeur} data={data} session={session} />}
@@ -5807,7 +6412,7 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
   const ETAPES_COLIS = [
     { cle: "En transit", bouton: "Marquer expédiés", vuClient: "Expédié", depuis: ["Enregistré"] },
     { cle: "Arrivé", bouton: "Marquer arrivés en Guinée", vuClient: "Arrivé en Guinée", depuis: ["Enregistré", "En transit"] },
-    { cle: "En livraison", bouton: "Marquer disponibles au retrait", vuClient: "Disponible pour retrait", depuis: ["Arrivé", "En douane"] },
+    { cle: "Disponible au retrait", bouton: "Marquer disponibles au retrait", vuClient: "Disponible pour retrait", depuis: ["Arrivé"] },
   ];
 
   function basculerSelection(tracking) {
@@ -5845,7 +6450,7 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
       // On passe par notifierEvenement pour que les réglages (Configuration → Notifications
       // WhatsApp) soient respectés : l'agence peut choisir de prévenir aussi l'expéditeur,
       // ou de désactiver complètement une étape.
-      const evt = { "En transit": "expedie", "Arrivé": "arrivee", "En livraison": "retrait" }[etape.cle] || "arrivee";
+      const evt = { "En transit": "expedie", "Arrivé": "arrivee", "Disponible au retrait": "retrait" }[etape.cle] || "arrivee";
       if (!c.telephone && !c.expediteurTelephone) { echecs.push({ tracking: c.tracking, raison: "pas de numéro" }); }
       else {
         const { envoyes: n } = await notifierEvenement(data, evt, c, messagePourEtape(c, etape));
@@ -6150,6 +6755,13 @@ function TicketCard({ colis, onOpen, selectionMode, checked }) {
         {colis.referenceCommande && (
           <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 1 }}>réf. commande : <strong style={{ color: "var(--text)" }}>{colis.referenceCommande}</strong></div>
         )}
+        {colis.emplacement && !colis.remise && (
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 4, marginTop: 4, marginInlineEnd: 6,
+                        background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)",
+                        borderRadius: 20, padding: "2px 9px", fontSize: 10, fontWeight: 700 }}>
+            <MapPin size={9} /> {colis.emplacement}
+          </div>
+        )}
         {colis.litige && (
           <div style={{ display: "inline-flex", alignItems: "center", gap: 4, marginTop: 4,
                         background: colis.litige.statut === "Ouvert" ? "var(--warn-bg)" : "var(--ok-bg)",
@@ -6197,6 +6809,14 @@ function StepIndicator({ step }) {
 }
 
 /** Calcule la valeur (en GNF) d’une ligne produit : mode catalogue (catégorie) ou mode personnalisé (montant/devise/type saisis). */
+/** Remise accordée selon le poids total du colis, en pourcentage. 0 si désactivée ou hors palier. */
+function remiseVolumePourcent(poidsTotal, config) {
+  if (!config || !config.active) return 0;
+  const paliers = [...(config.paliers || [])].sort((a, b) => b.minKg - a.minKg);
+  const atteint = paliers.find((p) => (Number(poidsTotal) || 0) >= Number(p.minKg));
+  return atteint ? Number(atteint.remise) || 0 : 0;
+}
+
 function produitValeurGNF(p, categories) {
   const qty = Number(p.quantite) || 1;
   if (p.personnalise) {
@@ -6218,7 +6838,7 @@ function splitNom(full) {
   return { prenom: parts[0], nom: parts.slice(1).join(" ") };
 }
 
-function ColisForm({ onClose, onSave, existingColis, categories, session, sites, partenaires, clientAccounts, preAlertes }) {
+function ColisForm({ onClose, onSave, existingColis, categories, session, sites, partenaires, clientAccounts, preAlertes, remiseVolumeConfig }) {
   const availableCountries = allowedCountries(session);
   const clientDirectory = useMemo(() => buildClientDirectory(existingColis || []), [existingColis]);
   const [step, setStep] = useState(0);
@@ -6260,12 +6880,96 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
   const [clientAccountId, setClientAccountId] = useState("");
   const [preAlerteRapprochee, setPreAlerteRapprochee] = useState("");
   const [provenance, setProvenance] = useState("");
+  /*
+   * Recherche d'un client par son nom.
+   *
+   * Reconnaître un client à son numéro suppose que l'agent le connaisse — or au comptoir, le
+   * client donne son nom bien plus souvent. Avec 343 fiches, retrouver « Fatoumata Diallo »
+   * en tapant trois lettres évite de tout ressaisir à chaque envoi.
+   */
   const [rechercheClient, setRechercheClient] = useState("");
+  const [coteRecherche, setCoteRecherche] = useState(null);
+
+  const suggestionsClients = useMemo(() => {
+    const q = pourRecherche(rechercheClient.trim());
+    if (q.length < 2) return [];
+    return clientDirectory
+      .filter((c) => pourRecherche(c.nomComplet).includes(q) || (c.telephone || "").includes(q))
+      .slice(0, 6);
+  }, [rechercheClient, clientDirectory]);
+
+  /*
+   * Champ de recherche par nom.
+   *
+   * Écrit comme une fonction qui retourne du JSX, et non comme un composant défini dans le corps
+   * du formulaire : un composant recréé à chaque rendu est démonté puis remonté par React, ce qui
+   * fait perdre le focus et la frappe dès la première lettre.
+   */
+  function champRecherche(cote) {
+    const actif = coteRecherche === cote;
+    return (
+      <div style={{ position: "relative", marginBottom: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "0 12px" }}>
+          <Search size={15} color="var(--muted)" />
+          <input
+            value={actif ? rechercheClient : ""}
+            onChange={(e) => { setCoteRecherche(cote); setRechercheClient(e.target.value); }}
+            onFocus={() => setCoteRecherche(cote)}
+            placeholder="Rechercher un client déjà enregistré (nom ou téléphone)…"
+            style={{ ...inputStyle, border: "none", background: "transparent", marginBottom: 0, flex: 1 }} />
+          {actif && rechercheClient && (
+            <button type="button" onClick={() => setRechercheClient("")}
+              style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 16, lineHeight: 1 }}>×</button>
+          )}
+        </div>
+        {actif && suggestionsClients.length > 0 && (
+          <div style={{ position: "absolute", top: "100%", insetInlineStart: 0, insetInlineEnd: 0, zIndex: 20, marginTop: 4,
+                        background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8,
+                        boxShadow: "0 8px 22px rgba(0,0,0,0.22)", overflow: "hidden" }}>
+            {suggestionsClients.map((c) => (
+              <button key={c.telephone} type="button"
+                onClick={() => { appliquerClient(c, cote); setRechercheClient(""); setCoteRecherche(null); }}
+                style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10,
+                         background: "none", border: "none", borderBottom: "1px solid var(--surface2)",
+                         padding: "9px 12px", cursor: "pointer", textAlign: "start" }}>
+                <span style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>{c.nomComplet}</span>
+                <span style={{ fontSize: 11.5, color: "var(--muted)", flexShrink: 0 }}>
+                  {c.telephone}{c.count > 0 ? ` · ${c.count} envoi${c.count > 1 ? "s" : ""}` : ""}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+        {actif && rechercheClient.trim().length >= 2 && suggestionsClients.length === 0 && (
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6 }}>
+            Aucun client trouvé — remplissez les champs ci-dessous.
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function appliquerClient(match, cote) {
+    const { prenom, nom } = splitNom(match.nomComplet);
+    if (cote === "exp") {
+      setExpPrenom(prenom); setExpNom(nom); setExpEmail(match.email || ""); setExpAdresse(match.adresse || "");
+      setExpTelephone(match.telephone || "");
+      if (match.pays && COUNTRIES.some((c) => c.code === match.pays)) setExpPays(match.pays);
+      setExpClientTrouve(match);
+    } else {
+      setDestPrenom(prenom); setDestNom(nom); setDestEmail(match.email || ""); setDestAdresse(match.adresse || "");
+      setDestTelephone(match.telephone || "");
+      setDestVille(match.ville || ""); setDestCodePostal(match.codePostal || "");
+      if (match.pays && COUNTRIES.some((c) => c.code === match.pays)) setDestPays(match.pays);
+      setDestClientTrouve(match);
+    }
+  }
 
   function chercherClient(tel, cote) {
     const clean = (tel || "").replace(/\s/g, "");
     if (clean.length < 6) { cote === "exp" ? setExpClientTrouve(null) : setDestClientTrouve(null); return; }
-    const match = clientDirectory.find((c) => c.telephone.replace(/\s/g, "") === clean);
+    const cle = normaliserTelephone(clean);
+    const match = clientDirectory.find((c) => normaliserTelephone(c.telephone) === cle);
     if (!match) { cote === "exp" ? setExpClientTrouve(null) : setDestClientTrouve(null); return; }
     const { prenom, nom } = splitNom(match.nomComplet);
     if (cote === "exp") {
@@ -6296,7 +7000,10 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
   const telephone = destTelephone;
   const previousCount = telephone ? (existingColis || []).filter((c) => c.telephone === telephone.trim()).length : 0;
   const discountLoyalty = loyaltyDiscount(previousCount);
-  const prixApresFidelite = +(prixBrut * (1 - discountLoyalty / 100)).toFixed(2);
+  // Les deux remises se cumulent : la fidélité récompense le nombre d'envois, la remise volume
+  // récompense la taille du colis. Elles s'appliquent l'une après l'autre.
+  const discountVolume = remiseVolumePourcent(poidsTotal, remiseVolumeConfig);
+  const prixApresFidelite = +(prixBrut * (1 - discountLoyalty / 100) * (1 - discountVolume / 100)).toFixed(2);
   const rabaisEUR = +((Number(rabaisMontant) || 0) / (LIVE_RATES[rabaisDevise] || CURRENCIES[rabaisDevise] || 1)).toFixed(2);
   const prix = Math.max(+(prixApresFidelite - rabaisEUR).toFixed(2), 0);
   const payeNum = (Number(paye) || 0) / (LIVE_RATES[payeDevise] || CURRENCIES[payeDevise] || 1);
@@ -6306,18 +7013,67 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
   // Le poids et la quantité ne peuvent pas être négatifs : sans ce contrôle, un colis à -5 kg
   // pouvait être enregistré et faussait ensuite les totaux de poids et les commissions.
   // L'attribut min= du champ ne protège pas contre un collage ou une saisie programmée.
+  /*
+   * Suggestion automatique de la catégorie d'après le nom du produit.
+   *
+   * Chaque catégorie porte des mots-clés (« adidas » et « nike » pour Chaussure marque, la liste
+   * des marques pour Vêtements de marque…). Ils servaient uniquement à la recherche : l'agent
+   * devait quand même choisir dans une liste de 30 entrées à chaque ligne de produit.
+   *
+   * On ne remplace jamais un choix déjà fait — l'agent garde la main.
+   */
+  function deviner(nomProduit) {
+    const texte = pourRecherche(nomProduit);
+    if (texte.length < 3) return null;
+    const trouvee = (categories || []).find((cat) =>
+      (cat.motsCles || []).some((mot) => {
+        const m = pourRecherche(mot);
+        return m.length >= 3 && texte.includes(m);
+      })
+    );
+    return trouvee ? trouvee.nom : null;
+  }
+
   function updateProduit(id, patch) {
     const propre = { ...patch };
     if ("poids" in propre && propre.poids !== "" && Number(propre.poids) < 0) propre.poids = "0";
     if ("quantite" in propre && propre.quantite !== "" && Number(propre.quantite) < 1) propre.quantite = "1";
-    setProduits((list) => list.map((p) => (p.id === id ? { ...p, ...propre } : p)));
+    setProduits((list) => list.map((p) => {
+      if (p.id !== id) return p;
+      const maj = { ...p, ...propre };
+      // La catégorie n'est suggérée que si l'agent n'en a pas encore choisi une.
+      if ("nom" in propre && !p.categorie) {
+        const suggeree = deviner(propre.nom);
+        if (suggeree) maj.categorie = suggeree;
+      }
+      return maj;
+    }));
   }
   function addProduit() { setProduits((list) => [...list, emptyProduit()]); }
   function removeProduit(id) { setProduits((list) => (list.length > 1 ? list.filter((p) => p.id !== id) : list)); }
 
+  /*
+   * Ajout de photos, plafonné à 4 par colis.
+   *
+   * Chaque photo est conservée en base64 dans les données, et l'application réécrit l'ensemble
+   * à chaque modification. Sans plafond, un agent zélé qui photographie sous six angles alourdit
+   * durablement TOUTES les opérations de l'agence, pas seulement ce colis.
+   * Quatre vues suffisent à constater l'état d'un colis à l'arrivée.
+   */
+  const MAX_PHOTOS = 4;
+
   function addPhotos(e) {
     const files = Array.from(e.target.files || []);
-    files.forEach((file) => {
+    const placeRestante = MAX_PHOTOS - photos.length;
+    if (placeRestante <= 0) {
+      notify?.(`${MAX_PHOTOS} photos au maximum par colis`);
+      e.target.value = "";
+      return;
+    }
+    if (files.length > placeRestante) {
+      notify?.(`Seules les ${placeRestante} premières photos seront ajoutées (${MAX_PHOTOS} au maximum)`);
+    }
+    files.slice(0, placeRestante).forEach((file) => {
       const reader = new FileReader();
       reader.onload = () => {
         const img = new Image();
@@ -6378,7 +7134,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
   }
 
   return (
-    <Modal onClose={onClose} title="Nouveau Colis" wide>
+    <Modal onClose={onClose} title="Nouveau Colis" wide saisieEnCours={!!expPrenom || !!expNom || !!destPrenom || !!destNom || produits.some((p) => p.nom)}>
       <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14 }}>📍 Envoi de {expCountry?.name.toUpperCase()} {FLAGS[expPays]} vers {destCountry?.name.toUpperCase()} {FLAGS[destPays]}</div>
       <StepIndicator step={step} />
       <div>
@@ -6412,9 +7168,10 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
               <span style={{ fontSize: 20 }}>{FLAGS[expPays]}</span>
               <div><div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Expéditeur • {expCountry?.name.toUpperCase()}</div><div style={{ fontSize: 11.5, color: "var(--muted)" }}>Personne qui envoie le colis</div></div>
             </div>
+            {champRecherche("exp")}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14 }}>
               <div style={{ gridColumn: "1 / -1" }}>
-                <Field label="Téléphone * — tapez le numéro d’un client existant pour un remplissage automatique">
+                <Field label="Téléphone * — le client est reconnu automatiquement s’il a déjà expédié">
                   <PhoneInput value={expTelephone} onChange={setExpTelephone} onBlur={(full) => chercherClient(full, "exp")} />
                 </Field>
                 {expClientTrouve && <div style={{ fontSize: 11.5, color: "var(--ok-fg)", marginTop: -8, marginBottom: 12 }}>✓ Client reconnu — informations reprises de son dernier colis du {new Date(expClientTrouve.date).toLocaleDateString("fr-FR")}</div>}
@@ -6434,9 +7191,10 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
               <span style={{ fontSize: 20 }}>{FLAGS[destPays]}</span>
               <div><div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Destinataire • {destCountry?.name.toUpperCase()}</div><div style={{ fontSize: 11.5, color: "var(--muted)" }}>Personne qui recevra le colis</div></div>
             </div>
+            {champRecherche("dest")}
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14 }}>
               <div style={{ gridColumn: "1 / -1" }}>
-                <Field label="Téléphone * — tapez le numéro d’un client existant pour un remplissage automatique">
+                <Field label="Téléphone * — le client est reconnu automatiquement s’il a déjà reçu un colis">
                   <PhoneInput value={destTelephone} onChange={setDestTelephone} onBlur={(full) => chercherClient(full, "dest")} defaultDial={DIAL_CODES.find((c) => c.name === destCountry?.name)?.dial} />
                 </Field>
                 {destClientTrouve && <div style={{ fontSize: 11.5, color: "var(--ok-fg)", marginTop: -8, marginBottom: 12 }}>✓ Client reconnu — informations reprises de son dernier colis du {new Date(destClientTrouve.date).toLocaleDateString("fr-FR")}</div>}
@@ -6565,10 +7323,12 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
               </Field>
             </div>
             {discountLoyalty > 0 && <div style={{ fontSize: 12, color: "var(--ok-fg)", marginBottom: 10 }}>Remise fidélité automatique : -{discountLoyalty}% ({previousCount} envois précédents)</div>}
+            {discountVolume > 0 && <div style={{ fontSize: 12, color: "var(--ok-fg)", marginBottom: 10 }}>Remise volume : -{discountVolume}% ({poidsTotal.toFixed(1)} kg)</div>}
             <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px" }}>
               <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", marginBottom: 10 }}>FRAIS D’EXPÉDITION</div>
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "var(--text)", marginBottom: 6 }}><span>Valeur des produits ({poidsTotal.toFixed(1)} kg · {mode === "air" ? "Aérien" : "Maritime"})</span><span>{fmt(prixBrut, "GNF")}</span></div>
               {discountLoyalty > 0 && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "var(--ok-fg)", marginBottom: 6 }}><span>Remise fidélité (-{discountLoyalty}%)</span><span>-{fmt(prixBrut - prixApresFidelite, "GNF")}</span></div>}
+              {discountVolume > 0 && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "var(--ok-fg)", marginBottom: 6 }}><span>Remise volume (-{discountVolume}%)</span><span>-{fmt(prixBrut * (1 - discountLoyalty / 100) * discountVolume / 100, destCurrency)}</span></div>}
               {rabaisEUR > 0 && <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: "var(--ok-fg)", marginBottom: 6 }}><span>Rabais ({fmt(rabaisEUR, rabaisDevise)})</span><span>-{fmt(rabaisEUR, "GNF")}</span></div>}
               <div style={{ borderTop: "1px solid var(--border)", margin: "8px 0" }} />
               <div style={{ display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 700, color: "var(--text)" }}><span>Total à payer</span><span>{fmt(prix, "GNF")}</span></div>
@@ -7230,7 +7990,13 @@ async function downloadRecu(colis, paiement) {
 
 /** Bon de sortie PDF — preuve de remise du colis à la personne qui l’a récupéré. */
 async function downloadBonSortie(colis) {
-  if (!colis.bonSortie) return;
+  /*
+   * Deux sources possibles : la preuve de remise saisie au moment de marquer « Livré » (voie
+   * normale depuis l'ajout du contrôle), ou l'ancien bon de sortie rempli à la main. On accepte
+   * les deux pour ne pas perdre les colis déjà traités avant ce changement.
+   */
+  const remise = colis.remise || colis.bonSortie;
+  if (!remise) return;
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a5" }));
   doc.setFillColor(10, 38, 71); doc.rect(0, 0, 148, 22, "F");
@@ -7263,16 +8029,38 @@ async function downloadBonSortie(colis) {
   };
   line("Colis", `${colis.tracking}`);
   line("Destinataire prévu", colis.destinataire);
-  line("Récupéré par", colis.bonSortie.nom);
-  line("Numéro de téléphone", colis.bonSortie.telephone);
-  line("Pièce d’identité", colis.bonSortie.piece);
-  line("Date de remise", colis.bonSortie.date ? new Date(colis.bonSortie.date).toLocaleDateString("fr-FR") : "—");
-  line("Enregistré par", colis.bonSortie.enregistrePar);
+  line("Récupéré par", remise.nom);
+  line("Emplacement en entrepôt", colis.emplacement);
+  line("Pièce d’identité", remise.piece || (remise.typePiece ? `${remise.typePiece}${remise.numeroPiece ? " " + remise.numeroPiece : ""}` : ""));
+  line("Date de remise", remise.date ? new Date(remise.date).toLocaleString("fr-FR") : "—");
+  line("Enregistré par", remise.enregistrePar || remise.agent);
 
   doc.setDrawColor(220); doc.line(10, ZB.sepBas, 138, ZB.sepBas);
   doc.setFontSize(9); doc.setTextColor(90, 90, 90);
+  /*
+   * Si la remise a déjà été enregistrée dans l'application, on imprime la personne, sa qualité
+   * et sa pièce d'identité : le bon devient une vraie preuve, pas seulement une case à signer.
+   * Sinon on garde la ligne vierge, pour le cas où l'agent imprime avant de remettre.
+   */
+  if (colis.remise) {
+    doc.setFontSize(8); doc.setTextColor(120, 120, 120);
+    doc.text("Remis à", 10, ZB.signature - 8);
+    doc.setFontSize(9.5); doc.setTextColor(30, 30, 30); doc.setFont(undefined, "bold");
+    const qualite = colis.remise.lien === "proche" ? " (un proche)" : colis.remise.lien === "mandataire" ? " (mandataire)" : "";
+    doc.text(`${colis.remise.nom}${qualite}`, 10, ZB.signature - 3);
+    doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(90, 90, 90);
+    const piece = colis.remise.typePiece
+      ? `${colis.remise.typePiece}${colis.remise.numeroPiece ? " " + colis.remise.numeroPiece : ""}`
+      : "Aucune pièce présentée";
+    doc.text(piece, 10, ZB.signature + 2);
+    doc.text(`Le ${new Date(colis.remise.date).toLocaleString("fr-FR")} · agent : ${colis.remise.agent}`, 10, ZB.signature + 7);
+    doc.setFontSize(9); doc.setTextColor(120, 120, 120);
+    doc.text("Signature :", 10, ZB.signature + 15);
+    doc.setDrawColor(150); doc.line(10, ZB.traitSignature + 8, 90, ZB.traitSignature + 8);
+  } else {
   doc.text("Signature de la personne qui récupère :", 10, ZB.signature);
   doc.setDrawColor(150); doc.line(10, ZB.traitSignature, 90, ZB.traitSignature);
+  }
 
   doc.setDrawColor(200); doc.line(10, ZB.sepPied, 138, ZB.sepPied);
   doc.setFontSize(7.5); doc.setTextColor(120, 120, 120);
@@ -7286,7 +8074,14 @@ async function downloadBonSortie(colis) {
  * récupérées automatiquement depuis la base de données (data.sites / data.agencesReception),
  * selon l’agence d’enregistrement du colis et son pays de destination.
  */
-async function downloadInvoice(colis, data) {
+/**
+ * Génère la facture du colis.
+ *
+ * `options.retourner` demande le PDF en base64 au lieu de l'ouvrir : c'est ce qui permet de le
+ * joindre à un e-mail. Le document est identique dans les deux cas — une seule mise en page à
+ * maintenir, donc aucun risque que la facture envoyée diffère de celle imprimée.
+ */
+async function downloadInvoice(colis, data, options = {}) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF());
   const dest = COUNTRIES.find((c) => c.code === colis.pays);
@@ -7505,6 +8300,10 @@ async function downloadInvoice(colis, data) {
   y += 4;
   doc.text(`Document généré le ${new Date().toLocaleString("fr-FR")}`, M, y);
 
+  if (options.retourner) {
+    // jsPDF produit une chaîne base64 avec un préfixe « data:… » qu'il faut retirer.
+    return { nom: `facture-${colis.tracking}.pdf`, contenu: doc.output("datauristring").split(",")[1] };
+  }
   openPdf(doc, `ticket-${colis.tracking}.pdf`);
 }
 
@@ -7735,6 +8534,160 @@ function LitigeModal({ colis, onDeclarer, onResoudre, onClose }) {
   );
 }
 
+/**
+ * Preuve de remise, exigée avant de marquer un colis « Livré ».
+ *
+ * Sans elle, l'application n'enregistrait que la date et l'agent : rien n'indiquait QUI était
+ * venu chercher le colis. Le jour où un client affirme n'avoir rien reçu, l'agence n'a rien à
+ * opposer — et sur des colis à plusieurs centaines de milliers de francs, c'est le litige le
+ * plus coûteux.
+ *
+ * Le nom est obligatoire ; la pièce d'identité ne l'est pas, car beaucoup de clients ne l'ont
+ * pas sur eux et bloquer la remise pour cela paralyserait le comptoir.
+ */
+function RemiseColisModal({ colis, session, onConfirmer, onClose, onRenvoyerCode }) {
+  const [nom, setNom] = useState(colis.destinataire || "");
+  const [codeSaisi, setCodeSaisi] = useState("");
+  const [sansCode, setSansCode] = useState(false);
+  const [renvoye, setRenvoye] = useState(false);
+  const codeAttendu = colis.codeRetrait;
+  const codeBon = !codeAttendu || sansCode || codeSaisi === codeAttendu;
+  const [lienDestinataire, setLien] = useState("lui-meme");
+  const [typePiece, setTypePiece] = useState("");
+  const [numeroPiece, setNumeroPiece] = useState("");
+  const [note, setNote] = useState("");
+  const resteDu = Number(colis.reste) || 0;
+
+  const liens = [
+    ["lui-meme", "Le destinataire"],
+    ["proche", "Un proche"],
+    ["mandataire", "Un mandataire"],
+  ];
+
+  return (
+    <Modal onClose={onClose} title={`Remise du colis ${colis.tracking}`} niveau={1}>
+      {resteDu > 0.005 && (
+        <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 10, padding: "11px 14px", marginBottom: 16 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--danger-fg)" }}>
+            Reste à encaisser : {fmtGNF(resteDu * (LIVE_RATES.GNF || CURRENCIES.GNF))}
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--text)", marginTop: 3 }}>
+            Pensez à encaisser avant de remettre le colis.
+          </div>
+        </div>
+      )}
+
+      {/*
+        Vérification du code de retrait.
+
+        Le code prouve que la personne en face est bien celle qui a reçu le message. L'agent peut
+        toutefois passer outre : un client de bonne foi qui a perdu son téléphone ne doit jamais
+        repartir sans son colis. Le contournement est alors enregistré avec la remise — c'est une
+        décision tracée, pas un trou dans la procédure.
+      */}
+      {codeAttendu && !sansCode && (
+        <div style={{ background: codeSaisi && !codeBon ? "var(--danger-bg)" : "var(--surface2)",
+                      border: "1px solid " + (codeSaisi && !codeBon ? "var(--danger-border)" : "var(--border)"),
+                      borderRadius: 10, padding: "12px 14px", marginBottom: 16 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>
+            Code de retrait à 4 chiffres
+          </div>
+          <input value={codeSaisi} onChange={(e) => setCodeSaisi(e.target.value.replace(/\D/g, "").slice(0, 4))}
+            inputMode="numeric" placeholder="••••" autoFocus
+            style={{ ...inputStyle, letterSpacing: 10, fontSize: 20, fontWeight: 700, textAlign: "center", marginBottom: 8 }} />
+          {codeSaisi.length === 4 && (
+            <div style={{ fontSize: 12, fontWeight: 700, color: codeBon ? "var(--ok-fg)" : "var(--danger-fg)" }}>
+              {codeBon ? "\u2713 Code correct" : "Code incorrect"}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 8 }}>
+            <button type="button" onClick={() => { onRenvoyerCode?.(colis); setRenvoye(true); }}
+              style={{ background: "none", border: "none", color: "var(--info-fg)", fontSize: 11.5, fontWeight: 600, cursor: "pointer", padding: 0 }}>
+              {renvoye ? "Code renvoyé" : "Renvoyer le code au client"}
+            </button>
+            <button type="button" onClick={() => setSansCode(true)}
+              style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 11.5, cursor: "pointer", padding: 0 }}>
+              Le client n’a pas son code
+            </button>
+          </div>
+        </div>
+      )}
+
+      {sansCode && (
+        <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 10, padding: "11px 14px", marginBottom: 16 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--warn-fg)" }}>Remise sans code</div>
+          <div style={{ fontSize: 11.5, color: "var(--text)", marginTop: 3 }}>
+            Vérifiez l’identité de la personne. Cette remise sera signalée comme effectuée sans code.
+          </div>
+          <button type="button" onClick={() => { setSansCode(false); setCodeSaisi(""); }}
+            style={{ background: "none", border: "none", color: "var(--info-fg)", fontSize: 11.5, fontWeight: 600, cursor: "pointer", padding: 0, marginTop: 6 }}>
+            Finalement, saisir le code
+          </button>
+        </div>
+      )}
+
+      <Field label="Nom de la personne qui récupère *">
+        <input value={nom} onChange={(e) => setNom(e.target.value)} style={inputStyle} />
+      </Field>
+
+      <Field label="En qualité de">
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {liens.map(([k, label]) => (
+            <button key={k} type="button" onClick={() => setLien(k)}
+              style={{ flex: 1, minWidth: 90, background: lienDestinataire === k ? "var(--info-bg)" : "var(--surface2)",
+                       border: "1.5px solid " + (lienDestinataire === k ? "var(--info-border)" : "var(--border)"),
+                       color: lienDestinataire === k ? "var(--info-fg)" : "var(--muted)",
+                       borderRadius: 8, padding: "9px 6px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </Field>
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <Field label="Pièce présentée (facultatif)">
+          <select value={typePiece} onChange={(e) => setTypePiece(e.target.value)} style={{ ...inputStyle, marginBottom: 0, width: 175 }}>
+            <option value="">Aucune</option>
+            <option value="CNI">Carte d’identité</option>
+            <option value="Passeport">Passeport</option>
+            <option value="Permis">Permis de conduire</option>
+            <option value="Carte consulaire">Carte consulaire</option>
+            <option value="Autre">Autre</option>
+          </select>
+        </Field>
+        {typePiece && (
+          <Field label="Numéro de la pièce">
+            <input value={numeroPiece} onChange={(e) => setNumeroPiece(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }} />
+          </Field>
+        )}
+      </div>
+
+      <Field label="Observation (facultatif)">
+        <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Emballage vérifié devant le client…" style={inputStyle} />
+      </Field>
+
+      <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 14 }}>
+        Ces informations sont conservées avec le colis et apparaissent sur le bon de sortie.
+        Elles vous protègent en cas de contestation.
+      </div>
+
+      <button onClick={() => onConfirmer({
+          nom: nom.trim(), lien: lienDestinataire, typePiece, numeroPiece: numeroPiece.trim(), note: note.trim(),
+          date: new Date().toISOString(),
+          agent: `${session.prenom} ${session.nom}`.trim() || session.identifiant,
+          codeVerifie: !!codeAttendu && !sansCode,
+          sansCode: !!codeAttendu && sansCode,
+        })}
+        disabled={!nom.trim() || !codeBon}
+        style={{ width: "100%", background: nom.trim() && codeBon ? "#16A163" : "var(--surface2)", color: nom.trim() && codeBon ? "#fff" : "var(--muted)",
+                 border: "none", borderRadius: 8, padding: "12px 0", fontSize: 14, fontWeight: 700,
+                 cursor: nom.trim() && codeBon ? "pointer" : "not-allowed" }}>
+        Confirmer la remise
+      </button>
+    </Modal>
+  );
+}
+
 function EncaisserGroupeModal({ data, onEncaisser, onClose }) {
   const impayes = (data.colis || []).filter((c) => c.reste > 0.005 && !["Annulé", "Refusé"].includes(c.status));
   const parClient = {};
@@ -7845,7 +8798,7 @@ function EncaisserGroupeModal({ data, onEncaisser, onClose }) {
   );
 }
 
-function EditColisForm({ colis, onClose, onSave, tarifsReception }) {
+function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeConfig, categories }) {
   const [expediteur, setExpediteur] = useState(colis.expediteur);
   const [destinataire, setDestinataire] = useState(colis.destinataire);
   const [telephone, setTelephone] = useState(colis.telephone);
@@ -7864,12 +8817,26 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception }) {
    * export, ce qui écrasait le prix d'un colis de l'Espace Client dès qu'on ouvrait la fiche
    * pour corriger un simple numéro de téléphone.
    */
+  /*
+   * Trois barèmes coexistent, et la modification doit reprendre CELUI qui a servi à créer le colis :
+   *   - paliers de réception, pour les colis annoncés depuis l'Espace Client ;
+   *   - somme des produits selon leur catégorie, cas le plus courant ;
+   *   - barème export par pays et mode, quand le colis n'a pas de produit tarifé.
+   *
+   * Auparavant la modification appliquait toujours le barème export : ouvrir la fiche d'un colis
+   * « Bateau » et enregistrer sans rien changer faisait passer son prix de 26,32 à 125,00 EUR,
+   * silencieusement. Le prix facturé au client était multiplié par 4,75.
+   */
   const auxPaliers = colis.tarification === "reception";
+  const valeurProduits = (colis.produits || []).reduce((somme, prod) => somme + produitValeurGNF(prod, categories || []), 0);
   const prixBrut = auxPaliers
     ? +(calcReceptionFee(Number(poids) || 0, tarifsReception).total / (LIVE_RATES.GNF || CURRENCIES.GNF)).toFixed(2)
-    : calcPrice(pays, poids, volume, mode);
+    : valeurProduits > 0
+      ? +(valeurProduits / (LIVE_RATES.GNF || CURRENCIES.GNF)).toFixed(2)
+      : calcPrice(pays, poids, volume, mode);
   const discountLoyalty = colis.discountLoyalty || 0;
-  const prixApresFidelite = +(prixBrut * (1 - discountLoyalty / 100)).toFixed(2);
+  const discountVolume = remiseVolumePourcent(poids, remiseVolumeConfig);
+  const prixApresFidelite = +(prixBrut * (1 - discountLoyalty / 100) * (1 - discountVolume / 100)).toFixed(2);
   const rabaisEUR = +((Number(rabaisMontant) || 0) / (LIVE_RATES[rabaisDevise] || CURRENCIES[rabaisDevise] || 1)).toFixed(2);
   const prix = Math.max(+(prixApresFidelite - rabaisEUR).toFixed(2), 0);
   const payeNum = Number(paye) || 0;
@@ -7889,7 +8856,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception }) {
   }
 
   return (
-    <Modal onClose={onClose} title={`Modifier le colis ${colis.tracking}`} wide>
+    <Modal onClose={onClose} title={`Modifier le colis ${colis.tracking}`} wide saisieEnCours={poids !== String(colis.poids) || destinataire !== colis.destinataire}>
       <form onSubmit={submit} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14 }}>
         <Field label="Expéditeur"><input value={expediteur} onChange={(e) => setExpediteur(e.target.value)} style={inputStyle} /></Field>
         <Field label="Destinataire"><input value={destinataire} onChange={(e) => setDestinataire(e.target.value)} style={inputStyle} /></Field>
@@ -7938,6 +8905,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
   const [motif, setMotif] = useState("");
   const [editing, setEditing] = useState(false);
   const [showLitige, setShowLitige] = useState(false);
+  const [emplacement, setEmplacement] = useState(colis.emplacement || "");
   const [waState, setWaState] = useState("");
   const [waErreur, setWaErreur] = useState("");
 
@@ -7989,6 +8957,40 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
     try { await downloadInvoice(colis, data); setInvoiceState("idle"); }
     catch (e) { console.error(e); setInvoiceState("error"); }
   }
+  const [emailState, setEmailState] = useState("idle");
+
+  /**
+   * Envoie la facture par e-mail au client.
+   *
+   * Le bouton n'apparaît que si une adresse est renseignée — inutile de proposer une action
+   * impossible. Si le service n'est pas configuré, on ouvre un brouillon : l'agent reste
+   * maître de l'envoi plutôt que de rester bloqué.
+   */
+  async function handleEnvoyerFacture() {
+    const adresse = colis.destinataireEmail || colis.email;
+    if (!adresse) return;
+    setEmailState("loading");
+    try {
+      const piece = await downloadInvoice(colis, data, { retourner: true });
+      const { envoye, raison } = await envoyerEmail(
+        adresse,
+        `Votre facture Ba-Diaby Express — ${colis.tracking}`,
+        `<p>Bonjour ${colis.destinataire},</p>
+         <p>Vous trouverez ci-joint la facture de votre colis <strong>${colis.tracking}</strong>.</p>
+         <p style="color:#888;font-size:12px">Ba-Diaby Express — Transport de colis Conakry - Monde</p>`,
+        piece ? [piece] : []
+      );
+      if (envoye) { setEmailState("envoye"); return; }
+      if (raison) notify?.(raison);
+      // Repli : brouillon dans le logiciel de messagerie de l'agent.
+      window.open(`mailto:${adresse}?subject=${encodeURIComponent(`Votre facture Ba-Diaby Express — ${colis.tracking}`)}&body=${encodeURIComponent(`Bonjour ${colis.destinataire},\n\nVeuillez trouver la facture de votre colis ${colis.tracking}.\n\nBa-Diaby Express`)}`, "_blank");
+      setEmailState("brouillon");
+    } catch (e) {
+      console.error(e);
+      setEmailState("error");
+    }
+  }
+
   async function handleDownloadTicketThermal() {
     setTicketThermalState("loading");
     try { await downloadTicketThermal(colis); setTicketThermalState("idle"); }
@@ -8265,15 +9267,15 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
       </div>
 
       <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 18 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: colis.bonSortie ? 10 : 0 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: (colis.remise || colis.bonSortie) ? 10 : 0 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Bon de sortie</div>
-          {!colis.bonSortie && canManage && <button onClick={() => setBonSortieOuvert(true)} style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Enregistrer la remise</button>}
+          {!colis.remise && !colis.bonSortie && canManage && <button onClick={() => setBonSortieOuvert(true)} style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "7px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Enregistrer la remise</button>}
         </div>
-        {colis.bonSortie && (
+        {(colis.remise || colis.bonSortie) && (
           <div>
-            <div style={{ fontSize: 12, color: "var(--text)" }}>Récupéré par <strong>{colis.bonSortie.nom}</strong> · {colis.bonSortie.telephone}</div>
-            {colis.bonSortie.piece && <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>Pièce d’identité : {colis.bonSortie.piece}</div>}
-            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>Le {new Date(colis.bonSortie.date).toLocaleDateString("fr-FR")} · enregistré par {colis.bonSortie.enregistrePar}</div>
+            <div style={{ fontSize: 12, color: "var(--text)" }}>Récupéré par <strong>{(colis.remise || colis.bonSortie).nom}</strong>{colis.bonSortie?.telephone ? ` · ${colis.bonSortie.telephone}` : ""}</div>
+            {(colis.bonSortie?.piece || colis.remise?.typePiece) && <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>Pièce d’identité : {colis.bonSortie?.piece || `${colis.remise.typePiece}${colis.remise.numeroPiece ? " " + colis.remise.numeroPiece : ""}`}</div>}
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>Le {new Date((colis.remise || colis.bonSortie).date).toLocaleDateString("fr-FR")} · enregistré par {(colis.remise || colis.bonSortie).enregistrePar || (colis.remise || colis.bonSortie).agent}</div>
             <button onClick={telechargerBonSortie} disabled={bonSortieState === "loading"} style={{ ...smallBtn, marginTop: 10 }}><Download size={13} /> {bonSortieState === "loading" ? "Génération…" : "Télécharger le bon de sortie"}</button>
             {bonSortieState === "error" && <span style={{ fontSize: 11, color: "var(--danger-fg)", marginLeft: 8 }}>Échec — réessayez</span>}
           </div>
@@ -8288,6 +9290,93 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
             {colis.photos.map((src, i) => (
               <img key={i} src={src} alt={`Photo ${i + 1}`} style={{ width: "100%", height: 96, objectFit: "cover", borderRadius: 8, border: "1.5px solid var(--border)" }} />
             ))}
+          </div>
+        </div>
+      )}
+
+      {/*
+        Emplacement physique du colis.
+
+        Savoir qu'un colis est « à Bambeto » ne dit pas sur quelle étagère. Avec plusieurs
+        centaines de colis en attente, l'agent fouille à chaque client. Le champ est libre :
+        chaque agence a sa façon de ranger (A3, étagère 2, palette 7…), lui imposer un format
+        serait la meilleure façon qu'il ne soit jamais rempli.
+      */}
+      {["Arrivé", "Disponible au retrait"].includes(colis.status) && !colis.remise && canManage && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: "10px 14px", marginBottom: 18 }}>
+          <MapPin size={14} color="var(--muted)" />
+          <span style={{ fontSize: 12.5, color: "var(--muted)", flexShrink: 0 }}>Emplacement</span>
+          <input
+            defaultValue={colis.emplacement || ""}
+            onBlur={(e) => {
+              const v = e.target.value.trim();
+              if (v !== (colis.emplacement || "")) onUpdate({ emplacement: v });
+            }}
+            placeholder="A3, étagère 2, palette 7…"
+            style={{ ...inputStyle, marginBottom: 0, flex: 1, minWidth: 140 }} />
+        </div>
+      )}
+
+      {/*
+        Emplacement physique du colis.
+
+        Savoir qu'un colis est « à Bambeto » ne dit pas sur quelle étagère il se trouve. Avec
+        plusieurs centaines de colis en attente, l'agent fouille à chaque client. Le champ se
+        modifie directement ici, sans passer par la fenêtre de modification : c'est un geste
+        qu'on fait en manipulant le colis, pas au bureau.
+      */}
+      {["Arrivé", "Disponible au retrait"].includes(colis.status) && !colis.remise && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+                      background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10,
+                      padding: "10px 14px", marginBottom: 18 }}>
+          <MapPin size={15} color="var(--muted)" />
+          <span style={{ fontSize: 12.5, color: "var(--muted)" }}>Emplacement</span>
+          <input
+            value={emplacement}
+            onChange={(e) => setEmplacement(e.target.value)}
+            onBlur={() => { if (emplacement !== (colis.emplacement || "")) onUpdate({ emplacement: emplacement.trim() }); }}
+            placeholder="Rayon A3, étagère 2…"
+            style={{ ...inputStyle, marginBottom: 0, flex: 1, minWidth: 150 }} />
+        </div>
+      )}
+
+      {colis.codeRetrait && !colis.remise && colis.status === "Disponible au retrait" && (
+        <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 10, padding: "12px 14px", marginBottom: 18, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)" }}>Code de retrait envoyé au client</div>
+            <div style={{ fontFamily: "monospace", fontSize: 22, fontWeight: 700, letterSpacing: 4, color: "var(--info-fg)" }}>{colis.codeRetrait}</div>
+          </div>
+          <div style={{ fontSize: 11, color: "var(--muted)", maxWidth: 230 }}>
+            À demander au comptoir. Le client l’a reçu par WhatsApp avec l’adresse de retrait.
+          </div>
+        </div>
+      )}
+
+      {colis.remise && (
+        <div style={{ background: "var(--ok-bg)", border: "1px solid var(--ok-border)", borderRadius: 10, padding: "12px 14px", marginBottom: 18 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ok-fg)", marginBottom: 6 }}>Preuve de remise</div>
+          <div style={{ fontSize: 12.5, color: "var(--text)" }}>
+            Remis à <strong>{colis.remise.nom}</strong>
+            {colis.remise.lien === "proche" ? " (un proche)" : colis.remise.lien === "mandataire" ? " (mandataire)" : ""}
+          </div>
+          {colis.remise.typePiece && (
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
+              {colis.remise.typePiece}{colis.remise.numeroPiece ? ` — ${colis.remise.numeroPiece}` : ""}
+            </div>
+          )}
+          {colis.remise.note && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>{colis.remise.note}</div>}
+          {colis.remise.sansCode && (
+            <div style={{ fontSize: 11.5, color: "var(--warn-fg)", marginTop: 5, fontWeight: 600 }}>
+              Remis sans présentation du code
+            </div>
+          )}
+          {colis.remise.codeVerifie && (
+            <div style={{ fontSize: 11.5, color: "var(--ok-fg)", marginTop: 5, fontWeight: 600 }}>
+              Code de retrait vérifié
+            </div>
+          )}
+          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6 }}>
+            {new Date(colis.remise.date).toLocaleString("fr-FR")} · par {colis.remise.agent}
           </div>
         </div>
       )}
@@ -8333,7 +9422,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
           {isAdmin && <button onClick={() => setEditing(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--text)", fontSize: 13, cursor: "pointer" }}><Settings size={14} /> Modifier</button>}
           {effectivePermission(session, "colis.supprimer") && <button onClick={onDelete} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--danger-fg)", fontSize: 13, cursor: "pointer" }}><Trash2 size={14} /> Supprimer</button>}
           {effectivePermission(session, "colis.annuler") && colis.status !== "Annulé" && colis.status !== "Livré" && colis.status !== "Refusé" && <button onClick={() => setCancelling(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--warn-fg)", fontSize: 13, cursor: "pointer" }}><AlertTriangle size={14} /> Annuler le colis</button>}
-          {effectivePermission(session, "colis.annuler") && ["En livraison", "Arrivé", "En douane"].includes(colis.status) && <button onClick={() => setRefusing(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--danger-fg)", fontSize: 13, cursor: "pointer" }}><X size={14} /> Marquer refusé / retourné</button>}
+          {effectivePermission(session, "colis.annuler") && ["Disponible au retrait", "Arrivé"].includes(colis.status) && <button onClick={() => setRefusing(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--danger-fg)", fontSize: 13, cursor: "pointer" }}><X size={14} /> Marquer refusé / retourné</button>}
           {canManage && (
             <label style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--text)", fontSize: 13, cursor: "pointer" }}>
               <Camera size={14} /> {uploadingPhoto ? "Envoi…" : colis.photoEntrepot ? "Changer la photo" : "Ajouter une photo"}
@@ -8358,6 +9447,11 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
           <button onClick={handleDownloadLabel} disabled={labelState === "loading"} style={smallBtn}><Printer size={13} /> {labelState === "loading" ? "Génération…" : "Étiquette QR"}</button>
           {labelState === "error" && <span style={{ fontSize: 11, color: "var(--danger-fg)", alignSelf: "center" }}>Échec — réessayez</span>}
           <button onClick={handleDownloadInvoice} disabled={invoiceState === "loading"} style={smallBtn}><Download size={13} /> {invoiceState === "loading" ? "Génération…" : "Facture PDF"}</button>
+          {(colis.destinataireEmail || colis.email) && (
+            <button onClick={handleEnvoyerFacture} disabled={emailState === "loading"} style={smallBtn}>
+              <Mail size={13} /> {emailState === "loading" ? "Envoi…" : emailState === "envoye" ? "Facture envoyée" : emailState === "brouillon" ? "Brouillon ouvert" : "Envoyer par e-mail"}
+            </button>
+          )}
           <button onClick={handleDownloadTicketThermal} disabled={ticketThermalState === "loading"} style={smallBtn}><Receipt size={13} /> {ticketThermalState === "loading" ? "Génération…" : "Ticket thermique 80mm"}</button>
           {invoiceState === "error" && <span style={{ fontSize: 11, color: "var(--danger-fg)", alignSelf: "center" }}>Échec — réessayez</span>}
           {canManage && !isLast && colis.status !== "Annulé" && colis.status !== "Refusé" && <button onClick={onAdvance} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Statut suivant <ChevronRight size={14} /></button>}
@@ -8407,7 +9501,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
         </div>
       )}
       {showLitige && <LitigeModal colis={colis} onDeclarer={onDeclarerLitige} onResoudre={onResoudreLitige} onClose={() => setShowLitige(false)} />}
-      {editing && <EditColisForm colis={colis} tarifsReception={data?.receptionTarifs} onClose={() => setEditing(false)} onSave={(patch) => { onUpdate(patch); setEditing(false); }} />}
+      {editing && <EditColisForm colis={colis} categories={data?.categories} remiseVolumeConfig={data?.remiseVolume} tarifsReception={data?.receptionTarifs} onClose={() => setEditing(false)} onSave={(patch) => { onUpdate(patch); setEditing(false); }} />}
       {bonSortieOuvert && (
         <Modal onClose={() => setBonSortieOuvert(false)} title="Enregistrer la remise du colis">
           <Field label="Nom de la personne qui récupère le colis *"><input value={recupNom} onChange={(e) => setRecupNom(e.target.value)} style={inputStyle} /></Field>
@@ -8432,6 +9526,17 @@ const Info = memo(function Info({ label, value, accent }) {
 /** Construit un annuaire client unique (téléphone) à partir de l’historique des colis, côté expéditeur ET destinataire. */
 /** Ne garde que les chiffres significatifs d'un numéro : « +224 622 11 11 11 » et
  *  « 622111111 » désignent la même personne, mais créaient deux fiches distinctes. */
+/**
+ * Prépare un texte pour la recherche : sans accents, en minuscules.
+ *
+ * Beaucoup de vos clients portent des noms accentués — Touré, Condé, Sidibé, Traoré. Un agent
+ * pressé tape rarement les accents, et le client devenait introuvable. La recherche compare
+ * désormais des textes normalisés des deux côtés.
+ */
+function pourRecherche(texte) {
+  return String(texte || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
 function normaliserTelephone(tel) {
   const chiffres = String(tel || "").replace(/\D/g, "");
   return chiffres.length > 9 ? chiffres.slice(-9) : chiffres;
@@ -8480,6 +9585,371 @@ function detecterDoublonsClients(clients) {
   return groupes;
 }
 
+/**
+ * Répertoire repris de l'ancienne plateforme, lu sur les captures d'écran fournies.
+ *
+ * ATTENTION — ces fiches sont marquées « à vérifier » (champ `aVerifier`). Les numéros ont été
+ * lus sur des photos d'écran : certains chiffres pouvaient être flous ou coupés. Une erreur d'un
+ * seul chiffre rend un client injoignable, il faut donc confirmer chaque fiche au premier contact.
+ * L'agent confirme d'un clic depuis la page Clients, et le repère disparaît.
+ *
+ * Il manque environ 40 clients (383 sur l'ancienne plateforme) : les pages 1 à 40 n'étaient pas
+ * dans les captures. Ils sont à ajouter à la main.
+ */
+const REPERTOIRE_IMPORTE = [
+  { n: "aboubacar bah", t: "+224624538625" },
+  { n: "djoulde bah", t: "+224627260728" },
+  { n: "fatoumata bah", t: "+33780597034" },
+  { n: "fatoumata lamarana bah", t: "+224623435322" },
+  { n: "guraissy bah", t: "+224624924566" },
+  { n: "koundouba bah", t: "+224627290816" },
+  { n: "mamadou djoumah bah", t: "+224622015589" },
+  { n: "mamadou saliou bah", t: "+49622636470" },
+  { n: "mariama bah", t: "+224625278583" },
+  { n: "mariama cire bah", t: "+22626938617" },
+  { n: "oury bah", t: "+49629595970" },
+  { n: "thierno bah", t: "+33768408027" },
+  { n: "yaya bah", t: "+33768551442" },
+  { n: "hassanatou balde", t: "+224624364647" },
+  { n: "hawaou balde", t: "+224623385065" },
+  { n: "mariama cire baldé", t: "+224626228348" },
+  { n: "souleymane baldé", t: "+49627859734" },
+  { n: "aly bamba", t: "+224621425829" },
+  { n: "hawa bamba", t: "+224622598314" },
+  { n: "ibrahima bangoura", t: "+224620174697" },
+  { n: "ousmanr bangoura", t: "+224611726034" },
+  { n: "fatoumata bangoura", t: "+224627099308" },
+  { n: "ibrahima bangoura", t: "+49664495257" },
+  { n: "mariame bangoura", t: "+224613964512" },
+  { n: "m'balia bangoura", t: "+33766814454" },
+  { n: "naby laye bangoura", t: "+224621574031" },
+  { n: "boubacar barry", t: "+224627585505" },
+  { n: "hawa barry", t: "+224626698367" },
+  { n: "kadjaliou barry", t: "+224622251487" },
+  { n: "mamadou barry", t: "+224628103829" },
+  { n: "mamadou dian barry", t: "+224623193961" },
+  { n: "oumou tabara barry", t: "+224624597514" },
+  { n: "ramatoulaye barry", t: "+224622543649" },
+  { n: "abdourahmane barry", t: "+224623532352" },
+  { n: "boubacar barry", t: "+224620356729" },
+  { n: "djoulde barry", t: "+33758370589" },
+  { n: "fatoumata binta barry", t: "+224628128143" },
+  { n: "fatoumata djaraye barry", t: "+224628068063" },
+  { n: "mariama barry", t: "+224622308700" },
+  { n: "mariame barry", t: "+224620910880" },
+  { n: "muhammed barry", t: "+224621528148", e: "famous.hayere@gmail.com" },
+  { n: "oury bailo barry", t: "+224612954810" },
+  { n: "salimatou barry", t: "+224655870323" },
+  { n: "souleymane barry", t: "+224623308070" },
+  { n: "yero barry", t: "+224611167920" },
+  { n: "mouhamed lamine bayo", t: "+224622227448" },
+  { n: "anama bayo", t: "+224620421523" },
+  { n: "fatoumata berete", t: "+49758386706" },
+  { n: "fatoumata berete", t: "+33758386706", e: "djeneefanta94@gmail.com" },
+  { n: "hawa berete", t: "+33751520116" },
+  { n: "moussa tiranke berete", t: "+224628813950", e: "mtberete@gmail.com" },
+  { n: "bramx bramx", t: "+33768122438" },
+  { n: "aissata camara", t: "+224624194189" },
+  { n: "alseny camara", t: "+224627624077" },
+  { n: "ba fode morcane camara", t: "+224622341229" },
+  { n: "celestin camara", t: "+224622292953" },
+  { n: "ibrahima camara", t: "+22622144906" },
+  { n: "ibrahima camara", t: "+224620179927" },
+  { n: "mamadama camara", t: "+224625306536" },
+  { n: "mamadama camara", t: "+224625306537" },
+  { n: "mariame camara", t: "+33783334930", e: "mariecamara878@gmail.com" },
+  { n: "m'mah camara", t: "+224626743509" },
+  { n: "sekouba camara", t: "+224625240843" },
+  { n: "abdoulaye camara", t: "+224611711143" },
+  { n: "aicha camara", t: "+224623696000" },
+  { n: "aly rouen camara", t: "+33606419460" },
+  { n: "aminata camara", t: "+224622216028" },
+  { n: "aminata camara", t: "+224621247737" },
+  { n: "fatima bintou camara", t: "+224620749159" },
+  { n: "fatoumata camara", t: "+224610302769" },
+  { n: "fode mouhamadou camara", t: "+224620202597" },
+  { n: "ibrahima camara", t: "+224622144906" },
+  { n: "ibrahima sory camara", t: "+224627162055" },
+  { n: "kadiza camara", t: "+33778329313" },
+  { n: "karamba camara", t: "+33612600777" },
+  { n: "laye camara", t: "+224625065193" },
+  { n: "mayeni camara", t: "+224626198781" },
+  { n: "mme camara", t: "+224624725085" },
+  { n: "morlaye camara", t: "+224621734444" },
+  { n: "naminata camara", t: "+33603295186" },
+  { n: "salif camara", t: "+224629358239" },
+  { n: "nounou camaraa", t: "+33673924171" },
+  { n: "nounou camaraa", t: "+33758993786" },
+  { n: "aladji cisse", t: "+33758063848", e: "tikendjahcisse@gmail.com" },
+  { n: "hirene cisse", t: "+224624816669" },
+  { n: "lonceny cisse", t: "+224620052542" },
+  { n: "moussa mariam cisse", t: "+224627695350" },
+  { n: "aboubacar cissé", t: "+49780051002", e: "koundouba@yahoo.fr" },
+  { n: "ibou cl", t: "+33623161085", e: "famous.hayere@gmail.com" },
+  { n: "ahmed conde", t: "+224620574183" },
+  { n: "aminata conde", t: "+224626882109" },
+  { n: "fanta conde", t: "+33604128349" },
+  { n: "la belle soeur de fanta conde", t: "+33751188872" },
+  { n: "lamine conde", t: "+33781820660" },
+  { n: "moussa conde", t: "+224624461879" },
+  { n: "mr conde", t: "+224628683515" },
+  { n: "prince conde", t: "+33766832214" },
+  { n: "seckou conde", t: "+33753775050" },
+  { n: "aly mariame condé", t: "+224611201212" },
+  { n: "hamidou condé", t: "+224629310012" },
+  { n: "maleny conte", t: "+224627292701" },
+  { n: "emmanuel correah", t: "+224627929880" },
+  { n: "oumar dabo", t: "+224629429140" },
+  { n: "seckou dabo", t: "+33617185305" },
+  { n: "kadiatou dallo", t: "+224624637650" },
+  { n: "maodo dell", t: "+33668324539" },
+  { n: "mme delphine", t: "+224628209640" },
+  { n: "maman de papo", t: "+224622320875" },
+  { n: "sona diabaté", t: "+224627165018" },
+  { n: "alkhaly diaby", t: "+224620990433" },
+  { n: "lassana diaby", t: "+224628047406" },
+  { n: "djaraye diaby", t: "+224610120814" },
+  { n: "fine diaby", t: "+33751419202" },
+  { n: "gassama diaby", t: "+224621022228" },
+  { n: "goundoba diaby", t: "+33605877468" },
+  { n: "lanssana diaby", t: "+33758757832" },
+  { n: "oumar diaby", t: "+224613045289", e: "badiabyexpress.bde@gmail.com" },
+  { n: "ousmane diaby", t: "+224623870026" },
+  { n: "fatoumata diakhaby", t: "+224620428398" },
+  { n: "adama hawa diallo", t: "+224611949029" },
+  { n: "alpha diallo", t: "+12069605294" },
+  { n: "alpha diallo", t: "+49625201405", e: "ousmane816077@gmail.com" },
+  { n: "assiatou diallo", t: "+224621228568" },
+  { n: "fatoumata diallo", t: "+224622844093" },
+  { n: "fatoumata binta diallo", t: "+224661139740" },
+  { n: "fatoumata binta diallo", t: "+224626815211" },
+  { n: "ibrahima diallo", t: "+224612162226" },
+  { n: "ibrahima diallo", t: "+221611122270" },
+  { n: "karimata diallo", t: "+224624383433" },
+  { n: "mamadou alpha diallo", t: "+224620059495" },
+  { n: "mamadou mouctar diallo", t: "+224628177163" },
+  { n: "saïd diallo", t: "+224628061099" },
+  { n: "saliou djan diallo", t: "+224620085461" },
+  { n: "souleymane diallo", t: "+224628284732" },
+  { n: "abdourahmane diallo", t: "+224628318478" },
+  { n: "alassane diallo", t: "+224625235544" },
+  { n: "aloha diallo", t: "+33753789750" },
+  { n: "alpha diallo", t: "+33641293656" },
+  { n: "alpha diallo", t: "+12069605254" },
+  { n: "amadou diallo", t: "+221775780281" },
+  { n: "amadou sadio diallo", t: "+49623192559" },
+  { n: "amadou sadjo diallo", t: "+224666043708" },
+  { n: "amadou tidiane diallo", t: "+33780789468" },
+  { n: "aminata diallo", t: "+393510780598" },
+  { n: "aminata diallo", t: "+224625864688" },
+  { n: "elhadji mamadou diallo", t: "+224622222903" },
+  { n: "fanta diallo", t: "+224620159884" },
+  { n: "fanta diallo", t: "+224629823075" },
+  { n: "fatoumata diarraye diallo", t: "+224628604325" },
+  { n: "fatoumata djoulde diallo", t: "+2246211603231" },
+  { n: "fatoumata djoulde diallo", t: "+224621603231" },
+  { n: "ibrahima diallo", t: "+224624830921" },
+  { n: "maïmouna diallo", t: "+224622310736" },
+  { n: "mamadou diallo", t: "+224620710034" },
+  { n: "mamadou alimou diallo", t: "+49621354117" },
+  { n: "mamadou mouctar diallo", t: "+49628177123" },
+  { n: "mamadou saidou diallo", t: "+33656721853" },
+  { n: "mariama diallo", t: "+224625688899" },
+  { n: "mr diallo", t: "+224613037333" },
+  { n: "souleymane diallo", t: "+49627390660" },
+  { n: "thierno mahmoud diallo", t: "+224620251653" },
+  { n: "siaka diawara", t: "+224621516924" },
+  { n: "lansana diawara", t: "+224629959232" },
+  { n: "hawa dieye", t: "+224611286465" },
+  { n: "thierno dillo", t: "+33769710135" },
+  { n: "j.o diop", t: "+224611159454", e: "badiabyexpress.bde@gmail.com" },
+  { n: "toure djimo", t: "+33652591510" },
+  { n: "djouwe djouwe", t: "+33751183947" },
+  { n: "ibrahima donzo", t: "+224620212770" },
+  { n: "moriba dougouno", t: "+33623080764" },
+  { n: "aissatou doumbouya", t: "+224626558340" },
+  { n: "fatoumata doumbouya", t: "+224621969844" },
+  { n: "hadja mahawa doumbouya", t: "+224620001058" },
+  { n: "maguette doumbouya", t: "+224611491953" },
+  { n: "séréfi doumbouya", t: "+224625660696" },
+  { n: "aicha doumbouya", t: "+33782616462" },
+  { n: "ibrahima kalil doumbouya", t: "+22669175189" },
+  { n: "ibrahima kalil doumbouya", t: "+224669175189" },
+  { n: "maïssata doumbouyah", t: "+224629631151" },
+  { n: "kadiatou doumbouyah", t: "+224628554800" },
+  { n: "saraba drame", t: "+224625208083" },
+  { n: "banfa drame", t: "+33652884808" },
+  { n: "n'na mariama drame", t: "+33652930499" },
+  { n: "soukama drame", t: "+33640287236" },
+  { n: "fatoumata duaby", t: "+224622145605" },
+  { n: "abdoulaye elhadji", t: "+224628770004" },
+  { n: "mariata eoumanigui", t: "+224622002236" },
+  { n: "hadja fatou fadiga", t: "+224620203043" },
+  { n: "diallo fatoumata binta", t: "+33753381481" },
+  { n: "fatoumata fofana", t: "+224624120622" },
+  { n: "hawa fofana", t: "+224628375686" },
+  { n: "lamine fofana", t: "+224620085937" },
+  { n: "maciré ben fofana", t: "+224622310753" },
+  { n: "mr fofana", t: "+224623519577" },
+  { n: "abdoulaye fofana", t: "+224622389780" },
+  { n: "fatoumata fofana", t: "+49627159536" },
+  { n: "fatoumata fofana", t: "+224627159536" },
+  { n: "fatoumata fofana", t: "+224624180622" },
+  { n: "mme fofana", t: "+224622727540" },
+  { n: "moussa fofana", t: "+224622084314" },
+  { n: "youlia fofana", t: "+224628138941" },
+  { n: "marie yvette foulah", t: "+33754834160" },
+  { n: "oumou gassama", t: "+33604494053" },
+  { n: "laurent gbamou", t: "+224623451975" },
+  { n: "mohamed lamine guirassy", t: "+224622329457" },
+  { n: "hariete heloumou", t: "+224623278782" },
+  { n: "diallo ibdiallo", t: "+224611122270" },
+  { n: "abdoulaye kaba", t: "+224625907575" },
+  { n: "abdoul bachir kaba", t: "+224629245656" },
+  { n: "djenabiou kaba", t: "+224660992080" },
+  { n: "mamadi kaba", t: "+49625158826" },
+  { n: "kandjigora kadiatou", t: "+33771819496" },
+  { n: "mme kakimbo", t: "+224664222141" },
+  { n: "hadja kande", t: "+33785374045" },
+  { n: "bintou kante", t: "+33610867943" },
+  { n: "mohamed kante", t: "+33780596626" },
+  { n: "kerfala kebe", t: "+224627505872", e: "kerfalakebe97@gmail.com" },
+  { n: "moussa keita", t: "+224627017667" },
+  { n: "aissata keita", t: "+33781749245" },
+  { n: "moussa keita", t: "+224660208877" },
+  { n: "oumar keita", t: "+224628168051" },
+  { n: "saran koma", t: "+33628778057" },
+  { n: "oumou konate", t: "+33621277276", e: "oumoukonate14@hotmail.fr" },
+  { n: "fatoumata konate", t: "+224621213729" },
+  { n: "aicha konate", t: "+224622093398" },
+  { n: "el kounfia", t: "+33672426366", e: "famous.hayere@gmail.com" },
+  { n: "mouhamed kourouma", t: "+224626284647" },
+  { n: "ayoub kourouma", t: "+224628468689" },
+  { n: "issa kourouma", t: "+49621649704" },
+  { n: "issa kourouma", t: "+224621649704" },
+  { n: "tiemoko kourouma", t: "+224625942340" },
+  { n: "yaya kouroumq", t: "+224613969102" },
+  { n: "fatoumata kouyate", t: "+224621288828" },
+  { n: "aminata kouyate", t: "+33613918089" },
+  { n: "aminata kouyate", t: "+33758060315" },
+  { n: "kadiatou kouyaté", t: "+49629541160" },
+  { n: "catherine lamah", t: "+224622160768" },
+  { n: "nyan kwita charles lega", t: "+224625368376" },
+  { n: "fatoumata madane", t: "+33777034948" },
+  { n: "mouhamed magane", t: "+224613396305" },
+  { n: "batoul magane", t: "+224628942411" },
+  { n: "fanta magane", t: "+33662012332" },
+  { n: "bangoura mouhamed lamine.", t: "+224611193022" },
+  { n: "ya moussa", t: "+224623126598" },
+  { n: "mohamed mozalin", t: "+224626246724" },
+  { n: "thiianguil multi service", t: "+224611835683" },
+  { n: "fatoumata nabe", t: "+33753765901" },
+  { n: "khalifa nabé", t: "+224624916306" },
+  { n: "hadja namou", t: "+33787822249" },
+  { n: "n'dela n'dela", t: "+33762632305" },
+  { n: "binta ndiaye", t: "+224621353537" },
+  { n: "maman papi", t: "+22462230875" },
+  { n: "coa partenaire", t: "+22462222903" },
+  { n: "saraba sacko", t: "+224623929815" },
+  { n: "hadja aicha sacko", t: "+224622583089" },
+  { n: "ibrahima sacko", t: "+33641275989" },
+  { n: "nasou sacko", t: "+224629930451" },
+  { n: "n na aissata sacko", t: "+33768593619" },
+  { n: "m'mah sakho", t: "+224620757279" },
+  { n: "hassanatou sambo", t: "+33759197378" },
+  { n: "mbalou samourah", t: "+224623067565" },
+  { n: "diaby senegalais", t: "+224613080456" },
+  { n: "hadja siata", t: "+224628240465" },
+  { n: "aminata sidibe", t: "+224623977879" },
+  { n: "mohamed sidibe", t: "+49625958449" },
+  { n: "muhamed sidibe", t: "+224626941779" },
+  { n: "ahmed tidiane sidibé", t: "+224613311060" },
+  { n: "diaby sidiya", t: "+33641201835" },
+  { n: "rabiatou souare", t: "+224621751768" },
+  { n: "mohamed soumah", t: "+224622923083" },
+  { n: "aminata soumah", t: "+224626173993" },
+  { n: "issiaga soumah", t: "+224611911644" },
+  { n: "mabintou soumah", t: "+224620838074" },
+  { n: "mama nana soumah", t: "+224629684722" },
+  { n: "mr thiam soumah", t: "+3306218069304" },
+  { n: "abdoul karim soumah camara", t: "+33753493367" },
+  { n: "boubacar sow", t: "+224622091237" },
+  { n: "mamadou lamarana sow", t: "+224620599288" },
+  { n: "oumar sow", t: "+224621224948" },
+  { n: "ramatoulaye sow", t: "+224624735474" },
+  { n: "aissatou bily sow", t: "+224622865086" },
+  { n: "amadou sow", t: "+224622326166" },
+  { n: "aminatou sow", t: "+224624138835" },
+  { n: "habibou sow", t: "+224623046611" },
+  { n: "mamadou dian sow", t: "+224623356932" },
+  { n: "mamadou djoulde sow", t: "+224620923675" },
+  { n: "ousmane sow", t: "+224628400956" },
+  { n: "ousmane sow", t: "+49628400956" },
+  { n: "mariam sy", t: "+224622647422" },
+  { n: "aboubacar sylla", t: "+224622147164" },
+  { n: "amadou sylla", t: "+224622033699" },
+  { n: "benoit sylla", t: "+224622005365" },
+  { n: "fatoumata sylla", t: "+224613446129" },
+  { n: "lamine sylla", t: "+224622405815" },
+  { n: "moussa sylla", t: "+224629263603" },
+  { n: "nabintou sylla", t: "+224621792479" },
+  { n: "ousmane sylla", t: "+224622737808" },
+  { n: "ousmane sylla", t: "+224629625515" },
+  { n: "yafode sylla", t: "+224613054876" },
+  { n: "zenab sylla", t: "+33781242374" },
+  { n: "abdoualye sylla", t: "+224628295041" },
+  { n: "abdoulaye sylla", t: "+224621114717" },
+  { n: "abdoulaye sylla", t: "+224625832203" },
+  { n: "aboubacar sylla", t: "+224624357866" },
+  { n: "amadou sylla", t: "+33753722998" },
+  { n: "amadou sylla", t: "+33604449595" },
+  { n: "mariama cire sylla", t: "+33689653576" },
+  { n: "mariama cire sylla", t: "+33689659576" },
+  { n: "mariame sylla", t: "+224628469132" },
+  { n: "mohamed sylla", t: "+33753090379" },
+  { n: "mouhamed sylla", t: "+224660973007" },
+  { n: "ousmane sylla", t: "+224629625520" },
+  { n: "taminy taminy", t: "+33766043199" },
+  { n: "mr thiam", t: "+33621806934", e: "famous.hayere@gmail.com" },
+  { n: "mamoudou thierno", t: "+224612145441" },
+  { n: "chek ahmed tidiane", t: "+224622500519" },
+  { n: "aly tombolia", t: "+224613901670" },
+  { n: "djiba toure", t: "+224627552014" },
+  { n: "fatoumata dominique toure", t: "+224620126887" },
+  { n: "macire toure", t: "+224627449781" },
+  { n: "mariame toure", t: "+224628558449" },
+  { n: "aissata toure", t: "+224622282762" },
+  { n: "aminata toure", t: "+33785948317" },
+  { n: "aye toure", t: "+224622126923" },
+  { n: "kadiatou toure", t: "+33780559695" },
+  { n: "kadiatou toure", t: "+224621682932" },
+  { n: "kamalbase toure", t: "+224610888872" },
+  { n: "mamadou oury toure", t: "+33751348514" },
+  { n: "mariama toure", t: "+224624425914" },
+  { n: "moustapha toure", t: "+33766783991" },
+  { n: "nana toure", t: "+224628047470" },
+  { n: "kakéba touré", t: "+224625494249" },
+  { n: "kamalbasse touré", t: "+49610888872" },
+  { n: "tanti toutou", t: "+33783963329" },
+  { n: "aissatou traore", t: "+224625598025" },
+  { n: "ibrahima traore", t: "+224627093411" },
+  { n: "fatoumata traore", t: "+224627293246" },
+  { n: "facinet traoré", t: "+49628316732" },
+  { n: "no yaawi", t: "+224624834960" },
+  { n: "abdoulaye yeressa", t: "+224629315255" },
+  { n: "mariame youla", t: "+224626160676" },
+  { n: "soeur de youla", t: "+224628354009" },
+  { n: "alayrangues zoe", t: "+224614220449" },
+].map((c, i) => ({
+  id: `imp-${i}`,
+  nomComplet: c.n,
+  telephone: c.t,
+  email: c.e || "",
+  adresse: "",
+  aVerifier: true,
+  source: "ancienne plateforme",
+}));
+
 function buildClientDirectory(colisList) {
   const map = {};
   colisList.forEach((c) => {
@@ -8497,6 +9967,33 @@ function buildClientDirectory(colisList) {
       }
     }
   });
+
+  /*
+   * Fusion avec le répertoire repris de l'ancienne plateforme.
+   *
+   * Les fiches issues des colis sont prioritaires : elles reflètent l'activité réelle et leurs
+   * numéros ont été saisis par un agent. Une fiche importée n'est ajoutée que si son numéro
+   * n'existe pas déjà. La comparaison ignore l'indicatif et les espaces, pour ne pas recréer un
+   * doublon quand le même client a été saisi sous une forme différente.
+   */
+  /*
+   * On compare sur le numéro COMPLET, indicatif compris. Comparer sur les 9 derniers chiffres
+   * fusionnerait « +224 611122270 » (Guinée) et « +221 611122270 » (Sénégal) : deux personnes
+   * peut-être différentes. Perdre un client silencieusement est pire que d'en afficher deux —
+   * l'onglet « Doublons possibles » signale ces cas et vous tranchez.
+   */
+  const dejaPresents = new Set(Object.keys(map).map((t) => String(t).replace(/\D/g, "")).filter(Boolean));
+  REPERTOIRE_IMPORTE.forEach((c) => {
+    const cle = String(c.telephone).replace(/\D/g, "");
+    if (!cle || dejaPresents.has(cle)) return;
+    dejaPresents.add(cle);
+    map[c.telephone] = {
+      telephone: c.telephone, nomComplet: c.nomComplet, prenom: "", nom: c.nomComplet,
+      email: c.email || "", adresse: "", count: 0, total: 0, date: null,
+      aVerifier: true, source: c.source,
+    };
+  });
+
   return Object.values(map);
 }
 
@@ -8513,13 +10010,13 @@ function Clients({ data }) {
   }
   let filtered = clients;
   if (filtre === "meilleurs") filtered = [...clients].sort((a, b) => b.total - a.total).slice(0, 20);
-  if (filtre === "nouveaux") filtered = clients.filter((c) => new Date(c.date).getTime() > trenteJours);
+  if (filtre === "nouveaux") filtered = clients.filter((c) => c.date && new Date(c.date).getTime() > trenteJours);
   if (filtre === "reguliers") filtered = clients.filter((c) => c.count >= 3);
   if (filtre === "proche_palier") {
     filtered = clients.filter((c) => { const p = prochainSeuilInfo(c.count); return p && p.reste <= 2; })
       .sort((a, b) => prochainSeuilInfo(a.count).reste - prochainSeuilInfo(b.count).reste);
   }
-  if (query) filtered = filtered.filter((c) => c.nomComplet?.toLowerCase().includes(query.toLowerCase()) || c.telephone?.includes(query));
+  if (query) filtered = filtered.filter((c) => pourRecherche(c.nomComplet).includes(pourRecherche(query)) || c.telephone?.includes(query));
 
   const doublons = useMemo(() => detecterDoublonsClients(clients), [clients]);
   const tabs = [["tous", "Tous"], ["meilleurs", "Meilleurs clients"], ["nouveaux", "Nouveaux clients"], ["reguliers", "Clients réguliers"], ["proche_palier", "Proches du palier suivant"], ["doublons", `Doublons possibles${doublons.length ? ` (${doublons.length})` : ""}`]];
@@ -8607,7 +10104,8 @@ function Clients({ data }) {
               <tr key={c.telephone} style={{ borderTop: "1px solid var(--surface2)" }}>
                 <td style={{ padding: "12px 16px", fontSize: 13.5, color: "var(--text)", fontWeight: 600 }}>
                   {c.nomComplet}
-                  {new Date(c.date).getTime() > trenteJours && <span style={{ marginLeft: 8, background: "var(--info-bg)", color: "var(--info-fg)", padding: "2px 7px", borderRadius: 12, fontSize: 10 }}>nouveau</span>}
+                  {c.aVerifier && <span title="Numéro repris de l’ancienne plateforme — à confirmer au premier contact" style={{ marginInlineStart: 8, background: "var(--warn-bg)", border: "1px solid var(--warn-border)", color: "var(--warn-fg)", padding: "1px 8px", borderRadius: 20, fontSize: 10, fontWeight: 700 }}>à vérifier</span>}
+                  {c.date && new Date(c.date).getTime() > trenteJours && <span style={{ marginLeft: 8, background: "var(--info-bg)", color: "var(--info-fg)", padding: "2px 7px", borderRadius: 12, fontSize: 10 }}>nouveau</span>}
                 </td>
                 <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{c.telephone}{c.email ? ` · ${c.email}` : ""}</td>
                 <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{c.count}</td>
@@ -8863,9 +10361,21 @@ function ComptabilitePage({ data, persist, session, notify }) {
     notify?.(`${form.type} enregistré${form.type === "Dépense" ? "e" : ""}`);
     setForm(null);
   }
+  const [depenseASupprimer, setDepenseASupprimer] = useState(null);
+
   function removeDepense(id) {
     persist({ ...data, depenses: depenses.filter((d) => d.id !== id) });
   }
+
+  const confirmationDepense = depenseASupprimer && (
+    <ConfirmerAction
+      titre="Supprimer cette dépense ?"
+      message={`« ${depenseASupprimer.libelle || depenseASupprimer.categorie || "Dépense"} » sera retirée de la comptabilité.`}
+      consequence="Le résultat de la période sera recalculé sans elle. Cette écriture ne peut pas être récupérée."
+      onConfirmer={() => { removeDepense(depenseASupprimer.id); setDepenseASupprimer(null); }}
+      onAnnuler={() => setDepenseASupprimer(null)}
+    />
+  );
   function exportRapport() {
     const headers = ["Type", "Nom", "Montant_GNF", "Date"];
     const rows = depensesPeriode.map((d) => [d.type, d.nom, d.montant, new Date(d.date).toLocaleDateString("fr-FR")]);
@@ -8942,6 +10452,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
 
   return (
     <div>
+      {confirmationDepense}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12, marginBottom: 18 }}>
         <div>
           <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: 0 }}>Comptabilité</h1>
@@ -9039,7 +10550,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
                 <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--text)" }}>{d.nom}</td>
                 <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{fmtGNF(d.montant)}</td>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)" }}>{new Date(d.date).toLocaleDateString("fr-FR")}</td>
-                <td style={{ padding: "12px 16px", textAlign: "right" }}>{effectivePermission(session, "compta.gerer_depenses") && <button onClick={() => removeDepense(d.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={14} /></button>}</td>
+                <td style={{ padding: "12px 16px", textAlign: "right" }}>{effectivePermission(session, "compta.gerer_depenses") && <button onClick={() => setDepenseASupprimer(d)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={14} /></button>}</td>
               </tr>
             ))}
             {depensesPeriode.length === 0 && <tr><td colSpan={5} style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucune dépense, salaire ou commission sur cette période.</td></tr>}
@@ -9072,11 +10583,10 @@ function ComptabilitePage({ data, persist, session, notify }) {
 async function callClaude(prompt) {
   const response = await fetch("/api/claude", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, model: "claude-sonnet-4-5-20250929", max_tokens: 1000 }),
+    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1000, messages: [{ role: "user", content: prompt }] }),
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || "Erreur API Claude");
-  return data.text || "";
+  return (data.content || []).map((b) => b.text || "").join("\n");
 }
 
 const IMPORT_TEMPLATE_HEADERS = [
@@ -9113,7 +10623,7 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
   const tarifs = data.receptionTarifs || { paliers: [{ max: 10, tarif: 100000 }, { max: 40, tarif: 95000 }, { max: 100, tarif: 92000 }] };
 
   const comptesTrouves = recherche.trim().length >= 2
-    ? (data.clientAccounts || []).filter((c) => `${c.prenom} ${c.nom}`.toLowerCase().includes(recherche.trim().toLowerCase()))
+    ? (data.clientAccounts || []).filter((c) => pourRecherche(`${c.prenom} ${c.nom}`).includes(pourRecherche(recherche.trim())))
     : [];
 
   const colisDisponibles = compte ? data.colis.filter((c) => c.clientAccountId === compte.id && c.status === "Arrivé") : [];
@@ -9646,6 +11156,99 @@ function SiteVitrinePage({ data, persist, notify, onBack }) {
  * Réglages des notifications WhatsApp : quel événement prévient qui.
  * Un tableau simple — une ligne par événement, une colonne par destinataire.
  */
+/** Gestion du calendrier des départs — ce que les clients verront annoncé. */
+function DepartsPage({ data, persist, notify, onBack }) {
+  const [departs, setDeparts] = useState(data.departs || []);
+  const modifie = JSON.stringify(departs) !== JSON.stringify(data.departs || []);
+
+  function ajouter() {
+    const dans7j = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+    const dans5j = new Date(Date.now() + 5 * 86400000).toISOString().slice(0, 10);
+    setDeparts((d) => [...d, { id: `dep${Date.now()}`, pays: "FR", mode: "air", dateDepart: dans7j, dateLimite: dans5j, note: "" }]);
+  }
+  function majDepart(i, cle, valeur) {
+    setDeparts((d) => d.map((x, k) => (k === i ? { ...x, [cle]: valeur } : x)));
+  }
+
+  const passes = (departs || []).filter((d) => d.dateLimite && new Date(d.dateLimite).getTime() < Date.now()).length;
+
+  return (
+    <div>
+      <ConfigPageHeader title="Calendrier des départs" desc="Annoncez à vos clients quand part le prochain envoi. Ils cessent de vous appeler pour le demander." onBack={onBack} />
+
+      <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 16px", marginBottom: 16 }}>
+        <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
+          La <strong>date limite de dépôt</strong> est celle qui compte pour le client : c’est le dernier
+          jour où il peut vous remettre son colis. Un départ dont la limite est passée disparaît
+          automatiquement de l’Espace Client — inutile d’annoncer une échéance intenable.
+        </div>
+      </div>
+
+      {passes > 0 && (
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>
+          {passes} départ{passes > 1 ? "s" : ""} dont la limite est dépassée — plus visible{passes > 1 ? "s" : ""} par les clients, à retirer quand vous voulez.
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 16 }}>
+        {departs.length === 0 && (
+          <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 26, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>
+            Aucun départ programmé. Ajoutez-en un : vos clients le verront aussitôt.
+          </div>
+        )}
+        {departs.map((d, i) => {
+          const depasse = d.dateLimite && new Date(d.dateLimite).getTime() < Date.now();
+          return (
+            <div key={d.id || i} style={{ background: "var(--surface)", border: "1px solid " + (depasse ? "var(--border)" : "var(--ok-border)"),
+                                          borderRadius: 12, padding: "14px 16px", opacity: depasse ? 0.6 : 1 }}>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+                <Field label="Destination">
+                  <select value={d.pays} onChange={(e) => majDepart(i, "pays", e.target.value)} style={{ ...inputStyle, width: 150, marginBottom: 0 }}>
+                    {COUNTRIES.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code] || ""} {c.city}</option>)}
+                  </select>
+                </Field>
+                <Field label="Mode">
+                  <select value={d.mode} onChange={(e) => majDepart(i, "mode", e.target.value)} style={{ ...inputStyle, width: 110, marginBottom: 0 }}>
+                    <option value="air">Aérien</option>
+                    <option value="mer">Maritime</option>
+                  </select>
+                </Field>
+                <Field label="Date limite de dépôt">
+                  <input type="date" value={d.dateLimite || ""} onChange={(e) => majDepart(i, "dateLimite", e.target.value)} style={{ ...inputStyle, width: 160, marginBottom: 0 }} />
+                </Field>
+                <Field label="Départ prévu">
+                  <input type="date" value={d.dateDepart || ""} onChange={(e) => majDepart(i, "dateDepart", e.target.value)} style={{ ...inputStyle, width: 160, marginBottom: 0 }} />
+                </Field>
+                <button onClick={() => setDeparts((x) => x.filter((_, k) => k !== i))}
+                  style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer", padding: "9px 4px" }}>
+                  <Trash2 size={15} />
+                </button>
+              </div>
+              <Field label="Précision pour le client (facultatif)">
+                <input value={d.note || ""} onChange={(e) => majDepart(i, "note", e.target.value)}
+                  placeholder="Arrivée estimée à Conakry vers le 20, dépôt jusqu’à 17h…"
+                  style={{ ...inputStyle, marginBottom: 0 }} />
+              </Field>
+              {depasse && <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8 }}>Date limite dépassée — n’apparaît plus côté client.</div>}
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ display: "flex", gap: 10, justifyContent: "space-between", flexWrap: "wrap" }}>
+        <button onClick={ajouter} style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "10px 18px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+          + Programmer un départ
+        </button>
+        <button onClick={() => { persist({ ...data, departs }); notify?.("Calendrier enregistré"); }} disabled={!modifie}
+          style={{ background: modifie ? "var(--brand-solid)" : "var(--surface2)", color: modifie ? "#fff" : "var(--muted)",
+                   border: "none", borderRadius: 8, padding: "10px 24px", fontSize: 13.5, fontWeight: 700, cursor: modifie ? "pointer" : "not-allowed" }}>
+          Enregistrer
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
   const prefs = data.notifWhatsApp || {};
   const [brouillon, setBrouillon] = useState(prefs);
@@ -9666,11 +11269,14 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
 
   return (
     <div>
-      <ConfigPageHeader title="Notifications WhatsApp" desc="Choisissez qui est prévenu automatiquement, et pour quel événement." onBack={onBack} />
+      <ConfigPageHeader title="Notifications clients" desc="Choisissez qui est prévenu automatiquement, et pour quel événement. Les messages partent par WhatsApp et par e-mail." onBack={onBack} />
 
       <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 16px", marginBottom: 16 }}>
         <div style={{ fontSize: 12.5, color: "var(--text)" }}>
-          Les messages partent automatiquement dès qu’un agent effectue l’action correspondante.
+          Les messages partent automatiquement dès qu’un agent effectue l’action correspondante :
+          par <strong>WhatsApp</strong> sur le numéro du client, et par <strong>e-mail</strong> si une
+          adresse est renseignée. Un client qui a donné son adresse suit ainsi son colis de
+          l’enregistrement à la livraison, même sans WhatsApp.
           Si l’envoi automatique n’est pas disponible, l’action se déroule normalement et le message
           peut être envoyé à la main depuis la fiche du colis.
         </div>
@@ -9743,7 +11349,195 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
   );
 }
 
+/**
+ * Sauvegarde et restauration complètes.
+ *
+ * Aucun moyen n'existait pour sortir l'ensemble des données de la plateforme. Les exports Excel
+ * et CSV ne couvrent que des vues partielles — de quoi analyser, pas de quoi reconstruire.
+ *
+ * Si la base devient inaccessible, si une manipulation efface des données, ou simplement pour
+ * changer d'hébergeur, ce fichier est le seul filet. Il contient tout : colis, clients,
+ * paiements, catégories, tarifs, comptes, journal.
+ */
+function SauvegardePage({ data, persist, notify, session, onBack }) {
+  const [restauration, setRestauration] = useState(null);
+  const [erreur, setErreur] = useState("");
+
+  const compte = {
+    colis: (data.colis || []).length,
+    clients: (data.clientAccounts || []).length,
+    categories: (data.categories || []).length,
+    utilisateurs: (data.users || []).length,
+    depenses: (data.depenses || []).length,
+    journal: (data.activityLog || []).length,
+  };
+
+  function telecharger() {
+    /*
+     * Les empreintes de mots de passe sont retirées du fichier.
+     *
+     * Elles ne permettent pas de retrouver un mot de passe, mais une sauvegarde circule par
+     * e-mail ou clé USB : autant ne pas l'exposer. À la restauration, chaque utilisateur devra
+     * se voir attribuer un nouveau mot de passe par l'administrateur — c'est le prix d'un
+     * fichier qu'on peut transporter sans risque.
+     */
+    const sansSecrets = {
+      ...data,
+      users: (data.users || []).map(({ motdepasse, motdepasseSecure, motdepasseSalt, ...reste }) => reste),
+      clientAccounts: (data.clientAccounts || []).map(({ motdepasse, motdepasseSecure, motdepasseSalt, ...reste }) => reste),
+    };
+    const contenu = {
+      format: "ba-diaby-express-sauvegarde",
+      version: 1,
+      genereLe: new Date().toISOString(),
+      generePar: `${session?.prenom || ""} ${session?.nom || ""}`.trim(),
+      motsDePasseExclus: true,
+      donnees: sansSecrets,
+    };
+    const blob = new Blob([JSON.stringify(contenu, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `sauvegarde-ba-diaby-express-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    notify?.("Sauvegarde téléchargée");
+  }
+
+  function lireFichier(e) {
+    setErreur("");
+    const fichier = e.target.files?.[0];
+    if (!fichier) return;
+    const lecteur = new FileReader();
+    lecteur.onload = () => {
+      try {
+        const contenu = JSON.parse(lecteur.result);
+        if (contenu.format !== "ba-diaby-express-sauvegarde" || !contenu.donnees) {
+          setErreur("Ce fichier n’est pas une sauvegarde Ba-Diaby Express.");
+          return;
+        }
+        setRestauration(contenu);
+      } catch (err) {
+        setErreur("Fichier illisible. Vérifiez qu’il n’a pas été modifié.");
+      }
+    };
+    lecteur.readAsText(fichier);
+    e.target.value = "";
+  }
+
+  function restaurer() {
+    /*
+     * Les comptes actuels sont conservés : sans eux, plus personne ne pourrait se connecter
+     * après une restauration — y compris l'administrateur en train de la faire.
+     */
+    const d = restauration.donnees;
+    persist({
+      ...d,
+      users: data.users,
+      activityLog: pushActivity(data, session, "Données restaurées",
+        `Sauvegarde du ${new Date(restauration.genereLe).toLocaleDateString("fr-FR")}`),
+    });
+    setRestauration(null);
+    notify?.("Données restaurées");
+  }
+
+  const ligne = (label, valeur) => (
+    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, padding: "5px 0" }}>
+      <span style={{ color: "var(--muted)" }}>{label}</span>
+      <span style={{ color: "var(--text)", fontWeight: 600 }}>{valeur}</span>
+    </div>
+  );
+
+  return (
+    <div>
+      <ConfigPageHeader title="Sauvegarde des données" desc="Téléchargez une copie complète de votre plateforme, ou restaurez-la depuis un fichier." onBack={onBack} />
+
+      {/*
+        Poids des données.
+
+        L'application réécrit l'intégralité des données à chaque modification. Les photos, gardées
+        en base64, en représentent l'essentiel : au-delà de quelques dizaines de méga-octets, la
+        moindre opération devient lente sur une connexion mobile. Mieux vaut le voir venir que le
+        découvrir un jour où le comptoir est plein.
+      */}
+      {(() => {
+        const octets = new Blob([JSON.stringify(data)]).size;
+        const mo = octets / (1024 * 1024);
+        const photos = (data.colis || []).reduce((n, c) => n + (c.photos || []).length, 0);
+        const alerte = mo >= 40 ? "danger" : mo >= 15 ? "warn" : "ok";
+        if (alerte === "ok") return null;
+        return (
+          <div style={{ background: alerte === "danger" ? "var(--danger-bg)" : "var(--warn-bg)",
+                        border: "1px solid " + (alerte === "danger" ? "var(--danger-border)" : "var(--warn-border)"),
+                        borderRadius: 12, padding: "13px 16px", maxWidth: 560, marginBottom: 20 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: alerte === "danger" ? "var(--danger-fg)" : "var(--warn-fg)" }}>
+              Vos données pèsent {mo.toFixed(1)} Mo
+            </div>
+            <div style={{ fontSize: 12, color: "var(--text)", marginTop: 4, lineHeight: 1.55 }}>
+              {photos} photo{photos > 1 ? "s" : ""} enregistrée{photos > 1 ? "s" : ""}. L’application transmet
+              l’ensemble des données à chaque modification : au-delà de 40 Mo, les agents constateront
+              des lenteurs sur connexion mobile.
+              {alerte === "danger"
+                ? " Envisagez de supprimer les photos des colis livrés depuis longtemps."
+                : " Surveillez cette valeur."}
+            </div>
+          </div>
+        );
+      })()}
+
+      <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 22, maxWidth: 560, marginBottom: 20 }}>
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Télécharger une sauvegarde</div>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14, lineHeight: 1.55 }}>
+          Un seul fichier contenant l’intégralité de vos données. Conservez-le hors de la plateforme —
+          sur votre ordinateur ou un espace de stockage en ligne.
+        </div>
+        <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "12px 14px", marginBottom: 16 }}>
+          {ligne("Colis", compte.colis)}
+          {ligne("Comptes clients", compte.clients)}
+          {ligne("Catégories", compte.categories)}
+          {ligne("Utilisateurs", compte.utilisateurs)}
+          {ligne("Dépenses", compte.depenses)}
+          {ligne("Entrées du journal", compte.journal)}
+          {ligne("Photos", (data.colis || []).reduce((n, c) => n + (c.photos || []).length, 0))}
+          {ligne("Poids total", `${(new Blob([JSON.stringify(data)]).size / (1024 * 1024)).toFixed(1)} Mo`)}
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 14 }}>
+          Les mots de passe ne sont pas inclus : le fichier peut circuler sans exposer les accès.
+        </div>
+        <button onClick={telecharger}
+          style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 20px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+          <Download size={15} /> Télécharger la sauvegarde
+        </button>
+      </div>
+
+      <div style={{ background: "var(--surface)", border: "1px solid var(--danger-border)", borderRadius: 14, padding: 22, maxWidth: 560 }}>
+        <div style={{ fontWeight: 700, color: "var(--danger-fg)", fontSize: 14, marginBottom: 4 }}>Restaurer depuis un fichier</div>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14, lineHeight: 1.55 }}>
+          Remplace les données actuelles par celles du fichier. À n’utiliser qu’en cas de perte
+          ou pour transférer la plateforme.
+        </div>
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 7, background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "10px 18px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+          <Upload size={14} /> Choisir un fichier
+          <input type="file" accept="application/json,.json" onChange={lireFichier} style={{ display: "none" }} />
+        </label>
+        {erreur && <div style={{ fontSize: 12.5, color: "var(--danger-fg)", marginTop: 10 }}>{erreur}</div>}
+      </div>
+
+      {restauration && (
+        <ConfirmerAction
+          titre="Restaurer ces données ?"
+          message={`Sauvegarde du ${new Date(restauration.genereLe).toLocaleString("fr-FR")}${restauration.generePar ? `, créée par ${restauration.generePar}` : ""} — ${(restauration.donnees.colis || []).length} colis, ${(restauration.donnees.clientAccounts || []).length} comptes clients.`}
+          consequence="Toutes les données actuelles seront remplacées. Les comptes utilisateurs et leurs mots de passe sont conservés pour que vous puissiez rester connecté. Téléchargez d’abord une sauvegarde de l’état présent si vous avez le moindre doute."
+          libelleAction="Restaurer"
+          onConfirmer={restaurer}
+          onAnnuler={() => setRestauration(null)}
+        />
+      )}
+    </div>
+  );
+}
+
 function SitesOperationPage({ data, persist, notify, onBack }) {
+  const [siteASupprimer, setSiteASupprimer] = useState(null);
   const sites = data.sites || [];
   const [form, setForm] = useState(null);
 
@@ -9760,6 +11554,15 @@ function SitesOperationPage({ data, persist, notify, onBack }) {
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+      {siteASupprimer && (
+        <ConfirmerAction
+          titre="Supprimer ce site ?"
+          message={`Le site « ${siteASupprimer.nom} » ne sera plus proposé aux agents.`}
+          consequence="Les colis déjà enregistrés sur ce site conservent leur historique. Vérifiez qu’aucun agent n’y est affecté, sinon il ne pourra plus enregistrer de colis."
+          onConfirmer={() => { removeSite(siteASupprimer.id); setSiteASupprimer(null); }}
+          onAnnuler={() => setSiteASupprimer(null)}
+        />
+      )}
         <ConfigPageHeader title="Sites d’opération" desc="Gérez vos points d’enregistrement et de retrait, et les informations affichées sur le ticket d’envoi." onBack={onBack} />
         <button onClick={() => setForm({ nom: "", adresse: "", telephone: "", horaires: "", paiements: "", stockage: "" })} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}><Plus size={16} /> Ajouter un site</button>
       </div>
@@ -9782,7 +11585,7 @@ function SitesOperationPage({ data, persist, notify, onBack }) {
               <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{s.nom}</div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button onClick={() => setForm(s)} style={{ background: "none", border: "none", color: "var(--info-fg)", cursor: "pointer" }}><Settings size={14} /></button>
-                <button onClick={() => removeSite(s.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={14} /></button>
+                <button onClick={() => setSiteASupprimer(s)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={14} /></button>
               </div>
             </div>
             <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6 }}>{s.adresse}</div>
@@ -9874,13 +11677,80 @@ function BrandingPage({ data, persist, notify, onBack }) {
 }
 
 function JournalActivitePage({ data, onBack }) {
+  /*
+   * La recherche libre existait déjà. S'y ajoutent trois choses qui manquaient pour que le
+   * journal serve vraiment : filtrer par période et par utilisateur (chercher « qui a encaissé
+   * hier » demandait de faire défiler 500 lignes), un repère de couleur par nature d'opération,
+   * et un export CSV pour conserver une trace hors de l'application.
+   */
   const [query, setQuery] = useState("");
+  const [periode, setPeriode] = useState("7j");
+  const [auteur, setAuteur] = useState("tous");
+  const [nbAffiches, setNbAffiches] = useState(100);
   const log = data.activityLog || [];
-  const filtered = log.filter((e) => !query || e.action.toLowerCase().includes(query.toLowerCase()) || e.detail?.toLowerCase().includes(query.toLowerCase()) || e.utilisateur?.toLowerCase().includes(query.toLowerCase()));
+
+  const auteurs = useMemo(() => [...new Set(log.map((e) => e.utilisateur).filter(Boolean))].sort(), [log]);
+
+  const filtered = useMemo(() => {
+    const maintenant = Date.now();
+    const jours = { "1j": 1, "7j": 7, "30j": 30, tout: null }[periode];
+    const q = pourRecherche(query.trim());
+    return log.filter((e) => {
+      if (jours && (maintenant - new Date(e.date).getTime()) / 86400000 > jours) return false;
+      if (auteur !== "tous" && e.utilisateur !== auteur) return false;
+      if (!q) return true;
+      return pourRecherche(e.action).includes(q) || pourRecherche(e.detail).includes(q) || pourRecherche(e.utilisateur).includes(q);
+    });
+  }, [log, periode, auteur, query]);
+
+  useEffect(() => { setNbAffiches(100); }, [periode, auteur, query]);
+  const visibles = filtered.slice(0, nbAffiches);
+
+  /** Repère de couleur : rouge pour ce qui retire ou annule, vert pour l'argent encaissé. */
+  function teinte(action) {
+    const a = String(action || "").toLowerCase();
+    if (/supprim|annul|refus|perdu|réinitialis/.test(a)) return "var(--danger-fg)";
+    if (/encaiss|paiement|remise|indemnit/.test(a)) return "var(--ok-fg)";
+    if (/modifi|statut|express/.test(a)) return "var(--warn-fg)";
+    return "var(--info-fg)";
+  }
+
+  function exporterJournal() {
+    const lignes = [["Date", "Heure", "Utilisateur", "Rôle", "Action", "Détail"]];
+    filtered.forEach((e) => {
+      const d = new Date(e.date);
+      lignes.push([d.toLocaleDateString("fr-FR"), d.toLocaleTimeString("fr-FR"), e.utilisateur || "", e.role || "", e.action || "", e.detail || ""]);
+    });
+    const csv = lignes.map((l) => l.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(";")).join("\n");
+    const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8;" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `journal-activite-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
 
   return (
     <div>
       <ConfigPageHeader title="Journal d’activité" desc="Historique complet des actions effectuées par les utilisateurs (les 500 dernières)." onBack={onBack} />
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12, alignItems: "center" }}>
+        {[["1j", "Aujourd’hui"], ["7j", "7 jours"], ["30j", "30 jours"], ["tout", "Tout"]].map(([k, label]) => (
+          <button key={k} onClick={() => setPeriode(k)}
+            style={{ padding: "7px 14px", borderRadius: 20, cursor: "pointer", fontSize: 12.5, fontWeight: 600,
+                     border: "1.5px solid " + (periode === k ? "var(--brand-solid)" : "var(--border)"),
+                     background: periode === k ? "var(--brand-solid)" : "var(--surface)",
+                     color: periode === k ? "#fff" : "var(--muted)" }}>{label}</button>
+        ))}
+        <select value={auteur} onChange={(e) => setAuteur(e.target.value)} style={{ ...inputStyle, width: "auto", marginBottom: 0, padding: "7px 12px" }}>
+          <option value="tous">Tous les utilisateurs</option>
+          {auteurs.map((a) => <option key={a} value={a}>{a}</option>)}
+        </select>
+        {filtered.length > 0 && (
+          <button onClick={exporterJournal} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "7px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
+            <Download size={13} /> Exporter (CSV)
+          </button>
+        )}
+      </div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 12px", marginBottom: 18, maxWidth: 420 }}>
         <Search size={15} color="var(--muted)" />
         <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Rechercher une action, un utilisateur..." style={{ border: "none", outline: "none", background: "none", flex: 1, fontSize: 13.5, color: "var(--text)" }} />
@@ -9888,9 +11758,10 @@ function JournalActivitePage({ data, onBack }) {
       <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden" }}>
         {filtered.length === 0 ? (
           <div style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucune activité enregistrée pour le moment.</div>
-        ) : filtered.map((e) => (
-          <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "12px 16px", borderTop: "1px solid var(--border)" }}>
-            <div>
+        ) : visibles.map((e) => (
+          <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, padding: "12px 16px", borderTop: "1px solid var(--border)" }}>
+            <div style={{ width: 4, alignSelf: "stretch", borderRadius: 4, background: teinte(e.action), flexShrink: 0 }} />
+            <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>{e.action}</div>
               {e.detail && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>{e.detail}</div>}
               <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>{e.utilisateur} · {e.role}</div>
@@ -9898,6 +11769,14 @@ function JournalActivitePage({ data, onBack }) {
             <div style={{ fontSize: 11, color: "var(--muted)", whiteSpace: "nowrap" }}>{new Date(e.date).toLocaleString("fr-FR")}</div>
           </div>
         ))}
+        {filtered.length > visibles.length && (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 12, padding: "12px 16px", borderTop: "1px solid var(--border)" }}>
+            <span style={{ fontSize: 12, color: "var(--muted)" }}>{visibles.length} sur {filtered.length}</span>
+            <button onClick={() => setNbAffiches((n) => n + 100)} style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "7px 16px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
+              Afficher 100 de plus
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -10200,6 +12079,7 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
    * en face de lui. Le nouveau mot de passe est affiché une seule fois, puis n'est plus lisible.
    */
   const [mdpTemporaire, setMdpTemporaire] = useState(null);
+  const [utilisateurAReinit, setUtilisateurAReinit] = useState(null);
 
   async function reinitialiserMotDePasse(u) {
     // Mot de passe provisoire lisible mais imprévisible : 8 caractères sans O/0/I/1 pour éviter
@@ -10238,12 +12118,23 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
                 <td style={{ padding: "12px 16px", fontSize: 13 }}><span style={{ background: "var(--surface2)", color: "var(--text)", padding: "4px 10px", borderRadius: 20, fontSize: 11.5, fontWeight: 600 }}>{u.role}</span></td>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)" }}>{u.role === "Administrateur" ? "Tous les pays" : (u.paysAutorises?.length ? u.paysAutorises.map((c) => FLAGS[c]).join(" ") : "Tous les pays")}</td>
                 <td style={{ padding: "12px 16px", fontSize: 13 }}>{u.twoFA ? <ShieldCheck size={15} color="var(--ok-fg)" /> : "—"}</td>
-                <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>{effectivePermission(session, "users.gerer") && <button onClick={() => reinitialiserMotDePasse(u)} title="Réinitialiser le mot de passe" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><Key size={15} /></button>}{u.identifiant !== "admin" && effectivePermission(session, "users.gerer") && <button onClick={() => removeUser(u.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={15} /></button>}</td>
+                <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>{effectivePermission(session, "users.gerer") && <button onClick={() => setUtilisateurAReinit(u)} title="Réinitialiser le mot de passe" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><Key size={15} /></button>}{u.identifiant !== "admin" && effectivePermission(session, "users.gerer") && <button onClick={() => removeUser(u.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={15} /></button>}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      {utilisateurAReinit && (
+        <ConfirmerAction
+          titre="Réinitialiser ce mot de passe ?"
+          message={`${utilisateurAReinit.prenom} ${utilisateurAReinit.nom} ne pourra plus se connecter avec son mot de passe actuel.`}
+          consequence="Un mot de passe provisoire sera affiché une seule fois. Assurez-vous de pouvoir le lui transmettre immédiatement."
+          libelleAction="Réinitialiser"
+          onConfirmer={() => { reinitialiserMotDePasse(utilisateurAReinit); setUtilisateurAReinit(null); }}
+          onAnnuler={() => setUtilisateurAReinit(null)}
+        />
+      )}
+
       {mdpTemporaire && (
         <Modal onClose={() => setMdpTemporaire(null)} title="Mot de passe réinitialisé">
           <div style={{ fontSize: 13, color: "var(--text)", marginBottom: 12 }}>
@@ -10487,15 +12378,104 @@ function UserForm({ onClose, onSave, existing, sites }) {
   );
 }
 
-function Modal({ title, children, onClose, wide }) {
+/**
+ * Fenêtre modale.
+ *
+ * `niveau` permet d'empiler une fenêtre par-dessus une autre. Sans lui, une seconde fenêtre
+ * ouverte depuis la première (par exemple la remise depuis la fiche colis) partageait le même
+ * niveau : selon l'ordre de rendu, la fiche pouvait recouvrir la remise et rendre ses boutons
+ * inaccessibles — l'agent voyait la fenêtre mais ne pouvait pas cliquer dedans.
+ */
+/**
+ * Confirmation avant une action irréversible.
+ *
+ * Plusieurs suppressions s'exécutaient au premier clic : catégorie, site d'opération, dépense,
+ * pré-alerte, réinitialisation de mot de passe. Sur téléphone, l'icône corbeille est petite et
+ * voisine d'autres boutons — un doigt qui glisse effaçait une donnée sans retour possible.
+ *
+ * Un composant unique plutôt que cinq fenêtres différentes : le geste est le même partout, et
+ * les prochaines suppressions ajoutées hériteront du même filet.
+ */
+function ConfirmerAction({ titre, message, consequence, libelleAction = "Supprimer", onConfirmer, onAnnuler }) {
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(4,7,14,0.65)", display: "grid", placeItems: "center", zIndex: 50, padding: 12 }} onClick={onClose}>
+    <Modal onClose={onAnnuler} title={titre} niveau={1}>
+      <div style={{ fontSize: 13.5, color: "var(--text)", marginBottom: consequence ? 12 : 18 }}>{message}</div>
+      {consequence && (
+        <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "11px 13px", marginBottom: 18 }}>
+          <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>{consequence}</div>
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={onConfirmer}
+          style={{ flex: 1, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+          {libelleAction}
+        </button>
+        <button onClick={onAnnuler}
+          style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "11px 20px", fontSize: 13, cursor: "pointer" }}>
+          Annuler
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
+function Modal({ title, children, onClose, wide, niveau = 0, saisieEnCours = false }) {
+  const [confirmerFermeture, setConfirmerFermeture] = useState(false);
+
+  /*
+   * Fermeture protégée.
+   *
+   * Un clic à côté de la fenêtre suffisait à tout perdre. Sur un formulaire de colis rempli
+   * pendant plusieurs minutes, avec le client en face, c'est le genre de détail qui fait
+   * détester un outil. Quand une saisie est en cours, on demande confirmation.
+   *
+   * La touche Échap ferme aussi la fenêtre : les agents habitués au clavier la cherchent.
+   */
+  function demanderFermeture() {
+    if (saisieEnCours) setConfirmerFermeture(true);
+    else onClose();
+  }
+
+  useEffect(() => {
+    function surTouche(e) {
+      if (e.key === "Escape" && !confirmerFermeture) { e.stopPropagation(); demanderFermeture(); }
+    }
+    window.addEventListener("keydown", surTouche);
+    return () => window.removeEventListener("keydown", surTouche);
+  }, [saisieEnCours, confirmerFermeture]);
+
+  return (
+    <div
+      onMouseDown={(e) => { if (e.target === e.currentTarget) demanderFermeture(); }}
+      style={{ position: "fixed", inset: 0, background: "rgba(4,7,14,0.65)", display: "grid", placeItems: "center", zIndex: 50 + niveau * 10, padding: 12 }} onClick={onClose}>
       <div onClick={(e) => e.stopPropagation()} style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 14, padding: 20, width: wide ? "min(94vw, 620px)" : "min(94vw, 420px)", maxHeight: "90vh", overflowY: "auto", boxShadow: "0 24px 60px rgba(0,0,0,0.5)" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
           <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 17, color: TEXT }}>{title}</div>
-          <button onClick={onClose} style={{ background: SURFACE2, border: "none", borderRadius: 8, width: 28, height: 28, cursor: "pointer", display: "grid", placeItems: "center", flexShrink: 0 }}><X size={15} color={MUTED} /></button>
+          <button onClick={demanderFermeture} style={{ background: SURFACE2, border: "none", borderRadius: 8, width: 28, height: 28, cursor: "pointer", display: "grid", placeItems: "center", flexShrink: 0 }}><X size={15} color={MUTED} /></button>
         </div>
         {children}
+
+        {confirmerFermeture && (
+          <div onClick={(e) => e.stopPropagation()}
+            style={{ position: "fixed", inset: 0, background: "rgba(4,7,14,0.75)", display: "grid", placeItems: "center", zIndex: 200, padding: 14 }}>
+            <div style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 14, padding: 22, width: "100%", maxWidth: 380 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, color: TEXT, marginBottom: 6 }}>Abandonner la saisie ?</div>
+              <div style={{ fontSize: 12.5, color: MUTED, marginBottom: 18, lineHeight: 1.55 }}>
+                Les informations saisies seront perdues.
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => { setConfirmerFermeture(false); onClose(); }}
+                  style={{ flex: 1, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+                  Abandonner
+                </button>
+                <button onClick={() => setConfirmerFermeture(false)}
+                  style={{ background: "none", border: `1px solid ${BORDER}`, color: MUTED, borderRadius: 8, padding: "11px 20px", fontSize: 13, cursor: "pointer" }}>
+                  Continuer la saisie
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

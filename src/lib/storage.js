@@ -72,8 +72,15 @@ export const storage = {
       if (error) throw error;
       return { key, value, shared: !!shared };
     } catch (e) {
-      // Hors ligne : la donnée reste dans le cache local (déjà fait ci-dessus), et l'écriture
-      // est mise en file d'attente pour être rejouée automatiquement au retour du réseau.
+      /*
+       * L'écriture a échoué : la donnée reste dans le cache local et rejoint la file d'attente,
+       * qui sera rejouée automatiquement.
+       *
+       * On retourne `queued: true` plutôt que de lever une erreur : l'application ne doit pas
+       * interrompre le travail de l'agent pour une coupure passagère. En revanche l'appelant
+       * DOIT vérifier ce drapeau — sans quoi il croirait le travail enregistré alors qu'il ne
+       * l'est pas encore, ce qui est exactement le cas dangereux pour un encaissement.
+       */
       const q = getQueue();
       q.push({ key, value: parsed, ts: Date.now() });
       setQueue(q);

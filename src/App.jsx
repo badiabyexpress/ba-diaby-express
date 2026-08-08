@@ -6848,13 +6848,35 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
   const [rechercheClient, setRechercheClient] = useState("");
   const [coteRecherche, setCoteRecherche] = useState(null);
 
+  /*
+   * Index de recherche, calculé UNE SEULE FOIS par annuaire.
+   *
+   * La version précédente normalisait les 343 noms à chaque touche frappée : le navigateur
+   * signalait des blocages de près d'une demi-seconde, et la frappe devenait saccadée.
+   * Ici la normalisation est faite d'avance ; taper une lettre ne fait plus qu'une comparaison
+   * de chaînes déjà préparées.
+   */
+  const indexClients = useMemo(
+    () => clientDirectory.map((c) => ({
+      client: c,
+      recherche: pourRecherche(`${c.nomComplet} ${c.telephone || ""}`),
+    })),
+    [clientDirectory]
+  );
+
   const suggestionsClients = useMemo(() => {
     const q = pourRecherche(rechercheClient.trim());
     if (q.length < 2) return [];
-    return clientDirectory
-      .filter((c) => pourRecherche(c.nomComplet).includes(q) || (c.telephone || "").includes(q))
-      .slice(0, 6);
-  }, [rechercheClient, clientDirectory]);
+    const trouves = [];
+    // Boucle interrompue dès 6 résultats : inutile de parcourir tout l'annuaire.
+    for (const entree of indexClients) {
+      if (entree.recherche.includes(q)) {
+        trouves.push(entree.client);
+        if (trouves.length === 6) break;
+      }
+    }
+    return trouves;
+  }, [rechercheClient, indexClients]);
 
   /*
    * Champ de recherche par nom.
@@ -8064,7 +8086,7 @@ async function downloadInvoice(colis, data, options = {}) {
 
   // Zones fixes : chaque bloc sait où il commence, aucun décalage cumulé possible.
   const Z = {
-    entete: 0, bandeau: 34, refs: 46, parties: 68, suivi: 104,
+    entete: 0, bandeau: 34, refs: 54, parties: 76, suivi: 108,
     produits: 128, produitsMax: 192, totaux: 197, agences: 252, pied: 288,
   };
 
@@ -8080,11 +8102,11 @@ async function downloadInvoice(colis, data, options = {}) {
   doc.addImage(DEFAULT_LOGO, "PNG", M, 7, 20, 20);
   doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold"); doc.setFontSize(16);
   doc.text("BA-DIABY EXPRESS", M + 25, 16);
-  doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(185, 200, 224);
+  doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(214, 226, 244);
   doc.text("Transport de colis Conakry - Monde", M + 25, 22.5);
   doc.setFontSize(11); doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold");
   doc.text("TICKET D'ENVOI", W - M, 16, { align: "right" });
-  doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(185, 200, 224);
+  doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(214, 226, 244);
   doc.text(new Date().toLocaleDateString("fr-FR"), W - M, 22.5, { align: "right" });
 
   // ── État du paiement, en évidence ─────────────────────────────────────────
@@ -8092,7 +8114,7 @@ async function downloadInvoice(colis, data, options = {}) {
   const paye = Number(colis.paye) || 0;
   const etat = solde <= 0.005 ? "PAYÉ" : paye > 0 ? "PARTIELLEMENT PAYÉ" : "NON PAYÉ";
   const etatFond = solde <= 0.005 ? [232, 247, 238] : paye > 0 ? [254, 246, 229] : [253, 235, 238];
-  const etatTexte = solde <= 0.005 ? [16, 116, 66] : paye > 0 ? [166, 106, 12] : [178, 36, 58];
+  const etatTexte = solde <= 0.005 ? [16, 116, 66] : paye > 0 ? [140, 88, 8] : [178, 36, 58];
   doc.setFillColor(...etatFond); doc.rect(0, Z.bandeau, W, 10, "F");
   doc.setFont(undefined, "bold"); doc.setFontSize(10); doc.setTextColor(...etatTexte);
   doc.text(etat, M, Z.bandeau + 6.8);
@@ -8170,7 +8192,7 @@ async function downloadInvoice(colis, data, options = {}) {
     doc.text(String(p.quantite || 1), M + 114, y + 5.4, { align: "right" });
     doc.text(`${p.poids || 0} kg`, M + 146, y + 5.4, { align: "right" });
     doc.setTextColor(...MUTED);
-    doc.text(couper(p.categorie || "—", 26), M + 150, y + 5.4);
+    if (p.categorie) doc.text(couper(p.categorie, 26), M + 150, y + 5.4);
     doc.setDrawColor(...LINE); doc.setLineWidth(0.2); doc.line(M, y + 8, W - M, y + 8);
     y += 8;
   });
@@ -8183,15 +8205,29 @@ async function downloadInvoice(colis, data, options = {}) {
   }
 
   // Récapitulatif quantité / poids, toujours à la même hauteur
+  /*
+   * Le récapitulatif suit immédiatement le tableau, au lieu d'être ancré en bas de zone : avec
+   * peu d'articles, un grand vide s'ouvrait au milieu du ticket et donnait un document bâclé.
+   * La zone reste bornée — au pire des cas le récapitulatif atteint Z.produitsMax, jamais plus.
+   */
   const totalQte = produits.reduce((s, p) => s + (Number(p.quantite) || 1), 0);
-  doc.setFillColor(...TINT); doc.rect(M, Z.produitsMax - 10, W - 2 * M, 10, "F");
+  const yRecap = Math.min(y + 2, Z.produitsMax - 10);
+  doc.setFillColor(...TINT); doc.rect(M, yRecap, W - 2 * M, 10, "F");
   doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...INK);
-  doc.text(`${produits.length} référence${produits.length > 1 ? "s" : ""} · ${totalQte} article${totalQte > 1 ? "s" : ""}`, M + 3, Z.produitsMax - 3.2);
-  doc.text(`Poids total : ${Number(colis.poids || 0).toFixed(2)} kg`, W - M - 3, Z.produitsMax - 3.2, { align: "right" });
+  doc.text(`${produits.length} référence${produits.length > 1 ? "s" : ""} · ${totalQte} article${totalQte > 1 ? "s" : ""}`, M + 3, yRecap + 6.5);
+  doc.text(`Poids total : ${Number(colis.poids || 0).toFixed(2)} kg`, W - M - 3, yRecap + 6.5, { align: "right" });
 
   // ── Totaux ────────────────────────────────────────────────────────────────
+  /*
+   * Les totaux sont posés sur un panneau encadré plutôt que sur du blanc : sans cadre, les
+   * lignes semblaient flotter au milieu de la page et le bandeau bleu paraissait détaché.
+   * Le panneau les rattache visuellement au reste du document.
+   */
   y = Z.totaux;
   const panL = W / 2 + 6;
+  doc.setFillColor(250, 251, 253);
+  doc.setDrawColor(...LINE); doc.setLineWidth(0.3);
+  doc.roundedRect(panL - 8, y - 8, W - M - panL + 8, 44, 3, 3, "FD");
   const ligneT = (label, valeur, gras) => {
     doc.setFont(undefined, gras ? "bold" : "normal"); doc.setFontSize(gras ? 9.5 : 8.5);
     doc.setTextColor(...(gras ? INK : MUTED));
@@ -10023,7 +10059,22 @@ function Clients({ data }) {
     filtered = clients.filter((c) => { const p = prochainSeuilInfo(c.count); return p && p.reste <= 2; })
       .sort((a, b) => prochainSeuilInfo(a.count).reste - prochainSeuilInfo(b.count).reste);
   }
-  if (query) filtered = filtered.filter((c) => pourRecherche(c.nomComplet).includes(pourRecherche(query)) || c.telephone?.includes(query));
+  /*
+   * Recherche dans l'annuaire, sur un index préparé d'avance.
+   *
+   * Normaliser 343 noms à chaque touche frappée bloquait l'interface : le navigateur signalait
+   * des attentes de près d'une demi-seconde. L'index est calculé une fois par annuaire, la
+   * frappe ne fait plus que comparer des chaînes déjà prêtes.
+   */
+  const indexAnnuaire = useMemo(
+    () => clients.map((c) => ({ client: c, recherche: pourRecherche(`${c.nomComplet} ${c.telephone || ""}`) })),
+    [clients]
+  );
+  if (query) {
+    const q = pourRecherche(query);
+    const gardes = new Set(indexAnnuaire.filter((e) => e.recherche.includes(q)).map((e) => e.client));
+    filtered = filtered.filter((c) => gardes.has(c));
+  }
 
   const doublons = useMemo(() => detecterDoublonsClients(clients), [clients]);
   const tabs = [["tous", "Tous"], ["meilleurs", "Meilleurs clients"], ["nouveaux", "Nouveaux clients"], ["reguliers", "Clients réguliers"], ["proche_palier", "Proches du palier suivant"], ["doublons", `Doublons possibles${doublons.length ? ` (${doublons.length})` : ""}`]];
@@ -12205,7 +12256,7 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
                 <td style={{ padding: "12px 16px", fontSize: 13 }}><span style={{ background: "var(--surface2)", color: "var(--text)", padding: "4px 10px", borderRadius: 20, fontSize: 11.5, fontWeight: 600 }}>{u.role}</span></td>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)" }}>{u.role === "Administrateur" ? "Tous les pays" : (u.paysAutorises?.length ? u.paysAutorises.map((c) => FLAGS[c]).join(" ") : "Tous les pays")}</td>
                 <td style={{ padding: "12px 16px", fontSize: 13 }}>{u.twoFA ? <ShieldCheck size={15} color="var(--ok-fg)" /> : "—"}</td>
-                <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>{effectivePermission(session, "users.gerer") && <button onClick={() => setUtilisateurAReinit(u)} title="Réinitialiser le mot de passe" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><Key size={15} /></button>}{u.identifiant !== "admin" && effectivePermission(session, "users.gerer") && <button onClick={() => removeUser(u.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={15} /></button>}</td>
+                <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>{effectivePermission(session, "users.gerer") && <button onClick={() => setUtilisateurAReinit(u)} title="Réinitialiser le mot de passe" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><Key size={15} /></button>}{u.id !== session?.id && (data.users || []).filter((x) => x.role === "Administrateur").length > 1 && effectivePermission(session, "users.gerer") && <button onClick={() => removeUser(u.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={15} /></button>}</td>
               </tr>
             ))}
           </tbody>

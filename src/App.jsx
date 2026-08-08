@@ -877,15 +877,7 @@ function defaultSeed() {
      * connue de tous. Le mot de passe n'est jamais stocké en clair — seule son empreinte PBKDF2
      * (150 000 itérations, sel unique) est enregistrée, et elle ne permet pas de le retrouver.
      */
-    users: [{
-      id: "u1", prenom: "Ibrahima", nom: "Diallo",
-      email: "badiabyexpress.bde@gmail.com", telephone: "+224620000000",
-      identifiant: "Iboush", role: "Administrateur", twoFA: false,
-      motdepasseAlgo: "pbkdf2",
-      motdepasseIter: 150000,
-      motdepasseSalt: "05072796eb9b2fde046a1ea0c17cc70f",
-      motdepasseSecure: "eac54df03597bdaa3d0166a8ebda86f608707a0fc218419dfcf12efdd20f2d0a",
-    }],
+    users: [DONNEES_REFERENCE.admin],
     colis: [], lang: "fr", theme: "dark",
     branding: { logo: DEFAULT_LOGO },
     clientAccounts: [],
@@ -945,38 +937,7 @@ function defaultSeed() {
      * GNF (Bateau, Shein/Temu, Vêtement USA, Petit Sipas) restent fixes.
      * `parDefaut` désigne la catégorie appliquée quand aucune ne correspond.
      */
-    categories: [
-      { nom: "Bateau", description: "Envoi par bateau", emoji: "🚢", type: "unite", montant: 250000, deviseSaisie: "GNF", paysLimite: null, motsCles: ["bateau"] },
-      { nom: "Beurre de karité (PARIS)", description: "BEURRE DE KARITÉ", emoji: "🧴", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: "GN", motsCles: ["Beurre de karité"] },
-      { nom: "CHAUSSURE MARQUE (PARIS)", description: "chaussures de marque nike, adidas", emoji: "👟", type: "unite", montant: 30, deviseSaisie: "EUR", paysLimite: null, motsCles: ["adidas", "Nike"] },
-      { nom: "Chaussures non marque ou traditionnel (PARIS)", description: "chaussure non marque ou traditionnel", emoji: "👞", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Chaussure non marque", "chaussure traditionnel"] },
-      { nom: "COLIS ITALIE", description: "COLIS ITALIE", emoji: "📦", type: "kg", montant: 13, deviseSaisie: "EUR", paysLimite: null, motsCles: ["italie"] },
-      { nom: "DOCUMENT B (PARIS)", description: "Passeport", emoji: "📄", type: "unite", montant: 50, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Passeport"] },
-      { nom: "DOCUMENT B PROVINCE Française", description: "Passeport", emoji: "📄", type: "unite", montant: 75, deviseSaisie: "EUR", paysLimite: "GN", motsCles: ["passeport"] },
-      { nom: "DOCUMENTS A (PARIS)", description: "Extrait de naissance, jugement supplétif, permis, diplôme, attestation, carte", emoji: "📑", type: "unite", montant: 30, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Extrait de naissance", "jugement supplétif", "permis", "diplôme", "attestation", "carte d’identité", "acte de mariage", "acte de divorce", "invitation"] },
-      { nom: "Drap (PARIS)", description: "Drap", emoji: "🛏️", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Drap-housse", "Drap plat", "Drap de dessus", "Drap de couverture", "Drap pour lit bébé"] },
-      { nom: "Habits 224 (PARIS)", description: "Vêtements de la marque 224 pour l’indépendant", emoji: "👕", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: "GN", motsCles: ["Pull 224", "casquette224", "T-shirt224"] },
-      { nom: "Habits traditionnel non cousu et cousu (PARIS)", description: "Les habits traditionnels africains", emoji: "🥻", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Pagne africaine", "wax", "bazin", "Robe", "complets", "boubou", "Macky sall", "grand boubou", "tissu"] },
-      { nom: "Huile rouge (PARIS)", description: "Huile rouge", emoji: "🫗", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: "GN", motsCles: ["Huile rouge"] },
-      { nom: "Médicaments liquide 1L et 1.5L", description: "Médicaments liquide", emoji: "💊", type: "unite", montant: 30, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Médicaments liquide 1L"] },
-      { nom: "Médicaments liquide Talisman 1 à 500ml (PARIS)", description: "Médicaments liquide petite bouteille", emoji: "💊", type: "unite", montant: 15, deviseSaisie: "EUR", paysLimite: "GN", motsCles: ["Talisman", "330cl", "petit bouteille", "liquide", "500ml"] },
-      { nom: "KARAMBA ALY TOMBOLIA", description: "Tarif partenaire", emoji: "🤝", type: "kg", montant: 10, deviseSaisie: "EUR", paysLimite: null, motsCles: ["KARAMBA ALY TOMBOLIA"] },
-      { nom: "PARTENAIRE NON YAWII", description: "Tarif partenaire", emoji: "🤝", type: "kg", montant: 8.69, deviseSaisie: "EUR", paysLimite: null, motsCles: ["PARTENAIRE NON YAWII"] },
-      { nom: "PARTENAITE THIANGUIL", description: "Tarif partenaire", emoji: "🤝", type: "kg", montant: 8.80, deviseSaisie: "EUR", paysLimite: null, motsCles: ["thianguil"] },
-      { nom: "Petit sipas USA", description: "Médicament liquide USA", emoji: "💊", type: "unite", montant: 220000, deviseSaisie: "GNF", paysLimite: null, motsCles: ["sipas"] },
-      { nom: "Poisson konkoe (PARIS)", description: "Poisson", emoji: "🐟", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: "GN", motsCles: ["Poisson", "konkoe"] },
-      { nom: "PRIX PARTENAIRE", description: "Seulement pour les partenaires", emoji: "🤝", type: "kg", montant: 8, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Partenaire"] },
-      { nom: "Produit cosmétique (PARIS)", description: "Produits cosmétiques visage et corporel", emoji: "💄", type: "kg", montant: 15, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Crème hydratante", "sérum", "lotion tonique", "gel nettoyant", "gommage", "masque visage", "crème anti-âge", "crème solaire", "Lait corporel", "huile corporelle", "crème éclaircissante", "gommage corporel", "beurre de karité", "gel douche", "savon", "Fond de teint", "poudre", "correcteur", "mascara", "rouge à lèvres", "gloss", "eyeliner", "fard à paupières", "blush", "Baume après-rasage", "mousse à raser", "crème hydratante homme", "huile barbe", "shampooing barbe", "Déodorant", "dentifrice", "bain de bouche", "savon liquide", "lingettes"] },
-      { nom: "Sac de marque (Paris)", description: "Sac avec des noms ou logo reconnus", emoji: "👜", type: "unite", montant: 12, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Louis Vuitton", "Gucci", "Bottega Veneta", "Saint Laurent", "Balenciaga", "Fendi", "Valentino", "Prada", "Dior", "Celine", "Hermès"] },
-      { nom: "Sac non marque", description: "Sac non reconnu", emoji: "👜", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Non marque"] },
-      { nom: "Savon noir (PARIS)", description: "Savon noir", emoji: "🧼", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: "GN", motsCles: ["Savon", "savon noir"] },
-      { nom: "SHEIN/TEMU", description: "les commandes shein et temu", emoji: "🛍️", type: "kg", montant: 100000, deviseSaisie: "GNF", paysLimite: null, motsCles: ["shein", "temu", "aliexpress"] },
-      { nom: "SHEIN /TEMU/ALIEXPRESS", description: "Les achats en ligne ou commande en ligne", emoji: "🛍️", type: "kg", montant: 10, deviseSaisie: "EUR", paysLimite: null, motsCles: ["shein", "temu", "aliexpress"] },
-      { nom: "Telephone neuf (PARIS)", description: "téléphone ou smartphone neuf", emoji: "📱", type: "unite", montant: 50, deviseSaisie: "EUR", paysLimite: null, motsCles: ["telephone", "iphone", "samsung", "tecno", "infinix", "smartphone"] },
-      { nom: "VETEMENT/HABITS (USA)", description: "pantalon, pull, t-shirt, culotte", emoji: "👕", type: "kg", montant: 250000, deviseSaisie: "GNF", paysLimite: null, motsCles: ["pantalon", "pull", "t-shirt", "culotte"] },
-      { nom: "Vêtements de marque (PARIS)", description: "Tous les vêtements de marque et maillots de marque", emoji: "👔", type: "unite", montant: 10, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Zara", "H&M", "Bershka", "Pull&Bear", "Stradivarius", "Uniqlo", "Mango", "Shein", "Primark", "Nike", "Adidas", "Puma", "Jordan", "Supreme", "Off-White", "Stüssy", "Carhartt", "The North Face", "Champion", "Lacoste", "Ralph Lauren", "Calvin Klein", "Tommy Hilfiger", "Gant", "Guess", "Hugo Boss", "Gucci", "Louis Vuitton", "Dior", "Balenciaga", "Chanel", "Fendi", "Versace", "Givenchy", "Sandro", "Maje", "A.P.C.", "Celio", "Kaporal", "Le Coq Sportif", "Okaïdi", "Tape à l’Œil", "Kiabi", "C&A", "DPAM"] },
-      { nom: "Autres articles", description: "Catégorie appliquée quand aucune autre ne correspond", emoji: "📦", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: null, motsCles: [], parDefaut: true },
-    ].map((c, i) => ({
+    categories: DONNEES_REFERENCE.categories.map((c, i) => ({
       id: `cat-${i}`, visibiliteColis: true, visibiliteFactures: true, ordre: i,
       parDefaut: false, commissionRate: null, ...c,
     })),
@@ -1549,7 +1510,6 @@ function ScannerModal({ onClose, onScan }) {
   const streamRef = useRef(null);
   const rafRef = useRef(null);
   const [etat, setEtat] = useState("demarrage"); // demarrage | actif | erreur
-  const [erreur, setErreur] = useState("");
 
   useEffect(() => {
     let annule = false;
@@ -2004,8 +1964,6 @@ const CLIENT_I18N = {
   "Mode": { en: "Mode", ar: "الوسيلة" },
   "Poids": { en: "Weight", ar: "الوزن" },
   "Enregistré le": { en: "Registered on", ar: "تاريخ التسجيل" },
-  "Aérien": { en: "Air", ar: "جوي" },
-  "Maritime": { en: "Sea", ar: "بحري" },
   "Aucun colis trouvé": { en: "No parcel found", ar: "لم يتم العثور على شحنة" },
   "Vérifiez le numéro de suivi et réessayez.": { en: "Check the tracking number and try again.", ar: "تحقق من رقم التتبع وحاول مرة أخرى." },
   "Suivez tous vos colis Ba-Diaby Express en un seul endroit.": { en: "Track all your Ba-Diaby Express parcels in one place.", ar: "تابع جميع شحناتك مع با-ديابي إكسبريس في مكان واحد." },
@@ -6127,7 +6085,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
           <button onClick={() => imprimerLot("facture")} disabled={impressionLot} style={{ background: "var(--surface2)", color: "#fff", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>{impressionLot ? "Génération…" : "Factures A4"}</button>
         </div>
       )}
-      {showForm && <ColisForm remiseVolumeConfig={data.remiseVolume} onClose={() => setShowForm(false)} onSave={addColis} existingColis={data.colis} categories={data.categories || []} session={session} sites={data.sites} partenaires={(data.users || []).filter((u) => u.role === "Partenaire")} clientAccounts={data.clientAccounts || []} preAlertes={data.preAlertes || []} />}
+      {showForm && <ColisForm remiseVolumeConfig={data.remiseVolume} repertoire={data.repertoire} onClose={() => setShowForm(false)} onSave={addColis} existingColis={data.colis} categories={data.categories || []} session={session} sites={data.sites} partenaires={(data.users || []).filter((u) => u.role === "Partenaire")} clientAccounts={data.clientAccounts || []} preAlertes={data.preAlertes || []} />}
       {showAi && <AiColisModal onClose={() => setShowAi(false)} onCreate={addColis} data={data} session={session} />}
       {showImport && <ImportExcelModal onClose={() => setShowImport(false)} onImportMany={importerColisMany} data={data} session={session} />}
       {remiseEnCours && <RemiseColisModal colis={remiseEnCours} session={session}
@@ -6838,9 +6796,9 @@ function splitNom(full) {
   return { prenom: parts[0], nom: parts.slice(1).join(" ") };
 }
 
-function ColisForm({ onClose, onSave, existingColis, categories, session, sites, partenaires, clientAccounts, preAlertes, remiseVolumeConfig }) {
+function ColisForm({ onClose, onSave, existingColis, categories, session, sites, partenaires, clientAccounts, preAlertes, remiseVolumeConfig, repertoire }) {
   const availableCountries = allowedCountries(session);
-  const clientDirectory = useMemo(() => buildClientDirectory(existingColis || []), [existingColis]);
+  const clientDirectory = useMemo(() => buildClientDirectory(existingColis || [], repertoire), [existingColis, repertoire]);
   const [step, setStep] = useState(0);
   const [expPrenom, setExpPrenom] = useState("");
   const [expNom, setExpNom] = useState("");
@@ -8081,227 +8039,219 @@ async function downloadBonSortie(colis) {
  * joindre à un e-mail. Le document est identique dans les deux cas — une seule mise en page à
  * maintenir, donc aucun risque que la facture envoyée diffère de celle imprimée.
  */
+/**
+ * Ticket d'envoi — une seule page A4, jamais de débordement.
+ *
+ * L'ancienne version empilait les blocs les uns après les autres : avec plusieurs produits, un
+ * nom long ou une remise, le contenu passait en page 2 et le client recevait un document coupé.
+ *
+ * Ici chaque zone a une position FIXE en millimètres, et le tableau des produits dispose d'une
+ * hauteur bornée : au-delà de 8 lignes, les articles restants sont résumés sur une ligne plutôt
+ * que de pousser le reste hors de la page. Le document tient toujours sur une feuille.
+ *
+ * `options.retourner` renvoie le PDF en base64 au lieu de l'ouvrir, pour l'envoi par e-mail.
+ */
 async function downloadInvoice(colis, data, options = {}) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF());
+  const W = 210, H = 297, M = 16;
+  const NAVY = [10, 38, 71], INK = [26, 30, 38], MUTED = [125, 133, 145], LINE = [226, 230, 236];
+  const TINT = [244, 247, 251];
+
   const dest = COUNTRIES.find((c) => c.code === colis.pays);
-  const destCur = dest?.currency || "EUR";
-  const statutPaiement = colis.reste <= 0 ? "PAYÉ" : (colis.paye > 0 ? "PAIEMENT PARTIEL" : "NON PAYÉ");
-  const statutColor = colis.reste <= 0 ? [30, 150, 90] : (colis.paye > 0 ? [200, 140, 20] : [214, 39, 63]);
-  const statutBg = colis.reste <= 0 ? [235, 248, 240] : (colis.paye > 0 ? [253, 244, 227] : [252, 233, 236]);
-  const qrData = await generateQRDataUrl(trackingUrlFor(colis.tracking), 220).catch(() => null);
-  const categories = [...new Set((colis.produits || []).map((p) => p.categorie).filter(Boolean))].join(", ") || "—";
-  const numeroTicket = `TCK-${colis.tracking}`;
-  const entreprise = data?.entreprise || { adresseSiege: "Conakry, Guinée", telephone: "+224612479339", email: "badiabyexpress.bde@gmail.com", siteWeb: "www.ba-diaby-express.com" };
-  const agenceOrigine = (data?.sites || []).find((s) => s.nom === colis.site);
-  const agenceReception = (data?.agencesReception || {})[colis.pays];
-  const articles = (colis.produits || []).reduce((s, p) => s + (Number(p.quantite) || 1), 0) || 1;
+  const origine = COUNTRIES.find((c) => c.code === (colis.direction === "import" ? colis.pays : "GN"));
+  const gnf = LIVE_RATES.GNF || CURRENCIES.GNF;
 
-  const SKY = [58, 141, 201], RED = [214, 39, 63], INK = [26, 30, 38], MUTED = [122, 130, 142], LINE = [228, 232, 238], SKYTINT = [235, 245, 252];
-  const W = 210, M = 16;
-
-  let y = 18;
-  let page = 1;
-  const ensureRoom = (needed) => {
-    if (y + needed > 280) { doc.addPage(); page++; y = 20; }
+  // Zones fixes : chaque bloc sait où il commence, aucun décalage cumulé possible.
+  const Z = {
+    entete: 0, bandeau: 34, refs: 46, parties: 68, suivi: 104,
+    produits: 128, produitsMax: 192, totaux: 197, agences: 252, pied: 288,
   };
-  const hr = (yy) => { doc.setDrawColor(...LINE); doc.setLineWidth(0.3); doc.line(M, yy, W - M, yy); };
-  const eyebrow = (text, x, yy, color = MUTED) => { doc.setFont(undefined, "bold"); doc.setFontSize(7.2); doc.setTextColor(...color); doc.text(text.toUpperCase(), x, yy); };
 
-  // ── En-tête ──────────────────────────────────────────────────────────────
-  doc.addImage(DEFAULT_LOGO, "PNG", M, y - 4, 18, 18);
-  doc.setFont(undefined, "bold"); doc.setFontSize(15); doc.setTextColor(...INK);
-  doc.text("BA-DIABY", M + 22, y + 2);
-  doc.setTextColor(...RED);
-  doc.text("EXPRESS", M + 22, y + 8);
+  const couper = (texte, largeur) => {
+    let t = String(texte ?? "");
+    if (doc.getTextWidth(t) <= largeur) return t;
+    while (t.length > 1 && doc.getTextWidth(t + "\u2026") > largeur) t = t.slice(0, -1);
+    return t + "\u2026";
+  };
+
+  // ── En-tête ───────────────────────────────────────────────────────────────
+  doc.setFillColor(...NAVY); doc.rect(0, 0, W, Z.bandeau, "F");
+  doc.addImage(DEFAULT_LOGO, "PNG", M, 7, 20, 20);
+  doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold"); doc.setFontSize(16);
+  doc.text("BA-DIABY EXPRESS", M + 25, 16);
+  doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(185, 200, 224);
+  doc.text("Transport de colis Conakry - Monde", M + 25, 22.5);
+  doc.setFontSize(11); doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold");
+  doc.text("TICKET D'ENVOI", W - M, 16, { align: "right" });
+  doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(185, 200, 224);
+  doc.text(new Date().toLocaleDateString("fr-FR"), W - M, 22.5, { align: "right" });
+
+  // ── État du paiement, en évidence ─────────────────────────────────────────
+  const solde = Number(colis.reste) || 0;
+  const paye = Number(colis.paye) || 0;
+  const etat = solde <= 0.005 ? "PAYÉ" : paye > 0 ? "PARTIELLEMENT PAYÉ" : "NON PAYÉ";
+  const etatFond = solde <= 0.005 ? [232, 247, 238] : paye > 0 ? [254, 246, 229] : [253, 235, 238];
+  const etatTexte = solde <= 0.005 ? [16, 116, 66] : paye > 0 ? [166, 106, 12] : [178, 36, 58];
+  doc.setFillColor(...etatFond); doc.rect(0, Z.bandeau, W, 10, "F");
+  doc.setFont(undefined, "bold"); doc.setFontSize(10); doc.setTextColor(...etatTexte);
+  doc.text(etat, M, Z.bandeau + 6.8);
+  if (solde > 0.005) {
+    doc.text(`Reste à payer : ${fmtGNF(solde * gnf)}`, W - M, Z.bandeau + 6.8, { align: "right" });
+  }
+
+  // ── Références ────────────────────────────────────────────────────────────
+  let y = Z.refs;
+  const champ = (label, valeur, x, largeur) => {
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
+    doc.text(label.toUpperCase(), x, y);
+    doc.setFont(undefined, "bold"); doc.setFontSize(10); doc.setTextColor(...INK);
+    doc.text(couper(valeur, largeur), x, y + 5.5);
+  };
+  champ("Numéro de suivi", colis.tracking, M, 56);
+  champ("Date d'enregistrement", new Date(colis.createdAt).toLocaleDateString("fr-FR"), M + 60, 40);
+  champ("Statut", clientStatusLabel(colis.status), M + 104, 40);
+  champ("Mode", colis.mode === "air" ? "Aérien" : "Maritime", W - M - 24, 24);
+  if (colis.referenceCommande) {
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
+    doc.text("RÉFÉRENCE COMMANDE", M, y + 12);
+    doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...INK);
+    doc.text(couper(colis.referenceCommande, 80), M, y + 16.5);
+  }
+
+  // ── Expéditeur / Destinataire ─────────────────────────────────────────────
+  y = Z.parties;
+  doc.setDrawColor(...LINE); doc.setLineWidth(0.3);
+  doc.line(M, y - 6, W - M, y - 6);
+  const partie = (titre, nom, tel, pays, x) => {
+    doc.setFont(undefined, "bold"); doc.setFontSize(8); doc.setTextColor(...MUTED);
+    doc.text(titre.toUpperCase(), x, y);
+    doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(...INK);
+    doc.text(couper(nom || "—", 82), x, y + 7);
+    doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(...MUTED);
+    doc.text(tel || "—", x, y + 13);
+    doc.text(pays || "—", x, y + 18.5);
+  };
+  partie("Expéditeur", colis.expediteur, colis.expediteurTelephone, origine?.name, M);
+  partie("Destinataire", colis.destinataire, colis.telephone, dest?.name, W / 2 + 2);
+
+  // ── Numéro de suivi mis en avant ──────────────────────────────────────────
+  y = Z.suivi;
+  doc.setFillColor(...TINT); doc.roundedRect(M, y, W - 2 * M, 18, 3, 3, "F");
+  doc.setFont(undefined, "bold"); doc.setFontSize(20); doc.setTextColor(...NAVY);
+  doc.text(colis.tracking, W / 2, y + 9, { align: "center" });
   doc.setFont(undefined, "normal"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
-  const enteteDroite = [entreprise.adresseSiege, entreprise.telephone, entreprise.email, entreprise.siteWeb].filter(Boolean);
-  enteteDroite.forEach((l, i) => doc.text(l, W - M, y - 2 + i * 3.6, { align: "right" }));
-  y += 18;
-  doc.setFillColor(...RED); doc.rect(M, y, W - 2 * M, 0.8, "F");
+  doc.text("Conservez ce numéro pour suivre votre colis", W / 2, y + 14.5, { align: "center" });
+
+  // ── Produits ──────────────────────────────────────────────────────────────
+  y = Z.produits;
+  doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...INK);
+  doc.text("DÉTAIL DES ARTICLES", M, y - 4);
+
+  const COLS = [
+    { t: "Article", x: M + 2, l: 92 },
+    { t: "Qté", x: M + 100, l: 14, d: true },
+    { t: "Poids", x: M + 124, l: 22, d: true },
+    { t: "Catégorie", x: M + 150, l: 26 },
+  ];
+  doc.setFillColor(...NAVY); doc.rect(M, y, W - 2 * M, 8, "F");
+  doc.setFont(undefined, "bold"); doc.setFontSize(8); doc.setTextColor(255, 255, 255);
+  COLS.forEach((c) => doc.text(c.t, c.d ? c.x + c.l : c.x, y + 5.4, c.d ? { align: "right" } : undefined));
   y += 8;
 
-  // ── Bandeau ticket : n° ticket / n° suivi / QR / date / agent ─────────────
-  doc.setFillColor(...SKYTINT); doc.roundedRect(M, y, W - 2 * M, 26, 3, 3, "F");
-  if (qrData) doc.addImage(qrData, "PNG", W - M - 22, y + 2, 22, 22);
-  eyebrow("N° de ticket", M + 8, y + 8, SKY);
-  doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(...INK);
-  doc.text(numeroTicket, M + 8, y + 13.5);
-  eyebrow("N° de suivi", M + 8, y + 19.5, SKY);
-  doc.setFontSize(11); doc.text(colis.tracking, M + 8, y + 25);
-  eyebrow("Enregistré le", M + 68, y + 8, SKY);
-  doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(...INK);
-  doc.text(new Date(colis.createdAt).toLocaleString("fr-FR"), M + 68, y + 13.5);
-  eyebrow("Agent", M + 68, y + 19.5, SKY);
-  doc.text(colis.agentCreation || "—", M + 68, y + 25);
-  y += 32;
-
-  // ── Statut de paiement (pastille) ────────────────────────────────────────
-  doc.setFillColor(...statutBg); doc.roundedRect(M, y, 62, 10, 5, 5, "F");
-  doc.setFont(undefined, "bold"); doc.setFontSize(9.5); doc.setTextColor(...statutColor);
-  doc.text(statutPaiement, M + 31, y + 6.7, { align: "center" });
-  y += 18;
-
-  // ── Expéditeur / Destinataire ────────────────────────────────────────────
-  const colW = (W - 2 * M - 10) / 2;
-  const drawPersonCard = (x, title, accent, nom, tel, email, adresse, ville, cp, pays) => {
-    doc.setDrawColor(...LINE); doc.setLineWidth(0.3);
-    let cy = y + 7;
-    eyebrow(title, x + 8, cy, accent);
-    cy += 6;
-    doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(...INK);
-    const nomLines = doc.splitTextToSize((nom || "—").toUpperCase(), colW - 14);
-    doc.text(nomLines, x + 8, cy);
-    cy += nomLines.length * 4.6;
-    doc.setFont(undefined, "normal"); doc.setFontSize(8.3); doc.setTextColor(...MUTED);
-    doc.text(tel || "—", x + 8, cy); cy += 4.2;
-    if (email) { doc.text(email, x + 8, cy); cy += 4.2; }
+  const produits = colis.produits || [];
+  const MAX_LIGNES = 6;
+  const visibles = produits.slice(0, MAX_LIGNES);
+  doc.setFont(undefined, "normal"); doc.setFontSize(8.5);
+  visibles.forEach((p, i) => {
+    if (i % 2 === 1) { doc.setFillColor(249, 251, 253); doc.rect(M, y, W - 2 * M, 8, "F"); }
     doc.setTextColor(...INK);
-    if (adresse) { const l = doc.splitTextToSize(adresse, colW - 14); doc.text(l, x + 8, cy); cy += l.length * 4; }
-    const villeCp = [cp, ville].filter(Boolean).join(" ");
-    if (villeCp) { doc.text(villeCp, x + 8, cy); cy += 4; }
-    if (pays) { doc.setFont(undefined, "bold"); doc.text(pays.toUpperCase(), x + 8, cy); cy += 4.5; }
-    return cy + 4;
-  };
-  const yExpEnd = drawPersonCard(M, "Expéditeur", SKY, colis.expediteur, colis.expediteurTelephone, colis.expediteurEmail, colis.expediteurAdresse, null, null, COUNTRIES.find((c) => c.code === colis.expediteurPays)?.name);
-  const yDestEnd = drawPersonCard(M + colW + 10, "Destinataire", RED, colis.destinataire, colis.telephone, colis.destinataireEmail, colis.destinataireAdresse, colis.destinataireVille, colis.destinataireCodePostal, COUNTRIES.find((c) => c.code === colis.destinatairePays)?.name || dest?.name);
-  const cardBottom = Math.max(yExpEnd, yDestEnd);
-  doc.setDrawColor(...LINE); doc.roundedRect(M, y, colW, cardBottom - y, 3, 3);
-  doc.roundedRect(M + colW + 10, y, colW, cardBottom - y, 3, 3);
-  doc.setFillColor(...SKY); doc.rect(M, y + 3, 1.4, cardBottom - y - 6, "F");
-  doc.setFillColor(...RED); doc.rect(M + colW + 10, y + 3, 1.4, cardBottom - y - 6, "F");
-  y = cardBottom + 8;
-
-  // ── Carte informations du colis ──────────────────────────────────────────
-  ensureRoom(46);
-  eyebrow("Informations du colis", M, y, SKY);
-  y += 6;
-  doc.setDrawColor(...LINE); doc.roundedRect(M, y, W - 2 * M, 38, 3, 3);
-  const champs = [
-    ["N° de suivi", colis.tracking], ["Articles", String(articles)], ["Poids total", `${colis.poids} kg`],
-    ["Catégorie", categories], ["Valeur déclarée", colis.valeurDeclaree > 0 ? fmtGNF(colis.valeurDeclaree) : "Non déclarée"], ["Mode de transport", colis.mode === "air" ? "Aérien" : "Maritime"],
-    ["Statut actuel", colis.status], ["Enregistré le", new Date(colis.createdAt).toLocaleDateString("fr-FR")],
-    ["Arrivée prévue", (() => { const d = colis.mode === "air" ? dest?.delayAir : dest?.delaySea; if (!d) return "—"; const dt = new Date(colis.createdAt); dt.setDate(dt.getDate() + d); return dt.toLocaleDateString("fr-FR"); })()],
-  ];
-  const cw = (W - 2 * M - 16) / 3;
-  champs.forEach(([label, value], i) => {
-    const col = i % 3, row = Math.floor(i / 3);
-    const cx = M + 8 + col * cw, cy = y + 8 + row * 12;
-    doc.setFont(undefined, "normal"); doc.setFontSize(7); doc.setTextColor(...MUTED);
-    doc.text(label.toUpperCase(), cx, cy);
-    doc.setFont(undefined, "bold"); doc.setFontSize(9.3); doc.setTextColor(...INK);
-    doc.text(String(value), cx, cy + 4.6);
+    doc.text(couper(p.nom || "—", 90), M + 2, y + 5.4);
+    doc.text(String(p.quantite || 1), M + 114, y + 5.4, { align: "right" });
+    doc.text(`${p.poids || 0} kg`, M + 146, y + 5.4, { align: "right" });
+    doc.setTextColor(...MUTED);
+    doc.text(couper(p.categorie || "—", 26), M + 150, y + 5.4);
+    doc.setDrawColor(...LINE); doc.setLineWidth(0.2); doc.line(M, y + 8, W - M, y + 8);
+    y += 8;
   });
-  y += 38 + 4;
-  doc.setFont(undefined, "normal"); doc.setFontSize(8); doc.setTextColor(...MUTED);
-  doc.text(`Route : ${routeLabel(colis.pays, colis.direction)}`, M, y);
-  if (colis.referenceCommande) {
-    doc.setFont(undefined, "bold"); doc.setTextColor(...INK);
-    doc.text(`Référence de commande du client : ${colis.referenceCommande}`, W - M, y, { align: "right" });
-    doc.setFont(undefined, "normal"); doc.setTextColor(...MUTED);
+  if (produits.length > MAX_LIGNES) {
+    const reste = produits.length - MAX_LIGNES;
+    const poidsReste = produits.slice(MAX_LIGNES).reduce((s, p) => s + (Number(p.poids) || 0), 0);
+    doc.setFont(undefined, "italic"); doc.setFontSize(8); doc.setTextColor(...MUTED);
+    doc.text(`et ${reste} autre${reste > 1 ? "s" : ""} article${reste > 1 ? "s" : ""} — ${poidsReste.toFixed(2)} kg`, M + 2, y + 5.4);
+    y += 8;
   }
-  y += 10;
 
-  // ── Paiement ─────────────────────────────────────────────────────────────
-  ensureRoom(74);  // bloc de totaux : remise, rabais et supplément express compris
-  eyebrow("Paiement", M, y, SKY);
-  y += 6;
-  /*
-   * Bloc de totaux façon facture : les montants sont regroupés dans un panneau à droite plutôt
-   * qu'étalés sur toute la largeur de la page. Auparavant le libellé était à 26 mm et le montant
-   * à 184 mm, soit 158 mm de vide entre les deux — d'où un rendu déstructuré et difficile à lire.
-   * Le total est mis en évidence sur un fond teinté, et le solde restant est coloré selon l'état.
-   */
-  const panL = W / 2 - 4;              // bord gauche du panneau
-  const panR = W - M;                  // bord droit
-  const padX = 8;
-  const payBoxTop = y;
+  // Récapitulatif quantité / poids, toujours à la même hauteur
+  const totalQte = produits.reduce((s, p) => s + (Number(p.quantite) || 1), 0);
+  doc.setFillColor(...TINT); doc.rect(M, Z.produitsMax - 10, W - 2 * M, 10, "F");
+  doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...INK);
+  doc.text(`${produits.length} référence${produits.length > 1 ? "s" : ""} · ${totalQte} article${totalQte > 1 ? "s" : ""}`, M + 3, Z.produitsMax - 3.2);
+  doc.text(`Poids total : ${Number(colis.poids || 0).toFixed(2)} kg`, W - M - 3, Z.produitsMax - 3.2, { align: "right" });
 
-  const ligneTotal = (label, valeur, opts = {}) => {
-    const { gras = false, couleur = MUTED, taille = 9 } = opts;
-    doc.setFont(undefined, gras ? "bold" : "normal"); doc.setFontSize(taille);
-    doc.setTextColor(...couleur);
-    doc.text(label, panL + padX, y);
-    doc.text(String(valeur), panR - padX, y, { align: "right" });
-    y += taille >= 11 ? 7.5 : 6;
+  // ── Totaux ────────────────────────────────────────────────────────────────
+  y = Z.totaux;
+  const panL = W / 2 + 6;
+  const ligneT = (label, valeur, gras) => {
+    doc.setFont(undefined, gras ? "bold" : "normal"); doc.setFontSize(gras ? 9.5 : 8.5);
+    doc.setTextColor(...(gras ? INK : MUTED));
+    doc.text(label, panL, y);
+    doc.text(valeur, W - M, y, { align: "right" });
+    y += 5;
   };
-
-  y += 7;
-  ligneTotal(`Prix du transport (${destCur})`, fmt(colis.prixBrut || colis.prix, destCur));
-  if (colis.discountLoyalty > 0) ligneTotal("Remise fidélité", `-${colis.discountLoyalty} %`);
-  if (colis.rabaisMontant > 0) ligneTotal("Rabais", `-${colis.rabaisMontant.toLocaleString("fr-FR")} ${colis.rabaisDevise}`);
-  // Supplément express : le client doit voir d'où vient la différence sur son total, et quand
-  // sa demande a été acceptée. Sans cette ligne, le montant paraîtrait avoir augmenté sans raison.
+  ligneT("Frais d'expédition", fmtGNF((colis.prixBrut || colis.prix) * gnf));
+  if (colis.discountLoyalty > 0) ligneT("Remise fidélité", `-${colis.discountLoyalty} %`);
+  if (colis.discountVolume > 0) ligneT("Remise volume", `-${colis.discountVolume} %`);
   const ex = colis.demandeExpress;
-  if (ex && ex.facture && ex.montant > 0) {
-    ligneTotal("Livraison express 72h", fmt(ex.montant, destCur));
-    if (ex.dateDecision) {
-      doc.setFont(undefined, "normal"); doc.setFontSize(7.2); doc.setTextColor(...MUTED);
-      doc.text(`demandée par le client, acceptée le ${new Date(ex.dateDecision).toLocaleDateString("fr-FR")}`
-        + (ex.traitePar ? ` par ${ex.traitePar}` : ""), panL + padX, y - 1.5);
-      y += 3.5;
-    }
+  if (ex && ex.facture && ex.montant > 0) ligneT("Livraison express 72h", fmtGNF(ex.montant * gnf));
+
+  y += 1;
+  doc.setFillColor(...NAVY); doc.rect(panL - 4, y - 4.5, W - M - panL + 4, 11, "F");
+  doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(255, 255, 255);
+  doc.text("TOTAL À PAYER", panL, y + 2.5);
+  doc.text(fmtGNF(colis.prix * gnf), W - M, y + 2.5, { align: "right" });
+  // L'équivalent en euros tient dans le bandeau : une ligne de moins, donc plus de marge.
+  doc.setFont(undefined, "normal"); doc.setFontSize(7); doc.setTextColor(205, 218, 236);
+  doc.text(`~ ${fmt(colis.prix, "EUR")}`, W - M, y + 6, { align: "right" });
+  y += 13;
+  if (paye > 0) {
+    doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
+    doc.text("Déjà versé", panL, y);
+    doc.text(fmtGNF(paye * gnf), W - M, y, { align: "right" });
+    y += 5.5;
+  }
+  if (solde > 0.005) {
+    doc.setFont(undefined, "bold"); doc.setFontSize(10); doc.setTextColor(...etatTexte);
+    doc.text("Reste à payer", panL, y);
+    doc.text(fmtGNF(solde * gnf), W - M, y, { align: "right" });
   }
 
-  // Bandeau du montant total, mis en avant
-  y += 1.5;
-  doc.setFillColor(...SKYTINT);
-  doc.rect(panL, y - 5, panR - panL, 11, "F");
-  doc.setFont(undefined, "bold"); doc.setFontSize(11.5); doc.setTextColor(...INK);
-  doc.text("MONTANT TOTAL", panL + padX, y + 1.5);
-  doc.text(fmt(colis.prix, "GNF"), panR - padX, y + 1.5, { align: "right" });
-  y += 9;
-  doc.setFont(undefined, "normal"); doc.setFontSize(7.6); doc.setTextColor(...MUTED);
-  doc.text(`soit ${fmt(colis.prix, destCur)}`, panR - padX, y, { align: "right" });
-  y += 7;
+  // ── Agences ───────────────────────────────────────────────────────────────
+  y = Z.agences;
+  doc.setDrawColor(...LINE); doc.setLineWidth(0.3); doc.line(M, y - 8, W - M, y - 8);
+  const sites = data?.sites || [];
+  const siteDepot = sites.find((s) => s.nom === colis.site) || sites[0];
+  const siteRetrait = sites.find((s) => s.id === (data?.agenceRetraitClient || "site-bambeto")) || sites[0];
+  const bloc = (titre, site, x) => {
+    doc.setFont(undefined, "bold"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
+    doc.text(titre.toUpperCase(), x, y);
+    doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...INK);
+    doc.text(couper(site?.nom || "—", 80), x, y + 5.5);
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
+    doc.text(couper(site?.adresse || "", 80), x, y + 10.5);
+    doc.text(couper(`${site?.telephone || ""}${site?.horaires ? " · " + site.horaires : ""}`, 80), x, y + 15);
+  };
+  bloc("Site d'enregistrement", siteDepot, M);
+  bloc("Site de retrait", siteRetrait, W / 2 + 2);
 
-  doc.setDrawColor(...LINE); doc.setLineWidth(0.3);
-  doc.line(panL + padX, y - 3.5, panR - padX, y - 3.5);
-  ligneTotal("Déjà payé", fmt(colis.paye, destCur));
-  const solde = colis.reste > 0;
-  ligneTotal(solde ? "Reste à payer" : "Solde", solde ? fmt(colis.reste, destCur) : "PAYÉ EN TOTALITÉ",
-             { gras: true, taille: 10.5, couleur: solde ? RED : [22, 120, 70] });
-  y += 3;
-  doc.setDrawColor(...LINE); doc.setLineWidth(0.3);
-  doc.roundedRect(panL, payBoxTop, panR - panL, y - payBoxTop, 3, 3);
-  y += 10;
-
-  // ── Réseau des agences (base de données) ────────────────────────────────
-  if (agenceOrigine || agenceReception) {
-    ensureRoom(34);
-    eyebrow("Réseau des agences", M, y, SKY);
-    y += 6;
-    const agTop = y;
-    const drawAgence = (x, titre, ag, villeLabel) => {
-      if (!ag) return;
-      let ay = y + 6;
-      doc.setFont(undefined, "bold"); doc.setFontSize(8.5); doc.setTextColor(...INK);
-      doc.text(`${titre} — ${villeLabel}`, x, ay); ay += 4.6;
-      doc.setFont(undefined, "normal"); doc.setFontSize(7.8); doc.setTextColor(...MUTED);
-      if (ag.adresse) { doc.text(ag.adresse, x, ay); ay += 4; }
-      if (ag.telephone) { doc.text(`Tél : ${ag.telephone}`, x, ay); ay += 4; }
-      if (ag.horaires) { doc.text(`Horaires : ${ag.horaires}`, x, ay); ay += 4; }
-    };
-    drawAgence(M + 8, "Agence d’enregistrement", agenceOrigine, colis.site || "");
-    drawAgence(M + colW + 10 + 8, "Agence de réception", agenceReception, dest?.city || "");
-    y += 30;
-    doc.setDrawColor(...LINE); doc.roundedRect(M, agTop, W - 2 * M, y - agTop - 4, 3, 3);
-    y += 6;
-  }
-
-  // ── Pied de page ─────────────────────────────────────────────────────────
-  ensureRoom(24);
-  hr(y); y += 7;
-  doc.setFont(undefined, "italic"); doc.setFontSize(8.5); doc.setTextColor(...INK);
-  doc.text("Merci de votre confiance. Conservez ce ticket jusqu’à la livraison de votre colis.", M, y);
-  y += 6;
+  // ── Pied de page ──────────────────────────────────────────────────────────
+  doc.setDrawColor(...LINE); doc.line(M, Z.pied - 8, W - M, Z.pied - 8);
   doc.setFont(undefined, "normal"); doc.setFontSize(7); doc.setTextColor(...MUTED);
-  doc.text(`Ba-Diaby Express — Transport de colis Conakry - Monde · ${entreprise.siteWeb || ""}`, M, y);
-  y += 4;
-  doc.text(`Document généré le ${new Date().toLocaleString("fr-FR")}`, M, y);
+  doc.text("Conservez ce ticket jusqu'à la remise du colis. Vous serez prévenu par WhatsApp à chaque étape.", M, Z.pied - 3);
+  doc.text("BA-DIABY EXPRESS · badiabyexpress.bde@gmail.com", M, Z.pied + 1.5);
+  doc.text("Page 1 / 1", W - M, Z.pied + 1.5, { align: "right" });
 
   if (options.retourner) {
-    // jsPDF produit une chaîne base64 avec un préfixe « data:… » qu'il faut retirer.
     return { nom: `facture-${colis.tracking}.pdf`, contenu: doc.output("datauristring").split(",")[1] };
   }
   openPdf(doc, `ticket-${colis.tracking}.pdf`);
@@ -9950,7 +9900,58 @@ const REPERTOIRE_IMPORTE = [
   source: "ancienne plateforme",
 }));
 
-function buildClientDirectory(colisList) {
+/**
+ * Données de référence : catégories tarifaires et compte administrateur.
+ *
+ * Définies ici plutôt qu'en ligne dans les valeurs par défaut, afin de pouvoir les recharger
+ * dans une base déjà en service — une plateforme existante ignore les valeurs par défaut, et
+ * ces informations lui resteraient sinon inaccessibles.
+ */
+const DONNEES_REFERENCE = {
+  categories: [
+      { nom: "Bateau", description: "Envoi par bateau", emoji: "🚢", type: "unite", montant: 250000, deviseSaisie: "GNF", paysLimite: null, motsCles: ["bateau"] },
+      { nom: "Beurre de karité (PARIS)", description: "BEURRE DE KARITÉ", emoji: "🧴", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: "GN", motsCles: ["Beurre de karité"] },
+      { nom: "CHAUSSURE MARQUE (PARIS)", description: "chaussures de marque nike, adidas", emoji: "👟", type: "unite", montant: 30, deviseSaisie: "EUR", paysLimite: null, motsCles: ["adidas", "Nike"] },
+      { nom: "Chaussures non marque ou traditionnel (PARIS)", description: "chaussure non marque ou traditionnel", emoji: "👞", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Chaussure non marque", "chaussure traditionnel"] },
+      { nom: "COLIS ITALIE", description: "COLIS ITALIE", emoji: "📦", type: "kg", montant: 13, deviseSaisie: "EUR", paysLimite: null, motsCles: ["italie"] },
+      { nom: "DOCUMENT B (PARIS)", description: "Passeport", emoji: "📄", type: "unite", montant: 50, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Passeport"] },
+      { nom: "DOCUMENT B PROVINCE Française", description: "Passeport", emoji: "📄", type: "unite", montant: 75, deviseSaisie: "EUR", paysLimite: "GN", motsCles: ["passeport"] },
+      { nom: "DOCUMENTS A (PARIS)", description: "Extrait de naissance, jugement supplétif, permis, diplôme, attestation, carte", emoji: "📑", type: "unite", montant: 30, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Extrait de naissance", "jugement supplétif", "permis", "diplôme", "attestation", "carte d’identité", "acte de mariage", "acte de divorce", "invitation"] },
+      { nom: "Drap (PARIS)", description: "Drap", emoji: "🛏️", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Drap-housse", "Drap plat", "Drap de dessus", "Drap de couverture", "Drap pour lit bébé"] },
+      { nom: "Habits 224 (PARIS)", description: "Vêtements de la marque 224 pour l’indépendant", emoji: "👕", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: "GN", motsCles: ["Pull 224", "casquette224", "T-shirt224"] },
+      { nom: "Habits traditionnel non cousu et cousu (PARIS)", description: "Les habits traditionnels africains", emoji: "🥻", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Pagne africaine", "wax", "bazin", "Robe", "complets", "boubou", "Macky sall", "grand boubou", "tissu"] },
+      { nom: "Huile rouge (PARIS)", description: "Huile rouge", emoji: "🫗", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: "GN", motsCles: ["Huile rouge"] },
+      { nom: "Médicaments liquide 1L et 1.5L", description: "Médicaments liquide", emoji: "💊", type: "unite", montant: 30, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Médicaments liquide 1L"] },
+      { nom: "Médicaments liquide Talisman 1 à 500ml (PARIS)", description: "Médicaments liquide petite bouteille", emoji: "💊", type: "unite", montant: 15, deviseSaisie: "EUR", paysLimite: "GN", motsCles: ["Talisman", "330cl", "petit bouteille", "liquide", "500ml"] },
+      { nom: "KARAMBA ALY TOMBOLIA", description: "Tarif partenaire", emoji: "🤝", type: "kg", montant: 10, deviseSaisie: "EUR", paysLimite: null, motsCles: ["KARAMBA ALY TOMBOLIA"] },
+      { nom: "PARTENAIRE NON YAWII", description: "Tarif partenaire", emoji: "🤝", type: "kg", montant: 8.69, deviseSaisie: "EUR", paysLimite: null, motsCles: ["PARTENAIRE NON YAWII"] },
+      { nom: "PARTENAITE THIANGUIL", description: "Tarif partenaire", emoji: "🤝", type: "kg", montant: 8.80, deviseSaisie: "EUR", paysLimite: null, motsCles: ["thianguil"] },
+      { nom: "Petit sipas USA", description: "Médicament liquide USA", emoji: "💊", type: "unite", montant: 220000, deviseSaisie: "GNF", paysLimite: null, motsCles: ["sipas"] },
+      { nom: "Poisson konkoe (PARIS)", description: "Poisson", emoji: "🐟", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: "GN", motsCles: ["Poisson", "konkoe"] },
+      { nom: "PRIX PARTENAIRE", description: "Seulement pour les partenaires", emoji: "🤝", type: "kg", montant: 8, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Partenaire"] },
+      { nom: "Produit cosmétique (PARIS)", description: "Produits cosmétiques visage et corporel", emoji: "💄", type: "kg", montant: 15, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Crème hydratante", "sérum", "lotion tonique", "gel nettoyant", "gommage", "masque visage", "crème anti-âge", "crème solaire", "Lait corporel", "huile corporelle", "crème éclaircissante", "gommage corporel", "beurre de karité", "gel douche", "savon", "Fond de teint", "poudre", "correcteur", "mascara", "rouge à lèvres", "gloss", "eyeliner", "fard à paupières", "blush", "Baume après-rasage", "mousse à raser", "crème hydratante homme", "huile barbe", "shampooing barbe", "Déodorant", "dentifrice", "bain de bouche", "savon liquide", "lingettes"] },
+      { nom: "Sac de marque (Paris)", description: "Sac avec des noms ou logo reconnus", emoji: "👜", type: "unite", montant: 12, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Louis Vuitton", "Gucci", "Bottega Veneta", "Saint Laurent", "Balenciaga", "Fendi", "Valentino", "Prada", "Dior", "Celine", "Hermès"] },
+      { nom: "Sac non marque", description: "Sac non reconnu", emoji: "👜", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Non marque"] },
+      { nom: "Savon noir (PARIS)", description: "Savon noir", emoji: "🧼", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: "GN", motsCles: ["Savon", "savon noir"] },
+      { nom: "SHEIN/TEMU", description: "les commandes shein et temu", emoji: "🛍️", type: "kg", montant: 100000, deviseSaisie: "GNF", paysLimite: null, motsCles: ["shein", "temu", "aliexpress"] },
+      { nom: "SHEIN /TEMU/ALIEXPRESS", description: "Les achats en ligne ou commande en ligne", emoji: "🛍️", type: "kg", montant: 10, deviseSaisie: "EUR", paysLimite: null, motsCles: ["shein", "temu", "aliexpress"] },
+      { nom: "Telephone neuf (PARIS)", description: "téléphone ou smartphone neuf", emoji: "📱", type: "unite", montant: 50, deviseSaisie: "EUR", paysLimite: null, motsCles: ["telephone", "iphone", "samsung", "tecno", "infinix", "smartphone"] },
+      { nom: "VETEMENT/HABITS (USA)", description: "pantalon, pull, t-shirt, culotte", emoji: "👕", type: "kg", montant: 250000, deviseSaisie: "GNF", paysLimite: null, motsCles: ["pantalon", "pull", "t-shirt", "culotte"] },
+      { nom: "Vêtements de marque (PARIS)", description: "Tous les vêtements de marque et maillots de marque", emoji: "👔", type: "unite", montant: 10, deviseSaisie: "EUR", paysLimite: null, motsCles: ["Zara", "H&M", "Bershka", "Pull&Bear", "Stradivarius", "Uniqlo", "Mango", "Shein", "Primark", "Nike", "Adidas", "Puma", "Jordan", "Supreme", "Off-White", "Stüssy", "Carhartt", "The North Face", "Champion", "Lacoste", "Ralph Lauren", "Calvin Klein", "Tommy Hilfiger", "Gant", "Guess", "Hugo Boss", "Gucci", "Louis Vuitton", "Dior", "Balenciaga", "Chanel", "Fendi", "Versace", "Givenchy", "Sandro", "Maje", "A.P.C.", "Celio", "Kaporal", "Le Coq Sportif", "Okaïdi", "Tape à l’Œil", "Kiabi", "C&A", "DPAM"] },
+      { nom: "Autres articles", description: "Catégorie appliquée quand aucune autre ne correspond", emoji: "📦", type: "kg", montant: 12, deviseSaisie: "EUR", paysLimite: null, motsCles: [], parDefaut: true },
+  ],
+  admin: {
+      id: "u1", prenom: "Ibrahima", nom: "Diallo",
+      email: "badiabyexpress.bde@gmail.com", telephone: "+224620000000",
+      identifiant: "Iboush", role: "Administrateur", twoFA: false,
+      motdepasseAlgo: "pbkdf2",
+      motdepasseIter: 150000,
+      motdepasseSalt: "05072796eb9b2fde046a1ea0c17cc70f",
+      motdepasseSecure: "eac54df03597bdaa3d0166a8ebda86f608707a0fc218419dfcf12efdd20f2d0a",
+  },
+};
+
+function buildClientDirectory(colisList, repertoireEnBase = null) {
   const map = {};
   colisList.forEach((c) => {
     if (c.telephone) {
@@ -9983,7 +9984,13 @@ function buildClientDirectory(colisList) {
    * l'onglet « Doublons possibles » signale ces cas et vous tranchez.
    */
   const dejaPresents = new Set(Object.keys(map).map((t) => String(t).replace(/\D/g, "")).filter(Boolean));
-  REPERTOIRE_IMPORTE.forEach((c) => {
+  /*
+   * Deux sources pour le répertoire : celui livré avec l'application (valeurs par défaut) et
+   * celui éventuellement chargé en base via « Charger les données de référence ». Sur une
+   * plateforme déjà en service, seul le second existe.
+   */
+  const repertoire = repertoireEnBase && repertoireEnBase.length ? repertoireEnBase : REPERTOIRE_IMPORTE;
+  repertoire.forEach((c) => {
     const cle = String(c.telephone).replace(/\D/g, "");
     if (!cle || dejaPresents.has(cle)) return;
     dejaPresents.add(cle);
@@ -10000,7 +10007,7 @@ function buildClientDirectory(colisList) {
 function Clients({ data }) {
   const [filtre, setFiltre] = useState("tous");
   const [query, setQuery] = useState("");
-  const clients = useMemo(() => buildClientDirectory(data.colis), [data.colis]);
+  const clients = useMemo(() => buildClientDirectory(data.colis, data.repertoire), [data.colis, data.repertoire]);
 
   const trenteJours = Date.now() - 30 * 24 * 60 * 60 * 1000;
   const SEUILS_FIDELITE = [3, 6, 11];
@@ -11363,6 +11370,7 @@ function SauvegardePage({ data, persist, notify, session, onBack }) {
   const [restauration, setRestauration] = useState(null);
   const [erreur, setErreur] = useState("");
 
+  /** Récapitulatif de ce que contient la base, affiché avant de proposer la sauvegarde. */
   const compte = {
     colis: (data.colis || []).length,
     clients: (data.clientAccounts || []).length,
@@ -11372,15 +11380,13 @@ function SauvegardePage({ data, persist, notify, session, onBack }) {
     journal: (data.activityLog || []).length,
   };
 
+  /*
+   * Téléchargement de la sauvegarde.
+   *
+   * Les empreintes de mots de passe sont retirées : elles ne permettent pas de retrouver un mot
+   * de passe, mais une sauvegarde circule par e-mail ou clé USB — autant ne rien exposer.
+   */
   function telecharger() {
-    /*
-     * Les empreintes de mots de passe sont retirées du fichier.
-     *
-     * Elles ne permettent pas de retrouver un mot de passe, mais une sauvegarde circule par
-     * e-mail ou clé USB : autant ne pas l'exposer. À la restauration, chaque utilisateur devra
-     * se voir attribuer un nouveau mot de passe par l'administrateur — c'est le prix d'un
-     * fichier qu'on peut transporter sans risque.
-     */
     const sansSecrets = {
       ...data,
       users: (data.users || []).map(({ motdepasse, motdepasseSecure, motdepasseSalt, ...reste }) => reste),
@@ -11401,6 +11407,52 @@ function SauvegardePage({ data, persist, notify, session, onBack }) {
     a.click();
     URL.revokeObjectURL(a.href);
     notify?.("Sauvegarde téléchargée");
+  }
+
+  const [chargementRef, setChargementRef] = useState(null);
+
+  /*
+   * Chargement des données de référence dans une base existante.
+   *
+   * Les catégories, le répertoire clients et le compte administrateur sont livrés comme valeurs
+   * par défaut : ils ne s'appliquent qu'à une base vide. Une plateforme déjà en service les
+   * ignore donc — c'est voulu, sinon chaque déploiement écraserait le travail en cours.
+   *
+   * Ce bouton comble ce manque : il AJOUTE ce qui est absent, sans jamais remplacer l'existant.
+   * Les colis, paiements et écritures comptables ne sont pas touchés.
+   */
+  function preparerChargementRef() {
+    const catsExistantes = new Set((data.categories || []).map((c) => (c.nom || "").toLowerCase()));
+    const catsAAjouter = DONNEES_REFERENCE.categories.filter((c) => !catsExistantes.has(c.nom.toLowerCase()));
+
+    const telsExistants = new Set(
+      [...(data.colis || []).map((c) => normaliserTelephone(c.telephone)),
+       ...(data.repertoire || []).map((c) => normaliserTelephone(c.telephone))].filter(Boolean)
+    );
+    const clientsAAjouter = REPERTOIRE_IMPORTE.filter((c) => !telsExistants.has(normaliserTelephone(c.telephone)));
+
+    const identifiants = new Set((data.users || []).map((u) => (u.identifiant || "").toLowerCase()));
+    const compteAAjouter = identifiants.has("iboush") ? null : DONNEES_REFERENCE.admin;
+
+    setChargementRef({ catsAAjouter, clientsAAjouter, compteAAjouter });
+  }
+
+  function chargerReference() {
+    const { catsAAjouter, clientsAAjouter, compteAAjouter } = chargementRef;
+    const depart = (data.categories || []).length;
+    persist({
+      ...data,
+      categories: [
+        ...(data.categories || []),
+        ...catsAAjouter.map((c, i) => ({ ...c, id: `cat-ref-${depart + i}`, ordre: depart + i })),
+      ],
+      repertoire: [...(data.repertoire || []), ...clientsAAjouter],
+      users: compteAAjouter ? [...(data.users || []), compteAAjouter] : data.users,
+      activityLog: pushActivity(data, session, "Données de référence chargées",
+        `${catsAAjouter.length} catégorie(s), ${clientsAAjouter.length} client(s)${compteAAjouter ? ", compte Iboush" : ""}`),
+    });
+    setChargementRef(null);
+    notify?.("Données de référence ajoutées");
   }
 
   function lireFichier(e) {
@@ -11484,6 +11536,26 @@ function SauvegardePage({ data, persist, notify, session, onBack }) {
         );
       })()}
 
+      {/*
+        Chargement des données de référence.
+
+        Les catégories, le répertoire et le compte administrateur livrés avec l'application ne
+        s'appliquent qu'à une base vide. Ce bouton permet de les ajouter à une base déjà en
+        service, sans rien remplacer.
+      */}
+      <div style={{ background: "var(--surface)", border: "1px solid var(--info-border)", borderRadius: 14, padding: 22, maxWidth: 560, marginBottom: 20 }}>
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Données de référence</div>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14, lineHeight: 1.55 }}>
+          Catégories tarifaires, répertoire clients et compte administrateur livrés avec l’application.
+          Ils ne s’appliquent qu’à une base vide : utilisez ce bouton pour les ajouter à votre base
+          existante. Rien n’est remplacé, et vos colis, paiements et écritures ne sont pas touchés.
+        </div>
+        <button onClick={preparerChargementRef}
+          style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "11px 20px", fontSize: 13.5, fontWeight: 600, cursor: "pointer" }}>
+          <Upload size={15} /> Vérifier ce qui manque
+        </button>
+      </div>
+
       <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 22, maxWidth: 560, marginBottom: 20 }}>
         <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Télécharger une sauvegarde</div>
         <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14, lineHeight: 1.55 }}>
@@ -11521,6 +11593,21 @@ function SauvegardePage({ data, persist, notify, session, onBack }) {
         </label>
         {erreur && <div style={{ fontSize: 12.5, color: "var(--danger-fg)", marginTop: 10 }}>{erreur}</div>}
       </div>
+
+      {chargementRef && (
+        <ConfirmerAction
+          titre="Ajouter les données de référence ?"
+          message={
+            chargementRef.catsAAjouter.length === 0 && chargementRef.clientsAAjouter.length === 0 && !chargementRef.compteAAjouter
+              ? "Tout est déjà présent : aucune donnée à ajouter."
+              : `${chargementRef.catsAAjouter.length} catégorie(s), ${chargementRef.clientsAAjouter.length} client(s)${chargementRef.compteAAjouter ? ", et le compte Iboush" : ""} seront ajoutés.`
+          }
+          consequence="Aucun élément existant n’est modifié ni supprimé. Les catégories déjà présentes sous le même nom sont ignorées, de même que les clients ayant le même numéro."
+          libelleAction="Ajouter"
+          onConfirmer={chargerReference}
+          onAnnuler={() => setChargementRef(null)}
+        />
+      )}
 
       {restauration && (
         <ConfirmerAction

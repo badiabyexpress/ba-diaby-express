@@ -7254,6 +7254,10 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
     // (!p.poids) laissait passer la valeur "0", car une chaîne "0" est considérée comme remplie.
     if (step === 3 && produits.some((p) => !(Number(p.poids) > 0))) { setErr("Le poids de chaque produit doit être supérieur à 0 kg."); return; }
     if (step === 3 && produits.some((p) => !(Number(p.quantite) >= 1))) { setErr("La quantité de chaque produit doit être d'au moins 1."); return; }
+    // Un colis à 0 GNF n'existe pas : sans catégorie choisie (ou prix personnalisé saisi), le
+    // produit ne vaut rien et le colis serait facturé gratuitement par erreur.
+    if (step === 3 && produits.some((p) => !p.personnalise && !p.categorie)) { setErr("Choisissez une catégorie pour chaque produit (ou cochez « Utiliser un prix personnalisé »)."); return; }
+    if (step === 3 && !(valeurDeclaree > 0)) { setErr("Le montant total du colis doit être supérieur à 0 — vérifiez le prix de chaque produit."); return; }
     setStep((s) => Math.min(s + 1, WIZARD_STEPS.length - 1));
   }
   function prev() { setErr(""); setStep((s) => Math.max(s - 1, 0)); }
@@ -7262,6 +7266,10 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
     e.preventDefault();
     if (!expNom || !destNom || !destTelephone) return;
     if (!(poidsTotal > 0)) { setErr("Le poids total du colis doit être supérieur à 0 kg."); return; }
+    // Même vérification qu'à l'étape Produits — nécessaire ici aussi car les pastilles d'étape
+    // permettent de sauter directement au résumé sans repasser par la validation de next().
+    if (produits.some((p) => !p.personnalise && !p.categorie)) { setErr("Choisissez une catégorie pour chaque produit (ou cochez « Utiliser un prix personnalisé »)."); return; }
+    if (!(valeurDeclaree > 0)) { setErr("Le montant total du colis doit être supérieur à 0 — vérifiez le prix de chaque produit."); return; }
     onSave({
       tracking: genTracking((existingColis || []).map((c) => c.tracking)),
       expediteur: `${expPrenom} ${expNom}`.trim(), expediteurTelephone: expTelephone, expediteurEmail: expEmail, expediteurAdresse: expAdresse, expediteurPays: expPays,

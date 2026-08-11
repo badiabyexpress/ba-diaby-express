@@ -3233,28 +3233,28 @@ function ClientPortalPage({ data, loading, persist }) {
         <div style={{ width: "100%", maxWidth: 420, display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
           <ClientLangSwitch lang={lang} onChange={setLang} />
         </div>
-        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 22, color: "var(--text)", marginBottom: 4 }}>{T("Espace Client")}</div>
-        <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 28, textAlign: "center" }}>{T("Retrouvez tous vos colis, leurs statuts et vos paiements en un coup d'œil.")}</div>
+        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 25, color: "var(--text)", marginBottom: 5 }}>{T("Espace Client")}</div>
+        <div style={{ fontSize: 14, color: "var(--muted)", marginBottom: 30, textAlign: "center" }}>{T("Retrouvez tous vos colis, leurs statuts et vos paiements en un coup d'œil.")}</div>
 
         {mode === "inscription" ? (
           <ClientRegisterForm data={data} persist={persist} onRegistered={(acc) => { ecrireSessionClient(acc.id); setCompte(acc); }} onCancel={() => setMode("login")} />
         ) : mode === "reset" ? (
           <ClientResetPasswordForm data={data} persist={persist} onDone={() => { setMode("login"); setErr(""); }} onCancel={() => setMode("login")} />
         ) : (
-          <form onSubmit={connecter} style={{ width: "100%", maxWidth: 380, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 24 }}>
-            <Field label={T("Identifiant")}><input value={identifiant} onChange={(e) => setIdentifiant(e.target.value)} style={inputStyle} autoFocus /></Field>
+          <form onSubmit={connecter} style={{ width: "100%", maxWidth: 380, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16, padding: 26, boxShadow: "0 4px 20px rgba(10,38,71,0.08)" }}>
+            <Field label={T("Identifiant")}><input value={identifiant} onChange={(e) => setIdentifiant(e.target.value)} style={{ ...inputStyle, fontSize: 15, padding: "11px 14px" }} autoFocus /></Field>
             <Field label={T("Mot de passe")}>
-              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                <input type={showPw ? "text" : "password"} autoComplete="current-password" value={motdepasse} onChange={(e) => setMotdepasse(e.target.value)} style={{ ...inputStyle, flex: 1 }} />
-                <button type="button" onClick={() => setShowPw((s) => !s)} style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, width: 34, height: 34, cursor: "pointer", display: "grid", placeItems: "center", flexShrink: 0 }}>
-                  {showPw ? <EyeOff size={14} color="var(--muted)" /> : <Eye size={14} color="var(--muted)" />}
+              <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                <input type={showPw ? "text" : "password"} autoComplete="current-password" value={motdepasse} onChange={(e) => setMotdepasse(e.target.value)} style={{ ...inputStyle, flex: 1, fontSize: 15, padding: "11px 14px" }} />
+                <button type="button" onClick={() => setShowPw((s) => !s)} style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 9, width: 38, height: 38, cursor: "pointer", display: "grid", placeItems: "center", flexShrink: 0 }}>
+                  {showPw ? <EyeOff size={15} color="var(--muted)" /> : <Eye size={15} color="var(--muted)" />}
                 </button>
               </div>
             </Field>
-            {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
-            <button type="submit" style={{ width: "100%", marginTop: 4, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>{T("Se connecter")}</button>
-            <button type="button" onClick={() => { setMode("reset"); setErr(""); }} style={{ width: "100%", marginTop: 10, background: "none", border: "none", color: "var(--muted)", fontSize: 12, cursor: "pointer" }}>{T("Mot de passe oublié ?")}</button>
-            <button type="button" onClick={() => { setMode("inscription"); setErr(""); }} style={{ width: "100%", marginTop: 6, background: "none", border: "1.5px solid var(--border)", borderRadius: 8, padding: "10px 0", fontSize: 13, fontWeight: 600, color: "var(--text)", cursor: "pointer" }}>{T("Créer un compte")}</button>
+            {err && <div style={{ color: "var(--danger-fg)", fontSize: 13, marginBottom: 10 }}>{err}</div>}
+            <button type="submit" style={{ width: "100%", marginTop: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "13px 0", fontSize: 15, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}>{T("Se connecter")}</button>
+            <button type="button" onClick={() => { setMode("reset"); setErr(""); }} style={{ width: "100%", marginTop: 12, background: "none", border: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>{T("Mot de passe oublié ?")}</button>
+            <button type="button" onClick={() => { setMode("inscription"); setErr(""); }} style={{ width: "100%", marginTop: 8, background: "none", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 0", fontSize: 14, fontWeight: 700, color: "var(--text)", cursor: "pointer" }}>{T("Créer un compte")}</button>
           </form>
         )}
       </div>
@@ -3264,12 +3264,12 @@ function ClientPortalPage({ data, loading, persist }) {
   return (
     <div dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "var(--bg)" }}>
       <div style={{ maxWidth: 900, margin: "0 auto", padding: "32px 20px 60px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, flexWrap: "wrap", gap: 10 }}>
-          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 20, color: "var(--text)" }}>{T("Espace Client")}</div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexWrap: "wrap", gap: 10 }}>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 22, color: "var(--text)" }}>{T("Espace Client")}</div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button onClick={() => setShowGuide(true)} style={{ background: "var(--brand-solid)", border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "#fff", fontWeight: 600, cursor: "pointer" }}>{T("Comment commander")}</button>
-            <button onClick={() => setShowPreAlerte(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>{T("Pré-alerte colis")}</button>
-            <button onClick={() => setShowVerif(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>{T("Vérifier une référence")}</button>
+            <button onClick={() => setShowGuide(true)} style={{ background: "var(--brand-solid)", border: "none", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "#fff", fontWeight: 700, cursor: "pointer" }}>{T("Comment commander")}</button>
+            <button onClick={() => setShowPreAlerte(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Pré-alerte colis")}</button>
+            <button onClick={() => setShowVerif(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Vérifier une référence")}</button>
             <button onClick={() => {
               setShowMessages(true);
               if ((compte.messages || []).some((m) => m.expediteur === "staff" && !m.lu)) {
@@ -3277,29 +3277,29 @@ function ClientPortalPage({ data, loading, persist }) {
                 persist({ ...data, clientAccounts: (data.clientAccounts || []).map((c) => (c.id === compte.id ? updated : c)) });
                 setCompte(updated);
               }
-            }} style={{ position: "relative", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>
+            }} style={{ position: "relative", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>
               Messages
-              {(compte.messages || []).some((m) => m.expediteur === "staff" && !m.lu) && <span style={{ position: "absolute", top: -4, right: -4, width: 9, height: 9, borderRadius: "50%", background: "var(--brand-solid)" }} />}
+              {(compte.messages || []).some((m) => m.expediteur === "staff" && !m.lu) && <span style={{ position: "absolute", top: -4, right: -4, width: 10, height: 10, borderRadius: "50%", background: "var(--brand-solid)" }} />}
             </button>
-            {statsClient.recusEntrepot > 1 && <button onClick={() => setShowRegroupement(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>{T("Regrouper mes colis")}</button>}
-            <button onClick={() => setShowPaiements(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>{T("Mes paiements")}</button>
-            <button onClick={() => setShowProfil(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>{T("Mon profil")}</button>
-            {mesColis.length > 0 && <button onClick={() => downloadClientManifest(compte, mesColis, deviseClient)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>{T("Mon bordereau (PDF)")}</button>}
+            {statsClient.recusEntrepot > 1 && <button onClick={() => setShowRegroupement(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Regrouper mes colis")}</button>}
+            <button onClick={() => setShowPaiements(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Mes paiements")}</button>
+            <button onClick={() => setShowProfil(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Mon profil")}</button>
+            {mesColis.length > 0 && <button onClick={() => downloadClientManifest(compte, mesColis, deviseClient)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Mon bordereau (PDF)")}</button>}
             <ClientLangSwitch lang={lang} onChange={setLang} />
-            <button onClick={() => { ecrireSessionClient(null); setCompte(null); setIdentifiant(""); setMotdepasse(""); setMode("login"); }} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--muted)", cursor: "pointer" }}>{T("Déconnexion")}</button>
+            <button onClick={() => { ecrireSessionClient(null); setCompte(null); setIdentifiant(""); setMotdepasse(""); setMode("login"); }} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--muted)", fontWeight: 600, cursor: "pointer" }}>{T("Déconnexion")}</button>
           </div>
         </div>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 22 }}>
-          <div style={{ fontSize: 13, color: "var(--muted)" }}>{T(salutationSelonHeure())} {compte.prenom} {compte.nom}</div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, background: remiseActuelle >= 12 ? "var(--warn-bg)" : remiseActuelle > 0 ? "var(--surface2)" : "var(--bronze-bg)", border: "1px solid " + (remiseActuelle >= 12 ? "var(--warn-border)" : "var(--border)"), borderRadius: 20, padding: "5px 12px" }}>
-            <span style={{ fontSize: 12 }}>{remiseActuelle >= 12 ? "🥇" : remiseActuelle > 0 ? "🥈" : "🥉"}</span>
-            <span style={{ fontSize: 11.5, color: "var(--text)", fontWeight: 700 }}>{nbEnvois} {T(nbEnvois > 1 ? "envois" : "envoi")}{remiseActuelle > 0 ? ` — ${remiseActuelle}% ${T("de réduction fidélité")}` : ""}</span>
-            {prochainSeuil && <span style={{ fontSize: 10.5, color: "var(--muted)" }}>({prochainSeuil - nbEnvois} {T("avant")} {loyaltyDiscount(prochainSeuil)}%)</span>}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 24 }}>
+          <div style={{ fontSize: 14.5, color: "var(--muted)" }}>{T(salutationSelonHeure())} {compte.prenom} {compte.nom}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, background: remiseActuelle >= 12 ? "var(--warn-bg)" : remiseActuelle > 0 ? "var(--surface2)" : "var(--bronze-bg)", border: "1px solid " + (remiseActuelle >= 12 ? "var(--warn-border)" : "var(--border)"), borderRadius: 20, padding: "6px 14px" }}>
+            <span style={{ fontSize: 13 }}>{remiseActuelle >= 12 ? "🥇" : remiseActuelle > 0 ? "🥈" : "🥉"}</span>
+            <span style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 700 }}>{nbEnvois} {T(nbEnvois > 1 ? "envois" : "envoi")}{remiseActuelle > 0 ? ` — ${remiseActuelle}% ${T("de réduction fidélité")}` : ""}</span>
+            {prochainSeuil && <span style={{ fontSize: 11, color: "var(--muted)" }}>({prochainSeuil - nbEnvois} {T("avant")} {loyaltyDiscount(prochainSeuil)}%)</span>}
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-            <span style={{ fontSize: 11.5, color: "var(--muted)" }}>{T("Afficher les montants en")}</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 12.5, color: "var(--muted)" }}>{T("Afficher les montants en")}</span>
             <select value={deviseClient} onChange={(e) => choisirDevise(e.target.value)}
-              style={{ ...inputStyle, width: "auto", marginBottom: 0, padding: "5px 10px", fontSize: 12, fontWeight: 600 }}>
+              style={{ ...inputStyle, width: "auto", marginBottom: 0, padding: "7px 12px", fontSize: 13, fontWeight: 700 }}>
               {Object.keys(CURRENCIES).map((d) => <option key={d} value={d}>{d}</option>)}
             </select>
           </div>
@@ -3400,20 +3400,20 @@ function ClientPortalPage({ data, loading, persist }) {
           </div>
         ) : (
           <>
-            <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
               {[["tous", "Tous"], ["en_cours", "En cours"], ["livres", "Livrés"], ["impayes", "Non payés"]].map(([k, label]) => (
-                <button key={k} onClick={() => setFiltreStatut(k)} style={{ padding: "7px 14px", borderRadius: 20, border: "1.5px solid " + (filtreStatut === k ? "var(--brand-solid)" : "var(--border)"), background: filtreStatut === k ? "var(--brand-solid)" : "var(--surface)", color: filtreStatut === k ? "#fff" : "var(--muted)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>{label}</button>
+                <button key={k} onClick={() => setFiltreStatut(k)} style={{ padding: "9px 16px", borderRadius: 20, border: "1.5px solid " + (filtreStatut === k ? "var(--brand-solid)" : "var(--border)"), background: filtreStatut === k ? "var(--brand-solid)" : "var(--surface)", color: filtreStatut === k ? "#fff" : "var(--muted)", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>{label}</button>
               ))}
             </div>
 
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               {listeAffichee.map((c) => {
                 const st = STATUS_STYLE[c.status];
                 return (
-                  <div key={c.tracking} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px" }}>
+                  <div key={c.tracking} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: "16px 18px", boxShadow: "0 2px 10px rgba(10,38,71,0.05)" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 8 }}>
                       <div>
-                        <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{c.tracking}{c.provenance && <span style={{ marginInlineStart: 8, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 6, padding: "1px 7px", fontSize: 10, fontWeight: 600, color: "var(--muted)" }}>{c.provenance}</span>}</div>
+                        <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{c.tracking}{c.provenance && <span style={{ marginInlineStart: 8, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 6, padding: "2px 8px", fontSize: 10.5, fontWeight: 600, color: "var(--muted)" }}>{c.provenance}</span>}</div>
                         {c.litige && (
                           <div style={{ background: c.litige.statut === "Ouvert" ? "var(--warn-bg)" : "var(--ok-bg)",
                                         border: "1px solid " + (c.litige.statut === "Ouvert" ? "var(--warn-border)" : "var(--ok-border)"),
@@ -3455,11 +3455,11 @@ function ClientPortalPage({ data, loading, persist }) {
                         })()}
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                        <span style={{ background: st?.bg, color: st?.fg, padding: "4px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>{clientStatusLabel(c.status)}</span>
-                        <span style={{ fontSize: 11.5, fontWeight: 700, color: c.reste > 0 ? "var(--danger-fg)" : "var(--ok-fg)" }}>{c.reste > 0 ? `${fmt(c.reste, deviseClient)} dû` : "Payé"}</span>
-                        <button onClick={() => downloadInvoice(c, data)} style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 10px", fontSize: 11, color: "var(--text)", cursor: "pointer" }}>{T("Facture")}</button>
-                        <a href={`https://wa.me/224612479339?text=${encodeURIComponent(`Bonjour, j’ai une question concernant mon colis ${c.tracking}.`)}`} target="_blank" rel="noopener noreferrer" style={{ background: "var(--ok-bg-soft)", border: "1px solid var(--ok-border)", borderRadius: 8, padding: "6px 10px", fontSize: 11, color: "var(--ok-fg)", textDecoration: "none" }}>💬 Contacter (GN)</a>
-                        <a href={`https://wa.me/33767562963?text=${encodeURIComponent(`Bonjour, j’ai une question concernant mon colis ${c.tracking}.`)}`} target="_blank" rel="noopener noreferrer" style={{ background: "var(--ok-bg-soft)", border: "1px solid var(--ok-border)", borderRadius: 8, padding: "6px 10px", fontSize: 11, color: "var(--ok-fg)", textDecoration: "none" }}>💬 Contacter (FR)</a>
+                        <span style={{ background: st?.bg, color: st?.fg, padding: "5px 12px", borderRadius: 20, fontSize: 12, fontWeight: 700 }}>{clientStatusLabel(c.status)}</span>
+                        <span style={{ fontSize: 12.5, fontWeight: 700, color: c.reste > 0 ? "var(--danger-fg)" : "var(--ok-fg)" }}>{c.reste > 0 ? `${fmt(c.reste, deviseClient)} dû` : "Payé"}</span>
+                        <button onClick={() => downloadInvoice(c, data)} style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 600, color: "var(--text)", cursor: "pointer" }}>{T("Facture")}</button>
+                        <a href={`https://wa.me/224612479339?text=${encodeURIComponent(`Bonjour, j’ai une question concernant mon colis ${c.tracking}.`)}`} target="_blank" rel="noopener noreferrer" style={{ background: "var(--ok-bg-soft)", border: "1px solid var(--ok-border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 600, color: "var(--ok-fg)", textDecoration: "none" }}>💬 Contacter (GN)</a>
+                        <a href={`https://wa.me/33767562963?text=${encodeURIComponent(`Bonjour, j’ai une question concernant mon colis ${c.tracking}.`)}`} target="_blank" rel="noopener noreferrer" style={{ background: "var(--ok-bg-soft)", border: "1px solid var(--ok-border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 600, color: "var(--ok-fg)", textDecoration: "none" }}>💬 Contacter (FR)</a>
                       </div>
                     </div>
                     <ClientTimeline status={c.status} />

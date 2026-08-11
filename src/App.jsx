@@ -3746,13 +3746,13 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome }) 
 
 const StatCard = memo(function StatCard({ label, value, icon: Icon, tint, trend, trendColor, outline }) {
   return (
-    <div style={{ background: SURFACE, borderRadius: 14, padding: "18px 20px", flex: 1, minWidth: 180, border: `1.5px solid ${outline || BORDER}` }}>
+    <div style={{ background: SURFACE, borderRadius: 16, padding: "20px 22px", flex: 1, minWidth: 190, border: `1.5px solid ${outline || BORDER}`, boxShadow: "0 2px 12px rgba(10,38,71,0.06)" }}>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div style={{ fontSize: 12.5, color: MUTED, fontWeight: 600 }}>{label}</div>
-        <div style={{ width: 32, height: 32, borderRadius: 8, background: tint, display: "grid", placeItems: "center" }}><Icon size={16} color="#fff" /></div>
+        <div style={{ fontSize: 13, color: MUTED, fontWeight: 600 }}>{label}</div>
+        <div style={{ width: 38, height: 38, borderRadius: 10, background: tint, display: "grid", placeItems: "center" }}><Icon size={18} color="#fff" /></div>
       </div>
-      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 26, fontWeight: 700, color: TEXT, marginTop: 10 }}>{value}</div>
-      {trend && <div style={{ fontSize: 11.5, color: trendColor || "var(--ok-fg)", marginTop: 6, fontWeight: 600 }}>{trend}</div>}
+      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 29, fontWeight: 700, color: TEXT, marginTop: 12 }}>{value}</div>
+      {trend && <div style={{ fontSize: 12, color: trendColor || "var(--ok-fg)", marginTop: 7, fontWeight: 600 }}>{trend}</div>}
     </div>
   );
 });
@@ -3827,39 +3827,39 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12, marginBottom: 22 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 14, marginBottom: 24 }}>
         <div>
-          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: 0 }}>{salutationSelonHeure()}, {(session?.prenom || "").toUpperCase() || "—"}</h1>
-          <p style={{ color: "var(--muted)", fontSize: 13.5, margin: "4px 0 0" }}>Voici un aperçu de votre activité logistique</p>
-          <p style={{ color: "var(--muted)", fontSize: 12.5, margin: "4px 0 0" }}>📍 Envoi de GUINÉE vers plusieurs destinations 🇬🇳</p>
+          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 27, margin: 0 }}>{salutationSelonHeure()}, {(session?.prenom || "").toUpperCase() || "—"}</h1>
+          <p style={{ color: "var(--muted)", fontSize: 14.5, margin: "6px 0 0" }}>Voici un aperçu de votre activité logistique</p>
+          <p style={{ color: "var(--muted)", fontSize: 13, margin: "4px 0 0" }}>📍 Envoi de GUINÉE vers plusieurs destinations 🇬🇳</p>
         </div>
         <div style={{ display: "flex", gap: 10 }}>
-          <button onClick={() => onNavigate("admin")} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}><Settings size={14} /> Configuration</button>
-          <button onClick={() => onNavigate("colis")} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}><Plus size={14} /> Nouveau Colis</button>
+          <button onClick={() => onNavigate("admin")} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "11px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}><Settings size={16} /> Configuration</button>
+          <button onClick={() => onNavigate("colis")} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}><Plus size={16} /> Nouveau Colis</button>
         </div>
       </div>
 
       {(oublies.length > 0 || impayesARelancer > 0 || centreClientsEnAttente > 0) && (
         <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderInlineStart: "4px solid var(--brand-solid)",
-                      borderRadius: 14, padding: "16px 20px", marginBottom: 20, display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap",
-                      boxShadow: "0 2px 10px rgba(0,0,0,0.10)" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, color: "var(--text)", fontWeight: 700, fontSize: 13.5, flexShrink: 0 }}>
-            <Bell size={16} color="var(--brand-on-dark)" /> À faire aujourd’hui
+                      borderRadius: 16, padding: "18px 22px", marginBottom: 22, display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap",
+                      boxShadow: "0 2px 12px rgba(0,0,0,0.10)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 9, color: "var(--text)", fontWeight: 700, fontSize: 14.5, flexShrink: 0 }}>
+            <Bell size={18} color="var(--brand-on-dark)" /> À faire aujourd’hui
           </div>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
             {oublies.length > 0 && (
-              <button onClick={() => onNavigate("colis")} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 20, padding: "6px 13px", color: "var(--danger-fg)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
-                <AlertTriangle size={12} /> {oublies.length} colis oublié{oublies.length > 1 ? "s" : ""}
+              <button onClick={() => onNavigate("colis")} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 20, padding: "8px 15px", color: "var(--danger-fg)", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                <AlertTriangle size={13} /> {oublies.length} colis oublié{oublies.length > 1 ? "s" : ""}
               </button>
             )}
             {impayesARelancer > 0 && (
-              <button onClick={() => onNavigate("paiements")} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 20, padding: "6px 13px", color: "var(--warn-fg)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
-                <DollarSign size={12} /> {impayesARelancer} impayé{impayesARelancer > 1 ? "s" : ""} à relancer
+              <button onClick={() => onNavigate("paiements")} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 20, padding: "8px 15px", color: "var(--warn-fg)", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                <DollarSign size={13} /> {impayesARelancer} impayé{impayesARelancer > 1 ? "s" : ""} à relancer
               </button>
             )}
             {centreClientsEnAttente > 0 && (
-              <button onClick={() => onNavigate("centreclients")} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 20, padding: "6px 13px", color: "var(--info-fg)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
-                <MessageCircle size={12} /> {centreClientsEnAttente} demande{centreClientsEnAttente > 1 ? "s" : ""} client{centreClientsEnAttente > 1 ? "s" : ""}
+              <button onClick={() => onNavigate("centreclients")} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 20, padding: "8px 15px", color: "var(--info-fg)", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                <MessageCircle size={13} /> {centreClientsEnAttente} demande{centreClientsEnAttente > 1 ? "s" : ""} client{centreClientsEnAttente > 1 ? "s" : ""}
               </button>
             )}
           </div>
@@ -3894,19 +3894,19 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
         </div>
       )}
 
-      <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 20, marginBottom: 20 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-          <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14.5 }}>Opérations fréquentes</div>
+      <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16, padding: 22, marginBottom: 22, boxShadow: "0 2px 12px rgba(10,38,71,0.05)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 16 }}>Opérations fréquentes</div>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 14 }}>
           {quickActions.map((a) => (
-            <button key={a.label} onClick={() => onNavigate(a.view)} style={{ display: "flex", alignItems: "center", gap: 12, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px", cursor: "pointer", textAlign: "start" }}>
-              <div style={{ width: 38, height: 38, borderRadius: 12, background: a.tint, display: "grid", placeItems: "center", flexShrink: 0 }}><a.icon size={17} color="#fff" /></div>
+            <button key={a.label} onClick={() => onNavigate(a.view)} style={{ display: "flex", alignItems: "center", gap: 14, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 13, padding: "16px 18px", cursor: "pointer", textAlign: "start" }}>
+              <div style={{ width: 44, height: 44, borderRadius: 13, background: a.tint, display: "grid", placeItems: "center", flexShrink: 0 }}><a.icon size={19} color="#fff" /></div>
               <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{a.label}</div>
-                <div style={{ fontSize: 11.5, color: "var(--muted)" }}>{a.desc}</div>
+                <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)" }}>{a.label}</div>
+                <div style={{ fontSize: 12.5, color: "var(--muted)" }}>{a.desc}</div>
               </div>
-              <ChevronRight size={16} color="var(--muted)" />
+              <ChevronRight size={18} color="var(--muted)" />
             </button>
           ))}
         </div>
@@ -3991,13 +3991,13 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
         </div>
       )}
 
-      <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 20 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-          <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14.5 }}>Activité récente</div>
-          {total > 0 && <button onClick={() => onNavigate("colis")} style={{ background: "none", border: "none", color: "var(--info-fg)", fontSize: 12.5, cursor: "pointer" }}>Voir tout</button>}
+      <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16, padding: 22, boxShadow: "0 2px 12px rgba(10,38,71,0.05)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 16 }}>Activité récente</div>
+          {total > 0 && <button onClick={() => onNavigate("colis")} style={{ background: "none", border: "none", color: "var(--info-fg)", fontSize: 13.5, fontWeight: 600, cursor: "pointer" }}>Voir tout</button>}
         </div>
         {recent.length === 0 ? (
-          <div style={{ textAlign: "center", padding: "30px 0", color: "var(--muted)", fontSize: 13 }}>
+          <div style={{ textAlign: "center", padding: "30px 0", color: "var(--muted)", fontSize: 13.5 }}>
             Aucune activité pour le moment.<br />Les nouveaux colis apparaîtront ici.
           </div>
         ) : (
@@ -4005,12 +4005,12 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
             {recent.map((c) => {
               const st = STATUS_STYLE[c.status];
               return (
-                <div key={c.tracking} onClick={() => onNavigate("colis")} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 4px", borderBottom: "1px solid var(--surface2)", cursor: "pointer" }}>
+                <div key={c.tracking} onClick={() => onNavigate("colis")} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 4px", borderBottom: "1px solid var(--surface2)", cursor: "pointer" }}>
                   <div>
-                    <div style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>{c.tracking} · {c.destinataire}</div>
-                    <div style={{ fontSize: 11.5, color: "var(--muted)" }}>{routeLabel(c.pays, c.direction)}</div>
+                    <div style={{ fontSize: 14.5, color: "var(--text)", fontWeight: 700 }}>{c.tracking} · {c.destinataire}</div>
+                    <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 2 }}>{routeLabel(c.pays, c.direction)}</div>
                   </div>
-                  <span style={{ background: st.bg, color: st.fg, padding: "4px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>{c.status}</span>
+                  <span style={{ background: st.bg, color: st.fg, padding: "5px 12px", borderRadius: 20, fontSize: 12, fontWeight: 700 }}>{c.status}</span>
                 </div>
               );
             })}

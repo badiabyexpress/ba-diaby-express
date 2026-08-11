@@ -12298,7 +12298,10 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
                 </td>
                 <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{u.identifiant}</td>
                 <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{u.telephone}</td>
-                <td style={{ padding: "12px 16px", fontSize: 13 }}><span style={{ background: "var(--surface2)", color: "var(--text)", padding: "4px 10px", borderRadius: 20, fontSize: 11.5, fontWeight: 600 }}>{u.role}</span></td>
+                <td style={{ padding: "12px 16px", fontSize: 13 }}>
+                  <span style={{ background: "var(--surface2)", color: "var(--text)", padding: "4px 10px", borderRadius: 20, fontSize: 11.5, fontWeight: 600 }}>{u.role}</span>
+                  {u.role !== "Administrateur" && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>{FLAGS[u.paysOperation || "GN"] || ""} basé {(COUNTRIES.find((c) => c.code === (u.paysOperation || "GN"))?.name) || "Guinée"}</div>}
+                </td>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)" }}>{u.role === "Administrateur" ? "Tous les pays" : (u.paysAutorises?.length ? u.paysAutorises.map((c) => FLAGS[c]).join(" ") : "Tous les pays")}</td>
                 <td style={{ padding: "12px 16px", fontSize: 13 }}>{u.twoFA ? <ShieldCheck size={15} color="var(--ok-fg)" /> : "—"}</td>
                 <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>{effectivePermission(session, "users.gerer") && <button onClick={() => setUtilisateurAReinit(u)} title="Réinitialiser le mot de passe" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><Key size={15} /></button>}{u.id !== session?.id && (data.users || []).filter((x) => x.role === "Administrateur").length > 1 && effectivePermission(session, "users.gerer") && <button onClick={() => removeUser(u.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={15} /></button>}</td>
@@ -12349,6 +12352,7 @@ function UserProfilePage({ user, onSave, onBack, sites }) {
   const [email, setEmail] = useState(user.email || "");
   const [telephone, setTelephone] = useState(user.telephone || "");
   const [role, setRole] = useState(user.role);
+  const [paysOperation, setPaysOperation] = useState(user.paysOperation || "GN");
   const [agence, setAgence] = useState(user.agence || "");
   const [paysAutorises, setPaysAutorises] = useState(user.paysAutorises || COUNTRIES.filter((c) => c.code !== "GN").map((c) => c.code));
   const [permissionsOverride, setPermissionsOverride] = useState(user.permissionsOverride || {});
@@ -12357,6 +12361,18 @@ function UserProfilePage({ user, onSave, onBack, sites }) {
 
   function toggleCountry(code) {
     setPaysAutorises((list) => (list.includes(code) ? list.filter((c) => c !== code) : [...list, code]));
+  }
+  /*
+   * Changer le pays d'opération réinitialise les destinations à la combinaison logique par
+   * défaut : un agent basé en Guinée exporte vers n'importe quel pays, un agent basé à
+   * l'étranger (ex. Paris) ne gère par défaut que les colis vers son propre pays — Guinée
+   * toujours implicite (voir allowedCountries()). L'administrateur reste libre de cocher
+   * d'autres pays ensuite pour lui accorder un accès multi-pays.
+   */
+  function onChangePaysOperation(code) {
+    setPaysOperation(code);
+    setAgence("");
+    setPaysAutorises(code === "GN" ? COUNTRIES.filter((c) => c.code !== "GN").map((c) => c.code) : [code]);
   }
   function togglePermission(key) {
     const current = effectivePermission({ role, permissionsOverride }, key);
@@ -12368,7 +12384,7 @@ function UserProfilePage({ user, onSave, onBack, sites }) {
     setPermissionsOverride(next);
   }
   function save() {
-    onSave({ ...user, prenom, nom, email, telephone, role, agence: role === "Administrateur" || role === "Comptable" ? "" : agence, paysAutorises: isAdmin ? [] : paysAutorises, permissionsOverride: isAdmin ? {} : permissionsOverride });
+    onSave({ ...user, prenom, nom, email, telephone, role, paysOperation, agence: role === "Administrateur" || role === "Comptable" ? "" : agence, paysAutorises: isAdmin ? [] : paysAutorises, permissionsOverride: isAdmin ? {} : permissionsOverride });
   }
 
   return (
@@ -12399,11 +12415,21 @@ function UserProfilePage({ user, onSave, onBack, sites }) {
               {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
             </select>
           </Field>
+          {!isAdmin && (
+            <Field label="Pays d’opération">
+              <select value={paysOperation} onChange={(e) => onChangePaysOperation(e.target.value)} style={inputStyle}>
+                {COUNTRIES.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code] || ""} {c.name}</option>)}
+              </select>
+              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
+                Pays où travaille cette personne — son point expéditeur. Détermine l’agence qu’elle peut choisir et les destinations proposées par défaut.
+              </div>
+            </Field>
+          )}
           {(role === "Agent" || role === "Chauffeur") && (
             <Field label="Agence assignée">
               <select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>
                 <option value="">Toutes les agences (aucune restriction)</option>
-                {(sites || []).filter((s) => !s.pays || s.pays === "GN").map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}
+                {(sites || []).filter((s) => (s.pays || "GN") === paysOperation).map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}
               </select>
             </Field>
           )}
@@ -12412,14 +12438,19 @@ function UserProfilePage({ user, onSave, onBack, sites }) {
           {isAdmin ? (
             <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "10px 12px", fontSize: 13, color: "var(--text)" }}>🌍 Tous les pays (Administrateur)</div>
           ) : (
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(140px,1fr))", gap: 8, marginBottom: 8 }}>
-              {COUNTRIES.filter((c) => c.code !== "GN").map((c) => (
-                <label key={c.code} style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface2)", borderRadius: 8, padding: "8px 10px", cursor: "pointer", fontSize: 12.5, color: "var(--text)" }}>
-                  <input type="checkbox" checked={paysAutorises.includes(c.code)} onChange={() => toggleCountry(c.code)} />
-                  {FLAGS[c.code]} {c.name}
-                </label>
-              ))}
-            </div>
+            <>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 8 }}>
+                Guinée toujours incluse. Par défaut, seul le pays d’opération ci-dessus est proposé — cochez-en d’autres pour autoriser un accès multi-pays.
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(140px,1fr))", gap: 8, marginBottom: 8 }}>
+                {COUNTRIES.filter((c) => c.code !== "GN").map((c) => (
+                  <label key={c.code} style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface2)", borderRadius: 8, padding: "8px 10px", cursor: "pointer", fontSize: 12.5, color: "var(--text)" }}>
+                    <input type="checkbox" checked={paysAutorises.includes(c.code)} onChange={() => toggleCountry(c.code)} />
+                    {FLAGS[c.code]} {c.name}
+                  </label>
+                ))}
+              </div>
+            </>
           )}
           {!isAdmin && paysAutorises.length === 0 && <div style={{ fontSize: 11.5, color: "var(--warn-fg)", marginBottom: 8 }}>Aucun pays coché = accès à tous les pays par défaut.</div>}
 
@@ -12485,6 +12516,7 @@ function UserForm({ onClose, onSave, existing, sites }) {
   const [identifiant, setIdentifiant] = useState("");
   const [motdepasse, setMotdepasse] = useState("");
   const [role, setRole] = useState("Agent");
+  const [paysOperation, setPaysOperation] = useState("GN");
   const [agence, setAgence] = useState("");
   const [twoFA, setTwoFA] = useState(false);
   const [paysAutorises, setPaysAutorises] = useState(COUNTRIES.filter((c) => c.code !== "GN").map((c) => c.code));
@@ -12493,13 +12525,19 @@ function UserForm({ onClose, onSave, existing, sites }) {
   function toggleCountry(code) {
     setPaysAutorises((list) => (list.includes(code) ? list.filter((c) => c !== code) : [...list, code]));
   }
+  // Cf. UserProfilePage : changer le pays d'opération recalcule les destinations par défaut.
+  function onChangePaysOperation(code) {
+    setPaysOperation(code);
+    setAgence("");
+    setPaysAutorises(code === "GN" ? COUNTRIES.filter((c) => c.code !== "GN").map((c) => c.code) : [code]);
+  }
   async function submit(e) {
     e.preventDefault();
     if (!prenom || !nom || !email || !telephone || !identifiant || !motdepasse) { setErr("Merci de renseigner tous les champs."); return; }
     if (!/^\S+@\S+\.\S+$/.test(email)) { setErr("Adresse email invalide."); return; }
     if (existing.some((u) => u.identifiant === identifiant.trim())) { setErr("Cet identifiant existe déjà."); return; }
     const identifiants = await creerIdentifiantsMotDePasse(motdepasse);
-    onSave({ id: `u${Date.now()}`, prenom, nom, email: email.trim(), telephone, identifiant: identifiant.trim(), ...identifiants, role, agence: role === "Administrateur" || role === "Comptable" ? "" : agence, twoFA, paysAutorises: role === "Administrateur" ? [] : paysAutorises });
+    onSave({ id: `u${Date.now()}`, prenom, nom, email: email.trim(), telephone, identifiant: identifiant.trim(), ...identifiants, role, paysOperation, agence: role === "Administrateur" || role === "Comptable" ? "" : agence, twoFA, paysAutorises: role === "Administrateur" ? [] : paysAutorises });
   }
   return (
     <Modal onClose={onClose} title="Créer un compte utilisateur">
@@ -12524,12 +12562,22 @@ function UserForm({ onClose, onSave, existing, sites }) {
         <div style={{ gridColumn: "1 / -1" }}>
           <Field label="Rôle"><select value={role} onChange={(e) => setRole(e.target.value)} style={inputStyle}>{ROLES.map((r) => <option key={r} value={r}>{r}</option>)}</select></Field>
         </div>
+        {role !== "Administrateur" && (
+          <div style={{ gridColumn: "1 / -1" }}>
+            <Field label="Pays d’opération">
+              <select value={paysOperation} onChange={(e) => onChangePaysOperation(e.target.value)} style={inputStyle}>
+                {COUNTRIES.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code] || ""} {c.name}</option>)}
+              </select>
+            </Field>
+            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: -8, marginBottom: 10 }}>Pays où travaille cette personne — son point expéditeur. Détermine l’agence proposée et les destinations autorisées par défaut.</div>
+          </div>
+        )}
         {(role === "Agent" || role === "Chauffeur") && (
           <div style={{ gridColumn: "1 / -1" }}>
             <Field label="Agence assignée">
               <select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>
                 <option value="">Toutes les agences (aucune restriction)</option>
-                {(sites || []).filter((s) => !s.pays || s.pays === "GN").map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}
+                {(sites || []).filter((s) => (s.pays || "GN") === paysOperation).map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}
               </select>
             </Field>
             <div style={{ fontSize: 11, color: "var(--muted)", marginTop: -8, marginBottom: 10 }}>Si une agence est choisie, cet utilisateur ne verra que les colis, statistiques et bordereaux de cette agence.</div>
@@ -12537,7 +12585,8 @@ function UserForm({ onClose, onSave, existing, sites }) {
         )}
         {role !== "Administrateur" && (
           <div style={{ gridColumn: "1 / -1" }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--muted)", marginBottom: 8 }}>Pays de destination autorisés</div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--muted)", marginBottom: 4 }}>Pays de destination autorisés</div>
+            <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8 }}>Guinée toujours incluse. Cochez d’autres pays pour autoriser un accès multi-pays.</div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(130px,1fr))", gap: 8, marginBottom: 8 }}>
               {COUNTRIES.filter((c) => c.code !== "GN").map((c) => (
                 <label key={c.code} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", borderRadius: 8, padding: "6px 9px", cursor: "pointer", fontSize: 12, color: "var(--text)" }}>

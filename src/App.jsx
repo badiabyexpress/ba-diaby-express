@@ -7077,6 +7077,40 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
   const dest = COUNTRIES.find((c) => c.code === pays) || COUNTRIES.find((c) => c.code === "FR");
   const expCountry = COUNTRIES.find((c) => c.code === expPays);
   const destCountry = COUNTRIES.find((c) => c.code === destPays);
+
+  /*
+   * Indicatif téléphonique suggéré automatiquement d'après le pays choisi. On ne l'impose pas :
+   * l'agent reste libre de choisir un autre indicatif dans le sélecteur (le client peut très bien
+   * utiliser un numéro d'un pays différent de celui d'expédition/destination) — dans ce cas on ne
+   * revient plus dessus tant que le pays ne change pas à nouveau.
+   */
+  const expDialAuto = useRef("224");
+  const destDialAuto = useRef(DIAL_CODES.find((c) => c.name === destCountry?.name)?.dial || "224");
+  /** Sépare un numéro international (+indicatif+reste) en {dial, reste}, comme PhoneInput. */
+  function scinderNumero(valeur) {
+    const match = DIAL_CODES.filter((c) => valeur.startsWith("+" + c.dial)).sort((a, b) => b.dial.length - a.dial.length)[0];
+    return { dial: match?.dial, reste: match ? valeur.slice(match.dial.length + 1) : valeur.replace(/^\+/, "") };
+  }
+  useEffect(() => {
+    const dial = DIAL_CODES.find((c) => c.name === expCountry?.name)?.dial;
+    if (!dial) return;
+    // Champ encore vide : rien à réécrire, le sélecteur affichera déjà le bon indicatif via
+    // defaultDial. On n'écrit dans le champ que s'il contient déjà des chiffres à conserver.
+    if (expTelephone) {
+      const { dial: dialActuel, reste } = scinderNumero(expTelephone);
+      if ((!dialActuel || dialActuel === expDialAuto.current) && reste) setExpTelephone(`+${dial}${reste}`);
+    }
+    expDialAuto.current = dial;
+  }, [expPays]);
+  useEffect(() => {
+    const dial = DIAL_CODES.find((c) => c.name === destCountry?.name)?.dial;
+    if (!dial) return;
+    if (destTelephone) {
+      const { dial: dialActuel, reste } = scinderNumero(destTelephone);
+      if ((!dialActuel || dialActuel === destDialAuto.current) && reste) setDestTelephone(`+${dial}${reste}`);
+    }
+    destDialAuto.current = dial;
+  }, [destPays]);
   const poidsTotal = produits.reduce((s, p) => s + (Number(p.poids) || 0), 0);
   const valeurDeclaree = produits.reduce((s, p) => s + produitValeurGNF(p, categories), 0);
   // Le montant facturé provient directement de la somme des valeurs produits
@@ -7257,7 +7291,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14 }}>
               <div style={{ gridColumn: "1 / -1" }}>
                 <Field label="Téléphone * — le client est reconnu automatiquement s’il a déjà expédié">
-                  <PhoneInput value={expTelephone} onChange={setExpTelephone} onBlur={(full) => chercherClient(full, "exp")} />
+                  <PhoneInput value={expTelephone} onChange={setExpTelephone} onBlur={(full) => chercherClient(full, "exp")} defaultDial={DIAL_CODES.find((c) => c.name === expCountry?.name)?.dial} />
                 </Field>
                 {expClientTrouve && <div style={{ fontSize: 11.5, color: "var(--ok-fg)", marginTop: -8, marginBottom: 12 }}>✓ Client reconnu — informations reprises de son dernier colis du {new Date(expClientTrouve.date).toLocaleDateString("fr-FR")}</div>}
               </div>

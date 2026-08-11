@@ -8949,6 +8949,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
   const [motif, setMotif] = useState("");
   const [editing, setEditing] = useState(false);
   const [showLitige, setShowLitige] = useState(false);
+  const [confirmerSuppression, setConfirmerSuppression] = useState(false);
   const [emplacement, setEmplacement] = useState(colis.emplacement || "");
   const [waState, setWaState] = useState("");
   const [waErreur, setWaErreur] = useState("");
@@ -9464,7 +9465,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
         <div style={{ display: "flex", gap: 14 }}>
           {canManage && <button onClick={() => setShowLitige(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "1px solid var(--warn-border)", color: "var(--warn-fg)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}><AlertTriangle size={14} /> {colis.litige?.statut === "Ouvert" ? "Résoudre le litige" : "Signaler un litige"}</button>}
           {isAdmin && <button onClick={() => setEditing(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--text)", fontSize: 13, cursor: "pointer" }}><Settings size={14} /> Modifier</button>}
-          {effectivePermission(session, "colis.supprimer") && <button onClick={onDelete} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--danger-fg)", fontSize: 13, cursor: "pointer" }}><Trash2 size={14} /> Supprimer</button>}
+          {effectivePermission(session, "colis.supprimer") && <button onClick={() => setConfirmerSuppression(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--danger-fg)", fontSize: 13, cursor: "pointer" }}><Trash2 size={14} /> Supprimer</button>}
           {effectivePermission(session, "colis.annuler") && colis.status !== "Annulé" && colis.status !== "Livré" && colis.status !== "Refusé" && <button onClick={() => setCancelling(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--warn-fg)", fontSize: 13, cursor: "pointer" }}><AlertTriangle size={14} /> Annuler le colis</button>}
           {effectivePermission(session, "colis.annuler") && ["Disponible au retrait", "Arrivé"].includes(colis.status) && <button onClick={() => setRefusing(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--danger-fg)", fontSize: 13, cursor: "pointer" }}><X size={14} /> Marquer refusé / retourné</button>}
           {canManage && (
@@ -9545,6 +9546,15 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
         </div>
       )}
       {showLitige && <LitigeModal colis={colis} onDeclarer={onDeclarerLitige} onResoudre={onResoudreLitige} onClose={() => setShowLitige(false)} />}
+      {confirmerSuppression && (
+        <ConfirmerAction
+          titre="Supprimer ce colis ?"
+          message={`Le colis ${colis.tracking} (${colis.destinataire}) sera définitivement supprimé.`}
+          consequence="Son historique, ses paiements et ses documents disparaissent avec lui. Cette action ne peut pas être annulée — réservée aux administrateurs."
+          onConfirmer={() => { setConfirmerSuppression(false); onDelete(); }}
+          onAnnuler={() => setConfirmerSuppression(false)}
+        />
+      )}
       {editing && <EditColisForm colis={colis} categories={data?.categories} remiseVolumeConfig={data?.remiseVolume} tarifsReception={data?.receptionTarifs} onClose={() => setEditing(false)} onSave={(patch) => { onUpdate(patch); setEditing(false); }} />}
       {bonSortieOuvert && (
         <Modal onClose={() => setBonSortieOuvert(false)} title="Enregistrer la remise du colis">

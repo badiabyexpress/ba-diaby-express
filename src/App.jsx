@@ -8120,9 +8120,16 @@ async function downloadInvoice(colis, data, options = {}) {
   const dest = COUNTRIES.find((c) => c.code === (colis.destinatairePays || colis.pays));
   const origine = COUNTRIES.find((c) => c.code === (colis.direction === "import" ? colis.pays : "GN"));
   const gnf = LIVE_RATES.GNF || CURRENCIES.GNF;
-  // Devise de l'expéditeur : un colis qui part de France/États-Unis/Maroc... a ses articles
-  // valorisés dans la devise de ce pays plutôt qu'en GNF (colis parti de Guinée par défaut).
-  const expCurrency = COUNTRIES.find((c) => c.code === (colis.expediteurPays || "GN"))?.currency || "GNF";
+  /*
+   * Devise principale du ticket = celle de l'expéditeur : un colis qui part de Conakry se paie en
+   * GNF, un colis qui part de France/États-Unis/Maroc... se paie dans la devise de ce pays. La
+   * devise secondaire (l'équivalent affiché en petit) est celle du destinataire — GNF pour un
+   * import qui arrive en Guinée, la devise du pays étranger pour un export. Les deux ne sont
+   * affichées ensemble que si elles diffèrent.
+   */
+  const primaryCur = COUNTRIES.find((c) => c.code === (colis.expediteurPays || "GN"))?.currency || "GNF";
+  const secondaryCur = dest?.currency || "EUR";
+  const fmtMontant = (eurValue, cur) => (cur === "GNF" ? fmtGNF(eurValue * gnf) : fmt(eurValue, cur));
 
   // Zones fixes : chaque bloc sait où il commence, aucun décalage cumulé possible.
   const Z = {
@@ -8159,7 +8166,7 @@ async function downloadInvoice(colis, data, options = {}) {
   doc.setFont(undefined, "bold"); doc.setFontSize(10); doc.setTextColor(...etatTexte);
   doc.text(etat, M, Z.bandeau + 6.8);
   if (solde > 0.005) {
-    doc.text(`Reste à payer : ${fmtGNF(solde * gnf)}`, W - M, Z.bandeau + 6.8, { align: "right" });
+    doc.text(`Reste à payer : ${fmtMontant(solde, primaryCur)}`, W - M, Z.bandeau + 6.8, { align: "right" });
   }
 
   // ── Références ────────────────────────────────────────────────────────────
@@ -8214,7 +8221,7 @@ async function downloadInvoice(colis, data, options = {}) {
     { t: "Article", x: M + 2, l: 92 },
     { t: "Qté", x: M + 100, l: 14, d: true },
     { t: "Poids", x: M + 124, l: 22, d: true },
-    { t: `Prix (${expCurrency})`, x: M + 150, l: 26, d: true },
+    { t: `Prix (${primaryCur})`, x: M + 150, l: 26, d: true },
   ];
   doc.setFillColor(...NAVY); doc.rect(M, y, W - 2 * M, 8, "F");
   doc.setFont(undefined, "bold"); doc.setFontSize(8); doc.setTextColor(255, 255, 255);
@@ -8232,8 +8239,7 @@ async function downloadInvoice(colis, data, options = {}) {
     doc.text(String(p.quantite || 1), M + 114, y + 5.4, { align: "right" });
     doc.text(`${p.poids || 0} kg`, M + 146, y + 5.4, { align: "right" });
     const ligneGNF = produitValeurGNF(p, data?.categories);
-    const prixTexte = expCurrency === "GNF" ? fmtGNF(ligneGNF) : fmt(ligneGNF / gnf, expCurrency);
-    doc.text(prixTexte, M + 176, y + 5.4, { align: "right" });
+    doc.text(fmtMontant(ligneGNF / gnf, primaryCur), M + 176, y + 5.4, { align: "right" });
     doc.setDrawColor(...LINE); doc.setLineWidth(0.2); doc.line(M, y + 8, W - M, y + 8);
     y += 8;
   });
@@ -8276,34 +8282,33 @@ async function downloadInvoice(colis, data, options = {}) {
     doc.text(valeur, W - M, y, { align: "right" });
     y += 5;
   };
-  ligneT("Frais d'expédition", fmtGNF((colis.prixBrut || colis.prix) * gnf));
+  ligneT("Frais d'expédition", fmtMontant(colis.prixBrut || colis.prix, primaryCur));
   if (colis.discountLoyalty > 0) ligneT("Remise fidélité", `-${colis.discountLoyalty} %`);
   if (colis.discountVolume > 0) ligneT("Remise volume", `-${colis.discountVolume} %`);
   const ex = colis.demandeExpress;
-  if (ex && ex.facture && ex.montant > 0) ligneT("Livraison express 72h", fmtGNF(ex.montant * gnf));
+  if (ex && ex.facture && ex.montant > 0) ligneT("Livraison express 72h", fmtMontant(ex.montant, primaryCur));
 
   y += 1;
   doc.setFillColor(...NAVY); doc.rect(panL - 4, y - 4.5, W - M - panL + 4, 11, "F");
   doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(255, 255, 255);
   doc.text("TOTAL À PAYER", panL, y + 2.5);
-  doc.text(fmtGNF(colis.prix * gnf), W - M, y + 2.5, { align: "right" });
-  // L'équivalent en devise de destination tient dans le bandeau : une ligne de moins, donc plus de marge.
-  const deviseDest = dest?.currency || "EUR";
-  if (deviseDest !== "GNF") {
+  doc.text(fmtMontant(colis.prix, primaryCur), W - M, y + 2.5, { align: "right" });
+  // L'équivalent dans la devise du destinataire tient dans le bandeau : une ligne de moins, donc plus de marge.
+  if (secondaryCur !== primaryCur) {
     doc.setFont(undefined, "normal"); doc.setFontSize(7); doc.setTextColor(205, 218, 236);
-    doc.text(`~ ${fmt(colis.prix, deviseDest)}`, W - M, y + 6, { align: "right" });
+    doc.text(`~ ${fmtMontant(colis.prix, secondaryCur)}`, W - M, y + 6, { align: "right" });
   }
   y += 13;
   if (paye > 0) {
     doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
     doc.text("Déjà versé", panL, y);
-    doc.text(fmtGNF(paye * gnf), W - M, y, { align: "right" });
+    doc.text(fmtMontant(paye, primaryCur), W - M, y, { align: "right" });
     y += 5.5;
   }
   if (solde > 0.005) {
     doc.setFont(undefined, "bold"); doc.setFontSize(10); doc.setTextColor(...etatTexte);
     doc.text("Reste à payer", panL, y);
-    doc.text(fmtGNF(solde * gnf), W - M, y, { align: "right" });
+    doc.text(fmtMontant(solde, primaryCur), W - M, y, { align: "right" });
   }
 
   // ── Agences ───────────────────────────────────────────────────────────────

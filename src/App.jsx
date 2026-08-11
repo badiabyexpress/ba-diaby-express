@@ -8876,7 +8876,8 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
     // ligne qui faussera ensuite les totaux de poids, le chiffre d'affaires et les commissions.
     if (!(Number(poids) > 0)) { setErr("Le poids doit être supérieur à 0 kg."); return; }
     onSave({
-      expediteur, destinataire, telephone, pays, direction, mode,
+      expediteur, destinataire, telephone, pays, direction,
+      destinatairePays: direction === "import" ? "GN" : pays, mode,
       poids: Number(poids) || 0, volume: Number(volume) || 0,
       prixBrut, discountLoyalty, rabaisMontant: Number(rabaisMontant) || 0, rabaisDevise, rabaisEUR, prix, paye: payeNum, reste,
     });

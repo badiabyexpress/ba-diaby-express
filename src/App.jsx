@@ -1084,14 +1084,13 @@ function useIsMobile() {
  * l'onglet (fréquent sur téléphone, où le navigateur décharge les pages en arrière-plan)
  * ramenait à l'écran de connexion.
  *
- * Une fois connecté dans la journée, un agent doit rester connecté sur son appareil tant qu'il
- * l'utilise au moins une fois toutes les 6 h — d'où un délai large plutôt que les 10 minutes
- * d'origine, pensées pour un usage bureautique classique et trop courtes pour un agent qui
- * n'ouvre l'application que ponctuellement entre deux colis. L'Espace Client (accès public,
- * potentiellement sur un appareil partagé) garde un délai plus court.
+ * Une fois connecté dans la journée, agent comme client doit rester connecté sur son appareil
+ * tant qu'il l'utilise au moins une fois toutes les 6 h — d'où un délai large plutôt que les
+ * 10 minutes d'origine, pensées pour un usage bureautique classique et trop courtes pour un
+ * usage ponctuel entre deux colis.
  */
 const MINUTES_INACTIVITE_AGENT = 360;
-const MINUTES_INACTIVITE_CLIENT = 10;
+const MINUTES_INACTIVITE_CLIENT = 360;
 const CLE_SESSION_CLIENT = "bde-session-client";
 const CLE_SESSION = "bde-session";
 

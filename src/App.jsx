@@ -198,6 +198,20 @@ function sitesPourPays(sites, pays) {
 function sitesLocaux(sites) {
   return sitesPourPays(sites, "GN");
 }
+/**
+ * Site où le destinataire vient retirer son colis.
+ *
+ * Pour un colis livré en Guinée (import, ou export vers "GN"), c'est l'agence de retrait
+ * configurée dans Configuration → Agences (Bambeto par défaut). Pour un export vers l'étranger,
+ * le retrait se fait chez le destinataire : on renvoie le site déclaré pour ce pays de
+ * destination s'il existe, sinon null plutôt que d'annoncer à tort une agence en Guinée.
+ */
+function siteRetraitPourColis(colis, data) {
+  const sites = data?.sites || [];
+  const versEtranger = (colis.direction || "export") === "export" && colis.pays && colis.pays !== "GN";
+  if (versEtranger) return sites.find((s) => s.pays === colis.pays) || null;
+  return sites.find((s) => s.id === (data?.agenceRetraitClient || "site-bambeto")) || sitesLocaux(sites)[0] || sites[0];
+}
 function routeLabel(pays, direction) {
   const c = COUNTRIES.find((x) => x.code === pays);
   if (!c) return "";
@@ -1520,6 +1534,7 @@ function ScannerModal({ onClose, onScan }) {
   const streamRef = useRef(null);
   const rafRef = useRef(null);
   const [etat, setEtat] = useState("demarrage"); // demarrage | actif | erreur
+  const [erreur, setErreur] = useState("");
 
   useEffect(() => {
     let annule = false;
@@ -5015,7 +5030,7 @@ function TraiterPreAlerteModal({ preAlerte, client, tarifs, onValider, onClose }
   }
 
   return (
-    <Modal onClose={onClose} title="Réception du colis annoncé" wide saisieEnCours={!!poidsReel}>
+    <Modal onClose={onClose} title="Réception du colis annoncé" wide saisieEnCours={!!poids}>
       <div style={{ background: "var(--surface2)", borderRadius: 12, padding: "10px 14px", marginBottom: 16 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{client ? `${client.prenom} ${client.nom}` : "Compte inconnu"}</div>
         <div style={{ fontSize: 11.5, color: "var(--muted)" }}>{client?.telephone} · annoncé le {new Date(preAlerte.dateCreation).toLocaleDateString("fr-FR")}</div>
@@ -5630,7 +5645,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     const echecs = [];
     for (let i = 0; i < aRelancer.length; i++) {
       const c = aRelancer[i];
-      const ag = agenceRetraitColis;
+      const ag = siteRetraitPourColis(c, data);
       const du = c.reste > 0 ? ` Reste à régler : ${fmtGNF(c.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}.` : "";
       const message = `Bonjour ${c.destinataire}, votre colis Ba-Diaby Express ${c.tracking} vous attend depuis ${c.joursAttente} jours`
         + (ag ? ` à notre agence ${ag.nom} — ${ag.adresse}${ag.horaires ? ` (${ag.horaires})` : ""}.` : ".")
@@ -5769,7 +5784,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     const evenementParStatut = { "En transit": "expedie", "Arrivé": "arrivee", "Disponible au retrait": "retrait", "Livré": "livre" };
     const evt = evenementParStatut[nextStatus];
     if (evt && colisMaj) {
-      const ag = (data.sites || []).find((x) => x.id === (data.agenceRetraitClient || "site-bambeto")) || (data.sites || [])[0];
+      const ag = siteRetraitPourColis(colisMaj, data);
       const messages = {
         expedie: `Bonjour ${colisMaj.destinataire}, votre colis Ba-Diaby Express ${tracking} vient de quitter notre entrepôt.`,
         arrivee: `Bonjour ${colisMaj.destinataire}, votre colis Ba-Diaby Express ${tracking} est arrivé en Guinée.`,
@@ -6099,7 +6114,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
           <button onClick={() => imprimerLot("facture")} disabled={impressionLot} style={{ background: "var(--surface2)", color: "#fff", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>{impressionLot ? "Génération…" : "Factures A4"}</button>
         </div>
       )}
-      {showForm && <ColisForm remiseVolumeConfig={data.remiseVolume} repertoire={data.repertoire} onClose={() => setShowForm(false)} onSave={addColis} existingColis={data.colis} categories={data.categories || []} session={session} sites={data.sites} partenaires={(data.users || []).filter((u) => u.role === "Partenaire")} clientAccounts={data.clientAccounts || []} preAlertes={data.preAlertes || []} />}
+      {showForm && <ColisForm remiseVolumeConfig={data.remiseVolume} repertoire={data.repertoire} onClose={() => setShowForm(false)} onSave={addColis} existingColis={data.colis} categories={data.categories || []} session={session} sites={data.sites} partenaires={(data.users || []).filter((u) => u.role === "Partenaire")} clientAccounts={data.clientAccounts || []} preAlertes={data.preAlertes || []} notify={notify} />}
       {showAi && <AiColisModal onClose={() => setShowAi(false)} onCreate={addColis} data={data} session={session} />}
       {showImport && <ImportExcelModal onClose={() => setShowImport(false)} onImportMany={importerColisMany} data={data} session={session} />}
       {remiseEnCours && <RemiseColisModal colis={remiseEnCours} session={session}
@@ -6112,7 +6127,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
         onClose={() => setRemiseEnCours(null)} />}
       {showEncaisseGroupe && <EncaisserGroupeModal data={data} onEncaisser={encaisserGroupe} onClose={() => setShowEncaisseGroupe(false)} />}
       {showReception && <ReceptionBordereauModal onClose={() => setShowReception(false)} data={data} persist={persist} notify={notify} session={session} />}
-      {selected && <ColisDetail colis={selected} onClose={() => setSelected(null)} onAdvance={() => advance(selected.tracking)} onDelete={() => remove(selected.tracking)} onCancel={(motif) => annuler(selected.tracking, motif)} onRefuser={(motif) => refuser(selected.tracking, motif)} onDeclarerLitige={(t, d) => declarerLitige(selected.tracking, t, d)} onResoudreLitige={(r, i) => resoudreLitige(selected.tracking, r, i)} onMajRetour={(statutRetour) => majRetour(selected.tracking, statutRetour)} onUpdate={(patch) => updateColis(selected.tracking, patch)} onEncaisser={(montant, mode, montantSaisi, deviseSaisie, details, declarationId) => encaisser(selected.tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId)} canManage={!isChauffeur} isAdmin={session.role === "Administrateur"} isChauffeur={isChauffeur} data={data} session={session} />}
+      {selected && <ColisDetail colis={selected} onClose={() => setSelected(null)} onAdvance={() => advance(selected.tracking)} onDelete={() => remove(selected.tracking)} onCancel={(motif) => annuler(selected.tracking, motif)} onRefuser={(motif) => refuser(selected.tracking, motif)} onDeclarerLitige={(t, d) => declarerLitige(selected.tracking, t, d)} onResoudreLitige={(r, i) => resoudreLitige(selected.tracking, r, i)} onMajRetour={(statutRetour) => majRetour(selected.tracking, statutRetour)} onUpdate={(patch) => updateColis(selected.tracking, patch)} onEncaisser={(montant, mode, montantSaisi, deviseSaisie, details, declarationId) => encaisser(selected.tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId)} canManage={!isChauffeur} isAdmin={session.role === "Administrateur"} isChauffeur={isChauffeur} data={data} session={session} notify={notify} />}
     </div>
   );
 }
@@ -6379,7 +6394,6 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
   const [confirmation, setConfirmation] = useState(null);
   const [prevenir, setPrevenir] = useState(true);
   const [envoiWa, setEnvoiWa] = useState(null);
-  const agenceRetrait = (data.sites || []).find((s) => s.id === (data.agenceRetraitClient || "site-bambeto")) || (data.sites || [])[0];
 
   const ETAPES_COLIS = [
     { cle: "En transit", bouton: "Marquer expédiés", vuClient: "Expédié", depuis: ["Enregistré"] },
@@ -6399,7 +6413,7 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
     const base = `Bonjour ${colis.destinataire}, votre colis Ba-Diaby Express ${colis.tracking}`;
     if (etape.cle === "En transit") return `${base} vient de quitter notre entrepôt. Nous vous préviendrons dès son arrivée en Guinée.`;
     if (etape.cle === "Arrivé") return `${base} est arrivé en Guinée. Il sera bientôt disponible au retrait.`;
-    const ag = agenceRetrait;
+    const ag = siteRetraitPourColis(colis, data);
     const ou = ag ? ` Retrait à notre agence ${ag.nom} — ${ag.adresse}${ag.horaires ? ` (${ag.horaires})` : ""}.` : "";
     const du = colis.reste > 0 ? ` Reste à régler : ${fmtGNF(colis.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}.` : "";
     return `${base} est disponible au retrait.${ou}${du}`;
@@ -6810,7 +6824,7 @@ function splitNom(full) {
   return { prenom: parts[0], nom: parts.slice(1).join(" ") };
 }
 
-function ColisForm({ onClose, onSave, existingColis, categories, session, sites, partenaires, clientAccounts, preAlertes, remiseVolumeConfig, repertoire }) {
+function ColisForm({ onClose, onSave, existingColis, categories, session, sites, partenaires, clientAccounts, preAlertes, remiseVolumeConfig, repertoire, notify }) {
   const availableCountries = allowedCountries(session);
   const clientDirectory = useMemo(() => buildClientDirectory(existingColis || [], repertoire), [existingColis, repertoire]);
   const [step, setStep] = useState(0);
@@ -8293,20 +8307,11 @@ async function downloadInvoice(colis, data, options = {}) {
   doc.setDrawColor(...LINE); doc.setLineWidth(0.3); doc.line(M, y - 8, W - M, y - 8);
   const sites = data?.sites || [];
   const siteDepot = sites.find((s) => s.nom === colis.site) || sitesLocaux(sites)[0] || sites[0];
-  /*
-   * Le retrait n'a lieu à une agence Guinée (Bambeto par défaut) que pour les colis livrés en
-   * Guinée. Pour un envoi vers l'étranger (export), le retrait se fait chez le destinataire — on
-   * n'affiche une agence que si une agence de réception existe réellement pour ce pays ; sinon
-   * le bloc est simplement omis plutôt que d'afficher Bambeto à tort.
-   */
-  const versEtranger = (colis.direction || "export") === "export" && dest?.code && dest.code !== "GN";
-  let siteRetrait = null;
-  if (versEtranger) {
-    // Site déclaré dans Configuration → Sites d'opération pour ce pays de destination, s'il existe.
-    siteRetrait = sites.find((s) => s.pays === dest.code) || null;
-  } else {
-    siteRetrait = sites.find((s) => s.id === (data?.agenceRetraitClient || "site-bambeto")) || sitesLocaux(sites)[0] || sites[0];
-  }
+  // Le retrait n'a lieu à une agence Guinée (Bambeto par défaut) que pour les colis livrés en
+  // Guinée ; pour un export vers l'étranger, siteRetraitPourColis() renvoie le site déclaré pour
+  // ce pays s'il existe, sinon null — le bloc est alors simplement omis plutôt que d'afficher
+  // Bambeto à tort.
+  const siteRetrait = siteRetraitPourColis(colis, data);
   const bloc = (titre, site, x) => {
     doc.setFont(undefined, "bold"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
     doc.text(titre.toUpperCase(), x, y);
@@ -8837,6 +8842,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   const [paye, setPaye] = useState(String(colis.paye || ""));
   const [rabaisMontant, setRabaisMontant] = useState(String(colis.rabaisMontant || 0));
   const [rabaisDevise, setRabaisDevise] = useState(colis.rabaisDevise || "GNF");
+  const [err, setErr] = useState("");
   /*
    * Deux barèmes coexistent : le barème export (par pays et mode de transport) et les paliers
    * de réception utilisés pour les colis annoncés depuis l'Espace Client. On applique celui
@@ -8913,6 +8919,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
           </select>
         </Field>
         <Field label="Montant payé (EUR)"><input value={paye} onChange={(e) => setPaye(e.target.value)} style={inputStyle} /></Field>
+        {err && <div style={{ gridColumn: "1 / -1", color: "var(--danger-fg)", fontSize: 12.5 }}>{err}</div>}
         <div style={{ gridColumn: "1 / -1", background: "var(--surface2)", borderRadius: 12, padding: "12px 16px", display: "flex", justifyContent: "space-between" }}>
           <div style={{ fontSize: 13, color: "var(--text)" }}>Total recalculé : <strong>{fmt(prix, "EUR")}</strong></div>
           <div style={{ fontSize: 13, color: reste > 0 ? "var(--danger-fg)" : "var(--ok-fg)" }}>Reste à payer : <strong>{fmt(reste, "EUR")}</strong></div>
@@ -8926,7 +8933,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   );
 }
 
-function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser, onDeclarerLitige, onResoudreLitige, onMajRetour, onUpdate, onEncaisser, canManage, isAdmin, isChauffeur, data, session }) {
+function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser, onDeclarerLitige, onResoudreLitige, onMajRetour, onUpdate, onEncaisser, canManage, isAdmin, isChauffeur, data, session, notify }) {
   const [cancelling, setCancelling] = useState(false);
   const [refusing, setRefusing] = useState(false);
   const [motifRefus, setMotifRefus] = useState("");
@@ -10470,7 +10477,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
   const confirmationDepense = depenseASupprimer && (
     <ConfirmerAction
       titre="Supprimer cette dépense ?"
-      message={`« ${depenseASupprimer.libelle || depenseASupprimer.categorie || "Dépense"} » sera retirée de la comptabilité.`}
+      message={`« ${depenseASupprimer.nom || "Dépense"} » sera retirée de la comptabilité.`}
       consequence="Le résultat de la période sera recalculé sans elle. Cette écriture ne peut pas être récupérée."
       onConfirmer={() => { removeDepense(depenseASupprimer.id); setDepenseASupprimer(null); }}
       onAnnuler={() => setDepenseASupprimer(null)}

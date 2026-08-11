@@ -7111,6 +7111,18 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
     }
     destDialAuto.current = dial;
   }, [destPays]);
+  /*
+   * Devise du rabais suggérée d'après le pays expéditeur (celui qui règle, en pratique) : GNF
+   * pour un envoi depuis la Guinée, EUR pour la France ou la Belgique, etc. — même principe que
+   * l'indicatif téléphonique ci-dessus. L'agent reste libre de choisir une autre devise ; ce choix
+   * n'est alors plus écrasé tant que le pays expéditeur ne change pas à nouveau.
+   */
+  const rabaisDeviseAuto = useRef("GNF");
+  useEffect(() => {
+    const devise = expCountry?.currency || "GNF";
+    if (rabaisDevise === rabaisDeviseAuto.current) setRabaisDevise(devise);
+    rabaisDeviseAuto.current = devise;
+  }, [expPays]);
   const poidsTotal = produits.reduce((s, p) => s + (Number(p.poids) || 0), 0);
   const valeurDeclaree = produits.reduce((s, p) => s + produitValeurGNF(p, categories), 0);
   // Le montant facturé provient directement de la somme des valeurs produits

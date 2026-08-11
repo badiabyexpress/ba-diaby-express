@@ -7908,6 +7908,16 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
     finalY += 6;
   }
 
+  /*
+   * Sur un bordereau chargé (beaucoup de colis), le tableau peut finir tout en bas d'une page —
+   * voire d'une page ajoutée automatiquement par autoTable. Sans cette vérification, le panneau
+   * des totaux et surtout le bloc des signatures étaient dessinés hors de la page (invisibles à
+   * l'impression) : mesuré, le bloc signature a besoin d'environ 44 mm après la fin du tableau,
+   * et le pied de page fixe est à 288 mm. On passe donc à une nouvelle page dès que ce bloc ne
+   * tiendrait plus confortablement au-dessus du pied de page.
+   */
+  if (finalY > 234) { doc.addPage(); finalY = 20; }
+
   const totalFacture = colisRoute.reduce((s, c) => s + c.prix, 0);
   const totalEncaisse = colisRoute.reduce((s, c) => s + c.paye, 0);
   const totalRestant = colisRoute.reduce((s, c) => s + c.reste, 0);

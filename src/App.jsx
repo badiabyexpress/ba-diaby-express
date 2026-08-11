@@ -3686,14 +3686,14 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome }) 
   if (pending) {
     return (
       <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "linear-gradient(135deg,#0A2647 0%,#0A2647 55%,#C8102E 250%)" }}>
-        <div style={{ width: "min(92vw, 380px)", background: "var(--surface)", borderRadius: 14, padding: "34px 32px", boxShadow: "0 24px 60px rgba(10,38,71,0.35)" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}><ShieldCheck size={18} color="var(--brand-on-dark)" /><div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, color: "var(--text)" }}>Double authentification</div></div>
-          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>Démo : aucune passerelle SMS n’étant connectée, votre code de vérification est affiché ci-dessous.</div>
-          <div style={{ background: "var(--surface2)", borderRadius: 12, padding: "12px 16px", textAlign: "center", fontFamily: "'Space Grotesk',sans-serif", fontSize: 24, letterSpacing: 4, color: "var(--text)", marginBottom: 14 }}>{otp}</div>
+        <div style={{ width: "min(92vw, 400px)", background: "var(--surface)", borderRadius: 18, padding: "38px 34px", boxShadow: "0 28px 70px rgba(10,38,71,0.4)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 8 }}><ShieldCheck size={20} color="var(--brand-on-dark)" /><div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 16, color: "var(--text)" }}>Double authentification</div></div>
+          <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>Démo : aucune passerelle SMS n’étant connectée, votre code de vérification est affiché ci-dessous.</div>
+          <div style={{ background: "var(--surface2)", borderRadius: 13, padding: "14px 16px", textAlign: "center", fontFamily: "'Space Grotesk',sans-serif", fontSize: 27, letterSpacing: 5, color: "var(--text)", marginBottom: 16 }}>{otp}</div>
           <div>
-            <input value={otpInput} onChange={(e) => setOtpInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && verifyOtp(e)} placeholder="Entrez le code à 6 chiffres" style={{ ...inputStyle, marginBottom: 10, textAlign: "center" }} />
-            {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 8 }}>{err}</div>}
-            <button type="button" onClick={verifyOtp} style={{ width: "100%", background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>Vérifier</button>
+            <input value={otpInput} onChange={(e) => setOtpInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && verifyOtp(e)} placeholder="Entrez le code à 6 chiffres" style={{ ...inputStyle, marginBottom: 12, textAlign: "center", fontSize: 15, padding: "12px 14px" }} />
+            {err && <div style={{ color: "var(--danger-fg)", fontSize: 13, marginBottom: 10 }}>{err}</div>}
+            <button type="button" onClick={verifyOtp} style={{ width: "100%", background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "13px 0", fontWeight: 700, fontSize: 15, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}>Vérifier</button>
           </div>
         </div>
       </div>
@@ -3702,40 +3702,40 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome }) 
 
   return (
     <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "linear-gradient(135deg,#0A2647 0%,#0A2647 55%,#C8102E 250%)" }}>
-      <div style={{ width: "min(92vw, 380px)", background: "var(--surface)", borderRadius: 14, padding: "34px 32px", boxShadow: "0 24px 60px rgba(10,38,71,0.35)", position: "relative" }}>
+      <div style={{ width: "min(92vw, 400px)", background: "var(--surface)", borderRadius: 18, padding: "38px 34px", boxShadow: "0 28px 70px rgba(10,38,71,0.4)", position: "relative" }}>
         {onBackToHome && (
-          <button onClick={onBackToHome} style={{ position: "absolute", top: 18, insetInlineStart: 18, display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 12 }}>
-            <ChevronLeft size={14} /> Accueil
+          <button onClick={onBackToHome} style={{ position: "absolute", top: 20, insetInlineStart: 20, display: "flex", alignItems: "center", gap: 4, background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 13 }}>
+            <ChevronLeft size={15} /> Accueil
           </button>
         )}
         {onToggleTheme && (
-          <button onClick={onToggleTheme} title="Changer de thème" style={{ position: "absolute", top: 18, insetInlineEnd: 18, width: 30, height: 30, borderRadius: 8, border: "1px solid var(--border)", background: "var(--surface2)", color: "var(--text)", cursor: "pointer", display: "grid", placeItems: "center" }}>
-            {theme === "dark" ? <Moon size={14} /> : <Sun size={14} />}
+          <button onClick={onToggleTheme} title="Changer de thème" style={{ position: "absolute", top: 20, insetInlineEnd: 20, width: 34, height: 34, borderRadius: 9, border: "1px solid var(--border)", background: "var(--surface2)", color: "var(--text)", cursor: "pointer", display: "grid", placeItems: "center" }}>
+            {theme === "dark" ? <Moon size={16} /> : <Sun size={16} />}
           </button>
         )}
-        <div style={{ textAlign: "center", marginBottom: 22 }}>
-          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 22, color: "var(--text)" }}>BA-DIABY <span style={{ color: "var(--danger-fg)" }}>EXPRESS</span></div>
-          <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 4 }}>Plateforme de gestion logistique</div>
+        <div style={{ textAlign: "center", marginBottom: 26 }}>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 25, color: "var(--text)" }}>BA-DIABY <span style={{ color: "var(--danger-fg)" }}>EXPRESS</span></div>
+          <div style={{ fontSize: 13.5, color: "var(--muted)", marginTop: 5 }}>Plateforme de gestion logistique</div>
         </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <label style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>Identifiant</label>
-          <div style={{ display: "flex", alignItems: "center", border: "1.5px solid var(--border)", borderRadius: 8, padding: "9px 12px", gap: 8 }}>
-            <User size={15} color="var(--muted)" />
-            <input value={id} onChange={(e) => setId(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit(e)} placeholder="Votre identifiant" style={{ border: "none", outline: "none", flex: 1, fontSize: 14, background: "none", color: "var(--text)" }} />
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <label style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>Identifiant</label>
+          <div style={{ display: "flex", alignItems: "center", border: "1.5px solid var(--border)", borderRadius: 9, padding: "11px 14px", gap: 9 }}>
+            <User size={16} color="var(--muted)" />
+            <input value={id} onChange={(e) => setId(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit(e)} placeholder="Votre identifiant" style={{ border: "none", outline: "none", flex: 1, fontSize: 15, background: "none", color: "var(--text)" }} />
           </div>
-          <label style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>Mot de passe</label>
-          <div style={{ display: "flex", alignItems: "center", border: "1.5px solid var(--border)", borderRadius: 8, padding: "9px 12px", gap: 8 }}>
-            <Lock size={15} color="var(--muted)" />
-            <input type={showPw ? "text" : "password"} autoComplete="current-password" value={pw} onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit(e)} placeholder="••••••••" style={{ border: "none", outline: "none", flex: 1, fontSize: 14, background: "none", color: "var(--text)" }} />
+          <label style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>Mot de passe</label>
+          <div style={{ display: "flex", alignItems: "center", border: "1.5px solid var(--border)", borderRadius: 9, padding: "11px 14px", gap: 9 }}>
+            <Lock size={16} color="var(--muted)" />
+            <input type={showPw ? "text" : "password"} autoComplete="current-password" value={pw} onChange={(e) => setPw(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit(e)} placeholder="••••••••" style={{ border: "none", outline: "none", flex: 1, fontSize: 15, background: "none", color: "var(--text)" }} />
             <button type="button" onClick={() => setShowPw((s) => !s)} title={showPw ? "Masquer le mot de passe" : "Afficher le mot de passe"} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", display: "flex", alignItems: "center" }}>
-              {showPw ? <EyeOff size={15} color="var(--muted)" /> : <Eye size={15} color="var(--muted)" />}
+              {showPw ? <EyeOff size={16} color="var(--muted)" /> : <Eye size={16} color="var(--muted)" />}
             </button>
           </div>
-          {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5 }}>{err}</div>}
-          <button type="button" onClick={submit} style={{ marginTop: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>Se connecter</button>
+          {err && <div style={{ color: "var(--danger-fg)", fontSize: 13 }}>{err}</div>}
+          <button type="button" onClick={submit} style={{ marginTop: 8, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "13px 0", fontWeight: 700, fontSize: 15, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}>Se connecter</button>
         </div>
         {offline && (
-          <div style={{ marginTop: 14, background: "var(--danger-bg)", color: "var(--danger-fg)", borderRadius: 8, padding: "9px 12px", fontSize: 11.5, textAlign: "center" }}>
+          <div style={{ marginTop: 16, background: "var(--danger-bg)", color: "var(--danger-fg)", borderRadius: 9, padding: "10px 14px", fontSize: 12.5, textAlign: "center" }}>
             Mode local : le stockage n’a pas répondu, vos données ne seront pas sauvegardées entre deux sessions.
           </div>
         )}
@@ -4124,18 +4124,18 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
   if (sub === "journal") return <JournalActivitePage data={data} onBack={back} />;
 
   const Card = ({ icon: Icon, tint, title, desc, onClick }) => (
-    <button onClick={onClick} style={{ display: "flex", gap: 14, textAlign: "start", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 18, cursor: "pointer" }}>
-      <div style={{ width: 40, height: 40, borderRadius: 12, background: tint, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon size={18} color="#fff" /></div>
+    <button onClick={onClick} style={{ display: "flex", gap: 16, textAlign: "start", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16, padding: 20, cursor: "pointer", boxShadow: "0 2px 10px rgba(10,38,71,0.05)" }}>
+      <div style={{ width: 46, height: 46, borderRadius: 13, background: tint, display: "grid", placeItems: "center", flexShrink: 0 }}><Icon size={20} color="#fff" /></div>
       <div>
-        <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{title}</div>
-        <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4, lineHeight: 1.4 }}>{desc}</div>
+        <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{title}</div>
+        <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 5, lineHeight: 1.45 }}>{desc}</div>
       </div>
     </button>
   );
   const SectionLabel = ({ children, badge }) => (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "22px 0 10px" }}>
-      <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", letterSpacing: 0.5 }}>{children}</div>
-      {badge && <span style={{ background: "#3D63FF", color: "#fff", fontSize: 9.5, fontWeight: 700, padding: "2px 7px", borderRadius: 6 }}>{badge}</span>}
+    <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "26px 0 12px" }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", letterSpacing: 0.5 }}>{children}</div>
+      {badge && <span style={{ background: "#3D63FF", color: "#fff", fontSize: 10, fontWeight: 700, padding: "2px 8px", borderRadius: 6 }}>{badge}</span>}
     </div>
   );
 
@@ -4143,8 +4143,8 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
         <div>
-          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: 0 }}>Configuration</h1>
-          <p style={{ color: "var(--muted)", fontSize: 13.5, margin: "4px 0 0" }}>Gérez les paramètres globaux de votre plateforme logistique.</p>
+          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 27, margin: 0 }}>Configuration</h1>
+          <p style={{ color: "var(--muted)", fontSize: 14.5, margin: "6px 0 0" }}>Gérez les paramètres globaux de votre plateforme logistique.</p>
         </div>
         <button onClick={() => onNavigateApp("dashboard")} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "9px 14px", color: "var(--text)", fontSize: 12.5, cursor: "pointer", flexShrink: 0 }}>
           <LayoutDashboard size={14} /> Retour Dashboard
@@ -4187,13 +4187,13 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
 
 function ConfigPageHeader({ title, desc, onBack }) {
   return (
-    <div style={{ display: "flex", alignItems: "flex-start", gap: 14, marginBottom: 22 }}>
-      <button onClick={onBack} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 12px", color: "var(--text)", fontSize: 12.5, cursor: "pointer", flexShrink: 0, marginTop: 2 }}>
-        <ChevronLeft size={14} /> Configuration
+    <div style={{ display: "flex", alignItems: "flex-start", gap: 16, marginBottom: 24 }}>
+      <button onClick={onBack} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 14px", color: "var(--text)", fontSize: 13.5, fontWeight: 600, cursor: "pointer", flexShrink: 0, marginTop: 2 }}>
+        <ChevronLeft size={15} /> Configuration
       </button>
       <div>
-        <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 22, margin: 0 }}>{title}</h1>
-        <p style={{ color: "var(--muted)", fontSize: 13, margin: "4px 0 0" }}>{desc}</p>
+        <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: 0 }}>{title}</h1>
+        <p style={{ color: "var(--muted)", fontSize: 14, margin: "5px 0 0" }}>{desc}</p>
       </div>
     </div>
   );
@@ -10782,13 +10782,13 @@ function Clients({ data }) {
 
   return (
     <div>
-      <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: "0 0 4px" }}>Clients</h1>
-      <p style={{ color: "var(--muted)", fontSize: 13.5, marginTop: 0, marginBottom: 4 }}>{clients.length} clients · Base de données et historique d’envoi</p>
-      <p style={{ color: "var(--muted)", fontSize: 12, marginTop: 0, marginBottom: 18 }}>Astuce : dans "Nouveau colis", tapez le numéro de téléphone d’un client existant pour remplir automatiquement ses informations.</p>
+      <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 27, margin: "0 0 5px" }}>Clients</h1>
+      <p style={{ color: "var(--muted)", fontSize: 14.5, marginTop: 0, marginBottom: 5 }}>{clients.length} clients · Base de données et historique d’envoi</p>
+      <p style={{ color: "var(--muted)", fontSize: 12.5, marginTop: 0, marginBottom: 20 }}>Astuce : dans "Nouveau colis", tapez le numéro de téléphone d’un client existant pour remplir automatiquement ses informations.</p>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
         {tabs.map(([k, label]) => (
-          <button key={k} onClick={() => setFiltre(k)} style={{ padding: "7px 14px", borderRadius: 20, border: "1.5px solid " + (filtre === k ? "var(--brand-solid)" : "var(--border)"), background: filtre === k ? "var(--brand-solid)" : "var(--surface)", color: filtre === k ? "#fff" : "var(--muted)", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>{label}</button>
+          <button key={k} onClick={() => setFiltre(k)} style={{ padding: "9px 16px", borderRadius: 20, border: "1.5px solid " + (filtre === k ? "var(--brand-solid)" : "var(--border)"), background: filtre === k ? "var(--brand-solid)" : "var(--surface)", color: filtre === k ? "#fff" : "var(--muted)", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>{label}</button>
         ))}
         {filtre === "proche_palier" && (
           <button onClick={exporterProchesPalier} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 20, padding: "7px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}><Download size={13} /> Exporter (Excel)</button>
@@ -10933,10 +10933,10 @@ function PaiementsPage({ data, notify }) {
 
   return (
     <div>
-      <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: "0 0 4px" }}>Paiements & Factures</h1>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 10, marginBottom: 22 }}>
-        <p style={{ color: "var(--muted)", fontSize: 13.5, margin: 0 }}>Suivi des règlements et téléchargement des factures commerciales</p>
-        <button onClick={exportPaiementsExcel} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}><Download size={14} /> Exporter (Excel)</button>
+      <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 27, margin: "0 0 5px" }}>Paiements & Factures</h1>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12, marginBottom: 24 }}>
+        <p style={{ color: "var(--muted)", fontSize: 14.5, margin: 0 }}>Suivi des règlements et téléchargement des factures commerciales</p>
+        <button onClick={exportPaiementsExcel} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><Download size={16} /> Exporter (Excel)</button>
       </div>
 
       {declarationsEnAttente.length > 0 && (
@@ -11195,14 +11195,14 @@ function ComptabilitePage({ data, persist, session, notify }) {
       {confirmationDepense}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12, marginBottom: 18 }}>
         <div>
-          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: 0 }}>Comptabilité</h1>
-          <p style={{ color: "var(--muted)", fontSize: 13.5, margin: "4px 0 0" }}>Recettes, dépenses, salaires, commissions et bénéfices</p>
+          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 27, margin: 0 }}>Comptabilité</h1>
+          <p style={{ color: "var(--muted)", fontSize: 14.5, margin: "5px 0 0" }}>Recettes, dépenses, salaires, commissions et bénéfices</p>
         </div>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <button onClick={exportRapport} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "9px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}><Download size={14} /> Rapport CSV</button>
-          <button onClick={exportRapportPDF} disabled={pdfState === "loading"} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "9px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={14} /> {pdfState === "loading" ? "Génération…" : "Récapitulatif PDF"}</button>
+          <button onClick={exportRapport} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "11px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><Download size={16} /> Rapport CSV</button>
+          <button onClick={exportRapportPDF} disabled={pdfState === "loading"} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "11px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={16} /> {pdfState === "loading" ? "Génération…" : "Récapitulatif PDF"}</button>
           {pdfState === "error" && <span style={{ fontSize: 11, color: "var(--danger-fg)", alignSelf: "center" }}>Échec — réessayez</span>}
-          {effectivePermission(session, "compta.gerer_depenses") && <button onClick={() => setForm({ type: "Dépense", nom: "", montant: "", date: new Date().toISOString().slice(0,10) })} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "9px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}><Plus size={14} /> Ajouter</button>}
+          {effectivePermission(session, "compta.gerer_depenses") && <button onClick={() => setForm({ type: "Dépense", nom: "", montant: "", date: new Date().toISOString().slice(0,10) })} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}><Plus size={16} /> Ajouter</button>}
         </div>
       </div>
 

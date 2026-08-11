@@ -8120,6 +8120,9 @@ async function downloadInvoice(colis, data, options = {}) {
   const dest = COUNTRIES.find((c) => c.code === (colis.destinatairePays || colis.pays));
   const origine = COUNTRIES.find((c) => c.code === (colis.direction === "import" ? colis.pays : "GN"));
   const gnf = LIVE_RATES.GNF || CURRENCIES.GNF;
+  // Devise de l'expéditeur : un colis qui part de France/États-Unis/Maroc... a ses articles
+  // valorisés dans la devise de ce pays plutôt qu'en GNF (colis parti de Guinée par défaut).
+  const expCurrency = COUNTRIES.find((c) => c.code === (colis.expediteurPays || "GN"))?.currency || "GNF";
 
   // Zones fixes : chaque bloc sait où il commence, aucun décalage cumulé possible.
   const Z = {
@@ -8211,7 +8214,7 @@ async function downloadInvoice(colis, data, options = {}) {
     { t: "Article", x: M + 2, l: 92 },
     { t: "Qté", x: M + 100, l: 14, d: true },
     { t: "Poids", x: M + 124, l: 22, d: true },
-    { t: "Prix", x: M + 150, l: 26, d: true },
+    { t: `Prix (${expCurrency})`, x: M + 150, l: 26, d: true },
   ];
   doc.setFillColor(...NAVY); doc.rect(M, y, W - 2 * M, 8, "F");
   doc.setFont(undefined, "bold"); doc.setFontSize(8); doc.setTextColor(255, 255, 255);
@@ -8228,7 +8231,9 @@ async function downloadInvoice(colis, data, options = {}) {
     doc.text(couper(p.nom || "—", 90), M + 2, y + 5.4);
     doc.text(String(p.quantite || 1), M + 114, y + 5.4, { align: "right" });
     doc.text(`${p.poids || 0} kg`, M + 146, y + 5.4, { align: "right" });
-    doc.text(fmtGNF(produitValeurGNF(p, data?.categories)), M + 176, y + 5.4, { align: "right" });
+    const ligneGNF = produitValeurGNF(p, data?.categories);
+    const prixTexte = expCurrency === "GNF" ? fmtGNF(ligneGNF) : fmt(ligneGNF / gnf, expCurrency);
+    doc.text(prixTexte, M + 176, y + 5.4, { align: "right" });
     doc.setDrawColor(...LINE); doc.setLineWidth(0.2); doc.line(M, y + 8, W - M, y + 8);
     y += 8;
   });

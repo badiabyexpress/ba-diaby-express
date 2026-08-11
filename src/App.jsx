@@ -7989,6 +7989,326 @@ async function downloadLabel(colis) {
   openPdf(doc, `etiquette-${colis.tracking}.pdf`);
 }
 
+/* ============================================================================================
+ * IMPRESSION DIRECTE — Bluetooth / USB / réseau (imprimantes d'étiquettes type Epson, Xprinter...)
+ *
+ * En plus du PDF (compatible avec n'importe quelle imprimante via la boîte de dialogue du
+ * navigateur), cette section permet d'envoyer l'étiquette directement à une imprimante
+ * thermique connectée, sans passer par un PDF. Le principe : dessiner l'étiquette sur un
+ * <canvas> monochrome, la convertir en trame ESC/POS (le langage compris par la quasi-totalité
+ * des imprimantes thermiques d'étiquettes/tickets, Epson et Xprinter compris), puis l'envoyer
+ * par le transport choisi.
+ *
+ * Fonctionnalité expérimentale par nature : sans avoir le modèle exact de l'imprimante sous les
+ * yeux, impossible de garantir à l'avance la largeur d'impression (points) ou, pour le
+ * Bluetooth, le bon identifiant de service — d'où les réglages ajustables et le bouton
+ * "Imprimer un test" avant de lancer une vraie étiquette. Le PDF reste le filet de sécurité qui
+ * marche partout.
+ * ============================================================================================ */
+
+const CLE_IMPRIMANTE = "bde-imprimante";
+function lireReglagesImprimante() {
+  try { return { largeurDots: 800, ip: "" , ...JSON.parse(localStorage.getItem(CLE_IMPRIMANTE) || "{}") }; }
+  catch (e) { return { largeurDots: 800, ip: "" }; }
+}
+function ecrireReglagesImprimante(patch) {
+  try { localStorage.setItem(CLE_IMPRIMANTE, JSON.stringify({ ...lireReglagesImprimante(), ...patch })); } catch (e) {}
+}
+
+/** Découpe un texte en lignes qui tiennent dans `maxLargeur` (mesure canvas), jusqu'à `maxLignes`. */
+function envelopperTexteCanvas(ctx, texte, maxLargeur, maxLignes) {
+  const mots = String(texte || "").split(/\s+/).filter(Boolean);
+  const lignes = [];
+  let courante = "";
+  for (const mot of mots) {
+    const essai = courante ? `${courante} ${mot}` : mot;
+    if (courante && ctx.measureText(essai).width > maxLargeur) {
+      lignes.push(courante);
+      courante = mot;
+      if (lignes.length >= maxLignes) return lignes;
+    } else {
+      courante = essai;
+    }
+  }
+  if (courante) lignes.push(courante);
+  return lignes.slice(0, maxLignes);
+}
+/** Charge une image (data URI ou URL) et attend qu'elle soit prête à être dessinée. */
+function chargerImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
+/**
+ * Dessine l'étiquette colis sur un canvas monochrome (fond blanc, traits noirs) — mise en page
+ * simplifiée par rapport au PDF (pas de couleur, une impression thermique ne les rend pas), mais
+ * les mêmes informations, dans le même ordre.
+ */
+async function renderLabelCanvas(colis, largeurDots) {
+  const dest = COUNTRIES.find((c) => c.code === (colis.destinatairePays || colis.pays));
+  const trackingUrl = trackingUrlFor(colis.tracking);
+  const [qrData, barcodeData, logo] = await Promise.all([
+    generateQRDataUrl(trackingUrl, 300),
+    generateBarcodeDataUrl(colis.tracking).catch(() => null),
+    chargerImage(DEFAULT_LOGO).catch(() => null),
+  ]);
+  const W = Math.round(largeurDots), H = Math.round(largeurDots * 1.5); // ratio 100×150mm
+  const s = W / 100; // échelle mm → px
+  const canvas = document.createElement("canvas");
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#000"; ctx.strokeStyle = "#000";
+  ctx.textBaseline = "alphabetic";
+
+  const M = 6 * s;
+  ctx.lineWidth = Math.max(1, 0.6 * s);
+  ctx.strokeRect(0.6 * s, 0.6 * s, W - 1.2 * s, H - 1.2 * s);
+  const hr = (y) => { ctx.lineWidth = Math.max(1, 0.3 * s); ctx.beginPath(); ctx.moveTo(M, y); ctx.lineTo(W - M, y); ctx.stroke(); };
+
+  // ── En-tête ────────────────────────────────────────────────────────────
+  if (logo) ctx.drawImage(logo, M, 4.5 * s, 14 * s, 14 * s);
+  ctx.font = `bold ${12 * s}px Arial`; ctx.textAlign = "left";
+  ctx.fillText("BA-DIABY EXPRESS", M + 17 * s, 13 * s);
+  const modeLabel = colis.mode === "air" ? "AÉRIEN" : "MARITIME";
+  ctx.font = `bold ${7.5 * s}px Arial`;
+  const modeW = ctx.measureText(modeLabel).width + 11 * s;
+  ctx.fillRect(W - M - modeW, 6 * s, modeW, 7 * s);
+  ctx.save(); ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+  ctx.fillText(modeLabel, W - M - modeW / 2, 10.7 * s);
+  ctx.restore();
+  ctx.fillRect(0.6 * s, 21.5 * s, W - 1.2 * s, 0.9 * s);
+
+  // ── Statut de paiement + route ────────────────────────────────────────
+  const paye = colis.reste <= 0;
+  const pastille = paye ? "PAYÉ" : "NON PAYÉ";
+  ctx.font = `bold ${7.6 * s}px Arial`;
+  const pW = ctx.measureText(pastille).width + 8 * s;
+  ctx.fillRect(M, 23.3 * s, pW, 6 * s);
+  ctx.save(); ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+  ctx.fillText(pastille, M + pW / 2, 27.8 * s);
+  ctx.restore();
+  ctx.textAlign = "right";
+  ctx.fillText(`GN-${colis.pays}`, W - M, 27.8 * s);
+  ctx.textAlign = "left";
+  hr(30.5 * s);
+
+  // ── Destinataire ──────────────────────────────────────────────────────
+  let y = 35 * s;
+  ctx.font = `bold ${6.4 * s}px Arial`;
+  ctx.fillText("LIVRER À / DELIVER TO", M, y);
+  y += 6 * s;
+  ctx.font = `bold ${13.5 * s}px Arial`;
+  const nomLignes = envelopperTexteCanvas(ctx, String(colis.destinataire || "").toUpperCase(), W - 2 * M, 2);
+  nomLignes.forEach((ligne) => { ctx.fillText(ligne, M, y); y += 6 * s; });
+  ctx.font = `bold ${9.2 * s}px Arial`;
+  ctx.fillText(colis.telephone || "—", M, y);
+  y += 5 * s;
+  if (colis.destinataireEmail) {
+    ctx.font = `${7.4 * s}px Arial`;
+    ctx.fillText(colis.destinataireEmail, M, y);
+    y += 4.5 * s;
+  }
+  y += 1.5 * s;
+  ctx.font = `${8 * s}px Arial`;
+  if (colis.destinataireAdresse) {
+    const adrLignes = envelopperTexteCanvas(ctx, colis.destinataireAdresse, W - 2 * M, 3);
+    adrLignes.forEach((ligne) => { ctx.fillText(ligne, M, y); y += 4.5 * s; });
+  }
+  const villeCp = [colis.destinataireCodePostal, colis.destinataireVille].filter(Boolean).join(" ");
+  if (villeCp) { ctx.fillText(villeCp, M, y); y += 4.5 * s; }
+  ctx.font = `bold ${9.5 * s}px Arial`;
+  const yPays = Math.min(y + 2 * s, 77 * s);
+  ctx.fillText((dest?.name || "").toUpperCase(), M, yPays);
+
+  const ySep = Math.min(yPays + 3 * s, 79 * s);
+  hr(ySep);
+  const yQr = Math.min(ySep + 3.5 * s, 79.5 * s);
+
+  // ── QR + numéro de suivi ──────────────────────────────────────────────
+  const qrSize = 23 * s;
+  ctx.lineWidth = Math.max(1, 0.3 * s);
+  ctx.strokeRect(M, yQr, qrSize, qrSize);
+  try { const qrImg = await chargerImage(qrData); ctx.drawImage(qrImg, M + 0.6 * s, yQr + 0.6 * s, qrSize - 1.2 * s, qrSize - 1.2 * s); } catch (e) {}
+  const txX = M + qrSize + 6 * s;
+  ctx.font = `bold ${6.4 * s}px Arial`;
+  ctx.fillText("CODE DE SUIVI", txX, yQr + 8 * s);
+  ctx.font = `bold ${15 * s}px Arial`;
+  ctx.fillText(colis.tracking, txX, yQr + 18 * s);
+  ctx.font = `${6.6 * s}px Arial`;
+  ctx.fillText("Scannez pour suivre le colis en direct", txX, yQr + 24 * s);
+  hr(Math.min(yQr + qrSize + 2.5 * s, 104 * s));
+
+  // ── Code-barres ───────────────────────────────────────────────────────
+  const yCode = 105 * s;
+  if (barcodeData) {
+    try { const bcImg = await chargerImage(barcodeData); ctx.drawImage(bcImg, M, yCode, W - 2 * M, 11 * s); } catch (e) {}
+  }
+  ctx.font = `bold ${8 * s}px Arial`; ctx.textAlign = "center";
+  ctx.fillText(colis.tracking, W / 2, yCode + 16.5 * s);
+  ctx.textAlign = "left";
+  hr(120.5 * s);
+
+  // ── Expéditeur ────────────────────────────────────────────────────────
+  ctx.font = `bold ${6.4 * s}px Arial`;
+  ctx.fillText("EXPÉDITEUR / FROM", M, 124.5 * s);
+  ctx.font = `bold ${9 * s}px Arial`;
+  ctx.fillText(colis.expediteur || "—", M, 128.5 * s);
+  ctx.textAlign = "right";
+  ctx.font = `${7.6 * s}px Arial`;
+  ctx.fillText(colis.expediteurTelephone || "", W - M, 128.5 * s);
+  ctx.textAlign = "left";
+  if (colis.expediteurAdresse) {
+    ctx.font = `${6.9 * s}px Arial`;
+    ctx.fillText(envelopperTexteCanvas(ctx, colis.expediteurAdresse, W - 2 * M, 1)[0] || "", M, 131.7 * s);
+  }
+  hr(132.5 * s);
+
+  // ── Poids / articles / date ───────────────────────────────────────────
+  const articles = (colis.produits || []).reduce((sum, p) => sum + (Number(p.quantite) || 1), 0) || 1;
+  const stats = [["POIDS", `${colis.poids} kg`], ["ARTICLES", String(articles)], ["ENREGISTRÉ", new Date(colis.createdAt).toLocaleDateString("fr-FR")]];
+  const colW = (W - 2 * M) / 3;
+  ctx.textAlign = "center";
+  stats.forEach(([label, value], i) => {
+    const cx = M + colW * i + colW / 2;
+    ctx.font = `bold ${6.2 * s}px Arial`;
+    ctx.fillText(label, cx, 137.5 * s);
+    ctx.font = `${9.4 * s}px Arial`;
+    ctx.fillText(value, cx, 142 * s);
+  });
+  ctx.textAlign = "left";
+
+  // ── Bandeau final : route ─────────────────────────────────────────────
+  ctx.fillRect(0.6 * s, 141.5 * s, W - 1.2 * s, 7.5 * s);
+  ctx.save(); ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+  ctx.font = `bold ${7.4 * s}px Arial`;
+  ctx.fillText(routeLabel(colis.pays, colis.direction).toUpperCase(), W / 2, 145.4 * s);
+  ctx.font = `${5.8 * s}px Arial`;
+  ctx.fillText("WWW.BA-DIABY-EXPRESS.COM", W / 2, 148.2 * s);
+  ctx.restore();
+
+  return canvas;
+}
+
+/** Convertit un canvas en trame raster ESC/POS 1 bit (noir/blanc), format "GS v 0". */
+function canvasVersRasterEscPos(canvas) {
+  const { width, height } = canvas;
+  const imgData = canvas.getContext("2d").getImageData(0, 0, width, height).data;
+  const bytesParLigne = Math.ceil(width / 8);
+  const data = new Uint8Array(bytesParLigne * height);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4;
+      const luminance = 0.299 * imgData[i] + 0.587 * imgData[i + 1] + 0.114 * imgData[i + 2];
+      if (imgData[i + 3] > 10 && luminance < 160) data[y * bytesParLigne + (x >> 3)] |= 0x80 >> (x & 7);
+    }
+  }
+  return { width, height, bytesParLigne, data };
+}
+/** Trame complète prête à envoyer à une imprimante ESC/POS (Bluetooth/USB) : init + image + avance papier. */
+function trameEscPos(canvas) {
+  const { bytesParLigne, height, data } = canvasVersRasterEscPos(canvas);
+  const entete = new Uint8Array([0x1d, 0x76, 0x30, 0x00, bytesParLigne & 0xff, (bytesParLigne >> 8) & 0xff, height & 0xff, (height >> 8) & 0xff]);
+  const init = new Uint8Array([0x1b, 0x40]);
+  const avance = new Uint8Array([0x1b, 0x64, 0x03]);
+  const out = new Uint8Array(init.length + entete.length + data.length + avance.length);
+  out.set(init, 0);
+  out.set(entete, init.length);
+  out.set(data, init.length + entete.length);
+  out.set(avance, init.length + entete.length + data.length);
+  return out;
+}
+/** Petite trame de test (texte + coupe de ligne), pour vérifier la connexion sans imprimer toute l'étiquette. */
+function trameTestEscPos() {
+  const texte = "Ba-Diaby Express\nTest de connexion imprimante\n\n\n";
+  const octets = new TextEncoder().encode(texte);
+  return new Uint8Array([0x1b, 0x40, ...octets]);
+}
+
+// ---- Bluetooth (Web Bluetooth, GATT) ---------------------------------------------------------
+// Identifiants de service courants sur les imprimantes thermiques Bluetooth (modules génériques
+// que l'on retrouve aussi bien sur des Xprinter que sur d'autres marques). Une imprimante qui
+// n'utilise aucun de ceux-ci ne sera pas détectée — c'est la limite du "sans configuration".
+const BLE_SERVICES_IMPRIMANTES = [
+  "000018f0-0000-1000-8000-00805f9b34fb",
+  "49535343-fe7d-4ae5-8fa9-9fafd205e455",
+  "e7810a71-73ae-499d-8c15-faa9aef0c3f2",
+];
+async function connecterImprimanteBluetooth() {
+  if (!navigator.bluetooth) throw new Error("Bluetooth non disponible sur ce navigateur — utilisez Chrome ou Edge (Android ou ordinateur).");
+  const device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: BLE_SERVICES_IMPRIMANTES });
+  const server = await device.gatt.connect();
+  const services = await server.getPrimaryServices();
+  for (const service of services) {
+    const caracteristiques = await service.getCharacteristics().catch(() => []);
+    const inscriptible = caracteristiques.find((c) => c.properties.write || c.properties.writeWithoutResponse);
+    if (inscriptible) return { type: "bluetooth", nom: device.name || "Imprimante Bluetooth", device, caracteristique: inscriptible };
+  }
+  throw new Error("Connecté, mais aucun canal d'écriture reconnu sur cette imprimante.");
+}
+async function envoyerBluetooth(connexion, octets) {
+  const TAILLE_BLOC = 180; // la plupart des imprimantes BLE n'acceptent que de petits blocs à la fois
+  for (let i = 0; i < octets.length; i += TAILLE_BLOC) {
+    const bloc = octets.slice(i, i + TAILLE_BLOC);
+    if (connexion.caracteristique.properties.writeWithoutResponse) await connexion.caracteristique.writeValueWithoutResponse(bloc);
+    else await connexion.caracteristique.writeValue(bloc);
+  }
+}
+
+// ---- USB (WebUSB) -----------------------------------------------------------------------------
+async function connecterImprimanteUsb() {
+  if (!navigator.usb) throw new Error("USB non disponible sur ce navigateur — utilisez Chrome ou Edge sur ordinateur.");
+  const device = await navigator.usb.requestDevice({ filters: [] });
+  await device.open();
+  if (!device.configuration) await device.selectConfiguration(1);
+  const iface = device.configuration.interfaces.find((i) => i.alternates[0].endpoints.some((e) => e.direction === "out"));
+  if (!iface) throw new Error("Aucune interface d'impression trouvée sur cet appareil USB.");
+  await device.claimInterface(iface.interfaceNumber);
+  const endpoint = iface.alternates[0].endpoints.find((e) => e.direction === "out");
+  return { type: "usb", nom: device.productName || "Imprimante USB", device, endpointNumber: endpoint.endpointNumber };
+}
+async function envoyerUsb(connexion, octets) {
+  const TAILLE_BLOC = 4096;
+  for (let i = 0; i < octets.length; i += TAILLE_BLOC) await connexion.device.transferOut(connexion.endpointNumber, octets.slice(i, i + TAILLE_BLOC));
+}
+
+// ---- Réseau (Epson ePOS-Print) ------------------------------------------------------------------
+// Protocole propre à Epson (HTTP local vers l'adresse IP de l'imprimante). Les imprimantes qui ne
+// parlent pas ePOS-Print (dont la plupart des Xprinter réseau, qui utilisent en général une
+// simple prise TCP brute sur le port 9100, injoignable depuis un navigateur) ne sont pas
+// compatibles avec cette option — seul le Bluetooth ou l'USB fonctionnent alors pour elles.
+// Autre limite à connaître : un site en HTTPS (comme celui-ci) ne peut pas toujours contacter une
+// adresse locale en HTTP simple ("contenu mixte") — certains navigateurs bloquent l'appel.
+function xmlEposImage({ bytesParLigne, height, data }) {
+  let base64 = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < data.length; i += CHUNK) base64 += String.fromCharCode(...data.subarray(i, i + CHUNK));
+  base64 = btoa(base64);
+  const largeur = bytesParLigne * 8;
+  return `<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><epos-print xmlns="http://www.epson-pos.com/schemas/2011/03/epos-print"><image width="${largeur}" height="${height}" color="color_1" mode="mono">${base64}</image><feed unit="60"/><cut type="feed"/></epos-print></s:Body></s:Envelope>`;
+}
+async function imprimerReseauEpson(ip, canvas) {
+  const raster = canvasVersRasterEscPos(canvas);
+  const xml = xmlEposImage(raster);
+  const res = await fetch(`http://${ip}/cgi-bin/epos/service.cgi?devid=local_printer&timeout=10000`, {
+    method: "POST", headers: { "Content-Type": "text/xml; charset=utf-8" }, body: xml,
+  });
+  if (!res.ok) throw new Error(`L'imprimante a répondu avec une erreur (HTTP ${res.status}).`);
+}
+async function testerReseauEpson(ip) {
+  const canvasTest = document.createElement("canvas");
+  canvasTest.width = 200; canvasTest.height = 60;
+  const ctx = canvasTest.getContext("2d");
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, 200, 60);
+  ctx.fillStyle = "#000"; ctx.font = "bold 16px Arial";
+  ctx.fillText("Test Ba-Diaby", 10, 30);
+  await imprimerReseauEpson(ip, canvasTest);
+}
+
 /** Reçu d’encaissement PDF pour un paiement précis — utile pour la comptabilité et le client. */
 async function downloadRecu(colis, paiement) {
   const jspdf = await loadJsPDF();
@@ -9012,6 +9332,135 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   );
 }
 
+/**
+ * Impression directe de l'étiquette sur une imprimante connectée (Bluetooth, USB, ou réseau
+ * Epson), en alternative au PDF classique. Voir le commentaire au-dessus de renderLabelCanvas()
+ * pour le fonctionnement et les limites (fonctionnalité expérimentale, dépend du modèle exact
+ * de l'imprimante).
+ */
+function ImpressionDirecteModal({ colis, onClose }) {
+  const [onglet, setOnglet] = useState("bluetooth");
+  const [reglages, setReglages] = useState(lireReglagesImprimante());
+  const [connexion, setConnexion] = useState(null);
+  const [etat, setEtat] = useState("idle"); // idle | connexion | impression | erreur | ok
+  const [erreur, setErreur] = useState("");
+
+  function majReglages(patch) {
+    const next = { ...reglages, ...patch };
+    setReglages(next);
+    ecrireReglagesImprimante(patch);
+  }
+
+  async function connecter() {
+    setEtat("connexion"); setErreur("");
+    try {
+      const conn = onglet === "bluetooth" ? await connecterImprimanteBluetooth() : await connecterImprimanteUsb();
+      setConnexion(conn);
+      setEtat("ok");
+    } catch (e) {
+      setErreur(e.message || "Connexion impossible.");
+      setEtat("erreur");
+    }
+  }
+
+  async function imprimerTest() {
+    setEtat("impression"); setErreur("");
+    try {
+      if (onglet === "reseau") {
+        if (!reglages.ip) throw new Error("Indiquez l'adresse IP de l'imprimante.");
+        await testerReseauEpson(reglages.ip);
+      } else {
+        const octets = trameTestEscPos();
+        if (onglet === "bluetooth") await envoyerBluetooth(connexion, octets);
+        else await envoyerUsb(connexion, octets);
+      }
+      setEtat("ok");
+    } catch (e) {
+      setErreur(e.message || "Échec de l'impression du test.");
+      setEtat("erreur");
+    }
+  }
+
+  async function imprimerEtiquette() {
+    setEtat("impression"); setErreur("");
+    try {
+      const canvas = await renderLabelCanvas(colis, reglages.largeurDots);
+      if (onglet === "reseau") {
+        if (!reglages.ip) throw new Error("Indiquez l'adresse IP de l'imprimante.");
+        await imprimerReseauEpson(reglages.ip, canvas);
+      } else {
+        const octets = trameEscPos(canvas);
+        if (onglet === "bluetooth") await envoyerBluetooth(connexion, octets);
+        else await envoyerUsb(connexion, octets);
+      }
+      setEtat("ok");
+    } catch (e) {
+      setErreur(e.message || "Échec de l'impression de l'étiquette.");
+      setEtat("erreur");
+    }
+  }
+
+  const pretAImprimer = onglet === "reseau" ? !!reglages.ip : !!connexion;
+
+  return (
+    <Modal onClose={onClose} title={`Imprimante connectée — ${colis.tracking}`}>
+      <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 8, padding: "10px 12px", fontSize: 11.5, color: "var(--muted)", marginBottom: 14 }}>
+        Fonctionnalité expérimentale : la compatibilité dépend du modèle exact de l'imprimante. Faites d'abord « Imprimer un test » — si le résultat est illisible ou tronqué, ajustez la largeur d'impression ci-dessous. Le PDF classique (bouton « Étiquette QR ») reste le filet de sécurité qui fonctionne avec n'importe quelle imprimante.
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+        {[["bluetooth", "Bluetooth"], ["usb", "USB"], ["reseau", "Réseau (Epson)"]].map(([val, label]) => (
+          <button key={val} onClick={() => { setOnglet(val); setConnexion(null); setEtat("idle"); setErreur(""); }}
+            style={{ flex: 1, background: onglet === val ? "var(--brand-solid)" : "var(--surface2)", color: onglet === val ? "#fff" : "var(--text)", border: "none", borderRadius: 8, padding: "9px 0", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {onglet !== "reseau" && (
+        <>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 10 }}>
+            {onglet === "bluetooth"
+              ? "Vérifiez que l'imprimante est allumée et à proximité, puis appairez-la — la fenêtre de sélection est celle de votre navigateur (Chrome/Edge)."
+              : "Branchez l'imprimante en USB à cet ordinateur, puis sélectionnez-la — fonctionne uniquement sur ordinateur (Chrome/Edge)."}
+          </div>
+          <button onClick={connecter} disabled={etat === "connexion"} style={{ width: "100%", background: connexion ? "var(--ok-bg)" : "var(--brand-solid)", color: connexion ? "var(--ok-fg)" : "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer", marginBottom: 12 }}>
+            {etat === "connexion" ? "Connexion…" : connexion ? `Connecté — ${connexion.nom}` : "Connecter l'imprimante"}
+          </button>
+        </>
+      )}
+
+      {onglet === "reseau" && (
+        <Field label="Adresse IP de l'imprimante">
+          <input value={reglages.ip} onChange={(e) => majReglages({ ip: e.target.value })} placeholder="ex : 192.168.1.50" style={inputStyle} />
+          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: -6 }}>
+            Uniquement pour les imprimantes Epson compatibles ePOS-Print, sur le même réseau Wi-Fi que cet appareil.
+          </div>
+        </Field>
+      )}
+
+      <Field label="Largeur d'impression (points)">
+        <input type="number" value={reglages.largeurDots} onChange={(e) => majReglages({ largeurDots: Number(e.target.value) || 800 })} style={inputStyle} />
+        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: -6 }}>
+          Valeurs courantes : 384 (rouleau 58 mm), 576 (80 mm), 800 (étiquette 100 mm à 203 ppp). À ajuster si le test sort tronqué ou trop petit.
+        </div>
+      </Field>
+
+      {erreur && <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", color: "var(--danger-fg)", borderRadius: 8, padding: "10px 12px", fontSize: 12.5, marginBottom: 12 }}>{erreur}</div>}
+      {etat === "ok" && !erreur && <div style={{ background: "var(--ok-bg)", border: "1px solid var(--ok-border)", color: "var(--ok-fg)", borderRadius: 8, padding: "10px 12px", fontSize: 12.5, marginBottom: 12 }}>Envoyé à l'imprimante.</div>}
+
+      <div style={{ display: "flex", gap: 10 }}>
+        <button onClick={imprimerTest} disabled={!pretAImprimer || etat === "impression"} style={{ flex: 1, background: "var(--surface2)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "11px 0", fontSize: 13, fontWeight: 700, cursor: pretAImprimer ? "pointer" : "not-allowed" }}>
+          Imprimer un test
+        </button>
+        <button onClick={imprimerEtiquette} disabled={!pretAImprimer || etat === "impression"} style={{ flex: 1, background: pretAImprimer ? "var(--brand-solid)" : "var(--surface2)", color: pretAImprimer ? "#fff" : "var(--muted)", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13, fontWeight: 700, cursor: pretAImprimer ? "pointer" : "not-allowed" }}>
+          {etat === "impression" ? "Impression…" : "Imprimer l'étiquette"}
+        </button>
+      </div>
+    </Modal>
+  );
+}
+
 function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser, onDeclarerLitige, onResoudreLitige, onMajRetour, onUpdate, onEncaisser, canManage, isAdmin, isChauffeur, data, session, notify }) {
   const [cancelling, setCancelling] = useState(false);
   const [refusing, setRefusing] = useState(false);
@@ -9020,6 +9469,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
   const [editing, setEditing] = useState(false);
   const [showLitige, setShowLitige] = useState(false);
   const [confirmerSuppression, setConfirmerSuppression] = useState(false);
+  const [showImpressionDirecte, setShowImpressionDirecte] = useState(false);
   const [emplacement, setEmplacement] = useState(colis.emplacement || "");
   const [waState, setWaState] = useState("");
   const [waErreur, setWaErreur] = useState("");
@@ -9561,6 +10011,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
           {waErreur && <span style={{ fontSize: 11, color: "var(--warn-fg)", alignSelf: "center" }}>{waErreur}</span>}
           <button onClick={handleDownloadLabel} disabled={labelState === "loading"} style={smallBtn}><Printer size={13} /> {labelState === "loading" ? "Génération…" : "Étiquette QR"}</button>
           {labelState === "error" && <span style={{ fontSize: 11, color: "var(--danger-fg)", alignSelf: "center" }}>Échec — réessayez</span>}
+          <button onClick={() => setShowImpressionDirecte(true)} style={smallBtn}><Printer size={13} /> Imprimante connectée</button>
           <button onClick={handleDownloadInvoice} disabled={invoiceState === "loading"} style={smallBtn}><Download size={13} /> {invoiceState === "loading" ? "Génération…" : "Facture PDF"}</button>
           {(colis.destinataireEmail || colis.email) && (
             <button onClick={handleEnvoyerFacture} disabled={emailState === "loading"} style={smallBtn}>
@@ -9626,6 +10077,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
         />
       )}
       {editing && <EditColisForm colis={colis} categories={data?.categories} remiseVolumeConfig={data?.remiseVolume} tarifsReception={data?.receptionTarifs} onClose={() => setEditing(false)} onSave={(patch) => { onUpdate(patch); setEditing(false); }} />}
+      {showImpressionDirecte && <ImpressionDirecteModal colis={colis} onClose={() => setShowImpressionDirecte(false)} />}
       {bonSortieOuvert && (
         <Modal onClose={() => setBonSortieOuvert(false)} title="Enregistrer la remise du colis">
           <Field label="Nom de la personne qui récupère le colis *"><input value={recupNom} onChange={(e) => setRecupNom(e.target.value)} style={inputStyle} /></Field>

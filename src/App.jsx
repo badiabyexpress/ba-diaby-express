@@ -188,6 +188,16 @@ function allowedCountries(session) {
   if (!session || session.role === "Administrateur" || !session.paysAutorises || session.paysAutorises.length === 0) return COUNTRIES;
   return COUNTRIES.filter((c) => c.code === "GN" || session.paysAutorises.includes(c.code));
 }
+/** Sites d'opération déclarés pour un pays donné (Guinée par défaut si le site n'a pas de pays). */
+function sitesPourPays(sites, pays) {
+  return (sites || []).filter((s) => (s.pays || "GN") === (pays || "GN"));
+}
+/** Sites d'opération en Guinée — seuls ceux-ci servent à l'enregistrement, à l'agence de retrait
+ *  de l'Espace Client et à l'affectation d'un agent : ce sont des points physiques tenus par nos
+ *  agents, contrairement aux sites étrangers qui ne servent que de point de retrait sur le ticket. */
+function sitesLocaux(sites) {
+  return sitesPourPays(sites, "GN");
+}
 function routeLabel(pays, direction) {
   const c = COUNTRIES.find((x) => x.code === pays);
   if (!c) return "";
@@ -2136,7 +2146,11 @@ function PublicTrackingPage({ data, loading }) {
     window.history.replaceState({}, "", url);
   }
 
-  const dest = colis ? COUNTRIES.find((c) => c.code === colis.pays) : null;
+  // Le destinataire réel (colis.destinatairePays) prime sur le pays de route (colis.pays) : pour
+  // un colis import, colis.pays est le pays d'origine à l'étranger, pas la destination affichée
+  // au client, qui est toujours la Guinée.
+  const destPaysCode = colis ? (colis.destinatairePays || colis.pays) : null;
+  const dest = destPaysCode ? COUNTRIES.find((c) => c.code === destPaysCode) : null;
   const publicSteps = ["Enregistré", "En transit", "Arrivé", "Disponible au retrait", "Livré"];
   const curIdx = colis ? Math.max(publicSteps.indexOf(colis.status), 0) : 0;
   // La terminologie "espace client" (Reçu à l’entrepôt, Arrivé en Guinée...) ne concerne que
@@ -2205,7 +2219,7 @@ function PublicTrackingPage({ data, loading }) {
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12, marginBottom: 18 }}>
-            <Info label="Destination" value={`${FLAGS[colis.pays] || ""} ${dest?.name || "—"}`} />
+            <Info label="Destination" value={`${FLAGS[destPaysCode] || ""} ${dest?.name || "—"}`} />
             <Info label="Mode" value={colis.mode === "air" ? "Aérien" : "Maritime"} />
             <Info label="Poids" value={`${colis.poids} kg`} />
             <Info label="Enregistré le" value={new Date(colis.createdAt).toLocaleDateString("fr-FR")} />
@@ -3688,7 +3702,7 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
     const encaisse = colis.reduce((s, c) => s + c.paye, 0);
     const parPays = COUNTRIES.map((p) => ({ ...p, count: colis.filter((c) => c.pays === p.code).length }));
     const recent = [...colis].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 5);
-    const parAgence = (data.sites || []).filter((s) => !s.pays || s.pays === "GN").map((s) => {
+    const parAgence = sitesLocaux(data.sites).map((s) => {
       const colisAgence = colis.filter((c) => (c.site || "Bambeto") === s.nom);
       return { nom: s.nom, count: colisAgence.length, ca: colisAgence.reduce((sum, c) => sum + c.prix, 0) };
     });
@@ -6833,7 +6847,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
    * sans affectation garde le choix, puisqu'il peut enregistrer pour n'importe quelle agence.
    */
   const agenceImposee = session?.agence || "";
-  const siteLocalParDefaut = (sites || []).find((s) => !s.pays || s.pays === "GN");
+  const siteLocalParDefaut = sitesLocaux(sites)[0];
   const [agence, setAgence] = useState(agenceImposee || siteLocalParDefaut?.nom || "Bambeto");
   const [partenaireId, setPartenaireId] = useState("");
   const [clientAccountId, setClientAccountId] = useState("");
@@ -7286,7 +7300,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
               {!agenceImposee && <Field label="Agence d’enregistrement">
                 <select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>
                   {(() => {
-                    const locaux = (sites || []).filter((s) => !s.pays || s.pays === "GN");
+                    const locaux = sitesLocaux(sites);
                     return (locaux.length > 0 ? locaux : [{ id: "x", nom: "Bambeto" }]).map((s) => <option key={s.id} value={s.nom}>{s.nom}</option>);
                   })()}
                 </select>
@@ -7715,7 +7729,9 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
 async function downloadLabel(colis) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: [100, 150] }));
-  const dest = COUNTRIES.find((c) => c.code === colis.pays);
+  // colis.pays est le pays de route (origine pour un import) ; le pays réellement affiché comme
+  // destination sur l'étiquette doit être celui du destinataire (toujours la Guinée à l'import).
+  const dest = COUNTRIES.find((c) => c.code === (colis.destinatairePays || colis.pays));
   const trackingUrl = trackingUrlFor(colis.tracking);
   const [qrData, barcodeData] = await Promise.all([
     generateQRDataUrl(trackingUrl, 300),
@@ -8084,7 +8100,10 @@ async function downloadInvoice(colis, data, options = {}) {
   const NAVY = [10, 38, 71], INK = [26, 30, 38], MUTED = [125, 133, 145], LINE = [226, 230, 236];
   const TINT = [244, 247, 251];
 
-  const dest = COUNTRIES.find((c) => c.code === colis.pays);
+  // colis.pays est le pays de route (l'origine pour un import) ; le destinataire réel — et donc
+  // sa devise affichée — doit suivre colis.destinatairePays quand il est renseigné (toujours la
+  // Guinée pour un import).
+  const dest = COUNTRIES.find((c) => c.code === (colis.destinatairePays || colis.pays));
   const origine = COUNTRIES.find((c) => c.code === (colis.direction === "import" ? colis.pays : "GN"));
   const gnf = LIVE_RATES.GNF || CURRENCIES.GNF;
 
@@ -8273,7 +8292,7 @@ async function downloadInvoice(colis, data, options = {}) {
   y = Z.agences;
   doc.setDrawColor(...LINE); doc.setLineWidth(0.3); doc.line(M, y - 8, W - M, y - 8);
   const sites = data?.sites || [];
-  const siteDepot = sites.find((s) => s.nom === colis.site) || sites.find((s) => !s.pays || s.pays === "GN") || sites[0];
+  const siteDepot = sites.find((s) => s.nom === colis.site) || sitesLocaux(sites)[0] || sites[0];
   /*
    * Le retrait n'a lieu à une agence Guinée (Bambeto par défaut) que pour les colis livrés en
    * Guinée. Pour un envoi vers l'étranger (export), le retrait se fait chez le destinataire — on
@@ -8286,7 +8305,7 @@ async function downloadInvoice(colis, data, options = {}) {
     // Site déclaré dans Configuration → Sites d'opération pour ce pays de destination, s'il existe.
     siteRetrait = sites.find((s) => s.pays === dest.code) || null;
   } else {
-    siteRetrait = sites.find((s) => s.id === (data?.agenceRetraitClient || "site-bambeto")) || sites.find((s) => !s.pays || s.pays === "GN") || sites[0];
+    siteRetrait = sites.find((s) => s.id === (data?.agenceRetraitClient || "site-bambeto")) || sitesLocaux(sites)[0] || sites[0];
   }
   const bloc = (titre, site, x) => {
     doc.setFont(undefined, "bold"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
@@ -8321,7 +8340,9 @@ async function downloadInvoice(colis, data, options = {}) {
  */
 async function downloadTicketThermal(colis) {
   const jspdf = await loadJsPDF();
-  const dest = COUNTRIES.find((c) => c.code === colis.pays);
+  // colis.pays est le pays de route (l'origine pour un import) ; la devise affichée doit suivre
+  // le destinataire réel, toujours la Guinée pour un import.
+  const dest = COUNTRIES.find((c) => c.code === (colis.destinatairePays || colis.pays));
   const destCur = dest?.currency || "EUR";
   const statutPaiement = colis.reste <= 0 ? "PAYÉ" : (colis.paye > 0 ? "PAIEMENT PARTIEL" : "NON PAYÉ");
   const statutColor = colis.reste <= 0 ? [30, 140, 80] : (colis.paye > 0 ? [180, 120, 20] : [200, 40, 55]);
@@ -10395,7 +10416,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
     const commissionsAuto = colisPeriode.reduce((s, c) => s + calcCommission(c, data.commissionConfig, data.categories), 0); // EUR-équivalent (taux en €)
     const gnfRate = LIVE_RATES.GNF || CURRENCIES.GNF;
     const totalCommissions = commissionsAuto + commissionsManuelles / gnfRate;
-    const commissionsParAgence = (data.sites || []).filter((s) => !s.pays || s.pays === "GN").map((s) => ({
+    const commissionsParAgence = sitesLocaux(data.sites).map((s) => ({
       nom: s.nom,
       montant: colisPeriode.filter((c) => (c.site || "Bambeto") === s.nom).reduce((sum, c) => sum + calcCommission(c, data.commissionConfig, data.categories), 0),
     }));
@@ -10843,7 +10864,8 @@ function ImportExcelModal({ onClose, onImportMany, data, session }) {
   const [rows, setRows] = useState(null);
   const [fileErr, setFileErr] = useState("");
   const [importing, setImporting] = useState(false);
-  const [agence, setAgence] = useState((data?.sites || []).find((s) => !s.pays || s.pays === "GN")?.nom || "Bambeto");
+  const sitesGN = sitesLocaux(data?.sites);
+  const [agence, setAgence] = useState(sitesGN[0]?.nom || "Bambeto");
 
   function getVal(row, ...keys) {
     for (const k of keys) {
@@ -10953,7 +10975,7 @@ function ImportExcelModal({ onClose, onImportMany, data, session }) {
               </tbody>
             </table>
           </div>
-          <Field label="Agence d’enregistrement"><select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>{((data?.sites || []).filter((s) => !s.pays || s.pays === "GN").length > 0 ? (data.sites || []).filter((s) => !s.pays || s.pays === "GN") : [{ nom: "Bambeto" }]).map((s) => <option key={s.nom} value={s.nom}>{s.nom}</option>)}</select></Field>
+          <Field label="Agence d’enregistrement"><select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>{(sitesGN.length > 0 ? sitesGN : [{ nom: "Bambeto" }]).map((s) => <option key={s.nom} value={s.nom}>{s.nom}</option>)}</select></Field>
           <button onClick={importer} disabled={validRows.length === 0 || importing} style={{ background: validRows.length ? "#3ECB84" : "var(--surface2)", color: validRows.length ? "#0A2647" : "var(--muted)", border: "none", borderRadius: 8, padding: "11px 22px", fontSize: 13.5, fontWeight: 700, cursor: validRows.length ? "pointer" : "not-allowed", marginTop: 8 }}>
             {importing ? "Import en cours…" : `Importer ${validRows.length} colis`}
           </button>
@@ -11704,14 +11726,24 @@ function SitesOperationPage({ data, persist, notify, onBack }) {
    * n'a pas sa place dans ces deux listes, sous peine de proposer aux agents un site où ils ne
    * peuvent pas enregistrer de colis.
    */
-  const sitesLocaux = sites.filter((s) => !s.pays || s.pays === "GN");
+  const sitesGN = sitesLocaux(sites);
   const [form, setForm] = useState(null);
 
   function saveSite() {
     if (!form.nom) return;
     const exists = sites.some((s) => s.id === form.id);
     const next = exists ? sites.map((s) => (s.id === form.id ? form : s)) : [...sites, { ...form, id: form.id || `s${Date.now()}` }];
-    persist({ ...data, sites: next });
+    /*
+     * Si le site édité est l'agence de retrait de l'Espace Client et qu'on lui retire son
+     * rattachement Guinée, cette référence deviendrait obsolète (un site étranger ne sert que de
+     * point de retrait sur le ticket, jamais d'agence Espace Client). On la fait suivre vers un
+     * autre site local plutôt que de laisser une agence de retrait qui n'existe plus vraiment.
+     */
+    let agenceRetraitClient = data.agenceRetraitClient;
+    if (exists && form.id === agenceRetraitClient && form.pays && form.pays !== "GN") {
+      agenceRetraitClient = sitesLocaux(next.filter((s) => s.id !== form.id))[0]?.id || "";
+    }
+    persist({ ...data, sites: next, agenceRetraitClient });
     notify?.(exists ? "Site mis à jour" : "Site ajouté");
     setForm(null);
   }
@@ -11740,7 +11772,7 @@ function SitesOperationPage({ data, persist, notify, onBack }) {
         <select value={data.agenceRetraitClient || "site-bambeto"}
           onChange={(e) => { persist({ ...data, agenceRetraitClient: e.target.value }); notify?.("Agence de retrait mise à jour"); }}
           style={{ ...inputStyle, maxWidth: 320, marginBottom: 0 }}>
-          {sitesLocaux.map((s) => <option key={s.id} value={s.id}>{s.nom} — {s.adresse}</option>)}
+          {sitesGN.map((s) => <option key={s.id} value={s.id}>{s.nom} — {s.adresse}</option>)}
         </select>
       </div>
 
@@ -12429,7 +12461,7 @@ function UserProfilePage({ user, onSave, onBack, sites }) {
             <Field label="Agence assignée">
               <select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>
                 <option value="">Toutes les agences (aucune restriction)</option>
-                {(sites || []).filter((s) => (s.pays || "GN") === paysOperation).map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}
+                {sitesPourPays(sites, paysOperation).map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}
               </select>
             </Field>
           )}
@@ -12577,7 +12609,7 @@ function UserForm({ onClose, onSave, existing, sites }) {
             <Field label="Agence assignée">
               <select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>
                 <option value="">Toutes les agences (aucune restriction)</option>
-                {(sites || []).filter((s) => (s.pays || "GN") === paysOperation).map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}
+                {sitesPourPays(sites, paysOperation).map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}
               </select>
             </Field>
             <div style={{ fontSize: 11, color: "var(--muted)", marginTop: -8, marginBottom: 10 }}>Si une agence est choisie, cet utilisateur ne verra que les colis, statistiques et bordereaux de cette agence.</div>

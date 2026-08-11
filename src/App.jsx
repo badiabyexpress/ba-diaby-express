@@ -7135,20 +7135,32 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
   /*
    * Suggestion automatique de la catégorie d'après le nom du produit.
    *
-   * Chaque catégorie porte des mots-clés (« adidas » et « nike » pour Chaussure marque, la liste
-   * des marques pour Vêtements de marque…). Ils servaient uniquement à la recherche : l'agent
-   * devait quand même choisir dans une liste de 30 entrées à chaque ligne de produit.
+   * Chaque catégorie porte des mots-clés, souvent des expressions à plusieurs mots (« Médicaments
+   * liquide 1L », « Chaussure non marque »…). Comparer le nom du produit au mot-clé ENTIER
+   * échouait dès que le produit était décrit plus brièvement que le mot-clé (« Médicament » ne
+   * contient jamais la phrase complète « médicaments liquide 1l ») — la détection ne se
+   * déclenchait quasiment jamais en pratique. La comparaison se fait donc mot par mot : chaque
+   * mot du produit (3 lettres ou plus) est comparé à chaque mot de chaque mot-clé, dans les deux
+   * sens, pour couvrir aussi bien un produit plus court qu'un mot-clé (« médicament » face à
+   * « médicaments ») que l'inverse.
+   *
+   * Tolérance aux fautes de frappe : si aucun mot ne se contient exactement, on tolère quelques
+   * lettres d'écart (distance de Levenshtein) — assez pour rattraper « Meducament » face à
+   * « médicaments » (une lettre changée, une lettre en trop), pas assez pour confondre deux mots
+   * réellement différents. Réservé aux mots d'au moins 4 lettres : sur un mot de 3 lettres,
+   * tolérer un écart ferait correspondre presque n'importe quoi.
    *
    * On ne remplace jamais un choix déjà fait — l'agent garde la main.
    */
   function deviner(nomProduit) {
-    const texte = pourRecherche(nomProduit);
-    if (texte.length < 3) return null;
+    const motsTexte = pourRecherche(nomProduit).split(/\s+/).filter((m) => m.length >= 3);
+    if (motsTexte.length === 0) return null;
     const trouvee = (categories || []).find((cat) =>
-      (cat.motsCles || []).some((mot) => {
-        const m = pourRecherche(mot);
-        return m.length >= 3 && texte.includes(m);
-      })
+      (cat.motsCles || []).some((motCle) =>
+        pourRecherche(motCle).split(/\s+/).filter((m) => m.length >= 3).some((mc) =>
+          motsTexte.some((mt) => mt.includes(mc) || mc.includes(mt) || motsProches(mt, mc))
+        )
+      )
     );
     return trouvee ? trouvee.nom : null;
   }
@@ -10151,6 +10163,34 @@ const Info = memo(function Info({ label, value, accent }) {
  */
 function pourRecherche(texte) {
   return String(texte || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+}
+
+/** Distance de Levenshtein (nombre minimal d'ajouts/suppressions/substitutions pour passer de a \u00e0 b). */
+function distanceLevenshtein(a, b) {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let precedente = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const courante = [i];
+    for (let j = 1; j <= n; j++) {
+      courante[j] = a[i - 1] === b[j - 1]
+        ? precedente[j - 1]
+        : 1 + Math.min(precedente[j - 1], precedente[j], courante[j - 1]);
+    }
+    precedente = courante;
+  }
+  return precedente[n];
+}
+/**
+ * Deux mots sont-ils "assez proches" pour \u00eatre consid\u00e9r\u00e9s comme la m\u00eame faute de frappe pr\u00e8s ?
+ * R\u00e9serv\u00e9 aux mots d'au moins 4 lettres \u2014 sur un mot tr\u00e8s court, tol\u00e9rer un \u00e9cart ferait
+ * correspondre presque n'importe quoi. Le seuil grandit doucement avec la longueur du mot.
+ */
+function motsProches(a, b) {
+  if (a.length < 4 || b.length < 4) return false;
+  const seuil = Math.max(a.length, b.length) <= 6 ? 1 : 2;
+  return distanceLevenshtein(a, b) <= seuil;
 }
 
 function normaliserTelephone(tel) {

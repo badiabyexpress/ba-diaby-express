@@ -7135,20 +7135,28 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
   /*
    * Suggestion automatique de la catégorie d'après le nom du produit.
    *
-   * Chaque catégorie porte des mots-clés (« adidas » et « nike » pour Chaussure marque, la liste
-   * des marques pour Vêtements de marque…). Ils servaient uniquement à la recherche : l'agent
-   * devait quand même choisir dans une liste de 30 entrées à chaque ligne de produit.
+   * Chaque catégorie porte des mots-clés, souvent des expressions à plusieurs mots (« Médicaments
+   * liquide 1L », « Chaussure non marque »…). Comparer le nom du produit au mot-clé ENTIER
+   * échouait dès que le produit était décrit plus brièvement que le mot-clé (« Médicament » ne
+   * contient jamais la phrase complète « médicaments liquide 1l ») — la détection ne se
+   * déclenchait quasiment jamais en pratique. La comparaison se fait donc mot par mot : chaque
+   * mot du produit (3 lettres ou plus) est comparé à chaque mot de chaque mot-clé, dans les deux
+   * sens, pour couvrir aussi bien un produit plus court qu'un mot-clé (« médicament » face à
+   * « médicaments ») que l'inverse.
    *
-   * On ne remplace jamais un choix déjà fait — l'agent garde la main.
+   * On ne remplace jamais un choix déjà fait — l'agent garde la main. Cela reste une
+   * correspondance exacte au préfixe près, pas une correction de fautes de frappe : une faute
+   * d'orthographe assez éloignée du mot-clé ne déclenchera toujours pas de suggestion.
    */
   function deviner(nomProduit) {
-    const texte = pourRecherche(nomProduit);
-    if (texte.length < 3) return null;
+    const motsTexte = pourRecherche(nomProduit).split(/\s+/).filter((m) => m.length >= 3);
+    if (motsTexte.length === 0) return null;
     const trouvee = (categories || []).find((cat) =>
-      (cat.motsCles || []).some((mot) => {
-        const m = pourRecherche(mot);
-        return m.length >= 3 && texte.includes(m);
-      })
+      (cat.motsCles || []).some((motCle) =>
+        pourRecherche(motCle).split(/\s+/).filter((m) => m.length >= 3).some((mc) =>
+          motsTexte.some((mt) => mt.includes(mc) || mc.includes(mt))
+        )
+      )
     );
     return trouvee ? trouvee.nom : null;
   }

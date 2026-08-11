@@ -188,6 +188,30 @@ function allowedCountries(session) {
   if (!session || session.role === "Administrateur" || !session.paysAutorises || session.paysAutorises.length === 0) return COUNTRIES;
   return COUNTRIES.filter((c) => c.code === "GN" || session.paysAutorises.includes(c.code));
 }
+/** Sites d'opération déclarés pour un pays donné (Guinée par défaut si le site n'a pas de pays). */
+function sitesPourPays(sites, pays) {
+  return (sites || []).filter((s) => (s.pays || "GN") === (pays || "GN"));
+}
+/** Sites d'opération en Guinée — seuls ceux-ci servent à l'enregistrement, à l'agence de retrait
+ *  de l'Espace Client et à l'affectation d'un agent : ce sont des points physiques tenus par nos
+ *  agents, contrairement aux sites étrangers qui ne servent que de point de retrait sur le ticket. */
+function sitesLocaux(sites) {
+  return sitesPourPays(sites, "GN");
+}
+/**
+ * Site où le destinataire vient retirer son colis.
+ *
+ * Pour un colis livré en Guinée (import, ou export vers "GN"), c'est l'agence de retrait
+ * configurée dans Configuration → Agences (Bambeto par défaut). Pour un export vers l'étranger,
+ * le retrait se fait chez le destinataire : on renvoie le site déclaré pour ce pays de
+ * destination s'il existe, sinon null plutôt que d'annoncer à tort une agence en Guinée.
+ */
+function siteRetraitPourColis(colis, data) {
+  const sites = data?.sites || [];
+  const versEtranger = (colis.direction || "export") === "export" && colis.pays && colis.pays !== "GN";
+  if (versEtranger) return sites.find((s) => s.pays === colis.pays) || null;
+  return sites.find((s) => s.id === (data?.agenceRetraitClient || "site-bambeto")) || sitesLocaux(sites)[0] || sites[0];
+}
 function routeLabel(pays, direction) {
   const c = COUNTRIES.find((x) => x.code === pays);
   if (!c) return "";
@@ -305,6 +329,15 @@ const PERMISSIONS_SCHEMA = [
     { key: "colis.annuler", label: "Annuler un colis" },
     { key: "colis.enregistrer_paiement", label: "Enregistrer un paiement" },
     { key: "colis.supprimer", label: "Supprimer un colis" },
+    /*
+     * Import Excel, bordereau de réception et règlement groupé agissent sur plusieurs colis à la
+     * fois (import en masse, encaissement groupé) — des actions plus sensibles que la création
+     * d'un colis à l'unité. Non accordées à l'Agent par défaut : c'est à l'administrateur de
+     * désigner nommément les agences/agents autorisés, comme pour l'Espace Client.
+     */
+    { key: "colis.importer_excel", label: "Importer des colis depuis Excel" },
+    { key: "colis.bordereau_reception", label: "Générer un bordereau de réception" },
+    { key: "colis.reglement_groupe", label: "Encaisser plusieurs colis en une fois (règlement groupé)" },
   ]},
   { group: "BORDEREAUX", permissions: [
     { key: "bordereaux.consulter", label: "Consulter les bordereaux" },
@@ -1059,8 +1092,14 @@ function useIsMobile() {
  * PAS — auparavant la session n'était pas conservée du tout, si bien qu'un simple retour sur
  * l'onglet (fréquent sur téléphone, où le navigateur décharge les pages en arrière-plan)
  * ramenait à l'écran de connexion.
+ *
+ * Une fois connecté dans la journée, agent comme client doit rester connecté sur son appareil
+ * tant qu'il l'utilise au moins une fois toutes les 6 h — d'où un délai large plutôt que les
+ * 10 minutes d'origine, pensées pour un usage bureautique classique et trop courtes pour un
+ * usage ponctuel entre deux colis.
  */
-const MINUTES_INACTIVITE = 10;
+const MINUTES_INACTIVITE_AGENT = 360;
+const MINUTES_INACTIVITE_CLIENT = 360;
 const CLE_SESSION_CLIENT = "bde-session-client";
 const CLE_SESSION = "bde-session";
 
@@ -1070,7 +1109,7 @@ function lireSessionEnregistree() {
     if (!brut) return null;
     const { userId, derniereActivite } = JSON.parse(brut);
     if (!userId || !derniereActivite) return null;
-    if (Date.now() - derniereActivite > MINUTES_INACTIVITE * 60000) {
+    if (Date.now() - derniereActivite > MINUTES_INACTIVITE_AGENT * 60000) {
       window.localStorage.removeItem(CLE_SESSION);
       return null;
     }
@@ -1084,7 +1123,7 @@ function lireSessionClient() {
     if (!brut) return null;
     const { compteId, derniereActivite } = JSON.parse(brut);
     if (!compteId || !derniereActivite) return null;
-    if (Date.now() - derniereActivite > MINUTES_INACTIVITE * 60000) {
+    if (Date.now() - derniereActivite > MINUTES_INACTIVITE_CLIENT * 60000) {
       window.localStorage.removeItem(CLE_SESSION_CLIENT);
       return null;
     }
@@ -1216,6 +1255,14 @@ function App() {
     window.addEventListener("offline", handleOffline);
 
     /*
+     * Une session précédente peut avoir laissé des écritures en file d'attente (fenêtre fermée
+     * avant la fin de la synchronisation). On tente de les rejouer dès l'ouverture plutôt que
+     * d'attendre l'événement "online" (qui ne se déclenche pas si la connexion n'a jamais été
+     * coupée depuis l'ouverture) ou les 20 premières secondes de la boucle ci-dessous.
+     */
+    if (navigator.onLine && pendingSyncCount() > 0) handleOnline();
+
+    /*
      * Nouvelle tentative périodique.
      *
      * La file n'était rejouée qu'à l'événement "online". Or une écriture peut échouer alors que
@@ -1233,9 +1280,23 @@ function App() {
       setPendingSync(pendingSyncCount());
     }, 20000);
 
+    /*
+     * Filet de sécurité contre la perte de données : fermer l'onglet (ou le navigateur) pendant
+     * qu'une écriture reste en file d'attente locale la perd définitivement — elle n'existe que
+     * dans le localStorage de cet appareil précis, jamais partagée tant qu'elle n'a pas atteint
+     * le serveur. C'est exactement ce qui s'est produit pour un colis créé puis introuvable :
+     * l'agent a fermé la page en croyant l'enregistrement terminé. On bloque donc la fermeture
+     * avec l'avertissement natif du navigateur tant qu'il reste quelque chose en attente.
+     */
+    function handleBeforeUnload(e) {
+      if (pendingSyncCount() > 0) { e.preventDefault(); e.returnValue = ""; }
+    }
+    window.addEventListener("beforeunload", handleBeforeUnload);
+
     return () => {
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
+      window.removeEventListener("beforeunload", handleBeforeUnload);
       clearInterval(minuteur);
     };
   }, []);
@@ -1251,25 +1312,33 @@ function App() {
    * repartira à la prochaine tentative automatique. L'agent sait qu'il doit vérifier plutôt que
    * de croire un travail enregistré alors qu'il ne l'est pas.
    */
+  /*
+   * persist() renvoie désormais la promesse d'enregistrement (au lieu de « tirer et oublier ») :
+   * la plupart des appelants l'ignorent, comme avant, mais un appelant qui gère une donnée
+   * difficile à reconstituer (ex: création d'un colis) peut l'attendre pour savoir si
+   * l'enregistrement a vraiment été confirmé par le serveur ou seulement mis en file d'attente
+   * locale — cas où fermer l'onglet ferait perdre la donnée pour de bon.
+   */
   const persist = useCallback((next) => {
     setData(next);
     if (next.exchangeRates) LIVE_RATES = { ...CURRENCIES, ...next.exchangeRates };
-    if (!offline) {
-      saveData(next)
-        .then((r) => {
-          setPendingSync(pendingSyncCount());
-          if (r && r.queued) {
-            setToast("Enregistrement en attente — vérifiez votre connexion");
-            setTimeout(() => setToast(null), 5000);
-          }
-        })
-        .catch((e) => {
-          console.error("Échec de l'enregistrement", e);
-          setPendingSync(pendingSyncCount());
+    if (offline) return Promise.resolve({ queued: false });
+    return saveData(next)
+      .then((r) => {
+        setPendingSync(pendingSyncCount());
+        if (r && r.queued) {
           setToast("Enregistrement en attente — vérifiez votre connexion");
           setTimeout(() => setToast(null), 5000);
-        });
-    }
+        }
+        return r || {};
+      })
+      .catch((e) => {
+        console.error("Échec de l'enregistrement", e);
+        setPendingSync(pendingSyncCount());
+        setToast("Enregistrement en attente — vérifiez votre connexion");
+        setTimeout(() => setToast(null), 5000);
+        return { queued: true, error: e };
+      });
   }, [offline]);
   const notify = useCallback((msg) => { setToast(msg); setTimeout(() => setToast(null), 2800); }, []);
   function setLanguage(l) { setLang(l); persist({ ...data, lang: l }); }
@@ -1510,6 +1579,7 @@ function ScannerModal({ onClose, onScan }) {
   const streamRef = useRef(null);
   const rafRef = useRef(null);
   const [etat, setEtat] = useState("demarrage"); // demarrage | actif | erreur
+  const [erreur, setErreur] = useState("");
 
   useEffect(() => {
     let annule = false;
@@ -1722,6 +1792,13 @@ function Shell({ children, rtl, theme }) {
            --brand-solid : rouge de marque assombri pour atteindre un contraste suffisant avec
            du texte blanc (l’ancien #E23F52 plafonnait à 4,1:1, sous le minimum de 4,5:1). */
         :root { --nav-fg: #FFFFFF; --nav-muted: #A9B6D0; --brand-on-dark: #FF7183; --brand-solid: #CE1B33; }
+        /* Filet de sécurité contre le défilement horizontal de la page entière sur mobile : un
+           bouton, un badge ou un texte trop large quelque part suffit sinon à décaler tout
+           l'écran vers la droite (titre et libellés partiellement coupés à gauche). Les zones
+           qui ont légitimement besoin de défiler horizontalement (tableaux larges...) gardent
+           leur propre défilement local (overflow-x auto) et ne sont pas affectées par cette
+           règle globale. */
+        html, body { overflow-x: hidden; max-width: 100%; }
         body { margin: 0; background: var(--bg); }
         input, select, button { font-family: 'Inter', sans-serif; }
         input, select { color: var(--text); }
@@ -2136,7 +2213,11 @@ function PublicTrackingPage({ data, loading }) {
     window.history.replaceState({}, "", url);
   }
 
-  const dest = colis ? COUNTRIES.find((c) => c.code === colis.pays) : null;
+  // Le destinataire réel (colis.destinatairePays) prime sur le pays de route (colis.pays) : pour
+  // un colis import, colis.pays est le pays d'origine à l'étranger, pas la destination affichée
+  // au client, qui est toujours la Guinée.
+  const destPaysCode = colis ? (colis.destinatairePays || colis.pays) : null;
+  const dest = destPaysCode ? COUNTRIES.find((c) => c.code === destPaysCode) : null;
   const publicSteps = ["Enregistré", "En transit", "Arrivé", "Disponible au retrait", "Livré"];
   const curIdx = colis ? Math.max(publicSteps.indexOf(colis.status), 0) : 0;
   // La terminologie "espace client" (Reçu à l’entrepôt, Arrivé en Guinée...) ne concerne que
@@ -2205,7 +2286,7 @@ function PublicTrackingPage({ data, loading }) {
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12, marginBottom: 18 }}>
-            <Info label="Destination" value={`${FLAGS[colis.pays] || ""} ${dest?.name || "—"}`} />
+            <Info label="Destination" value={`${FLAGS[destPaysCode] || ""} ${dest?.name || "—"}`} />
             <Info label="Mode" value={colis.mode === "air" ? "Aérien" : "Maritime"} />
             <Info label="Poids" value={`${colis.poids} kg`} />
             <Info label="Enregistré le" value={new Date(colis.createdAt).toLocaleDateString("fr-FR")} />
@@ -3688,7 +3769,7 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
     const encaisse = colis.reduce((s, c) => s + c.paye, 0);
     const parPays = COUNTRIES.map((p) => ({ ...p, count: colis.filter((c) => c.pays === p.code).length }));
     const recent = [...colis].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 5);
-    const parAgence = (data.sites || []).map((s) => {
+    const parAgence = sitesLocaux(data.sites).map((s) => {
       const colisAgence = colis.filter((c) => (c.site || "Bambeto") === s.nom);
       return { nom: s.nom, count: colisAgence.length, ca: colisAgence.reduce((sum, c) => sum + c.prix, 0) };
     });
@@ -5001,7 +5082,7 @@ function TraiterPreAlerteModal({ preAlerte, client, tarifs, onValider, onClose }
   }
 
   return (
-    <Modal onClose={onClose} title="Réception du colis annoncé" wide saisieEnCours={!!poidsReel}>
+    <Modal onClose={onClose} title="Réception du colis annoncé" wide saisieEnCours={!!poids}>
       <div style={{ background: "var(--surface2)", borderRadius: 12, padding: "10px 14px", marginBottom: 16 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{client ? `${client.prenom} ${client.nom}` : "Compte inconnu"}</div>
         <div style={{ fontSize: 11.5, color: "var(--muted)" }}>{client?.telephone} · annoncé le {new Date(preAlerte.dateCreation).toLocaleDateString("fr-FR")}</div>
@@ -5616,7 +5697,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     const echecs = [];
     for (let i = 0; i < aRelancer.length; i++) {
       const c = aRelancer[i];
-      const ag = agenceRetraitColis;
+      const ag = siteRetraitPourColis(c, data);
       const du = c.reste > 0 ? ` Reste à régler : ${fmtGNF(c.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}.` : "";
       const message = `Bonjour ${c.destinataire}, votre colis Ba-Diaby Express ${c.tracking} vous attend depuis ${c.joursAttente} jours`
         + (ag ? ` à notre agence ${ag.nom} — ${ag.adresse}${ag.horaires ? ` (${ag.horaires})` : ""}.` : ".")
@@ -5655,13 +5736,23 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     setSelectionLot([]);
     setModeSelection(false);
   }
-  function addColis(colis) {
+  /*
+   * La création d'un colis est la donnée la plus coûteuse à perdre — reconstituer un envoi payé
+   * dont on n'a plus le détail est souvent impossible. On attend donc la confirmation réelle de
+   * persist() avant d'informer l'agent : si l'enregistrement n'a été que mis en file d'attente
+   * locale (pas encore confirmé par le serveur), on le dit clairement plutôt que d'afficher le
+   * même message de succès que d'habitude — le bandeau en bas de l'écran et le blocage de
+   * fermeture d'onglet prennent le relais tant que ce n'est pas synchronisé.
+   */
+  async function addColis(colis) {
     const { preAlerteRapprochee, ...colisPropre } = colis;
     const preAlertes = preAlerteRapprochee
       ? (data.preAlertes || []).map((p) => (p.id === preAlerteRapprochee ? { ...p, statut: "Rapproché", colisTracking: colis.tracking } : p))
       : data.preAlertes;
-    persist({ ...data, colis: [colisPropre, ...data.colis], preAlertes, activityLog: logActivity("Colis créé", `${colis.tracking} — ${colis.destinataire}`) });
-    notify(`Colis ${colis.tracking} enregistré`);
+    const resultat = await persist({ ...data, colis: [colisPropre, ...data.colis], preAlertes, activityLog: logActivity("Colis créé", `${colis.tracking} — ${colis.destinataire}`) });
+    notify(resultat?.queued
+      ? `Colis ${colis.tracking} en attente de synchronisation — ne fermez pas cette page avant confirmation`
+      : `Colis ${colis.tracking} enregistré`);
     // Notification automatique selon les préférences (Configuration → Notifications WhatsApp).
     notifierEvenement(data, "enregistrement", colis,
       `Bonjour ${colis.destinataire}, votre colis Ba-Diaby Express ${colis.tracking} a bien été enregistré`
@@ -5755,7 +5846,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     const evenementParStatut = { "En transit": "expedie", "Arrivé": "arrivee", "Disponible au retrait": "retrait", "Livré": "livre" };
     const evt = evenementParStatut[nextStatus];
     if (evt && colisMaj) {
-      const ag = (data.sites || []).find((x) => x.id === (data.agenceRetraitClient || "site-bambeto")) || (data.sites || [])[0];
+      const ag = siteRetraitPourColis(colisMaj, data);
       const messages = {
         expedie: `Bonjour ${colisMaj.destinataire}, votre colis Ba-Diaby Express ${tracking} vient de quitter notre entrepôt.`,
         arrivee: `Bonjour ${colisMaj.destinataire}, votre colis Ba-Diaby Express ${tracking} est arrivé en Guinée.`,
@@ -5973,33 +6064,41 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
-        <div>
-          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: 0 }}>{t.colis}</h1>
-          <p style={{ color: "var(--muted)", fontSize: 13.5, margin: "4px 0 0" }}>{isChauffeur ? "Vos livraisons en cours" : "Enregistrement et suivi des expéditions"}{session.agence && <span style={{ marginLeft: 8, background: "var(--surface2)", color: "var(--info-fg)", padding: "2px 8px", borderRadius: 20, fontSize: 11, fontWeight: 600 }}>Agence : {session.agence}</span>}</p>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20, flexWrap: "wrap", gap: 14 }}>
+        <div style={{ minWidth: 0 }}>
+          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 27, margin: 0 }}>{t.colis}</h1>
+          <p style={{ color: "var(--muted)", fontSize: 14.5, margin: "5px 0 0" }}>{isChauffeur ? "Vos livraisons en cours" : "Enregistrement et suivi des expéditions"}{session.agence && <span style={{ marginLeft: 8, background: "var(--surface2)", color: "var(--info-fg)", padding: "3px 9px", borderRadius: 20, fontSize: 12, fontWeight: 600 }}>Agence : {session.agence}</span>}</p>
         </div>
-        {peutCreer && (
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button onClick={() => setShowImport(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><Download size={16} color="var(--info-fg)" style={{ transform: "rotate(180deg)" }} /> Importer Excel</button>
-            <button onClick={() => setShowReception(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={16} color="var(--ok-fg)" /> Bordereau de réception</button>
-            <button onClick={() => setShowEncaisseGroupe(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}><DollarSign size={15} color="var(--ok-fg)" /> Règlement groupé</button>
-            <button onClick={() => setShowAi(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><Sparkles size={16} color="#8B5CF6" /> Créer par IA</button>
-            <button onClick={() => setShowForm(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><Plus size={16} /> {t.newColis}</button>
-          </div>
-        )}
+        {/*
+          Chaque action a désormais sa propre permission — import Excel, bordereau de réception et
+          règlement groupé agissent sur plusieurs colis à la fois, donc plus sensibles que la
+          création à l'unité (colis.creer). Non accordées par défaut : à l'administrateur de
+          désigner nommément les agences/agents autorisés.
+          `minWidth: 0` sur ce conteneur évite qu'il ne force la page entière à défiler
+          horizontalement sur mobile : un enfant flex garde par défaut la largeur de son contenu
+          non replié pour le calcul de la mise en page, même si `flexWrap` le replie ensuite à
+          l'affichage — sans ce correctif, les derniers boutons débordaient hors de l'écran.
+        */}
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", minWidth: 0 }}>
+          {effectivePermission(session, "colis.importer_excel") && <button onClick={() => setShowImport(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><Download size={17} color="var(--info-fg)" style={{ transform: "rotate(180deg)" }} /> Importer Excel</button>}
+          {effectivePermission(session, "colis.bordereau_reception") && <button onClick={() => setShowReception(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={17} color="var(--ok-fg)" /> Bordereau de réception</button>}
+          {effectivePermission(session, "colis.reglement_groupe") && <button onClick={() => setShowEncaisseGroupe(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><DollarSign size={17} color="var(--ok-fg)" /> Règlement groupé</button>}
+          {peutCreer && <button onClick={() => setShowAi(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><Sparkles size={17} color="#8B5CF6" /> Créer par IA</button>}
+          {peutCreer && <button onClick={() => setShowForm(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}><Plus size={17} /> {t.newColis}</button>}
+        </div>
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "8px 12px", maxWidth: 380, flex: 1 }}>
-          <Search size={15} color="var(--muted)" />
-          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`${t.search}...`} style={{ border: "none", outline: "none", flex: 1, fontSize: 13.5, background: "none", color: "var(--text)" }} />
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 9, background: "var(--surface)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 14px", maxWidth: 380, flex: 1 }}>
+          <Search size={17} color="var(--muted)" />
+          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`${t.search}...`} style={{ border: "none", outline: "none", flex: 1, fontSize: 15, background: "none", color: "var(--text)" }} />
         </div>
         {peutCreer && (
-          <button onClick={() => { setModeSelection((m) => !m); setSelectionLot([]); }} style={{ background: modeSelection ? "var(--brand-solid)" : "var(--surface)", color: modeSelection ? "#fff" : "var(--text)", border: "1.5px solid " + (modeSelection ? "var(--brand-solid)" : "var(--border)"), borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
+          <button onClick={() => { setModeSelection((m) => !m); setSelectionLot([]); }} style={{ background: modeSelection ? "var(--brand-solid)" : "var(--surface)", color: modeSelection ? "#fff" : "var(--text)", border: "1.5px solid " + (modeSelection ? "var(--brand-solid)" : "var(--border)"), borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
             {modeSelection ? "Annuler la sélection" : "Sélectionner plusieurs"}
           </button>
         )}
-        <button onClick={() => setShowScanner(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
-          <Camera size={14} /> Scanner
+        <button onClick={() => setShowScanner(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+          <Camera size={16} /> Scanner
         </button>
       </div>
       {aRelancer.length > 0 && (
@@ -6062,7 +6161,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
           else { setQuery(tracking); notify(`Aucun colis trouvé pour "${tracking}" — recherche lancée`); }
         }} />
       )}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))", gap: 16, marginBottom: modeSelection && selectionLot.length > 0 ? 90 : 0 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 18, marginBottom: modeSelection && selectionLot.length > 0 ? 90 : 0 }}>
         {listeVisible.map((c) => <TicketCard key={c.tracking} colis={c} onOpen={() => (modeSelection ? toggleSelectionLot(c.tracking) : setSelected(c))} selectionMode={modeSelection} checked={selectionLot.includes(c.tracking)} />)}
         {list.length === 0 && <div style={{ color: "var(--muted)", fontSize: 13.5 }}>Aucun colis à afficher.</div>}
         {list.length > listeVisible.length && (
@@ -6085,7 +6184,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
           <button onClick={() => imprimerLot("facture")} disabled={impressionLot} style={{ background: "var(--surface2)", color: "#fff", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>{impressionLot ? "Génération…" : "Factures A4"}</button>
         </div>
       )}
-      {showForm && <ColisForm remiseVolumeConfig={data.remiseVolume} repertoire={data.repertoire} onClose={() => setShowForm(false)} onSave={addColis} existingColis={data.colis} categories={data.categories || []} session={session} sites={data.sites} partenaires={(data.users || []).filter((u) => u.role === "Partenaire")} clientAccounts={data.clientAccounts || []} preAlertes={data.preAlertes || []} />}
+      {showForm && <ColisForm remiseVolumeConfig={data.remiseVolume} repertoire={data.repertoire} onClose={() => setShowForm(false)} onSave={addColis} existingColis={data.colis} categories={data.categories || []} session={session} sites={data.sites} partenaires={(data.users || []).filter((u) => u.role === "Partenaire")} clientAccounts={data.clientAccounts || []} preAlertes={data.preAlertes || []} notify={notify} />}
       {showAi && <AiColisModal onClose={() => setShowAi(false)} onCreate={addColis} data={data} session={session} />}
       {showImport && <ImportExcelModal onClose={() => setShowImport(false)} onImportMany={importerColisMany} data={data} session={session} />}
       {remiseEnCours && <RemiseColisModal colis={remiseEnCours} session={session}
@@ -6098,7 +6197,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
         onClose={() => setRemiseEnCours(null)} />}
       {showEncaisseGroupe && <EncaisserGroupeModal data={data} onEncaisser={encaisserGroupe} onClose={() => setShowEncaisseGroupe(false)} />}
       {showReception && <ReceptionBordereauModal onClose={() => setShowReception(false)} data={data} persist={persist} notify={notify} session={session} />}
-      {selected && <ColisDetail colis={selected} onClose={() => setSelected(null)} onAdvance={() => advance(selected.tracking)} onDelete={() => remove(selected.tracking)} onCancel={(motif) => annuler(selected.tracking, motif)} onRefuser={(motif) => refuser(selected.tracking, motif)} onDeclarerLitige={(t, d) => declarerLitige(selected.tracking, t, d)} onResoudreLitige={(r, i) => resoudreLitige(selected.tracking, r, i)} onMajRetour={(statutRetour) => majRetour(selected.tracking, statutRetour)} onUpdate={(patch) => updateColis(selected.tracking, patch)} onEncaisser={(montant, mode, montantSaisi, deviseSaisie, details, declarationId) => encaisser(selected.tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId)} canManage={!isChauffeur} isAdmin={session.role === "Administrateur"} isChauffeur={isChauffeur} data={data} session={session} />}
+      {selected && <ColisDetail colis={selected} onClose={() => setSelected(null)} onAdvance={() => advance(selected.tracking)} onDelete={() => remove(selected.tracking)} onCancel={(motif) => annuler(selected.tracking, motif)} onRefuser={(motif) => refuser(selected.tracking, motif)} onDeclarerLitige={(t, d) => declarerLitige(selected.tracking, t, d)} onResoudreLitige={(r, i) => resoudreLitige(selected.tracking, r, i)} onMajRetour={(statutRetour) => majRetour(selected.tracking, statutRetour)} onUpdate={(patch) => updateColis(selected.tracking, patch)} onEncaisser={(montant, mode, montantSaisi, deviseSaisie, details, declarationId) => encaisser(selected.tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId)} canManage={!isChauffeur} isAdmin={session.role === "Administrateur"} isChauffeur={isChauffeur} data={data} session={session} notify={notify} />}
     </div>
   );
 }
@@ -6365,7 +6464,6 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
   const [confirmation, setConfirmation] = useState(null);
   const [prevenir, setPrevenir] = useState(true);
   const [envoiWa, setEnvoiWa] = useState(null);
-  const agenceRetrait = (data.sites || []).find((s) => s.id === (data.agenceRetraitClient || "site-bambeto")) || (data.sites || [])[0];
 
   const ETAPES_COLIS = [
     { cle: "En transit", bouton: "Marquer expédiés", vuClient: "Expédié", depuis: ["Enregistré"] },
@@ -6385,7 +6483,7 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
     const base = `Bonjour ${colis.destinataire}, votre colis Ba-Diaby Express ${colis.tracking}`;
     if (etape.cle === "En transit") return `${base} vient de quitter notre entrepôt. Nous vous préviendrons dès son arrivée en Guinée.`;
     if (etape.cle === "Arrivé") return `${base} est arrivé en Guinée. Il sera bientôt disponible au retrait.`;
-    const ag = agenceRetrait;
+    const ag = siteRetraitPourColis(colis, data);
     const ou = ag ? ` Retrait à notre agence ${ag.nom} — ${ag.adresse}${ag.horaires ? ` (${ag.horaires})` : ""}.` : "";
     const du = colis.reste > 0 ? ` Reste à régler : ${fmtGNF(colis.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}.` : "";
     return `${base} est disponible au retrait.${ou}${du}`;
@@ -6698,39 +6796,39 @@ function TicketCard({ colis, onOpen, selectionMode, checked }) {
   const st = STATUS_STYLE[colis.status];
   const Icon = st.icon;
   return (
-    <div onClick={onOpen} style={{ position: "relative", background: "var(--surface)", borderRadius: 14, overflow: "hidden", boxShadow: "0 2px 10px rgba(10,38,71,0.07)", cursor: "pointer", border: checked ? "2px solid var(--brand-solid)" : "1px solid var(--surface2)" }}>
+    <div onClick={onOpen} style={{ position: "relative", background: "var(--surface)", borderRadius: 16, overflow: "hidden", boxShadow: "0 3px 14px rgba(10,38,71,0.09)", cursor: "pointer", border: checked ? "2px solid var(--brand-solid)" : "1px solid var(--surface2)", transition: "box-shadow 0.15s, transform 0.15s" }}>
       {selectionMode && (
-        <div style={{ position: "absolute", top: 10, right: 10, zIndex: 2, width: 22, height: 22, borderRadius: 6, background: checked ? "var(--brand-solid)" : "rgba(255,255,255,0.9)", border: "1.5px solid " + (checked ? "var(--brand-solid)" : "var(--border)"), display: "grid", placeItems: "center" }}>
-          {checked && <Check size={14} color="#fff" />}
+        <div style={{ position: "absolute", top: 12, right: 12, zIndex: 2, width: 24, height: 24, borderRadius: 7, background: checked ? "var(--brand-solid)" : "rgba(255,255,255,0.9)", border: "1.5px solid " + (checked ? "var(--brand-solid)" : "var(--border)"), display: "grid", placeItems: "center" }}>
+          {checked && <Check size={15} color="#fff" />}
         </div>
       )}
-      <div style={{ background: "#0A2647", padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span style={{ color: "#fff", fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13.5 }}>{colis.tracking}</span>
-        <span style={{ background: "rgba(255,255,255,0.15)", color: "#fff", fontSize: 10.5, padding: "3px 8px", borderRadius: 20 }}>{colis.mode === "air" ? "AÉRIEN" : "MARITIME"}</span>
+      <div style={{ background: "#0A2647", padding: "14px 18px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span style={{ color: "#fff", fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 15.5, letterSpacing: 0.3 }}>{colis.tracking}</span>
+        <span style={{ background: "rgba(255,255,255,0.15)", color: "#fff", fontSize: 11.5, fontWeight: 600, padding: "4px 10px", borderRadius: 20 }}>{colis.mode === "air" ? "AÉRIEN" : "MARITIME"}</span>
       </div>
-      <div style={{ padding: "14px 16px" }}>
-        <div style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>{colis.destinataire}</div>
+      <div style={{ padding: "16px 18px" }}>
+        <div style={{ fontSize: 15, color: "var(--text)", fontWeight: 700 }}>{colis.destinataire}</div>
         {colis.referenceCommande && (
-          <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 1 }}>réf. commande : <strong style={{ color: "var(--text)" }}>{colis.referenceCommande}</strong></div>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>réf. commande : <strong style={{ color: "var(--text)" }}>{colis.referenceCommande}</strong></div>
         )}
         {colis.emplacement && !colis.remise && (
-          <div style={{ display: "inline-flex", alignItems: "center", gap: 4, marginTop: 4, marginInlineEnd: 6,
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 5, marginTop: 6, marginInlineEnd: 6,
                         background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)",
-                        borderRadius: 20, padding: "2px 9px", fontSize: 10, fontWeight: 700 }}>
-            <MapPin size={9} /> {colis.emplacement}
+                        borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700 }}>
+            <MapPin size={10} /> {colis.emplacement}
           </div>
         )}
         {colis.litige && (
-          <div style={{ display: "inline-flex", alignItems: "center", gap: 4, marginTop: 4,
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 5, marginTop: 6,
                         background: colis.litige.statut === "Ouvert" ? "var(--warn-bg)" : "var(--ok-bg)",
                         border: "1px solid " + (colis.litige.statut === "Ouvert" ? "var(--warn-border)" : "var(--ok-border)"),
                         color: colis.litige.statut === "Ouvert" ? "var(--warn-fg)" : "var(--ok-fg)",
-                        borderRadius: 20, padding: "2px 9px", fontSize: 10, fontWeight: 700 }}>
+                        borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700 }}>
             {colis.litige.type === "perdu" ? "Perdu" : "Endommagé"}{colis.litige.statut === "Résolu" ? " · réglé" : ""}
           </div>
         )}
-        <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>{routeLabel(colis.pays, colis.direction)}</div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 10, background: st.bg, color: st.fg, padding: "5px 10px", borderRadius: 20, fontSize: 11.5, fontWeight: 600, width: "fit-content" }}><Icon size={13} /> {colis.status}</div>
+        <div style={{ fontSize: 13.5, color: "var(--muted)", marginTop: 4, fontWeight: 500 }}>{routeLabel(colis.pays, colis.direction)}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 12, background: st.bg, color: st.fg, padding: "6px 12px", borderRadius: 20, fontSize: 12.5, fontWeight: 700, width: "fit-content" }}><Icon size={14} /> {colis.status}</div>
       </div>
     </div>
   );
@@ -6796,7 +6894,7 @@ function splitNom(full) {
   return { prenom: parts[0], nom: parts.slice(1).join(" ") };
 }
 
-function ColisForm({ onClose, onSave, existingColis, categories, session, sites, partenaires, clientAccounts, preAlertes, remiseVolumeConfig, repertoire }) {
+function ColisForm({ onClose, onSave, existingColis, categories, session, sites, partenaires, clientAccounts, preAlertes, remiseVolumeConfig, repertoire, notify }) {
   const availableCountries = allowedCountries(session);
   const clientDirectory = useMemo(() => buildClientDirectory(existingColis || [], repertoire), [existingColis, repertoire]);
   const [step, setStep] = useState(0);
@@ -6833,7 +6931,8 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
    * sans affectation garde le choix, puisqu'il peut enregistrer pour n'importe quelle agence.
    */
   const agenceImposee = session?.agence || "";
-  const [agence, setAgence] = useState(agenceImposee || sites?.[0]?.nom || "Bambeto");
+  const siteLocalParDefaut = sitesLocaux(sites)[0];
+  const [agence, setAgence] = useState(agenceImposee || siteLocalParDefaut?.nom || "Bambeto");
   const [partenaireId, setPartenaireId] = useState("");
   const [clientAccountId, setClientAccountId] = useState("");
   const [preAlerteRapprochee, setPreAlerteRapprochee] = useState("");
@@ -7284,7 +7383,10 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
               </Field>
               {!agenceImposee && <Field label="Agence d’enregistrement">
                 <select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>
-                  {(sites && sites.length > 0 ? sites : [{ id: "x", nom: "Bambeto" }]).map((s) => <option key={s.id} value={s.nom}>{s.nom}</option>)}
+                  {(() => {
+                    const locaux = sitesLocaux(sites);
+                    return (locaux.length > 0 ? locaux : [{ id: "x", nom: "Bambeto" }]).map((s) => <option key={s.id} value={s.nom}>{s.nom}</option>);
+                  })()}
                 </select>
               </Field>}
       {/*
@@ -7711,7 +7813,9 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
 async function downloadLabel(colis) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: [100, 150] }));
-  const dest = COUNTRIES.find((c) => c.code === colis.pays);
+  // colis.pays est le pays de route (origine pour un import) ; le pays réellement affiché comme
+  // destination sur l'étiquette doit être celui du destinataire (toujours la Guinée à l'import).
+  const dest = COUNTRIES.find((c) => c.code === (colis.destinatairePays || colis.pays));
   const trackingUrl = trackingUrlFor(colis.tracking);
   const [qrData, barcodeData] = await Promise.all([
     generateQRDataUrl(trackingUrl, 300),
@@ -8080,9 +8184,22 @@ async function downloadInvoice(colis, data, options = {}) {
   const NAVY = [10, 38, 71], INK = [26, 30, 38], MUTED = [125, 133, 145], LINE = [226, 230, 236];
   const TINT = [244, 247, 251];
 
-  const dest = COUNTRIES.find((c) => c.code === colis.pays);
+  // colis.pays est le pays de route (l'origine pour un import) ; le destinataire réel — et donc
+  // sa devise affichée — doit suivre colis.destinatairePays quand il est renseigné (toujours la
+  // Guinée pour un import).
+  const dest = COUNTRIES.find((c) => c.code === (colis.destinatairePays || colis.pays));
   const origine = COUNTRIES.find((c) => c.code === (colis.direction === "import" ? colis.pays : "GN"));
   const gnf = LIVE_RATES.GNF || CURRENCIES.GNF;
+  /*
+   * Devise principale du ticket = celle de l'expéditeur : un colis qui part de Conakry se paie en
+   * GNF, un colis qui part de France/États-Unis/Maroc... se paie dans la devise de ce pays. La
+   * devise secondaire (l'équivalent affiché en petit) est celle du destinataire — GNF pour un
+   * import qui arrive en Guinée, la devise du pays étranger pour un export. Les deux ne sont
+   * affichées ensemble que si elles diffèrent.
+   */
+  const primaryCur = COUNTRIES.find((c) => c.code === (colis.expediteurPays || "GN"))?.currency || "GNF";
+  const secondaryCur = dest?.currency || "EUR";
+  const fmtMontant = (eurValue, cur) => (cur === "GNF" ? fmtGNF(eurValue * gnf) : fmt(eurValue, cur));
 
   // Zones fixes : chaque bloc sait où il commence, aucun décalage cumulé possible.
   const Z = {
@@ -8119,7 +8236,7 @@ async function downloadInvoice(colis, data, options = {}) {
   doc.setFont(undefined, "bold"); doc.setFontSize(10); doc.setTextColor(...etatTexte);
   doc.text(etat, M, Z.bandeau + 6.8);
   if (solde > 0.005) {
-    doc.text(`Reste à payer : ${fmtGNF(solde * gnf)}`, W - M, Z.bandeau + 6.8, { align: "right" });
+    doc.text(`Reste à payer : ${fmtMontant(solde, primaryCur)}`, W - M, Z.bandeau + 6.8, { align: "right" });
   }
 
   // ── Références ────────────────────────────────────────────────────────────
@@ -8174,7 +8291,7 @@ async function downloadInvoice(colis, data, options = {}) {
     { t: "Article", x: M + 2, l: 92 },
     { t: "Qté", x: M + 100, l: 14, d: true },
     { t: "Poids", x: M + 124, l: 22, d: true },
-    { t: "Catégorie", x: M + 150, l: 26 },
+    { t: `Prix (${primaryCur})`, x: M + 150, l: 26, d: true },
   ];
   doc.setFillColor(...NAVY); doc.rect(M, y, W - 2 * M, 8, "F");
   doc.setFont(undefined, "bold"); doc.setFontSize(8); doc.setTextColor(255, 255, 255);
@@ -8191,8 +8308,8 @@ async function downloadInvoice(colis, data, options = {}) {
     doc.text(couper(p.nom || "—", 90), M + 2, y + 5.4);
     doc.text(String(p.quantite || 1), M + 114, y + 5.4, { align: "right" });
     doc.text(`${p.poids || 0} kg`, M + 146, y + 5.4, { align: "right" });
-    doc.setTextColor(...MUTED);
-    if (p.categorie) doc.text(couper(p.categorie, 26), M + 150, y + 5.4);
+    const ligneGNF = produitValeurGNF(p, data?.categories);
+    doc.text(fmtMontant(ligneGNF / gnf, primaryCur), M + 176, y + 5.4, { align: "right" });
     doc.setDrawColor(...LINE); doc.setLineWidth(0.2); doc.line(M, y + 8, W - M, y + 8);
     y += 8;
   });
@@ -8235,39 +8352,45 @@ async function downloadInvoice(colis, data, options = {}) {
     doc.text(valeur, W - M, y, { align: "right" });
     y += 5;
   };
-  ligneT("Frais d'expédition", fmtGNF((colis.prixBrut || colis.prix) * gnf));
+  ligneT("Frais d'expédition", fmtMontant(colis.prixBrut || colis.prix, primaryCur));
   if (colis.discountLoyalty > 0) ligneT("Remise fidélité", `-${colis.discountLoyalty} %`);
   if (colis.discountVolume > 0) ligneT("Remise volume", `-${colis.discountVolume} %`);
   const ex = colis.demandeExpress;
-  if (ex && ex.facture && ex.montant > 0) ligneT("Livraison express 72h", fmtGNF(ex.montant * gnf));
+  if (ex && ex.facture && ex.montant > 0) ligneT("Livraison express 72h", fmtMontant(ex.montant, primaryCur));
 
   y += 1;
   doc.setFillColor(...NAVY); doc.rect(panL - 4, y - 4.5, W - M - panL + 4, 11, "F");
   doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(255, 255, 255);
   doc.text("TOTAL À PAYER", panL, y + 2.5);
-  doc.text(fmtGNF(colis.prix * gnf), W - M, y + 2.5, { align: "right" });
-  // L'équivalent en euros tient dans le bandeau : une ligne de moins, donc plus de marge.
-  doc.setFont(undefined, "normal"); doc.setFontSize(7); doc.setTextColor(205, 218, 236);
-  doc.text(`~ ${fmt(colis.prix, "EUR")}`, W - M, y + 6, { align: "right" });
+  doc.text(fmtMontant(colis.prix, primaryCur), W - M, y + 2.5, { align: "right" });
+  // L'équivalent dans la devise du destinataire tient dans le bandeau : une ligne de moins, donc plus de marge.
+  if (secondaryCur !== primaryCur) {
+    doc.setFont(undefined, "normal"); doc.setFontSize(7); doc.setTextColor(205, 218, 236);
+    doc.text(`~ ${fmtMontant(colis.prix, secondaryCur)}`, W - M, y + 6, { align: "right" });
+  }
   y += 13;
   if (paye > 0) {
     doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
     doc.text("Déjà versé", panL, y);
-    doc.text(fmtGNF(paye * gnf), W - M, y, { align: "right" });
+    doc.text(fmtMontant(paye, primaryCur), W - M, y, { align: "right" });
     y += 5.5;
   }
   if (solde > 0.005) {
     doc.setFont(undefined, "bold"); doc.setFontSize(10); doc.setTextColor(...etatTexte);
     doc.text("Reste à payer", panL, y);
-    doc.text(fmtGNF(solde * gnf), W - M, y, { align: "right" });
+    doc.text(fmtMontant(solde, primaryCur), W - M, y, { align: "right" });
   }
 
   // ── Agences ───────────────────────────────────────────────────────────────
   y = Z.agences;
   doc.setDrawColor(...LINE); doc.setLineWidth(0.3); doc.line(M, y - 8, W - M, y - 8);
   const sites = data?.sites || [];
-  const siteDepot = sites.find((s) => s.nom === colis.site) || sites[0];
-  const siteRetrait = sites.find((s) => s.id === (data?.agenceRetraitClient || "site-bambeto")) || sites[0];
+  const siteDepot = sites.find((s) => s.nom === colis.site) || sitesLocaux(sites)[0] || sites[0];
+  // Le retrait n'a lieu à une agence Guinée (Bambeto par défaut) que pour les colis livrés en
+  // Guinée ; pour un export vers l'étranger, siteRetraitPourColis() renvoie le site déclaré pour
+  // ce pays s'il existe, sinon null — le bloc est alors simplement omis plutôt que d'afficher
+  // Bambeto à tort.
+  const siteRetrait = siteRetraitPourColis(colis, data);
   const bloc = (titre, site, x) => {
     doc.setFont(undefined, "bold"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
     doc.text(titre.toUpperCase(), x, y);
@@ -8278,7 +8401,7 @@ async function downloadInvoice(colis, data, options = {}) {
     doc.text(couper(`${site?.telephone || ""}${site?.horaires ? " · " + site.horaires : ""}`, 80), x, y + 15);
   };
   bloc("Site d'enregistrement", siteDepot, M);
-  bloc("Site de retrait", siteRetrait, W / 2 + 2);
+  if (siteRetrait) bloc("Site de retrait", siteRetrait, W / 2 + 2);
 
   // ── Pied de page ──────────────────────────────────────────────────────────
   doc.setDrawColor(...LINE); doc.line(M, Z.pied - 8, W - M, Z.pied - 8);
@@ -8301,7 +8424,9 @@ async function downloadInvoice(colis, data, options = {}) {
  */
 async function downloadTicketThermal(colis) {
   const jspdf = await loadJsPDF();
-  const dest = COUNTRIES.find((c) => c.code === colis.pays);
+  // colis.pays est le pays de route (l'origine pour un import) ; la devise affichée doit suivre
+  // le destinataire réel, toujours la Guinée pour un import.
+  const dest = COUNTRIES.find((c) => c.code === (colis.destinatairePays || colis.pays));
   const destCur = dest?.currency || "EUR";
   const statutPaiement = colis.reste <= 0 ? "PAYÉ" : (colis.paye > 0 ? "PAIEMENT PARTIEL" : "NON PAYÉ");
   const statutColor = colis.reste <= 0 ? [30, 140, 80] : (colis.paye > 0 ? [180, 120, 20] : [200, 40, 55]);
@@ -8796,6 +8921,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   const [paye, setPaye] = useState(String(colis.paye || ""));
   const [rabaisMontant, setRabaisMontant] = useState(String(colis.rabaisMontant || 0));
   const [rabaisDevise, setRabaisDevise] = useState(colis.rabaisDevise || "GNF");
+  const [err, setErr] = useState("");
   /*
    * Deux barèmes coexistent : le barème export (par pays et mode de transport) et les paliers
    * de réception utilisés pour les colis annoncés depuis l'Espace Client. On applique celui
@@ -8835,7 +8961,8 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
     // ligne qui faussera ensuite les totaux de poids, le chiffre d'affaires et les commissions.
     if (!(Number(poids) > 0)) { setErr("Le poids doit être supérieur à 0 kg."); return; }
     onSave({
-      expediteur, destinataire, telephone, pays, direction, mode,
+      expediteur, destinataire, telephone, pays, direction,
+      destinatairePays: direction === "import" ? "GN" : pays, mode,
       poids: Number(poids) || 0, volume: Number(volume) || 0,
       prixBrut, discountLoyalty, rabaisMontant: Number(rabaisMontant) || 0, rabaisDevise, rabaisEUR, prix, paye: payeNum, reste,
     });
@@ -8871,6 +8998,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
           </select>
         </Field>
         <Field label="Montant payé (EUR)"><input value={paye} onChange={(e) => setPaye(e.target.value)} style={inputStyle} /></Field>
+        {err && <div style={{ gridColumn: "1 / -1", color: "var(--danger-fg)", fontSize: 12.5 }}>{err}</div>}
         <div style={{ gridColumn: "1 / -1", background: "var(--surface2)", borderRadius: 12, padding: "12px 16px", display: "flex", justifyContent: "space-between" }}>
           <div style={{ fontSize: 13, color: "var(--text)" }}>Total recalculé : <strong>{fmt(prix, "EUR")}</strong></div>
           <div style={{ fontSize: 13, color: reste > 0 ? "var(--danger-fg)" : "var(--ok-fg)" }}>Reste à payer : <strong>{fmt(reste, "EUR")}</strong></div>
@@ -8884,13 +9012,14 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   );
 }
 
-function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser, onDeclarerLitige, onResoudreLitige, onMajRetour, onUpdate, onEncaisser, canManage, isAdmin, isChauffeur, data, session }) {
+function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser, onDeclarerLitige, onResoudreLitige, onMajRetour, onUpdate, onEncaisser, canManage, isAdmin, isChauffeur, data, session, notify }) {
   const [cancelling, setCancelling] = useState(false);
   const [refusing, setRefusing] = useState(false);
   const [motifRefus, setMotifRefus] = useState("");
   const [motif, setMotif] = useState("");
   const [editing, setEditing] = useState(false);
   const [showLitige, setShowLitige] = useState(false);
+  const [confirmerSuppression, setConfirmerSuppression] = useState(false);
   const [emplacement, setEmplacement] = useState(colis.emplacement || "");
   const [waState, setWaState] = useState("");
   const [waErreur, setWaErreur] = useState("");
@@ -9406,7 +9535,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
         <div style={{ display: "flex", gap: 14 }}>
           {canManage && <button onClick={() => setShowLitige(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "1px solid var(--warn-border)", color: "var(--warn-fg)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}><AlertTriangle size={14} /> {colis.litige?.statut === "Ouvert" ? "Résoudre le litige" : "Signaler un litige"}</button>}
           {isAdmin && <button onClick={() => setEditing(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--text)", fontSize: 13, cursor: "pointer" }}><Settings size={14} /> Modifier</button>}
-          {effectivePermission(session, "colis.supprimer") && <button onClick={onDelete} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--danger-fg)", fontSize: 13, cursor: "pointer" }}><Trash2 size={14} /> Supprimer</button>}
+          {effectivePermission(session, "colis.supprimer") && <button onClick={() => setConfirmerSuppression(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--danger-fg)", fontSize: 13, cursor: "pointer" }}><Trash2 size={14} /> Supprimer</button>}
           {effectivePermission(session, "colis.annuler") && colis.status !== "Annulé" && colis.status !== "Livré" && colis.status !== "Refusé" && <button onClick={() => setCancelling(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--warn-fg)", fontSize: 13, cursor: "pointer" }}><AlertTriangle size={14} /> Annuler le colis</button>}
           {effectivePermission(session, "colis.annuler") && ["Disponible au retrait", "Arrivé"].includes(colis.status) && <button onClick={() => setRefusing(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--danger-fg)", fontSize: 13, cursor: "pointer" }}><X size={14} /> Marquer refusé / retourné</button>}
           {canManage && (
@@ -9487,6 +9616,15 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
         </div>
       )}
       {showLitige && <LitigeModal colis={colis} onDeclarer={onDeclarerLitige} onResoudre={onResoudreLitige} onClose={() => setShowLitige(false)} />}
+      {confirmerSuppression && (
+        <ConfirmerAction
+          titre="Supprimer ce colis ?"
+          message={`Le colis ${colis.tracking} (${colis.destinataire}) sera définitivement supprimé.`}
+          consequence="Son historique, ses paiements et ses documents disparaissent avec lui. Cette action ne peut pas être annulée — réservée aux administrateurs."
+          onConfirmer={() => { setConfirmerSuppression(false); onDelete(); }}
+          onAnnuler={() => setConfirmerSuppression(false)}
+        />
+      )}
       {editing && <EditColisForm colis={colis} categories={data?.categories} remiseVolumeConfig={data?.remiseVolume} tarifsReception={data?.receptionTarifs} onClose={() => setEditing(false)} onSave={(patch) => { onUpdate(patch); setEditing(false); }} />}
       {bonSortieOuvert && (
         <Modal onClose={() => setBonSortieOuvert(false)} title="Enregistrer la remise du colis">
@@ -10375,7 +10513,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
     const commissionsAuto = colisPeriode.reduce((s, c) => s + calcCommission(c, data.commissionConfig, data.categories), 0); // EUR-équivalent (taux en €)
     const gnfRate = LIVE_RATES.GNF || CURRENCIES.GNF;
     const totalCommissions = commissionsAuto + commissionsManuelles / gnfRate;
-    const commissionsParAgence = (data.sites || []).map((s) => ({
+    const commissionsParAgence = sitesLocaux(data.sites).map((s) => ({
       nom: s.nom,
       montant: colisPeriode.filter((c) => (c.site || "Bambeto") === s.nom).reduce((sum, c) => sum + calcCommission(c, data.commissionConfig, data.categories), 0),
     }));
@@ -10428,7 +10566,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
   const confirmationDepense = depenseASupprimer && (
     <ConfirmerAction
       titre="Supprimer cette dépense ?"
-      message={`« ${depenseASupprimer.libelle || depenseASupprimer.categorie || "Dépense"} » sera retirée de la comptabilité.`}
+      message={`« ${depenseASupprimer.nom || "Dépense"} » sera retirée de la comptabilité.`}
       consequence="Le résultat de la période sera recalculé sans elle. Cette écriture ne peut pas être récupérée."
       onConfirmer={() => { removeDepense(depenseASupprimer.id); setDepenseASupprimer(null); }}
       onAnnuler={() => setDepenseASupprimer(null)}
@@ -10823,7 +10961,8 @@ function ImportExcelModal({ onClose, onImportMany, data, session }) {
   const [rows, setRows] = useState(null);
   const [fileErr, setFileErr] = useState("");
   const [importing, setImporting] = useState(false);
-  const [agence, setAgence] = useState(data?.sites?.[0]?.nom || "Bambeto");
+  const sitesGN = sitesLocaux(data?.sites);
+  const [agence, setAgence] = useState(sitesGN[0]?.nom || "Bambeto");
 
   function getVal(row, ...keys) {
     for (const k of keys) {
@@ -10933,7 +11072,7 @@ function ImportExcelModal({ onClose, onImportMany, data, session }) {
               </tbody>
             </table>
           </div>
-          <Field label="Agence d’enregistrement"><select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>{(data?.sites || [{ nom: "Bambeto" }]).map((s) => <option key={s.nom} value={s.nom}>{s.nom}</option>)}</select></Field>
+          <Field label="Agence d’enregistrement"><select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>{(sitesGN.length > 0 ? sitesGN : [{ nom: "Bambeto" }]).map((s) => <option key={s.nom} value={s.nom}>{s.nom}</option>)}</select></Field>
           <button onClick={importer} disabled={validRows.length === 0 || importing} style={{ background: validRows.length ? "#3ECB84" : "var(--surface2)", color: validRows.length ? "#0A2647" : "var(--muted)", border: "none", borderRadius: 8, padding: "11px 22px", fontSize: 13.5, fontWeight: 700, cursor: validRows.length ? "pointer" : "not-allowed", marginTop: 8 }}>
             {importing ? "Import en cours…" : `Importer ${validRows.length} colis`}
           </button>
@@ -11677,13 +11816,31 @@ function SauvegardePage({ data, persist, notify, session, onBack }) {
 function SitesOperationPage({ data, persist, notify, onBack }) {
   const [siteASupprimer, setSiteASupprimer] = useState(null);
   const sites = data.sites || [];
+  /*
+   * Seuls les sites en Guinée servent à l'enregistrement d'un colis et à l'agence de retrait de
+   * l'Espace Client : ce sont des points physiques tenus par nos agents. Un site à l'étranger
+   * (ajouté ici pour qu'un pays de destination ait un point de retrait sur le ticket, ex. Maroc)
+   * n'a pas sa place dans ces deux listes, sous peine de proposer aux agents un site où ils ne
+   * peuvent pas enregistrer de colis.
+   */
+  const sitesGN = sitesLocaux(sites);
   const [form, setForm] = useState(null);
 
   function saveSite() {
     if (!form.nom) return;
     const exists = sites.some((s) => s.id === form.id);
     const next = exists ? sites.map((s) => (s.id === form.id ? form : s)) : [...sites, { ...form, id: form.id || `s${Date.now()}` }];
-    persist({ ...data, sites: next });
+    /*
+     * Si le site édité est l'agence de retrait de l'Espace Client et qu'on lui retire son
+     * rattachement Guinée, cette référence deviendrait obsolète (un site étranger ne sert que de
+     * point de retrait sur le ticket, jamais d'agence Espace Client). On la fait suivre vers un
+     * autre site local plutôt que de laisser une agence de retrait qui n'existe plus vraiment.
+     */
+    let agenceRetraitClient = data.agenceRetraitClient;
+    if (exists && form.id === agenceRetraitClient && form.pays && form.pays !== "GN") {
+      agenceRetraitClient = sitesLocaux(next.filter((s) => s.id !== form.id))[0]?.id || "";
+    }
+    persist({ ...data, sites: next, agenceRetraitClient });
     notify?.(exists ? "Site mis à jour" : "Site ajouté");
     setForm(null);
   }
@@ -11702,7 +11859,7 @@ function SitesOperationPage({ data, persist, notify, onBack }) {
         />
       )}
         <ConfigPageHeader title="Sites d’opération" desc="Gérez vos points d’enregistrement et de retrait, et les informations affichées sur le ticket d’envoi." onBack={onBack} />
-        <button onClick={() => setForm({ nom: "", adresse: "", telephone: "", horaires: "", paiements: "", stockage: "" })} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}><Plus size={16} /> Ajouter un site</button>
+        <button onClick={() => setForm({ nom: "", pays: "GN", adresse: "", telephone: "", horaires: "", paiements: "", stockage: "" })} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}><Plus size={16} /> Ajouter un site</button>
       </div>
       <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "14px 16px", marginBottom: 16 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>Agence de retrait de l’Espace Client</div>
@@ -11712,7 +11869,7 @@ function SitesOperationPage({ data, persist, notify, onBack }) {
         <select value={data.agenceRetraitClient || "site-bambeto"}
           onChange={(e) => { persist({ ...data, agenceRetraitClient: e.target.value }); notify?.("Agence de retrait mise à jour"); }}
           style={{ ...inputStyle, maxWidth: 320, marginBottom: 0 }}>
-          {sites.map((s) => <option key={s.id} value={s.id}>{s.nom} — {s.adresse}</option>)}
+          {sitesGN.map((s) => <option key={s.id} value={s.id}>{s.nom} — {s.adresse}</option>)}
         </select>
       </div>
 
@@ -11720,9 +11877,16 @@ function SitesOperationPage({ data, persist, notify, onBack }) {
         {sites.map((s) => (
           <div key={s.id} style={{ background: "var(--surface)", borderRadius: 14, padding: 18, border: "1px solid var(--border)" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{s.nom}</div>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{s.nom}</div>
+                {s.pays && s.pays !== "GN" && (
+                  <div style={{ fontSize: 11, color: "var(--info-fg)", marginTop: 2 }}>
+                    {FLAGS[s.pays] || ""} {COUNTRIES.find((c) => c.code === s.pays)?.name || s.pays} · retrait uniquement
+                  </div>
+                )}
+              </div>
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => setForm(s)} style={{ background: "none", border: "none", color: "var(--info-fg)", cursor: "pointer" }}><Settings size={14} /></button>
+                <button onClick={() => setForm({ pays: "GN", ...s })} style={{ background: "none", border: "none", color: "var(--info-fg)", cursor: "pointer" }}><Settings size={14} /></button>
                 <button onClick={() => setSiteASupprimer(s)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={14} /></button>
               </div>
             </div>
@@ -11738,6 +11902,16 @@ function SitesOperationPage({ data, persist, notify, onBack }) {
       {form && (
         <Modal onClose={() => setForm(null)} title={form.id ? "Modifier le site" : "Nouveau site"}>
           <Field label="Nom"><input value={form.nom} onChange={(e) => setForm({ ...form, nom: e.target.value })} style={inputStyle} placeholder="ex: Bambeto" /></Field>
+          <Field label="Pays">
+            <select value={form.pays || "GN"} onChange={(e) => setForm({ ...form, pays: e.target.value })} style={inputStyle}>
+              {COUNTRIES.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code] || ""} {c.name}</option>)}
+            </select>
+          </Field>
+          {form.pays && form.pays !== "GN" && (
+            <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 8, padding: "8px 12px", fontSize: 11.5, color: "var(--muted)", marginBottom: 14 }}>
+              Ce site n’apparaîtra pas dans les agences d’enregistrement ni comme agence de retrait de l’Espace Client — il servira uniquement de point de retrait sur le ticket des colis envoyés vers ce pays.
+            </div>
+          )}
           <Field label="Adresse"><input value={form.adresse} onChange={(e) => setForm({ ...form, adresse: e.target.value })} style={inputStyle} /></Field>
           <Field label="Téléphone"><input value={form.telephone || ""} onChange={(e) => setForm({ ...form, telephone: e.target.value })} style={inputStyle} placeholder="+224..." /></Field>
           <Field label="Horaires"><input value={form.horaires} onChange={(e) => setForm({ ...form, horaires: e.target.value })} style={inputStyle} placeholder="Lun-Sam 8h-18h" /></Field>
@@ -12253,7 +12427,10 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
                 </td>
                 <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{u.identifiant}</td>
                 <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{u.telephone}</td>
-                <td style={{ padding: "12px 16px", fontSize: 13 }}><span style={{ background: "var(--surface2)", color: "var(--text)", padding: "4px 10px", borderRadius: 20, fontSize: 11.5, fontWeight: 600 }}>{u.role}</span></td>
+                <td style={{ padding: "12px 16px", fontSize: 13 }}>
+                  <span style={{ background: "var(--surface2)", color: "var(--text)", padding: "4px 10px", borderRadius: 20, fontSize: 11.5, fontWeight: 600 }}>{u.role}</span>
+                  {u.role !== "Administrateur" && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>{FLAGS[u.paysOperation || "GN"] || ""} basé {(COUNTRIES.find((c) => c.code === (u.paysOperation || "GN"))?.name) || "Guinée"}</div>}
+                </td>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)" }}>{u.role === "Administrateur" ? "Tous les pays" : (u.paysAutorises?.length ? u.paysAutorises.map((c) => FLAGS[c]).join(" ") : "Tous les pays")}</td>
                 <td style={{ padding: "12px 16px", fontSize: 13 }}>{u.twoFA ? <ShieldCheck size={15} color="var(--ok-fg)" /> : "—"}</td>
                 <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>{effectivePermission(session, "users.gerer") && <button onClick={() => setUtilisateurAReinit(u)} title="Réinitialiser le mot de passe" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><Key size={15} /></button>}{u.id !== session?.id && (data.users || []).filter((x) => x.role === "Administrateur").length > 1 && effectivePermission(session, "users.gerer") && <button onClick={() => removeUser(u.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={15} /></button>}</td>
@@ -12304,6 +12481,7 @@ function UserProfilePage({ user, onSave, onBack, sites }) {
   const [email, setEmail] = useState(user.email || "");
   const [telephone, setTelephone] = useState(user.telephone || "");
   const [role, setRole] = useState(user.role);
+  const [paysOperation, setPaysOperation] = useState(user.paysOperation || "GN");
   const [agence, setAgence] = useState(user.agence || "");
   const [paysAutorises, setPaysAutorises] = useState(user.paysAutorises || COUNTRIES.filter((c) => c.code !== "GN").map((c) => c.code));
   const [permissionsOverride, setPermissionsOverride] = useState(user.permissionsOverride || {});
@@ -12312,6 +12490,18 @@ function UserProfilePage({ user, onSave, onBack, sites }) {
 
   function toggleCountry(code) {
     setPaysAutorises((list) => (list.includes(code) ? list.filter((c) => c !== code) : [...list, code]));
+  }
+  /*
+   * Changer le pays d'opération réinitialise les destinations à la combinaison logique par
+   * défaut : un agent basé en Guinée exporte vers n'importe quel pays, un agent basé à
+   * l'étranger (ex. Paris) ne gère par défaut que les colis vers son propre pays — Guinée
+   * toujours implicite (voir allowedCountries()). L'administrateur reste libre de cocher
+   * d'autres pays ensuite pour lui accorder un accès multi-pays.
+   */
+  function onChangePaysOperation(code) {
+    setPaysOperation(code);
+    setAgence("");
+    setPaysAutorises(code === "GN" ? COUNTRIES.filter((c) => c.code !== "GN").map((c) => c.code) : [code]);
   }
   function togglePermission(key) {
     const current = effectivePermission({ role, permissionsOverride }, key);
@@ -12323,7 +12513,7 @@ function UserProfilePage({ user, onSave, onBack, sites }) {
     setPermissionsOverride(next);
   }
   function save() {
-    onSave({ ...user, prenom, nom, email, telephone, role, agence: role === "Administrateur" || role === "Comptable" ? "" : agence, paysAutorises: isAdmin ? [] : paysAutorises, permissionsOverride: isAdmin ? {} : permissionsOverride });
+    onSave({ ...user, prenom, nom, email, telephone, role, paysOperation, agence: role === "Administrateur" || role === "Comptable" ? "" : agence, paysAutorises: isAdmin ? [] : paysAutorises, permissionsOverride: isAdmin ? {} : permissionsOverride });
   }
 
   return (
@@ -12354,11 +12544,21 @@ function UserProfilePage({ user, onSave, onBack, sites }) {
               {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
             </select>
           </Field>
+          {!isAdmin && (
+            <Field label="Pays d’opération">
+              <select value={paysOperation} onChange={(e) => onChangePaysOperation(e.target.value)} style={inputStyle}>
+                {COUNTRIES.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code] || ""} {c.name}</option>)}
+              </select>
+              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
+                Pays où travaille cette personne — son point expéditeur. Détermine l’agence qu’elle peut choisir et les destinations proposées par défaut.
+              </div>
+            </Field>
+          )}
           {(role === "Agent" || role === "Chauffeur") && (
             <Field label="Agence assignée">
               <select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>
                 <option value="">Toutes les agences (aucune restriction)</option>
-                {(sites || []).map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}
+                {sitesPourPays(sites, paysOperation).map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}
               </select>
             </Field>
           )}
@@ -12367,14 +12567,19 @@ function UserProfilePage({ user, onSave, onBack, sites }) {
           {isAdmin ? (
             <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "10px 12px", fontSize: 13, color: "var(--text)" }}>🌍 Tous les pays (Administrateur)</div>
           ) : (
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(140px,1fr))", gap: 8, marginBottom: 8 }}>
-              {COUNTRIES.filter((c) => c.code !== "GN").map((c) => (
-                <label key={c.code} style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface2)", borderRadius: 8, padding: "8px 10px", cursor: "pointer", fontSize: 12.5, color: "var(--text)" }}>
-                  <input type="checkbox" checked={paysAutorises.includes(c.code)} onChange={() => toggleCountry(c.code)} />
-                  {FLAGS[c.code]} {c.name}
-                </label>
-              ))}
-            </div>
+            <>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 8 }}>
+                Guinée toujours incluse. Par défaut, seul le pays d’opération ci-dessus est proposé — cochez-en d’autres pour autoriser un accès multi-pays.
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(140px,1fr))", gap: 8, marginBottom: 8 }}>
+                {COUNTRIES.filter((c) => c.code !== "GN").map((c) => (
+                  <label key={c.code} style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface2)", borderRadius: 8, padding: "8px 10px", cursor: "pointer", fontSize: 12.5, color: "var(--text)" }}>
+                    <input type="checkbox" checked={paysAutorises.includes(c.code)} onChange={() => toggleCountry(c.code)} />
+                    {FLAGS[c.code]} {c.name}
+                  </label>
+                ))}
+              </div>
+            </>
           )}
           {!isAdmin && paysAutorises.length === 0 && <div style={{ fontSize: 11.5, color: "var(--warn-fg)", marginBottom: 8 }}>Aucun pays coché = accès à tous les pays par défaut.</div>}
 
@@ -12440,6 +12645,7 @@ function UserForm({ onClose, onSave, existing, sites }) {
   const [identifiant, setIdentifiant] = useState("");
   const [motdepasse, setMotdepasse] = useState("");
   const [role, setRole] = useState("Agent");
+  const [paysOperation, setPaysOperation] = useState("GN");
   const [agence, setAgence] = useState("");
   const [twoFA, setTwoFA] = useState(false);
   const [paysAutorises, setPaysAutorises] = useState(COUNTRIES.filter((c) => c.code !== "GN").map((c) => c.code));
@@ -12448,13 +12654,19 @@ function UserForm({ onClose, onSave, existing, sites }) {
   function toggleCountry(code) {
     setPaysAutorises((list) => (list.includes(code) ? list.filter((c) => c !== code) : [...list, code]));
   }
+  // Cf. UserProfilePage : changer le pays d'opération recalcule les destinations par défaut.
+  function onChangePaysOperation(code) {
+    setPaysOperation(code);
+    setAgence("");
+    setPaysAutorises(code === "GN" ? COUNTRIES.filter((c) => c.code !== "GN").map((c) => c.code) : [code]);
+  }
   async function submit(e) {
     e.preventDefault();
     if (!prenom || !nom || !email || !telephone || !identifiant || !motdepasse) { setErr("Merci de renseigner tous les champs."); return; }
     if (!/^\S+@\S+\.\S+$/.test(email)) { setErr("Adresse email invalide."); return; }
     if (existing.some((u) => u.identifiant === identifiant.trim())) { setErr("Cet identifiant existe déjà."); return; }
     const identifiants = await creerIdentifiantsMotDePasse(motdepasse);
-    onSave({ id: `u${Date.now()}`, prenom, nom, email: email.trim(), telephone, identifiant: identifiant.trim(), ...identifiants, role, agence: role === "Administrateur" || role === "Comptable" ? "" : agence, twoFA, paysAutorises: role === "Administrateur" ? [] : paysAutorises });
+    onSave({ id: `u${Date.now()}`, prenom, nom, email: email.trim(), telephone, identifiant: identifiant.trim(), ...identifiants, role, paysOperation, agence: role === "Administrateur" || role === "Comptable" ? "" : agence, twoFA, paysAutorises: role === "Administrateur" ? [] : paysAutorises });
   }
   return (
     <Modal onClose={onClose} title="Créer un compte utilisateur">
@@ -12479,12 +12691,22 @@ function UserForm({ onClose, onSave, existing, sites }) {
         <div style={{ gridColumn: "1 / -1" }}>
           <Field label="Rôle"><select value={role} onChange={(e) => setRole(e.target.value)} style={inputStyle}>{ROLES.map((r) => <option key={r} value={r}>{r}</option>)}</select></Field>
         </div>
+        {role !== "Administrateur" && (
+          <div style={{ gridColumn: "1 / -1" }}>
+            <Field label="Pays d’opération">
+              <select value={paysOperation} onChange={(e) => onChangePaysOperation(e.target.value)} style={inputStyle}>
+                {COUNTRIES.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code] || ""} {c.name}</option>)}
+              </select>
+            </Field>
+            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: -8, marginBottom: 10 }}>Pays où travaille cette personne — son point expéditeur. Détermine l’agence proposée et les destinations autorisées par défaut.</div>
+          </div>
+        )}
         {(role === "Agent" || role === "Chauffeur") && (
           <div style={{ gridColumn: "1 / -1" }}>
             <Field label="Agence assignée">
               <select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>
                 <option value="">Toutes les agences (aucune restriction)</option>
-                {(sites || []).map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}
+                {sitesPourPays(sites, paysOperation).map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}
               </select>
             </Field>
             <div style={{ fontSize: 11, color: "var(--muted)", marginTop: -8, marginBottom: 10 }}>Si une agence est choisie, cet utilisateur ne verra que les colis, statistiques et bordereaux de cette agence.</div>
@@ -12492,7 +12714,8 @@ function UserForm({ onClose, onSave, existing, sites }) {
         )}
         {role !== "Administrateur" && (
           <div style={{ gridColumn: "1 / -1" }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--muted)", marginBottom: 8 }}>Pays de destination autorisés</div>
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--muted)", marginBottom: 4 }}>Pays de destination autorisés</div>
+            <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8 }}>Guinée toujours incluse. Cochez d’autres pays pour autoriser un accès multi-pays.</div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(130px,1fr))", gap: 8, marginBottom: 8 }}>
               {COUNTRIES.filter((c) => c.code !== "GN").map((c) => (
                 <label key={c.code} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", borderRadius: 8, padding: "6px 9px", cursor: "pointer", fontSize: 12, color: "var(--text)" }}>

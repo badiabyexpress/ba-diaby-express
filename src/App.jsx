@@ -6843,12 +6843,18 @@ const WIZARD_STEPS = [
   { key: "resume", label: "Résumé", icon: CheckCircle2 },
 ];
 
-function StepIndicator({ step }) {
+/*
+ * Chaque pastille est cliquable pour sauter directement à cette étape — pratique pour revenir
+ * corriger un champ plus haut sans repasser par "Précédent" à chaque fois, ou pour avancer voir
+ * le résumé sans ressaisir. Le bouton "Suivant" garde ses propres vérifications (téléphone,
+ * poids...) : sauter une étape ne contourne donc pas la validation finale à l'enregistrement.
+ */
+function StepIndicator({ step, onStepClick }) {
   return (
     <div style={{ display: "flex", alignItems: "center", marginBottom: 22 }}>
       {WIZARD_STEPS.map((s, i) => (
         <React.Fragment key={s.key}>
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+          <button type="button" onClick={() => onStepClick?.(i)} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6, background: "none", border: "none", padding: 0, cursor: onStepClick ? "pointer" : "default" }}>
             <div style={{
               width: 30, height: 30, borderRadius: "50%", display: "grid", placeItems: "center",
               background: i < step ? "#3D63FF" : i === step ? "var(--brand-solid)" : "var(--surface2)",
@@ -6856,7 +6862,7 @@ function StepIndicator({ step }) {
               color: i <= step ? "#fff" : "var(--muted)", fontSize: 12.5, fontWeight: 700,
             }}>{i < step ? <CheckCircle2 size={15} /> : <s.icon size={14} />}</div>
             <div style={{ fontSize: 10.5, color: i <= step ? "var(--text)" : "var(--muted)", fontWeight: 600, whiteSpace: "nowrap" }}>{s.label}</div>
-          </div>
+          </button>
           {i < WIZARD_STEPS.length - 1 && <div style={{ flex: 1, height: 2, background: i < step ? "#3D63FF" : "var(--surface2)", margin: "0 6px 18px" }} />}
         </React.Fragment>
       ))}
@@ -7215,7 +7221,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
   return (
     <Modal onClose={onClose} title="Nouveau Colis" wide saisieEnCours={!!expPrenom || !!expNom || !!destPrenom || !!destNom || produits.some((p) => p.nom)}>
       <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14 }}>📍 Envoi de {expCountry?.name.toUpperCase()} {FLAGS[expPays]} vers {destCountry?.name.toUpperCase()} {FLAGS[destPays]}</div>
-      <StepIndicator step={step} />
+      <StepIndicator step={step} onStepClick={(i) => { setErr(""); setStep(i); }} />
       <div>
         {step === 0 && (
           <div>

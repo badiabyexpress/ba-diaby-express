@@ -7942,17 +7942,22 @@ async function downloadLabel(colis) {
   doc.setDrawColor(...INK); doc.setLineWidth(0.5); doc.rect(0.6, 0.6, W - 1.2, H - 1.2);
 
   // ── En-tête : logo + wordmark + mode de transport ──────────────────────────
+  // Double filet (rouge fin + marine épais) sous l'en-tête : traitement en bloc de couleur plein,
+  // comme les étiquettes des grands transporteurs internationaux (DHL, FedEx), plutôt qu'un trait
+  // de séparation discret — l'étiquette doit s'identifier au premier coup d'œil, même de loin.
   doc.addImage(DEFAULT_LOGO, "PNG", M, 4.5, 14, 14);
-  doc.setTextColor(...NAVY); doc.setFont(undefined, "bold"); doc.setFontSize(12);
+  doc.setTextColor(...NAVY); doc.setFont(undefined, "bold"); doc.setFontSize(12.5);
   doc.text("BA-DIABY", M + 17, 10.5);
   doc.setTextColor(...RED);
   doc.text("EXPRESS", M + 17, 16.5);
   const modeLabel = colis.mode === "air" ? "AÉRIEN" : "MARITIME";
-  const modeW = doc.getTextWidth(modeLabel) + 11;
-  doc.setFillColor(...NAVY); doc.roundedRect(W - M - modeW, 6, modeW, 7, 3.5, 3.5, "F");
-  doc.setTextColor(255, 255, 255); doc.setFontSize(7.5); doc.setFont(undefined, "bold");
-  doc.text(modeLabel, W - M - modeW / 2, 10.5, { align: "center" });
-  doc.setFillColor(...RED); doc.rect(0.6, Z.filetHaut, W - 1.2, 0.8, "F");
+  doc.setFontSize(7.5); doc.setFont(undefined, "bold");
+  const modeW = doc.getTextWidth(modeLabel) + 12;
+  doc.setFillColor(...RED); doc.roundedRect(W - M - modeW, 5.5, modeW, 8, 4, 4, "F");
+  doc.setTextColor(255, 255, 255);
+  doc.text(modeLabel, W - M - modeW / 2, 10.7, { align: "center" });
+  doc.setFillColor(...NAVY); doc.rect(0.6, Z.filetHaut - 1.6, W - 1.2, 1.6, "F");
+  doc.setFillColor(...RED); doc.rect(0.6, Z.filetHaut, W - 1.2, 0.9, "F");
 
   // ── Statut de paiement (pastille pleine, jamais de montant) + route ────────
   const pastille = paye ? "PAYÉ" : "NON PAYÉ";
@@ -7964,9 +7969,13 @@ async function downloadLabel(colis) {
   doc.text(pastille, M + pW / 2, Z.statut, { align: "center" });
   doc.setFont(undefined, "bold"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
   doc.text(`GN-${colis.pays}`, W - M, Z.statut, { align: "right" });
-  hr(Z.sepStatut);
 
   // ── Destinataire (zone fixe : le texte s'adapte, la zone ne bouge pas) ─────
+  // Fond teinté sur toute la zone réservée (jamais sur le texte débordant, elle est bornée par
+  // Z.destMax comme le texte) : l'adresse de livraison est l'information la plus importante de
+  // l'étiquette pour l'agent en entrepôt, elle doit sauter aux yeux en un coup d'œil. Ce bloc de
+  // couleur sert lui-même de séparateur visuel, plus net qu'un simple filet.
+  doc.setFillColor(244, 247, 251); doc.rect(0.6, Z.sepStatut, W - 1.2, Z.destMax - Z.sepStatut, "F");
   let y = Z.destinataire + 4.5;
   eyebrow("Livrer à / Deliver to", M, y);
   y += 5.5;
@@ -8052,9 +8061,12 @@ async function downloadLabel(colis) {
   });
 
   // ── Bandeau final : route + site (deux informations en un seul bloc) ───────
+  // Filet rouge au-dessus, comme sous l'en-tête : les deux bandes de couleur encadrent
+  // l'étiquette du haut en bas, pour une identité reconnaissable même à distance.
+  doc.setFillColor(...RED); doc.rect(0.6, Z.bandeau - 0.9, W - 1.2, 0.9, "F");
   doc.setFillColor(...NAVY); doc.rect(0.6, Z.bandeau, W - 1.2, 7.5, "F");
-  doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold"); doc.setFontSize(7.4);
-  doc.text(routeLabel(colis.pays, colis.direction).toUpperCase(), W / 2, Z.bandeau + 3.4, { align: "center" });
+  doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold"); doc.setFontSize(7.8);
+  doc.text(routeLabel(colis.pays, colis.direction).toUpperCase(), W / 2, Z.bandeau + 3.6, { align: "center" });
   doc.setFontSize(5.8); doc.setTextColor(178, 196, 222);
   doc.text("WWW.BA-DIABY-EXPRESS.COM · TRANSPORT SOUMIS AUX CGV BA-DIABY EXPRESS", W / 2, Z.bandeau + 6.4, { align: "center" });
 
@@ -8573,7 +8585,7 @@ async function downloadInvoice(colis, data, options = {}) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF());
   const W = 210, H = 297, M = 16;
-  const NAVY = [10, 38, 71], INK = [26, 30, 38], MUTED = [125, 133, 145], LINE = [226, 230, 236];
+  const NAVY = [10, 38, 71], RED = [214, 39, 63], INK = [26, 30, 38], MUTED = [125, 133, 145], LINE = [226, 230, 236];
   const TINT = [244, 247, 251];
 
   // colis.pays est le pays de route (l'origine pour un import) ; le destinataire réel — et donc
@@ -8607,7 +8619,11 @@ async function downloadInvoice(colis, data, options = {}) {
   };
 
   // ── En-tête ───────────────────────────────────────────────────────────────
+  // Filet rouge en pied de bandeau : même traitement bicolore navy/rouge que l'étiquette,
+  // pour que les deux documents portent la même identité de marque reconnaissable au premier
+  // coup d'œil, comme les documents des grands transporteurs internationaux.
   doc.setFillColor(...NAVY); doc.rect(0, 0, W, Z.bandeau, "F");
+  doc.setFillColor(...RED); doc.rect(0, Z.bandeau - 1.4, W, 1.4, "F");
   doc.addImage(DEFAULT_LOGO, "PNG", M, 7, 20, 20);
   doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold"); doc.setFontSize(16);
   doc.text("BA-DIABY EXPRESS", M + 25, 16);
@@ -8676,8 +8692,9 @@ async function downloadInvoice(colis, data, options = {}) {
 
   // ── Produits ──────────────────────────────────────────────────────────────
   y = Z.produits;
+  doc.setFillColor(...RED); doc.rect(M, y - 7.6, 2, 4.4, "F");
   doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...INK);
-  doc.text("DÉTAIL DES ARTICLES", M, y - 4);
+  doc.text("DÉTAIL DES ARTICLES", M + 4, y - 4);
 
   const COLS = [
     { t: "Article", x: M + 2, l: 92 },
@@ -8737,6 +8754,10 @@ async function downloadInvoice(colis, data, options = {}) {
   doc.setFillColor(250, 251, 253);
   doc.setDrawColor(...LINE); doc.setLineWidth(0.3);
   doc.roundedRect(panL - 8, y - 8, W - M - panL + 8, 44, 3, 3, "FD");
+  // Liseré rouge sur le bord gauche du panneau : signale le bloc financier le plus important
+  // du document sans avoir à foncer tout le panneau, qui doit rester lisible sur les montants.
+  // Légèrement rétracté en haut/bas pour ne pas déborder des coins arrondis du panneau (rayon 3 mm).
+  doc.setFillColor(...RED); doc.rect(panL - 8, y - 5, 1.4, 38, "F");
   const ligneT = (label, valeur, gras) => {
     doc.setFont(undefined, gras ? "bold" : "normal"); doc.setFontSize(gras ? 9.5 : 8.5);
     doc.setTextColor(...(gras ? INK : MUTED));

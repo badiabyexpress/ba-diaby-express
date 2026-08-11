@@ -1083,8 +1083,15 @@ function useIsMobile() {
  * PAS — auparavant la session n'était pas conservée du tout, si bien qu'un simple retour sur
  * l'onglet (fréquent sur téléphone, où le navigateur décharge les pages en arrière-plan)
  * ramenait à l'écran de connexion.
+ *
+ * Une fois connecté dans la journée, un agent doit rester connecté sur son appareil tant qu'il
+ * l'utilise au moins une fois toutes les 6 h — d'où un délai large plutôt que les 10 minutes
+ * d'origine, pensées pour un usage bureautique classique et trop courtes pour un agent qui
+ * n'ouvre l'application que ponctuellement entre deux colis. L'Espace Client (accès public,
+ * potentiellement sur un appareil partagé) garde un délai plus court.
  */
-const MINUTES_INACTIVITE = 10;
+const MINUTES_INACTIVITE_AGENT = 360;
+const MINUTES_INACTIVITE_CLIENT = 10;
 const CLE_SESSION_CLIENT = "bde-session-client";
 const CLE_SESSION = "bde-session";
 
@@ -1094,7 +1101,7 @@ function lireSessionEnregistree() {
     if (!brut) return null;
     const { userId, derniereActivite } = JSON.parse(brut);
     if (!userId || !derniereActivite) return null;
-    if (Date.now() - derniereActivite > MINUTES_INACTIVITE * 60000) {
+    if (Date.now() - derniereActivite > MINUTES_INACTIVITE_AGENT * 60000) {
       window.localStorage.removeItem(CLE_SESSION);
       return null;
     }
@@ -1108,7 +1115,7 @@ function lireSessionClient() {
     if (!brut) return null;
     const { compteId, derniereActivite } = JSON.parse(brut);
     if (!compteId || !derniereActivite) return null;
-    if (Date.now() - derniereActivite > MINUTES_INACTIVITE * 60000) {
+    if (Date.now() - derniereActivite > MINUTES_INACTIVITE_CLIENT * 60000) {
       window.localStorage.removeItem(CLE_SESSION_CLIENT);
       return null;
     }

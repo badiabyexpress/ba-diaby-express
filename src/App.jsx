@@ -8246,9 +8246,12 @@ async function downloadInvoice(colis, data, options = {}) {
   doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(255, 255, 255);
   doc.text("TOTAL À PAYER", panL, y + 2.5);
   doc.text(fmtGNF(colis.prix * gnf), W - M, y + 2.5, { align: "right" });
-  // L'équivalent en euros tient dans le bandeau : une ligne de moins, donc plus de marge.
-  doc.setFont(undefined, "normal"); doc.setFontSize(7); doc.setTextColor(205, 218, 236);
-  doc.text(`~ ${fmt(colis.prix, "EUR")}`, W - M, y + 6, { align: "right" });
+  // L'équivalent en devise de destination tient dans le bandeau : une ligne de moins, donc plus de marge.
+  const deviseDest = dest?.currency || "EUR";
+  if (deviseDest !== "GNF") {
+    doc.setFont(undefined, "normal"); doc.setFontSize(7); doc.setTextColor(205, 218, 236);
+    doc.text(`~ ${fmt(colis.prix, deviseDest)}`, W - M, y + 6, { align: "right" });
+  }
   y += 13;
   if (paye > 0) {
     doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
@@ -8267,7 +8270,20 @@ async function downloadInvoice(colis, data, options = {}) {
   doc.setDrawColor(...LINE); doc.setLineWidth(0.3); doc.line(M, y - 8, W - M, y - 8);
   const sites = data?.sites || [];
   const siteDepot = sites.find((s) => s.nom === colis.site) || sites[0];
-  const siteRetrait = sites.find((s) => s.id === (data?.agenceRetraitClient || "site-bambeto")) || sites[0];
+  /*
+   * Le retrait n'a lieu à une agence Guinée (Bambeto par défaut) que pour les colis livrés en
+   * Guinée. Pour un envoi vers l'étranger (export), le retrait se fait chez le destinataire — on
+   * n'affiche une agence que si une agence de réception existe réellement pour ce pays ; sinon
+   * le bloc est simplement omis plutôt que d'afficher Bambeto à tort.
+   */
+  const versEtranger = (colis.direction || "export") === "export" && dest?.code && dest.code !== "GN";
+  let siteRetrait = null;
+  if (versEtranger) {
+    const agenceEtrangere = (data?.agencesReception || {})[dest.code];
+    siteRetrait = agenceEtrangere ? { nom: `Agence ${dest.name}`, ...agenceEtrangere } : null;
+  } else {
+    siteRetrait = sites.find((s) => s.id === (data?.agenceRetraitClient || "site-bambeto")) || sites[0];
+  }
   const bloc = (titre, site, x) => {
     doc.setFont(undefined, "bold"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
     doc.text(titre.toUpperCase(), x, y);
@@ -8278,7 +8294,7 @@ async function downloadInvoice(colis, data, options = {}) {
     doc.text(couper(`${site?.telephone || ""}${site?.horaires ? " · " + site.horaires : ""}`, 80), x, y + 15);
   };
   bloc("Site d'enregistrement", siteDepot, M);
-  bloc("Site de retrait", siteRetrait, W / 2 + 2);
+  if (siteRetrait) bloc("Site de retrait", siteRetrait, W / 2 + 2);
 
   // ── Pied de page ──────────────────────────────────────────────────────────
   doc.setDrawColor(...LINE); doc.line(M, Z.pied - 8, W - M, Z.pied - 8);

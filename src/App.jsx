@@ -318,6 +318,18 @@ function normalizeBordereauStatut(statut) {
   if (statut === "Reçu") return "Livré";
   return BORDEREAU_STATUSES.includes(statut) ? statut : "Brouillon";
 }
+/**
+ * Correspondance entre le statut du bordereau (le lot entier) et le statut à appliquer aux
+ * colis qu'il contient, quand on fait avancer le bordereau via "Statut suivant".
+ *
+ * "Brouillon" et "Validé" n'ont pas d'équivalent colis (le premier précède tout envoi, le
+ * second est une étape purement administrative) : ces deux-là n'entraînent aucun changement
+ * de statut sur les colis. "Livré" au niveau du bordereau signifie que le lot est arrivé et
+ * traité, pas que chaque client a déjà récupéré son colis — la remise finale à chaque client
+ * reste une confirmation individuelle et volontaire (comme "Faire avancer les colis" le fait
+ * déjà en s'arrêtant à "Disponible au retrait"), donc le bordereau ne force jamais "Livré".
+ */
+const BORDEREAU_VERS_STATUT_COLIS = { "Acheminement": "En transit", "Arrivé": "Arrivé", "Livré": "Disponible au retrait" };
 
 const PERMISSIONS_SCHEMA = [
   { group: "COLIS", permissions: [
@@ -6267,12 +6279,38 @@ function BordereauxPage({ data, persist, session, notify }) {
     const idx = BORDEREAU_STATUSES.indexOf(cur);
     const next = BORDEREAU_STATUSES[Math.min(idx + 1, BORDEREAU_STATUSES.length - 1)];
     const entry = { statut: next, date: new Date().toISOString(), par: `${session.prenom} ${session.nom}` };
+
+    /*
+     * Le statut du bordereau et celui de ses colis vivaient jusqu'ici dans deux compteurs
+     * complètement déconnectés : faire avancer le bordereau ("Statut suivant") ne touchait
+     * jamais le statut des colis, et inversement. Un bordereau pouvait ainsi afficher "Livré"
+     * pendant que ses colis restaient "Enregistré", invisibles pour les clients. On répercute
+     * donc ici le même changement sur les colis concernés, sans jamais faire reculer un colis
+     * déjà plus avancé (un agent qui a fait avancer certains colis à la main via "Faire avancer
+     * les colis" ne verra rien se dédoubler) ni toucher un colis Annulé/Refusé.
+     */
+    const statutColisCible = BORDEREAU_VERS_STATUT_COLIS[next];
+    let colisMaj = data.colis;
+    let colisSynchronises = 0;
+    if (statutColisCible) {
+      const cibleIdx = STATUSES.indexOf(statutColisCible);
+      const maintenant = new Date().toISOString();
+      colisMaj = data.colis.map((c) => {
+        if (!b.colisTrackings.includes(c.tracking)) return c;
+        if (["Annulé", "Refusé"].includes(c.status)) return c;
+        if (STATUSES.indexOf(c.status) >= cibleIdx) return c;
+        colisSynchronises++;
+        return { ...c, status: statutColisCible, historique: [...(c.historique || []), { status: statutColisCible, date: maintenant }] };
+      });
+    }
+
     persist({
       ...data,
+      colis: colisMaj,
       bordereaux: bordereaux.map((x) => (x.id === id ? { ...x, statut: next, historique: [...(x.historique || []), entry], dateModif: new Date().toISOString() } : x)),
-      activityLog: pushActivity(data, session, "Statut du bordereau modifié", `${b.numero} → ${next}`),
+      activityLog: pushActivity(data, session, "Statut du bordereau modifié", `${b.numero} → ${next}` + (colisSynchronises ? ` (${colisSynchronises} colis synchronisés)` : "")),
     });
-    notify?.(`Bordereau ${b.numero} : ${next}`);
+    notify?.(`Bordereau ${b.numero} : ${next}` + (colisSynchronises ? ` — ${colisSynchronises} colis mis à jour` : ""));
   }
 
   if (mode === "creation") return <BordereauCreation data={data} session={session} onCancel={() => setMode("liste")} onCreate={creerBordereau} />;
@@ -7804,10 +7842,22 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   doc.text(`Bordereau d’expédition${bordereau?.numero ? ` — ${bordereau.numero}` : ""}`, 37, 19.5);
   doc.setFontSize(8); doc.text(`Route : ${label} · Généré le ${new Date().toLocaleDateString("fr-FR")}`, 37, 25);
   if (bordereau?.statut) {
-    doc.setFillColor(bordereau.statut === "Reçu" ? 62 : 91, bordereau.statut === "Reçu" ? 203 : 141, bordereau.statut === "Reçu" ? 132 : 239);
-    doc.roundedRect(170, 9, 26, 8, 4, 4, "F");
-    doc.setFontSize(8); doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold");
-    doc.text(bordereau.statut.toUpperCase(), 183, 14.3, { align: "center" });
+    /*
+     * Comparait autrefois à "Reçu", un statut disparu depuis le passage au parcours en 5
+     * étapes (Brouillon → Acheminement → Validé → Arrivé → Livré) : la pastille restait donc
+     * bleue en permanence, même sur un bordereau réellement Livré. On normalise le statut et
+     * on lui donne une couleur par étape, cohérente avec celle affichée dans l'application.
+     */
+    const statutBadge = normalizeBordereauStatut(bordereau.statut);
+    const COULEURS_STATUT_BORDEREAU = {
+      "Brouillon": [148, 156, 172], "Acheminement": [91, 141, 239], "Validé": [214, 158, 46],
+      "Arrivé": [61, 180, 140], "Livré": [62, 203, 132],
+    };
+    const [r, g, bl] = COULEURS_STATUT_BORDEREAU[statutBadge] || [91, 141, 239];
+    doc.setFillColor(r, g, bl);
+    doc.roundedRect(168, 9, 30, 8, 4, 4, "F");
+    doc.setFontSize(7.5); doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold");
+    doc.text(statutBadge.toUpperCase(), 183, 14.3, { align: "center" });
   }
 
   // Cartes statistiques

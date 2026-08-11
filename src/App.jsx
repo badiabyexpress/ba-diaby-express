@@ -329,6 +329,15 @@ const PERMISSIONS_SCHEMA = [
     { key: "colis.annuler", label: "Annuler un colis" },
     { key: "colis.enregistrer_paiement", label: "Enregistrer un paiement" },
     { key: "colis.supprimer", label: "Supprimer un colis" },
+    /*
+     * Import Excel, bordereau de réception et règlement groupé agissent sur plusieurs colis à la
+     * fois (import en masse, encaissement groupé) — des actions plus sensibles que la création
+     * d'un colis à l'unité. Non accordées à l'Agent par défaut : c'est à l'administrateur de
+     * désigner nommément les agences/agents autorisés, comme pour l'Espace Client.
+     */
+    { key: "colis.importer_excel", label: "Importer des colis depuis Excel" },
+    { key: "colis.bordereau_reception", label: "Générer un bordereau de réception" },
+    { key: "colis.reglement_groupe", label: "Encaisser plusieurs colis en une fois (règlement groupé)" },
   ]},
   { group: "BORDEREAUX", permissions: [
     { key: "bordereaux.consulter", label: "Consulter les bordereaux" },
@@ -1783,6 +1792,13 @@ function Shell({ children, rtl, theme }) {
            --brand-solid : rouge de marque assombri pour atteindre un contraste suffisant avec
            du texte blanc (l’ancien #E23F52 plafonnait à 4,1:1, sous le minimum de 4,5:1). */
         :root { --nav-fg: #FFFFFF; --nav-muted: #A9B6D0; --brand-on-dark: #FF7183; --brand-solid: #CE1B33; }
+        /* Filet de sécurité contre le défilement horizontal de la page entière sur mobile : un
+           bouton, un badge ou un texte trop large quelque part suffit sinon à décaler tout
+           l'écran vers la droite (titre et libellés partiellement coupés à gauche). Les zones
+           qui ont légitimement besoin de défiler horizontalement (tableaux larges...) gardent
+           leur propre défilement local (overflow-x auto) et ne sont pas affectées par cette
+           règle globale. */
+        html, body { overflow-x: hidden; max-width: 100%; }
         body { margin: 0; background: var(--bg); }
         input, select, button { font-family: 'Inter', sans-serif; }
         input, select { color: var(--text); }
@@ -6049,19 +6065,27 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20, flexWrap: "wrap", gap: 14 }}>
-        <div>
+        <div style={{ minWidth: 0 }}>
           <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 27, margin: 0 }}>{t.colis}</h1>
           <p style={{ color: "var(--muted)", fontSize: 14.5, margin: "5px 0 0" }}>{isChauffeur ? "Vos livraisons en cours" : "Enregistrement et suivi des expéditions"}{session.agence && <span style={{ marginLeft: 8, background: "var(--surface2)", color: "var(--info-fg)", padding: "3px 9px", borderRadius: 20, fontSize: 12, fontWeight: 600 }}>Agence : {session.agence}</span>}</p>
         </div>
-        {peutCreer && (
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button onClick={() => setShowImport(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><Download size={17} color="var(--info-fg)" style={{ transform: "rotate(180deg)" }} /> Importer Excel</button>
-            <button onClick={() => setShowReception(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={17} color="var(--ok-fg)" /> Bordereau de réception</button>
-            <button onClick={() => setShowEncaisseGroupe(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><DollarSign size={17} color="var(--ok-fg)" /> Règlement groupé</button>
-            <button onClick={() => setShowAi(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><Sparkles size={17} color="#8B5CF6" /> Créer par IA</button>
-            <button onClick={() => setShowForm(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}><Plus size={17} /> {t.newColis}</button>
-          </div>
-        )}
+        {/*
+          Chaque action a désormais sa propre permission — import Excel, bordereau de réception et
+          règlement groupé agissent sur plusieurs colis à la fois, donc plus sensibles que la
+          création à l'unité (colis.creer). Non accordées par défaut : à l'administrateur de
+          désigner nommément les agences/agents autorisés.
+          `minWidth: 0` sur ce conteneur évite qu'il ne force la page entière à défiler
+          horizontalement sur mobile : un enfant flex garde par défaut la largeur de son contenu
+          non replié pour le calcul de la mise en page, même si `flexWrap` le replie ensuite à
+          l'affichage — sans ce correctif, les derniers boutons débordaient hors de l'écran.
+        */}
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", minWidth: 0 }}>
+          {effectivePermission(session, "colis.importer_excel") && <button onClick={() => setShowImport(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><Download size={17} color="var(--info-fg)" style={{ transform: "rotate(180deg)" }} /> Importer Excel</button>}
+          {effectivePermission(session, "colis.bordereau_reception") && <button onClick={() => setShowReception(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={17} color="var(--ok-fg)" /> Bordereau de réception</button>}
+          {effectivePermission(session, "colis.reglement_groupe") && <button onClick={() => setShowEncaisseGroupe(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><DollarSign size={17} color="var(--ok-fg)" /> Règlement groupé</button>}
+          {peutCreer && <button onClick={() => setShowAi(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><Sparkles size={17} color="#8B5CF6" /> Créer par IA</button>}
+          {peutCreer && <button onClick={() => setShowForm(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}><Plus size={17} /> {t.newColis}</button>}
+        </div>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 9, background: "var(--surface)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 14px", maxWidth: 380, flex: 1 }}>

@@ -8211,7 +8211,7 @@ async function downloadInvoice(colis, data, options = {}) {
     { t: "Article", x: M + 2, l: 92 },
     { t: "Qté", x: M + 100, l: 14, d: true },
     { t: "Poids", x: M + 124, l: 22, d: true },
-    { t: "Catégorie", x: M + 150, l: 26 },
+    { t: "Prix", x: M + 150, l: 26, d: true },
   ];
   doc.setFillColor(...NAVY); doc.rect(M, y, W - 2 * M, 8, "F");
   doc.setFont(undefined, "bold"); doc.setFontSize(8); doc.setTextColor(255, 255, 255);
@@ -8228,8 +8228,7 @@ async function downloadInvoice(colis, data, options = {}) {
     doc.text(couper(p.nom || "—", 90), M + 2, y + 5.4);
     doc.text(String(p.quantite || 1), M + 114, y + 5.4, { align: "right" });
     doc.text(`${p.poids || 0} kg`, M + 146, y + 5.4, { align: "right" });
-    doc.setTextColor(...MUTED);
-    if (p.categorie) doc.text(couper(p.categorie, 26), M + 150, y + 5.4);
+    doc.text(fmtGNF(produitValeurGNF(p, data?.categories)), M + 176, y + 5.4, { align: "right" });
     doc.setDrawColor(...LINE); doc.setLineWidth(0.2); doc.line(M, y + 8, W - M, y + 8);
     y += 8;
   });

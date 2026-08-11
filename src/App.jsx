@@ -6048,33 +6048,33 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20, flexWrap: "wrap", gap: 14 }}>
         <div>
-          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: 0 }}>{t.colis}</h1>
-          <p style={{ color: "var(--muted)", fontSize: 13.5, margin: "4px 0 0" }}>{isChauffeur ? "Vos livraisons en cours" : "Enregistrement et suivi des expéditions"}{session.agence && <span style={{ marginLeft: 8, background: "var(--surface2)", color: "var(--info-fg)", padding: "2px 8px", borderRadius: 20, fontSize: 11, fontWeight: 600 }}>Agence : {session.agence}</span>}</p>
+          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 27, margin: 0 }}>{t.colis}</h1>
+          <p style={{ color: "var(--muted)", fontSize: 14.5, margin: "5px 0 0" }}>{isChauffeur ? "Vos livraisons en cours" : "Enregistrement et suivi des expéditions"}{session.agence && <span style={{ marginLeft: 8, background: "var(--surface2)", color: "var(--info-fg)", padding: "3px 9px", borderRadius: 20, fontSize: 12, fontWeight: 600 }}>Agence : {session.agence}</span>}</p>
         </div>
         {peutCreer && (
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            <button onClick={() => setShowImport(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><Download size={16} color="var(--info-fg)" style={{ transform: "rotate(180deg)" }} /> Importer Excel</button>
-            <button onClick={() => setShowReception(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={16} color="var(--ok-fg)" /> Bordereau de réception</button>
-            <button onClick={() => setShowEncaisseGroupe(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}><DollarSign size={15} color="var(--ok-fg)" /> Règlement groupé</button>
-            <button onClick={() => setShowAi(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><Sparkles size={16} color="#8B5CF6" /> Créer par IA</button>
-            <button onClick={() => setShowForm(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><Plus size={16} /> {t.newColis}</button>
+            <button onClick={() => setShowImport(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><Download size={17} color="var(--info-fg)" style={{ transform: "rotate(180deg)" }} /> Importer Excel</button>
+            <button onClick={() => setShowReception(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={17} color="var(--ok-fg)" /> Bordereau de réception</button>
+            <button onClick={() => setShowEncaisseGroupe(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><DollarSign size={17} color="var(--ok-fg)" /> Règlement groupé</button>
+            <button onClick={() => setShowAi(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><Sparkles size={17} color="#8B5CF6" /> Créer par IA</button>
+            <button onClick={() => setShowForm(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}><Plus size={17} /> {t.newColis}</button>
           </div>
         )}
       </div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--surface)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "8px 12px", maxWidth: 380, flex: 1 }}>
-          <Search size={15} color="var(--muted)" />
-          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`${t.search}...`} style={{ border: "none", outline: "none", flex: 1, fontSize: 13.5, background: "none", color: "var(--text)" }} />
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 9, background: "var(--surface)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 14px", maxWidth: 380, flex: 1 }}>
+          <Search size={17} color="var(--muted)" />
+          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`${t.search}...`} style={{ border: "none", outline: "none", flex: 1, fontSize: 15, background: "none", color: "var(--text)" }} />
         </div>
         {peutCreer && (
-          <button onClick={() => { setModeSelection((m) => !m); setSelectionLot([]); }} style={{ background: modeSelection ? "var(--brand-solid)" : "var(--surface)", color: modeSelection ? "#fff" : "var(--text)", border: "1.5px solid " + (modeSelection ? "var(--brand-solid)" : "var(--border)"), borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
+          <button onClick={() => { setModeSelection((m) => !m); setSelectionLot([]); }} style={{ background: modeSelection ? "var(--brand-solid)" : "var(--surface)", color: modeSelection ? "#fff" : "var(--text)", border: "1.5px solid " + (modeSelection ? "var(--brand-solid)" : "var(--border)"), borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
             {modeSelection ? "Annuler la sélection" : "Sélectionner plusieurs"}
           </button>
         )}
-        <button onClick={() => setShowScanner(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
-          <Camera size={14} /> Scanner
+        <button onClick={() => setShowScanner(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+          <Camera size={16} /> Scanner
         </button>
       </div>
       {aRelancer.length > 0 && (
@@ -6137,7 +6137,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
           else { setQuery(tracking); notify(`Aucun colis trouvé pour "${tracking}" — recherche lancée`); }
         }} />
       )}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(260px,1fr))", gap: 16, marginBottom: modeSelection && selectionLot.length > 0 ? 90 : 0 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 18, marginBottom: modeSelection && selectionLot.length > 0 ? 90 : 0 }}>
         {listeVisible.map((c) => <TicketCard key={c.tracking} colis={c} onOpen={() => (modeSelection ? toggleSelectionLot(c.tracking) : setSelected(c))} selectionMode={modeSelection} checked={selectionLot.includes(c.tracking)} />)}
         {list.length === 0 && <div style={{ color: "var(--muted)", fontSize: 13.5 }}>Aucun colis à afficher.</div>}
         {list.length > listeVisible.length && (
@@ -6772,39 +6772,39 @@ function TicketCard({ colis, onOpen, selectionMode, checked }) {
   const st = STATUS_STYLE[colis.status];
   const Icon = st.icon;
   return (
-    <div onClick={onOpen} style={{ position: "relative", background: "var(--surface)", borderRadius: 14, overflow: "hidden", boxShadow: "0 2px 10px rgba(10,38,71,0.07)", cursor: "pointer", border: checked ? "2px solid var(--brand-solid)" : "1px solid var(--surface2)" }}>
+    <div onClick={onOpen} style={{ position: "relative", background: "var(--surface)", borderRadius: 16, overflow: "hidden", boxShadow: "0 3px 14px rgba(10,38,71,0.09)", cursor: "pointer", border: checked ? "2px solid var(--brand-solid)" : "1px solid var(--surface2)", transition: "box-shadow 0.15s, transform 0.15s" }}>
       {selectionMode && (
-        <div style={{ position: "absolute", top: 10, right: 10, zIndex: 2, width: 22, height: 22, borderRadius: 6, background: checked ? "var(--brand-solid)" : "rgba(255,255,255,0.9)", border: "1.5px solid " + (checked ? "var(--brand-solid)" : "var(--border)"), display: "grid", placeItems: "center" }}>
-          {checked && <Check size={14} color="#fff" />}
+        <div style={{ position: "absolute", top: 12, right: 12, zIndex: 2, width: 24, height: 24, borderRadius: 7, background: checked ? "var(--brand-solid)" : "rgba(255,255,255,0.9)", border: "1.5px solid " + (checked ? "var(--brand-solid)" : "var(--border)"), display: "grid", placeItems: "center" }}>
+          {checked && <Check size={15} color="#fff" />}
         </div>
       )}
-      <div style={{ background: "#0A2647", padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span style={{ color: "#fff", fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13.5 }}>{colis.tracking}</span>
-        <span style={{ background: "rgba(255,255,255,0.15)", color: "#fff", fontSize: 10.5, padding: "3px 8px", borderRadius: 20 }}>{colis.mode === "air" ? "AÉRIEN" : "MARITIME"}</span>
+      <div style={{ background: "#0A2647", padding: "14px 18px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span style={{ color: "#fff", fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 15.5, letterSpacing: 0.3 }}>{colis.tracking}</span>
+        <span style={{ background: "rgba(255,255,255,0.15)", color: "#fff", fontSize: 11.5, fontWeight: 600, padding: "4px 10px", borderRadius: 20 }}>{colis.mode === "air" ? "AÉRIEN" : "MARITIME"}</span>
       </div>
-      <div style={{ padding: "14px 16px" }}>
-        <div style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>{colis.destinataire}</div>
+      <div style={{ padding: "16px 18px" }}>
+        <div style={{ fontSize: 15, color: "var(--text)", fontWeight: 700 }}>{colis.destinataire}</div>
         {colis.referenceCommande && (
-          <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 1 }}>réf. commande : <strong style={{ color: "var(--text)" }}>{colis.referenceCommande}</strong></div>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>réf. commande : <strong style={{ color: "var(--text)" }}>{colis.referenceCommande}</strong></div>
         )}
         {colis.emplacement && !colis.remise && (
-          <div style={{ display: "inline-flex", alignItems: "center", gap: 4, marginTop: 4, marginInlineEnd: 6,
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 5, marginTop: 6, marginInlineEnd: 6,
                         background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)",
-                        borderRadius: 20, padding: "2px 9px", fontSize: 10, fontWeight: 700 }}>
-            <MapPin size={9} /> {colis.emplacement}
+                        borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700 }}>
+            <MapPin size={10} /> {colis.emplacement}
           </div>
         )}
         {colis.litige && (
-          <div style={{ display: "inline-flex", alignItems: "center", gap: 4, marginTop: 4,
+          <div style={{ display: "inline-flex", alignItems: "center", gap: 5, marginTop: 6,
                         background: colis.litige.statut === "Ouvert" ? "var(--warn-bg)" : "var(--ok-bg)",
                         border: "1px solid " + (colis.litige.statut === "Ouvert" ? "var(--warn-border)" : "var(--ok-border)"),
                         color: colis.litige.statut === "Ouvert" ? "var(--warn-fg)" : "var(--ok-fg)",
-                        borderRadius: 20, padding: "2px 9px", fontSize: 10, fontWeight: 700 }}>
+                        borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700 }}>
             {colis.litige.type === "perdu" ? "Perdu" : "Endommagé"}{colis.litige.statut === "Résolu" ? " · réglé" : ""}
           </div>
         )}
-        <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>{routeLabel(colis.pays, colis.direction)}</div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 10, background: st.bg, color: st.fg, padding: "5px 10px", borderRadius: 20, fontSize: 11.5, fontWeight: 600, width: "fit-content" }}><Icon size={13} /> {colis.status}</div>
+        <div style={{ fontSize: 13.5, color: "var(--muted)", marginTop: 4, fontWeight: 500 }}>{routeLabel(colis.pays, colis.direction)}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 12, background: st.bg, color: st.fg, padding: "6px 12px", borderRadius: 20, fontSize: 12.5, fontWeight: 700, width: "fit-content" }}><Icon size={14} /> {colis.status}</div>
       </div>
     </div>
   );

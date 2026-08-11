@@ -3688,7 +3688,7 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
     const encaisse = colis.reduce((s, c) => s + c.paye, 0);
     const parPays = COUNTRIES.map((p) => ({ ...p, count: colis.filter((c) => c.pays === p.code).length }));
     const recent = [...colis].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 5);
-    const parAgence = (data.sites || []).map((s) => {
+    const parAgence = (data.sites || []).filter((s) => !s.pays || s.pays === "GN").map((s) => {
       const colisAgence = colis.filter((c) => (c.site || "Bambeto") === s.nom);
       return { nom: s.nom, count: colisAgence.length, ca: colisAgence.reduce((sum, c) => sum + c.prix, 0) };
     });
@@ -6833,7 +6833,8 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
    * sans affectation garde le choix, puisqu'il peut enregistrer pour n'importe quelle agence.
    */
   const agenceImposee = session?.agence || "";
-  const [agence, setAgence] = useState(agenceImposee || sites?.[0]?.nom || "Bambeto");
+  const siteLocalParDefaut = (sites || []).find((s) => !s.pays || s.pays === "GN");
+  const [agence, setAgence] = useState(agenceImposee || siteLocalParDefaut?.nom || "Bambeto");
   const [partenaireId, setPartenaireId] = useState("");
   const [clientAccountId, setClientAccountId] = useState("");
   const [preAlerteRapprochee, setPreAlerteRapprochee] = useState("");
@@ -7284,7 +7285,10 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
               </Field>
               {!agenceImposee && <Field label="Agence d’enregistrement">
                 <select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>
-                  {(sites && sites.length > 0 ? sites : [{ id: "x", nom: "Bambeto" }]).map((s) => <option key={s.id} value={s.nom}>{s.nom}</option>)}
+                  {(() => {
+                    const locaux = (sites || []).filter((s) => !s.pays || s.pays === "GN");
+                    return (locaux.length > 0 ? locaux : [{ id: "x", nom: "Bambeto" }]).map((s) => <option key={s.id} value={s.nom}>{s.nom}</option>);
+                  })()}
                 </select>
               </Field>}
       {/*
@@ -8269,7 +8273,7 @@ async function downloadInvoice(colis, data, options = {}) {
   y = Z.agences;
   doc.setDrawColor(...LINE); doc.setLineWidth(0.3); doc.line(M, y - 8, W - M, y - 8);
   const sites = data?.sites || [];
-  const siteDepot = sites.find((s) => s.nom === colis.site) || sites[0];
+  const siteDepot = sites.find((s) => s.nom === colis.site) || sites.find((s) => !s.pays || s.pays === "GN") || sites[0];
   /*
    * Le retrait n'a lieu à une agence Guinée (Bambeto par défaut) que pour les colis livrés en
    * Guinée. Pour un envoi vers l'étranger (export), le retrait se fait chez le destinataire — on
@@ -8279,10 +8283,10 @@ async function downloadInvoice(colis, data, options = {}) {
   const versEtranger = (colis.direction || "export") === "export" && dest?.code && dest.code !== "GN";
   let siteRetrait = null;
   if (versEtranger) {
-    const agenceEtrangere = (data?.agencesReception || {})[dest.code];
-    siteRetrait = agenceEtrangere ? { nom: `Agence ${dest.name}`, ...agenceEtrangere } : null;
+    // Site déclaré dans Configuration → Sites d'opération pour ce pays de destination, s'il existe.
+    siteRetrait = sites.find((s) => s.pays === dest.code) || null;
   } else {
-    siteRetrait = sites.find((s) => s.id === (data?.agenceRetraitClient || "site-bambeto")) || sites[0];
+    siteRetrait = sites.find((s) => s.id === (data?.agenceRetraitClient || "site-bambeto")) || sites.find((s) => !s.pays || s.pays === "GN") || sites[0];
   }
   const bloc = (titre, site, x) => {
     doc.setFont(undefined, "bold"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
@@ -10391,7 +10395,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
     const commissionsAuto = colisPeriode.reduce((s, c) => s + calcCommission(c, data.commissionConfig, data.categories), 0); // EUR-équivalent (taux en €)
     const gnfRate = LIVE_RATES.GNF || CURRENCIES.GNF;
     const totalCommissions = commissionsAuto + commissionsManuelles / gnfRate;
-    const commissionsParAgence = (data.sites || []).map((s) => ({
+    const commissionsParAgence = (data.sites || []).filter((s) => !s.pays || s.pays === "GN").map((s) => ({
       nom: s.nom,
       montant: colisPeriode.filter((c) => (c.site || "Bambeto") === s.nom).reduce((sum, c) => sum + calcCommission(c, data.commissionConfig, data.categories), 0),
     }));
@@ -10839,7 +10843,7 @@ function ImportExcelModal({ onClose, onImportMany, data, session }) {
   const [rows, setRows] = useState(null);
   const [fileErr, setFileErr] = useState("");
   const [importing, setImporting] = useState(false);
-  const [agence, setAgence] = useState(data?.sites?.[0]?.nom || "Bambeto");
+  const [agence, setAgence] = useState((data?.sites || []).find((s) => !s.pays || s.pays === "GN")?.nom || "Bambeto");
 
   function getVal(row, ...keys) {
     for (const k of keys) {
@@ -10949,7 +10953,7 @@ function ImportExcelModal({ onClose, onImportMany, data, session }) {
               </tbody>
             </table>
           </div>
-          <Field label="Agence d’enregistrement"><select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>{(data?.sites || [{ nom: "Bambeto" }]).map((s) => <option key={s.nom} value={s.nom}>{s.nom}</option>)}</select></Field>
+          <Field label="Agence d’enregistrement"><select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>{((data?.sites || []).filter((s) => !s.pays || s.pays === "GN").length > 0 ? (data.sites || []).filter((s) => !s.pays || s.pays === "GN") : [{ nom: "Bambeto" }]).map((s) => <option key={s.nom} value={s.nom}>{s.nom}</option>)}</select></Field>
           <button onClick={importer} disabled={validRows.length === 0 || importing} style={{ background: validRows.length ? "#3ECB84" : "var(--surface2)", color: validRows.length ? "#0A2647" : "var(--muted)", border: "none", borderRadius: 8, padding: "11px 22px", fontSize: 13.5, fontWeight: 700, cursor: validRows.length ? "pointer" : "not-allowed", marginTop: 8 }}>
             {importing ? "Import en cours…" : `Importer ${validRows.length} colis`}
           </button>
@@ -11693,6 +11697,14 @@ function SauvegardePage({ data, persist, notify, session, onBack }) {
 function SitesOperationPage({ data, persist, notify, onBack }) {
   const [siteASupprimer, setSiteASupprimer] = useState(null);
   const sites = data.sites || [];
+  /*
+   * Seuls les sites en Guinée servent à l'enregistrement d'un colis et à l'agence de retrait de
+   * l'Espace Client : ce sont des points physiques tenus par nos agents. Un site à l'étranger
+   * (ajouté ici pour qu'un pays de destination ait un point de retrait sur le ticket, ex. Maroc)
+   * n'a pas sa place dans ces deux listes, sous peine de proposer aux agents un site où ils ne
+   * peuvent pas enregistrer de colis.
+   */
+  const sitesLocaux = sites.filter((s) => !s.pays || s.pays === "GN");
   const [form, setForm] = useState(null);
 
   function saveSite() {
@@ -11718,7 +11730,7 @@ function SitesOperationPage({ data, persist, notify, onBack }) {
         />
       )}
         <ConfigPageHeader title="Sites d’opération" desc="Gérez vos points d’enregistrement et de retrait, et les informations affichées sur le ticket d’envoi." onBack={onBack} />
-        <button onClick={() => setForm({ nom: "", adresse: "", telephone: "", horaires: "", paiements: "", stockage: "" })} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}><Plus size={16} /> Ajouter un site</button>
+        <button onClick={() => setForm({ nom: "", pays: "GN", adresse: "", telephone: "", horaires: "", paiements: "", stockage: "" })} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}><Plus size={16} /> Ajouter un site</button>
       </div>
       <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "14px 16px", marginBottom: 16 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>Agence de retrait de l’Espace Client</div>
@@ -11728,7 +11740,7 @@ function SitesOperationPage({ data, persist, notify, onBack }) {
         <select value={data.agenceRetraitClient || "site-bambeto"}
           onChange={(e) => { persist({ ...data, agenceRetraitClient: e.target.value }); notify?.("Agence de retrait mise à jour"); }}
           style={{ ...inputStyle, maxWidth: 320, marginBottom: 0 }}>
-          {sites.map((s) => <option key={s.id} value={s.id}>{s.nom} — {s.adresse}</option>)}
+          {sitesLocaux.map((s) => <option key={s.id} value={s.id}>{s.nom} — {s.adresse}</option>)}
         </select>
       </div>
 
@@ -11736,9 +11748,16 @@ function SitesOperationPage({ data, persist, notify, onBack }) {
         {sites.map((s) => (
           <div key={s.id} style={{ background: "var(--surface)", borderRadius: 14, padding: 18, border: "1px solid var(--border)" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{s.nom}</div>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{s.nom}</div>
+                {s.pays && s.pays !== "GN" && (
+                  <div style={{ fontSize: 11, color: "var(--info-fg)", marginTop: 2 }}>
+                    {FLAGS[s.pays] || ""} {COUNTRIES.find((c) => c.code === s.pays)?.name || s.pays} · retrait uniquement
+                  </div>
+                )}
+              </div>
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => setForm(s)} style={{ background: "none", border: "none", color: "var(--info-fg)", cursor: "pointer" }}><Settings size={14} /></button>
+                <button onClick={() => setForm({ pays: "GN", ...s })} style={{ background: "none", border: "none", color: "var(--info-fg)", cursor: "pointer" }}><Settings size={14} /></button>
                 <button onClick={() => setSiteASupprimer(s)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={14} /></button>
               </div>
             </div>
@@ -11754,6 +11773,16 @@ function SitesOperationPage({ data, persist, notify, onBack }) {
       {form && (
         <Modal onClose={() => setForm(null)} title={form.id ? "Modifier le site" : "Nouveau site"}>
           <Field label="Nom"><input value={form.nom} onChange={(e) => setForm({ ...form, nom: e.target.value })} style={inputStyle} placeholder="ex: Bambeto" /></Field>
+          <Field label="Pays">
+            <select value={form.pays || "GN"} onChange={(e) => setForm({ ...form, pays: e.target.value })} style={inputStyle}>
+              {COUNTRIES.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code] || ""} {c.name}</option>)}
+            </select>
+          </Field>
+          {form.pays && form.pays !== "GN" && (
+            <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 8, padding: "8px 12px", fontSize: 11.5, color: "var(--muted)", marginBottom: 14 }}>
+              Ce site n’apparaîtra pas dans les agences d’enregistrement ni comme agence de retrait de l’Espace Client — il servira uniquement de point de retrait sur le ticket des colis envoyés vers ce pays.
+            </div>
+          )}
           <Field label="Adresse"><input value={form.adresse} onChange={(e) => setForm({ ...form, adresse: e.target.value })} style={inputStyle} /></Field>
           <Field label="Téléphone"><input value={form.telephone || ""} onChange={(e) => setForm({ ...form, telephone: e.target.value })} style={inputStyle} placeholder="+224..." /></Field>
           <Field label="Horaires"><input value={form.horaires} onChange={(e) => setForm({ ...form, horaires: e.target.value })} style={inputStyle} placeholder="Lun-Sam 8h-18h" /></Field>
@@ -12374,7 +12403,7 @@ function UserProfilePage({ user, onSave, onBack, sites }) {
             <Field label="Agence assignée">
               <select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>
                 <option value="">Toutes les agences (aucune restriction)</option>
-                {(sites || []).map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}
+                {(sites || []).filter((s) => !s.pays || s.pays === "GN").map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}
               </select>
             </Field>
           )}
@@ -12500,7 +12529,7 @@ function UserForm({ onClose, onSave, existing, sites }) {
             <Field label="Agence assignée">
               <select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>
                 <option value="">Toutes les agences (aucune restriction)</option>
-                {(sites || []).map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}
+                {(sites || []).filter((s) => !s.pays || s.pays === "GN").map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}
               </select>
             </Field>
             <div style={{ fontSize: 11, color: "var(--muted)", marginTop: -8, marginBottom: 10 }}>Si une agence est choisie, cet utilisateur ne verra que les colis, statistiques et bordereaux de cette agence.</div>

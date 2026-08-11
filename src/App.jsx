@@ -1240,6 +1240,14 @@ function App() {
     window.addEventListener("offline", handleOffline);
 
     /*
+     * Une session précédente peut avoir laissé des écritures en file d'attente (fenêtre fermée
+     * avant la fin de la synchronisation). On tente de les rejouer dès l'ouverture plutôt que
+     * d'attendre l'événement "online" (qui ne se déclenche pas si la connexion n'a jamais été
+     * coupée depuis l'ouverture) ou les 20 premières secondes de la boucle ci-dessous.
+     */
+    if (navigator.onLine && pendingSyncCount() > 0) handleOnline();
+
+    /*
      * Nouvelle tentative périodique.
      *
      * La file n'était rejouée qu'à l'événement "online". Or une écriture peut échouer alors que
@@ -1257,9 +1265,23 @@ function App() {
       setPendingSync(pendingSyncCount());
     }, 20000);
 
+    /*
+     * Filet de sécurité contre la perte de données : fermer l'onglet (ou le navigateur) pendant
+     * qu'une écriture reste en file d'attente locale la perd définitivement — elle n'existe que
+     * dans le localStorage de cet appareil précis, jamais partagée tant qu'elle n'a pas atteint
+     * le serveur. C'est exactement ce qui s'est produit pour un colis créé puis introuvable :
+     * l'agent a fermé la page en croyant l'enregistrement terminé. On bloque donc la fermeture
+     * avec l'avertissement natif du navigateur tant qu'il reste quelque chose en attente.
+     */
+    function handleBeforeUnload(e) {
+      if (pendingSyncCount() > 0) { e.preventDefault(); e.returnValue = ""; }
+    }
+    window.addEventListener("beforeunload", handleBeforeUnload);
+
     return () => {
       window.removeEventListener("online", handleOnline);
       window.removeEventListener("offline", handleOffline);
+      window.removeEventListener("beforeunload", handleBeforeUnload);
       clearInterval(minuteur);
     };
   }, []);
@@ -1275,25 +1297,33 @@ function App() {
    * repartira à la prochaine tentative automatique. L'agent sait qu'il doit vérifier plutôt que
    * de croire un travail enregistré alors qu'il ne l'est pas.
    */
+  /*
+   * persist() renvoie désormais la promesse d'enregistrement (au lieu de « tirer et oublier ») :
+   * la plupart des appelants l'ignorent, comme avant, mais un appelant qui gère une donnée
+   * difficile à reconstituer (ex: création d'un colis) peut l'attendre pour savoir si
+   * l'enregistrement a vraiment été confirmé par le serveur ou seulement mis en file d'attente
+   * locale — cas où fermer l'onglet ferait perdre la donnée pour de bon.
+   */
   const persist = useCallback((next) => {
     setData(next);
     if (next.exchangeRates) LIVE_RATES = { ...CURRENCIES, ...next.exchangeRates };
-    if (!offline) {
-      saveData(next)
-        .then((r) => {
-          setPendingSync(pendingSyncCount());
-          if (r && r.queued) {
-            setToast("Enregistrement en attente — vérifiez votre connexion");
-            setTimeout(() => setToast(null), 5000);
-          }
-        })
-        .catch((e) => {
-          console.error("Échec de l'enregistrement", e);
-          setPendingSync(pendingSyncCount());
+    if (offline) return Promise.resolve({ queued: false });
+    return saveData(next)
+      .then((r) => {
+        setPendingSync(pendingSyncCount());
+        if (r && r.queued) {
           setToast("Enregistrement en attente — vérifiez votre connexion");
           setTimeout(() => setToast(null), 5000);
-        });
-    }
+        }
+        return r || {};
+      })
+      .catch((e) => {
+        console.error("Échec de l'enregistrement", e);
+        setPendingSync(pendingSyncCount());
+        setToast("Enregistrement en attente — vérifiez votre connexion");
+        setTimeout(() => setToast(null), 5000);
+        return { queued: true, error: e };
+      });
   }, [offline]);
   const notify = useCallback((msg) => { setToast(msg); setTimeout(() => setToast(null), 2800); }, []);
   function setLanguage(l) { setLang(l); persist({ ...data, lang: l }); }
@@ -5684,13 +5714,23 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     setSelectionLot([]);
     setModeSelection(false);
   }
-  function addColis(colis) {
+  /*
+   * La création d'un colis est la donnée la plus coûteuse à perdre — reconstituer un envoi payé
+   * dont on n'a plus le détail est souvent impossible. On attend donc la confirmation réelle de
+   * persist() avant d'informer l'agent : si l'enregistrement n'a été que mis en file d'attente
+   * locale (pas encore confirmé par le serveur), on le dit clairement plutôt que d'afficher le
+   * même message de succès que d'habitude — le bandeau en bas de l'écran et le blocage de
+   * fermeture d'onglet prennent le relais tant que ce n'est pas synchronisé.
+   */
+  async function addColis(colis) {
     const { preAlerteRapprochee, ...colisPropre } = colis;
     const preAlertes = preAlerteRapprochee
       ? (data.preAlertes || []).map((p) => (p.id === preAlerteRapprochee ? { ...p, statut: "Rapproché", colisTracking: colis.tracking } : p))
       : data.preAlertes;
-    persist({ ...data, colis: [colisPropre, ...data.colis], preAlertes, activityLog: logActivity("Colis créé", `${colis.tracking} — ${colis.destinataire}`) });
-    notify(`Colis ${colis.tracking} enregistré`);
+    const resultat = await persist({ ...data, colis: [colisPropre, ...data.colis], preAlertes, activityLog: logActivity("Colis créé", `${colis.tracking} — ${colis.destinataire}`) });
+    notify(resultat?.queued
+      ? `Colis ${colis.tracking} en attente de synchronisation — ne fermez pas cette page avant confirmation`
+      : `Colis ${colis.tracking} enregistré`);
     // Notification automatique selon les préférences (Configuration → Notifications WhatsApp).
     notifierEvenement(data, "enregistrement", colis,
       `Bonjour ${colis.destinataire}, votre colis Ba-Diaby Express ${colis.tracking} a bien été enregistré`

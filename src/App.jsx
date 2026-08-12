@@ -7800,10 +7800,23 @@ async function downloadReceptionBordereau(compte, colisSelectionnes, tarifs) {
     });
     y = doc.lastAutoTable.finalY + 10;
   } else {
+    // Repli sans autoTable : pagination manuelle, sinon un client avec beaucoup de colis
+    // disponibles voyait la liste continuer d'être écrite hors de la page, invisible.
     y += 8;
-    rows.forEach((r) => { doc.setFontSize(9); doc.setTextColor(40, 40, 40); doc.text(`${r[0]} — ${r[1]} — ${r[3]}`, 14, y); y += 6; });
+    rows.forEach((r) => {
+      if (y > 270) { doc.addPage(); y = 20; }
+      doc.setFontSize(9); doc.setTextColor(40, 40, 40); doc.text(`${r[0]} — ${r[1]} — ${r[3]}`, 14, y); y += 6;
+    });
     y += 4;
   }
+
+  /*
+   * Le panneau des totaux (34 mm) et le pied de page ont besoin d'environ 44 mm après la fin
+   * de la liste — que celle-ci vienne d'autoTable (qui peut ajouter des pages tout seul) ou du
+   * repli manuel ci-dessus. Sans cette vérification, un client avec beaucoup de colis disponibles
+   * se retrouvait avec le montant à payer dessiné hors de la page.
+   */
+  if (y > 253) { doc.addPage(); y = 20; }
 
   doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, 34, "F");
   doc.setFont(undefined, "normal"); doc.setFontSize(9.5); doc.setTextColor(90, 90, 90);
@@ -11252,6 +11265,21 @@ function ComptabilitePage({ data, persist, session, notify }) {
       if (hasAutoTable && doc.autoTable) {
         doc.autoTable({ startY: y, body: kpis, theme: "plain", styles: { fontSize: 11, cellPadding: 3 }, columnStyles: { 0: { fontStyle: "bold", textColor: INK }, 1: { halign: "right", textColor: INK } }, margin: { left: 14, right: 14 } });
         y = doc.lastAutoTable.finalY + 12;
+      } else {
+        // autoTable est chargé depuis un CDN externe : si le chargement échoue (client à
+        // l'étranger, réseau instable...), le document sortait auparavant sans le moindre
+        // chiffre — juste l'en-tête et un titre, sans aucun message. On dessine ici les mêmes
+        // données à la main, comme c'est déjà fait pour le bordereau de réception et le
+        // bordereau d'expédition.
+        doc.setFontSize(10.5);
+        kpis.forEach(([label, valeur]) => {
+          doc.setFont(undefined, "bold"); doc.setTextColor(...INK);
+          doc.text(label, 14, y);
+          doc.setFont(undefined, "normal");
+          doc.text(String(valeur), 196, y, { align: "right" });
+          y += 6.5;
+        });
+        y += 8;
       }
 
       doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(...INK);
@@ -11267,10 +11295,39 @@ function ComptabilitePage({ data, persist, session, notify }) {
       } else if (rows.length === 0) {
         doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(...MUTED);
         doc.text("Aucun colis sur cette période.", 14, y + 8);
+      } else {
+        // Même repli manuel que ci-dessus, avec pagination : sur "Depuis le début", la période
+        // peut contenir des centaines de colis, largement de quoi dépasser une seule page.
+        y += 4;
+        const colX = [14, 55, 100, 145, 172];
+        doc.setFontSize(8); doc.setTextColor(255, 255, 255); doc.setFillColor(10, 38, 71);
+        doc.rect(14, y, 182, 7, "F");
+        ["N° de suivi", "Destinataire", "Route", "Montant", "Solde"].forEach((h, i) => doc.text(h, colX[i] + 1, y + 5));
+        y += 9;
+        doc.setTextColor(40, 40, 40);
+        rows.forEach((r, i) => {
+          if (y > 275) {
+            doc.addPage(); y = 20;
+            doc.setFontSize(8); doc.setTextColor(255, 255, 255); doc.setFillColor(10, 38, 71);
+            doc.rect(14, y, 182, 7, "F");
+            ["N° de suivi", "Destinataire", "Route", "Montant", "Solde"].forEach((h, j) => doc.text(h, colX[j] + 1, y + 5));
+            y += 9;
+            doc.setTextColor(40, 40, 40);
+          }
+          if (i % 2 === 1) { doc.setFillColor(238, 243, 250); doc.rect(14, y - 4.5, 182, 6.5, "F"); }
+          doc.setFontSize(8);
+          r.forEach((cell, j) => doc.text(String(cell).slice(0, 22), colX[j] + 1, y));
+          y += 6.5;
+        });
       }
 
-      doc.setFontSize(7.3); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
-      doc.text(`Généré le ${new Date().toLocaleDateString("fr-FR")} — Ba-Diaby Express`, 14, 290);
+      const totalPages = doc.getNumberOfPages();
+      for (let p = 1; p <= totalPages; p++) {
+        doc.setPage(p);
+        doc.setFontSize(7.3); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
+        doc.text(`Généré le ${new Date().toLocaleDateString("fr-FR")} — Ba-Diaby Express`, 14, 290);
+        doc.text(`Page ${p} / ${totalPages}`, 196, 290, { align: "right" });
+      }
       openPdf(doc, `recapitulatif-${periode}-${new Date().toISOString().slice(0, 10)}.pdf`);
       setPdfState("idle");
     } catch (e) {

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue, memo } from "react";
 import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, ChevronDown, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell, SlidersHorizontal, Copy, MoreHorizontal } from "lucide-react";
-import { storage, subscribeToChanges, flushOutbox, pendingSyncCount } from "./lib/storage.js";
+import { storage, supabase, subscribeToChanges, flushOutbox, pendingSyncCount } from "./lib/storage.js";
 
 /* ---------- design tokens ----------
 Identité : Navy #0A2647 · Rouge de marque #C8102E · Blanc #FFFFFF
@@ -754,12 +754,12 @@ async function envoyerEmail(adresse, sujet, message, piecesJointes = []) {
   }
 }
 
-async function envoyerWhatsApp(telephone, message) {
+async function envoyerWhatsApp(telephone, message, mediaUrl) {
   try {
     const reponse = await fetch("/api/whatsapp", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ to: telephone, message }),
+      body: JSON.stringify(mediaUrl ? { to: telephone, message, mediaUrl } : { to: telephone, message }),
     });
     if (reponse.ok) return { envoye: true };
     const data = await reponse.json().catch(() => ({}));
@@ -8233,7 +8233,9 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   openPdf(doc, `bordereau-${bordereau?.numero || `${country.code}-${direction}`}-${new Date().toISOString().slice(0, 10)}.pdf`);
 }
 
-async function downloadLabel(colis) {
+/** Construit le document jsPDF de l'étiquette, sans l'ouvrir — réutilisé par downloadLabel()
+ * (ouverture dans un onglet) et par l'envoi WhatsApp (upload du PDF généré vers Supabase Storage). */
+async function construireEtiquetteDoc(colis) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: [100, 150] }));
   // colis.pays est le pays de route (origine pour un import) ; le pays réellement affiché comme
@@ -8421,7 +8423,41 @@ async function downloadLabel(colis) {
   doc.setFontSize(5.8); doc.setTextColor(178, 196, 222);
   doc.text("WWW.BA-DIABY-EXPRESS.COM · TRANSPORT SOUMIS AUX CGV BA-DIABY EXPRESS", W / 2, Z.bandeau + 6.4, { align: "center" });
 
+  return doc;
+}
+
+async function downloadLabel(colis) {
+  const doc = await construireEtiquetteDoc(colis);
   openPdf(doc, `etiquette-${colis.tracking}.pdf`);
+}
+
+/**
+ * Envoie l'étiquette du colis au destinataire sur WhatsApp, en pièce jointe.
+ *
+ * Twilio n'accepte pas d'envoyer les octets du PDF directement : il faut une URL PUBLIQUE que
+ * Twilio va lui-même récupérer (MediaUrl). Le PDF est donc généré comme pour le téléchargement,
+ * puis déposé dans le bucket Supabase Storage "colis-documents" (public en lecture) avant l'appel
+ * à l'API WhatsApp. Le fichier est réécrit à chaque envoi (upsert) : il n'y a pas besoin d'historiser
+ * les étiquettes, seule la dernière version compte.
+ */
+async function envoyerEtiquetteWhatsApp(colis) {
+  const doc = await construireEtiquetteDoc(colis);
+  const blob = doc.output("blob");
+  const chemin = `etiquettes/${colis.tracking}.pdf`;
+  const { error: erreurUpload } = await supabase.storage
+    .from("colis-documents")
+    .upload(chemin, blob, { contentType: "application/pdf", upsert: true });
+  if (erreurUpload) return { envoye: false, raison: "Échec de l’envoi du PDF vers le stockage." };
+  const { data: { publicUrl } } = supabase.storage.from("colis-documents").getPublicUrl(chemin);
+  const message = `Bonjour ${colis.destinataire}, voici l’étiquette de votre colis Ba-Diaby Express (${colis.tracking}).`;
+  const resultat = await envoyerWhatsApp(colis.telephone, message, publicUrl);
+  // Contrairement à notifierWhatsApp() (message texte), il n'existe pas de brouillon WhatsApp de
+  // secours pour une pièce jointe — wa.me ne sait pré-remplir que du texte. Sans Twilio configuré,
+  // il n'y a donc rien à faire automatiquement : on le dit clairement plutôt que de rester muet.
+  if (!resultat.envoye && !resultat.raison) {
+    return { envoye: false, raison: "Envoi automatique non configuré — téléchargez l’étiquette et envoyez-la manuellement." };
+  }
+  return resultat;
 }
 
 /* ============================================================================================
@@ -10062,6 +10098,21 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
     setWaState("brouillon");
     window.open(waLink(colis.telephone, message), "_blank", "noreferrer");
   }
+  const [etiquetteWaState, setEtiquetteWaState] = useState("idle");
+  const [etiquetteWaErreur, setEtiquetteWaErreur] = useState("");
+  async function handleEnvoyerEtiquetteWhatsApp() {
+    setEtiquetteWaErreur(""); setEtiquetteWaState("envoi");
+    try {
+      const { envoye, raison } = await envoyerEtiquetteWhatsApp(colis);
+      if (envoye) { setEtiquetteWaState("envoye"); return; }
+      setEtiquetteWaErreur(raison || "Échec de l’envoi.");
+      setEtiquetteWaState("idle");
+    } catch (e) {
+      console.error(e);
+      setEtiquetteWaErreur("Échec de la génération — réessayez.");
+      setEtiquetteWaState("idle");
+    }
+  }
   const [payerOuvert, setPayerOuvert] = useState(false);
   const [montantPaye, setMontantPaye] = useState(String(colis.reste || ""));
   const [devisePaiement, setDevisePaiement] = useState("EUR");
@@ -10295,6 +10346,12 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
                     {labelState === "error" && <span style={menuItemHint}>Échec — réessayez</span>}
                   </button>
                   <button onClick={() => { setShowImpressionDirecte(true); setShowDocMenu(false); }} style={menuItemStyle}>Imprimer l’étiquette (imprimante connectée)</button>
+                  {colis.telephone && (
+                    <button onClick={handleEnvoyerEtiquetteWhatsApp} disabled={etiquetteWaState === "envoi"} style={menuItemStyle}>
+                      {etiquetteWaState === "envoi" ? "Envoi…" : etiquetteWaState === "envoye" ? "Étiquette envoyée" : "Envoyer l’étiquette par WhatsApp"}
+                      {etiquetteWaErreur && <span style={{ ...menuItemHint, color: "var(--warn-fg)" }}>{etiquetteWaErreur}</span>}
+                    </button>
+                  )}
                   <div style={{ height: 1, background: "var(--border)", margin: "4px 2px" }} />
                   <button onClick={handleDownloadInvoice} disabled={invoiceState === "loading"} style={menuItemStyle}>
                     {invoiceState === "loading" ? "Génération…" : "Télécharger la facture"}

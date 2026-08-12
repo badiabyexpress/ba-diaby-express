@@ -53,7 +53,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { to, message } = req.body || {};
+    const { to, message, mediaUrl } = req.body || {};
     if (!to || !message) {
       return res.status(400).json({ error: "Paramètres 'to' et 'message' requis." });
     }
@@ -69,6 +69,9 @@ export default async function handler(req, res) {
       From: from.startsWith("whatsapp:") ? from : `whatsapp:${from}`,
       Body: String(message),
     });
+    // Pièce jointe (étiquette, facture...) : Twilio va lui-même récupérer le fichier à cette URL,
+    // qui doit donc être publiquement accessible (bucket Supabase Storage public).
+    if (mediaUrl) corps.append("MediaUrl", String(mediaUrl));
 
     const reponse = await fetch(
       `https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`,

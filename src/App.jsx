@@ -7602,9 +7602,6 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
         {step === 0 && (
           <div>
             <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 16 }}>Choisissez le pays d’expédition et le pays de destination — les tarifs et la devise seront calculés automatiquement.</div>
-            {availableCountries.length < COUNTRIES.length && (
-              <div style={{ fontSize: 11.5, color: "var(--warn-fg)", marginBottom: 12 }}>Votre compte est limité à certaines destinations par votre administrateur.</div>
-            )}
             <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: 10, alignItems: "end" }}>
               <Field label="Pays expéditeur *">
                 {paysExpediteurVerrouille ? (

@@ -2237,6 +2237,16 @@ function PublicTrackingPage({ data, loading }) {
   // Un colis "ordinaire" envoyé par un expéditeur quelconque, sans compte client, garde le
   // vocabulaire interne classique (Enregistré, En transit, Arrivé...).
   const estAchatEnLigne = colis ? !!colis.clientAccountId : false;
+  /*
+   * Le reste à payer est toujours annoncé en GNF en premier : c'est ce que le client remettra
+   * physiquement à l'agence, quel que soit le sens du trajet. Mais expéditeur et destinataire ne
+   * partagent pas toujours le même pays (ex. expéditeur en France, destinataire en Guinée) — sans
+   * l'équivalent dans leur propre devise, l'un des deux ne peut pas se faire une idée du montant.
+   * On affiche donc en plus chaque devise concernée qui n'est pas déjà le GNF.
+   */
+  const expCur = colis ? COUNTRIES.find((c) => c.code === colis.expediteurPays)?.currency : null;
+  const destCur = dest?.currency;
+  const autresDevisesReste = [...new Set([expCur, destCur].filter((c) => c && c !== "GNF"))];
 
   return (
     <div dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "linear-gradient(135deg,#0A2647 0%,#0A2647 55%,#C8102E 250%)", display: "flex", flexDirection: "column", alignItems: "center", padding: "40px 16px" }}>
@@ -2311,9 +2321,10 @@ function PublicTrackingPage({ data, loading }) {
           </div>
 
           {/*
-            État du paiement. Le reste dû est annoncé en GNF — c'est ce que le client remettra à
-            l'agence. Page publique : on annonce ce qui reste à régler, jamais l'historique des
-            versements ni le détail des prix.
+            État du paiement. Le reste dû est annoncé en GNF en premier — c'est ce que le client
+            remettra à l'agence — avec l'équivalent dans la devise de l'expéditeur et/ou du
+            destinataire quand elle diffère du GNF. Page publique : on annonce ce qui reste à
+            régler, jamais l'historique des versements ni le détail des prix.
           */}
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap",
                         background: colis.reste <= 0.005 ? "var(--ok-bg)" : colis.paye > 0 ? "var(--warn-bg)" : "var(--danger-bg)",
@@ -2324,8 +2335,13 @@ function PublicTrackingPage({ data, loading }) {
               {colis.reste <= 0.005 ? T("Payé en totalité") : colis.paye > 0 ? T("Partiellement payé") : T("Non payé")}
             </span>
             {colis.reste > 0.005 && (
-              <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", textAlign: "end" }}>
                 {T("Reste à payer")} : {fmtGNF(colis.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}
+                {autresDevisesReste.length > 0 && (
+                  <div style={{ fontSize: 11, fontWeight: 600, color: "var(--muted)", marginTop: 2 }}>
+                    ≈ {autresDevisesReste.map((c) => fmt(colis.reste, c)).join(" · ")}
+                  </div>
+                )}
               </span>
             )}
           </div>

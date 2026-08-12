@@ -2239,35 +2239,41 @@ function PublicTrackingPage({ data, loading }) {
   const estAchatEnLigne = colis ? !!colis.clientAccountId : false;
 
   return (
-    <div dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", flexDirection: "column", alignItems: "center", padding: "40px 16px" }}>
-      <div style={{ width: "100%", maxWidth: 560, display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+    <div dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "linear-gradient(135deg,#0A2647 0%,#0A2647 55%,#C8102E 250%)", display: "flex", flexDirection: "column", alignItems: "center", padding: "40px 16px" }}>
+      <div style={{ width: "100%", maxWidth: 560, display: "flex", justifyContent: "flex-end", marginBottom: 20 }}>
         <ClientLangSwitch lang={lang} onChange={setLang} />
       </div>
-      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 24, color: "var(--text)", marginBottom: 4 }}>
-        BA-DIABY <span style={{ color: "var(--danger-fg)" }}>EXPRESS</span>
+      <img src={data?.branding?.logo || DEFAULT_LOGO} alt="logo" style={{ width: 54, height: 54, borderRadius: 13, objectFit: "cover", marginBottom: 14, boxShadow: "0 10px 26px rgba(0,0,0,0.3)" }} />
+      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 25, color: "#fff", marginBottom: 4, textAlign: "center" }}>
+        BA-DIABY <span style={{ color: "#FF8A9B" }}>EXPRESS</span>
       </div>
-      <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 28 }}>{T("Suivi de colis")}</div>
+      <div style={{ fontSize: 13.5, color: "rgba(255,255,255,0.78)", marginBottom: 28 }}>{T("Suivi de colis")}</div>
 
       <form onSubmit={rechercher} style={{ display: "flex", gap: 8, width: "100%", maxWidth: 420, marginBottom: 24 }}>
-        <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="Numéro de suivi (ex : BDE123456)" style={{ ...inputStyle, flex: 1, fontSize: 15, padding: "12px 14px" }} />
-        <button type="submit" style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "0 20px", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>{T("Suivre")}</button>
+        <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="Numéro de suivi (ex : BDE123456)" style={{ ...inputStyle, flex: 1, fontSize: 15, padding: "13px 16px", border: "none" }} />
+        <button type="submit" style={{ background: "#fff", color: "#0A2647", border: "none", borderRadius: 8, padding: "0 22px", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>{T("Suivre")}</button>
       </form>
 
-      {loading && searched && <div style={{ color: "var(--muted)", fontSize: 13 }}>{T("Recherche en cours…")}</div>}
+      {loading && searched && <div style={{ color: "rgba(255,255,255,0.8)", fontSize: 13 }}>{T("Recherche en cours…")}</div>}
 
       {notFound && (
-        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 20, width: "100%", maxWidth: 420, textAlign: "center" }}>
+        <div style={{ background: "var(--surface)", borderRadius: 14, padding: 20, width: "100%", maxWidth: 420, textAlign: "center", boxShadow: "0 24px 60px rgba(10,38,71,0.35)" }}>
           <div style={{ fontSize: 13.5, color: "var(--text)", fontWeight: 600 }}>{T("Aucun colis trouvé")}</div>
           <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>{T("Vérifiez le numéro de suivi et réessayez.")}</div>
         </div>
       )}
 
       {colis && (
-        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 24, width: "100%", maxWidth: 480 }}>
+        <div style={{ background: "var(--surface)", borderRadius: 16, overflow: "hidden", width: "100%", maxWidth: 480, boxShadow: "0 28px 70px rgba(10,38,71,0.4)" }}>
+          {/* Filet rouge en tête de carte : même identité bicolore navy/rouge que l'étiquette et le
+              ticket — cette carte est souvent la première chose qu'un inconnu voit de la marque
+              en scannant le QR code d'une étiquette. */}
+          <div style={{ height: 4, background: "linear-gradient(90deg,#D6273F,#D6273F 60%,#0A2647 60%,#0A2647)" }} />
+          <div style={{ padding: 24 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 18, flexWrap: "wrap", gap: 8 }}>
             <div>
-              <div style={{ fontSize: 11, color: "var(--muted)" }}>{T("N° DE SUIVI")}</div>
-              <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 19, fontWeight: 700, color: "var(--text)" }}>{colis.tracking}</div>
+              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.4 }}>{T("N° DE SUIVI")}</div>
+              <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 21, fontWeight: 700, color: "var(--text)" }}>{colis.tracking}</div>
             </div>
             <span style={{ background: STATUS_STYLE[colis.status]?.bg || "var(--surface2)", color: STATUS_STYLE[colis.status]?.fg || "var(--text)", padding: "5px 12px", borderRadius: 20, fontSize: 12, fontWeight: 700 }}>{estAchatEnLigne ? clientStatusLabel(colis.status) : colis.status}</span>
           </div>
@@ -2333,10 +2339,11 @@ function PublicTrackingPage({ data, loading }) {
               </div>
             ))}
           </div>
+          </div>
         </div>
       )}
 
-      <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 32 }}>{T("Ba-Diaby Express — Transport de colis Conakry - Monde")}</div>
+      <div style={{ fontSize: 11, color: "rgba(255,255,255,0.65)", marginTop: 32 }}>{T("Ba-Diaby Express — Transport de colis Conakry - Monde")}</div>
     </div>
   );
 }

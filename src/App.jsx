@@ -1090,6 +1090,26 @@ const MINUTES_INACTIVITE_AGENT = 360;
 const MINUTES_INACTIVITE_CLIENT = 360;
 const CLE_SESSION_CLIENT = "bde-session-client";
 const CLE_SESSION = "bde-session";
+const CLE_DERNIERE_VUE = "bde-derniere-vue";
+
+/*
+ * Sur mobile, changer d'application (ou même verrouiller l'écran) pousse souvent le navigateur
+ * à décharger complètement l'onglet pour libérer de la mémoire — au retour, l'application
+ * redémarre de zéro. La session survit déjà à ça (lireSessionEnregistree), mais la page
+ * affichée, elle, retombait systématiquement sur le tableau de bord : un agent en plein
+ * enregistrement d'un colis se retrouvait ramené à l'accueil sans prévenir.
+ *
+ * On mémorise donc la dernière page ouverte pour la restaurer au redémarrage silencieux.
+ * Une connexion ou déconnexion EXPLICITE continue de ramener au tableau de bord (ces deux
+ * chemins appellent déjà setView("dashboard") eux-mêmes) : seule la reprise automatique après
+ * un redémarrage de l'application doit préserver la page en cours.
+ */
+function lireDerniereVue() {
+  try { return window.localStorage.getItem(CLE_DERNIERE_VUE) || null; } catch (e) { return null; }
+}
+function ecrireDerniereVue(vue) {
+  try { window.localStorage.setItem(CLE_DERNIERE_VUE, vue); } catch (e) { /* pas grave */ }
+}
 
 function lireSessionEnregistree() {
   try {
@@ -1185,7 +1205,8 @@ function App() {
       clearInterval(minuteur);
     };
   }, [session]);
-  const [view, setView] = useState("dashboard");
+  const [view, setView] = useState(() => lireDerniereVue() || "dashboard");
+  useEffect(() => { ecrireDerniereVue(view); }, [view]);
   const [toast, setToast] = useState(null);
   const [lang, setLang] = useState("fr");
   const [theme, setTheme] = useState("dark");

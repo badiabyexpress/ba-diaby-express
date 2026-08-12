@@ -8091,8 +8091,10 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   const label = direction === "import" ? `${country.city} → Conakry` : `Conakry → ${country.city}`;
   const poidsTotal = colisRoute.reduce((s, c) => s + c.poids, 0);
 
-  // Bandeau d’en-tête
+  // Bandeau d’en-tête — filet rouge au pied de la bande navy, comme sur l'étiquette et le ticket
+  // d'envoi : même identité de marque bicolore sur tous les documents imprimés.
   doc.setFillColor(10, 38, 71); doc.rect(0, 0, 210, 30, "F");
+  doc.setFillColor(214, 39, 63); doc.rect(0, 28.6, 210, 1.4, "F");
   doc.setFillColor(255, 255, 255); doc.roundedRect(14, 5, 20, 20, 2.5, 2.5, "F");
   doc.addImage(DEFAULT_LOGO, "PNG", 15, 6, 18, 18);
   doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold"); doc.setFontSize(15);
@@ -8119,18 +8121,20 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
     doc.text(statutBadge.toUpperCase(), 183, 14.3, { align: "center" });
   }
 
-  // Cartes statistiques
+  // Cartes statistiques — liseré rouge sur celle du montant, le chiffre le plus regardé, comme
+  // sur le panneau des totaux du ticket d'envoi.
   let y = 38;
-  const stat = (x, label2, value) => {
+  const stat = (x, label2, value, accent) => {
     doc.setFillColor(240, 243, 250); doc.roundedRect(x, y, 58, 18, 2, 2, "F");
+    if (accent) { doc.setFillColor(214, 39, 63); doc.rect(x, y + 2, 1.4, 14, "F"); }
     doc.setFontSize(7.5); doc.setTextColor(120, 130, 150); doc.setFont(undefined, "normal");
-    doc.text(label2, x + 4, y + 6.5);
+    doc.text(label2, x + (accent ? 6.5 : 4), y + 6.5);
     doc.setFontSize(12); doc.setTextColor(10, 38, 71); doc.setFont(undefined, "bold");
-    doc.text(String(value), x + 4, y + 14);
+    doc.text(String(value), x + (accent ? 6.5 : 4), y + 14);
   };
   stat(14, "COLIS", colisRoute.length);
   stat(76, "POIDS TOTAL", `${poidsTotal.toFixed(1)} kg`);
-  stat(138, "MONTANT TOTAL", fmt(colisRoute.reduce((s, c) => s + c.prix, 0), cur));
+  stat(138, "MONTANT TOTAL", fmt(colisRoute.reduce((s, c) => s + c.prix, 0), cur), true);
   y += 26;
 
   const head = ["N° de suivi", "Destinataire", "Téléphone", "Mode", "Poids", "Statut", `Montant (${cur})`];

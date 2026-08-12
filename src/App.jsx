@@ -5642,6 +5642,35 @@ function CentreClientsPage({ data, persist, notify, session }) {
   );
 }
 
+const colisThStyle = { padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" };
+
+/**
+ * Carte de statistiques de la page Colis, avec lien "Filtrer" qui applique/retire le filtre de
+ * statut correspondant sur la liste juste en dessous. `highlight` met la carte en évidence
+ * (fond et texte teintés) — utilisée pour signaler le statut qui a le plus besoin d'attention
+ * (Arrivé : le colis est là mais pas encore marqué disponible au retrait) ou le filtre actif.
+ */
+const ColisStatCard = memo(function ColisStatCard({ label, value, icon: Icon, tint, active, highlight, onFiltrer }) {
+  return (
+    <div style={{
+      background: highlight ? "var(--warn-bg)" : "var(--surface)",
+      border: "1.5px solid " + (highlight ? "var(--warn-border)" : active ? tint : "var(--border)"),
+      borderRadius: 14, padding: "16px 18px", minWidth: 0,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span style={{ fontSize: 12, color: highlight ? "var(--warn-fg)" : "var(--muted)", fontWeight: 600 }}>{label}</span>
+        <div style={{ width: 32, height: 32, borderRadius: 9, background: tint, flexShrink: 0, display: "grid", placeItems: "center" }}><Icon size={15} color="#fff" /></div>
+      </div>
+      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 26, fontWeight: 700, color: highlight ? "var(--warn-fg)" : "var(--text)", marginTop: 10 }}>{value}</div>
+      {onFiltrer && (
+        <button onClick={onFiltrer} style={{ display: "flex", alignItems: "center", gap: 2, background: "none", border: "none", color: highlight ? "var(--warn-fg)" : "var(--info-fg)", fontSize: 11.5, fontWeight: 700, padding: 0, marginTop: 8, cursor: "pointer" }}>
+          Filtrer <ChevronRight size={13} />
+        </button>
+      )}
+    </div>
+  );
+});
+
 function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirFormulaire }) {
   const [showForm, setShowForm] = useState(false);
   const [showAi, setShowAi] = useState(false);
@@ -5659,18 +5688,31 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
   const [showScanner, setShowScanner] = useState(false);
   const isChauffeur = session.role === "Chauffeur";
   const peutCreer = effectivePermission(session, "colis.creer");
-  const list = useMemo(() => {
-    const q = pourRecherche(deferredQuery);
+  // Portée avant recherche/filtre de statut : sert à la fois de base à la liste affichée et au
+  // calcul des compteurs des cartes de statistiques (qui ne doivent pas bouger pendant que
+  // l'agent tape une recherche).
+  const baseList = useMemo(() => {
     return data.colis
       .filter((c) => (isChauffeur ? c.status === "Disponible au retrait" : true))
-      .filter((c) => !session.agence || (c.site || "Bambeto") === session.agence)
+      .filter((c) => !session.agence || (c.site || "Bambeto") === session.agence);
+  }, [data.colis, isChauffeur, session.agence]);
+  const [statutFiltre, setStatutFiltre] = useState(null);
+  const list = useMemo(() => {
+    const q = pourRecherche(deferredQuery);
+    return baseList
+      .filter((c) => !statutFiltre || c.status === statutFiltre)
       .filter((c) => !q || pourRecherche(c.tracking).includes(q) || pourRecherche(c.destinataire).includes(q) || pourRecherche(c.referenceCommande).includes(q) || pourRecherche(c.emplacement).includes(q));
-  }, [data.colis, isChauffeur, session.agence, deferredQuery]);
+  }, [baseList, statutFiltre, deferredQuery]);
+  const statsParStatut = useMemo(() => {
+    const compte = { "Enregistré": 0, "En transit": 0, "Arrivé": 0, "Disponible au retrait": 0, "Livré": 0 };
+    baseList.forEach((c) => { if (compte[c.status] !== undefined) compte[c.status]++; });
+    return compte;
+  }, [baseList]);
   // Affichage progressif : la recherche porte toujours sur TOUS les colis, seul le nombre de
-  // cartes rendues d'un coup est limité, pour que la page reste rapide même avec des milliers
+  // lignes rendues d'un coup est limité, pour que la page reste rapide même avec des milliers
   // de colis en base.
   const [nbColisAffiches, setNbColisAffiches] = useState(TAILLE_PAGE);
-  useEffect(() => { setNbColisAffiches(TAILLE_PAGE); }, [deferredQuery]);
+  useEffect(() => { setNbColisAffiches(TAILLE_PAGE); }, [deferredQuery, statutFiltre]);
   const listeVisible = useMemo(() => list.slice(0, nbColisAffiches), [list, nbColisAffiches]);
 
   /*
@@ -6099,11 +6141,36 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
           {peutCreer && <button onClick={() => setShowForm(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}><Plus size={17} /> {t.newColis}</button>}
         </div>
       </div>
+
+      {!isChauffeur && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 12, marginBottom: 20 }}>
+          <ColisStatCard label="Total colis" value={baseList.length} icon={Package} tint="#3D63FF"
+            active={!statutFiltre} onFiltrer={statutFiltre ? () => setStatutFiltre(null) : null} />
+          <ColisStatCard label="En attente" value={statsParStatut["Enregistré"]} icon={Clock} tint="#6B7A99"
+            active={statutFiltre === "Enregistré"}
+            onFiltrer={() => setStatutFiltre(statutFiltre === "Enregistré" ? null : "Enregistré")} />
+          <ColisStatCard label="En transit" value={statsParStatut["En transit"]} icon={Plane} tint="#5B8DEF"
+            active={statutFiltre === "En transit"} onFiltrer={() => setStatutFiltre(statutFiltre === "En transit" ? null : "En transit")} />
+          <ColisStatCard label="Arrivé" value={statsParStatut["Arrivé"]} icon={MapPin} tint="#D6A22E"
+            active={statutFiltre === "Arrivé"} highlight={statutFiltre ? statutFiltre === "Arrivé" : true}
+            onFiltrer={() => setStatutFiltre(statutFiltre === "Arrivé" ? null : "Arrivé")} />
+          <ColisStatCard label="Disponible au retrait" value={statsParStatut["Disponible au retrait"]} icon={MapPin} tint="#16A163"
+            active={statutFiltre === "Disponible au retrait"} onFiltrer={() => setStatutFiltre(statutFiltre === "Disponible au retrait" ? null : "Disponible au retrait")} />
+          <ColisStatCard label="Livré" value={statsParStatut["Livré"]} icon={CheckCircle2} tint="#3ECB84"
+            active={statutFiltre === "Livré"} onFiltrer={() => setStatutFiltre(statutFiltre === "Livré" ? null : "Livré")} />
+        </div>
+      )}
+
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 9, background: "var(--surface)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 14px", maxWidth: 380, flex: 1 }}>
           <Search size={17} color="var(--muted)" />
           <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`${t.search}...`} style={{ border: "none", outline: "none", flex: 1, fontSize: 15, background: "none", color: "var(--text)" }} />
         </div>
+        {statutFiltre && (
+          <button onClick={() => setStatutFiltre(null)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--info-bg)", color: "var(--info-fg)", border: "1px solid var(--info-border)", borderRadius: 9, padding: "10px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+            Filtré : {statutFiltre} <X size={13} />
+          </button>
+        )}
         {peutCreer && (
           <button onClick={() => { setModeSelection((m) => !m); setSelectionLot([]); }} style={{ background: modeSelection ? "var(--brand-solid)" : "var(--surface)", color: modeSelection ? "#fff" : "var(--text)", border: "1.5px solid " + (modeSelection ? "var(--brand-solid)" : "var(--border)"), borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
             {modeSelection ? "Annuler la sélection" : "Sélectionner plusieurs"}
@@ -6173,11 +6240,59 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
           else { setQuery(tracking); notify(`Aucun colis trouvé pour "${tracking}" — recherche lancée`); }
         }} />
       )}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 18, marginBottom: modeSelection && selectionLot.length > 0 ? 90 : 0 }}>
-        {listeVisible.map((c) => <TicketCard key={c.tracking} colis={c} onOpen={() => (modeSelection ? toggleSelectionLot(c.tracking) : setSelected(c))} selectionMode={modeSelection} checked={selectionLot.includes(c.tracking)} />)}
-        {list.length === 0 && <div style={{ color: "var(--muted)", fontSize: 13.5 }}>Aucun colis à afficher.</div>}
+      <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16, overflow: "hidden", marginBottom: modeSelection && selectionLot.length > 0 ? 90 : 0 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 18px", borderBottom: "1px solid var(--border)", flexWrap: "wrap", gap: 8 }}>
+          <span style={{ fontWeight: 700, color: "var(--text)", fontSize: 14 }}>Liste des colis <span style={{ color: "var(--muted)", fontWeight: 600 }}>· {list.length}</span></span>
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", minWidth: 760, borderCollapse: "collapse" }}>
+            <thead>
+              <tr style={{ background: "var(--surface2)", textAlign: "start" }}>
+                {modeSelection && <th style={{ padding: "10px 14px", width: 36 }} />}
+                <th style={colisThStyle}>Code de suivi</th>
+                <th style={colisThStyle}>Destinataire</th>
+                <th style={colisThStyle}>Route</th>
+                <th style={colisThStyle}>Poids</th>
+                <th style={colisThStyle}>Type</th>
+                <th style={colisThStyle}>Frais d’expédition</th>
+                <th style={colisThStyle}>Statut</th>
+                <th style={colisThStyle}>Date</th>
+              </tr>
+            </thead>
+            <tbody>
+              {listeVisible.map((c) => {
+                const st = STATUS_STYLE[c.status];
+                const Icon = st.icon;
+                const checked = selectionLot.includes(c.tracking);
+                return (
+                  <tr key={c.tracking} onClick={() => (modeSelection ? toggleSelectionLot(c.tracking) : setSelected(c))}
+                    style={{ borderTop: "1px solid var(--border)", cursor: "pointer", background: checked ? "var(--info-bg)" : "transparent" }}>
+                    {modeSelection && (
+                      <td style={{ padding: "10px 14px" }}>
+                        <div style={{ width: 20, height: 20, borderRadius: 6, background: checked ? "var(--brand-solid)" : "var(--surface2)", border: "1.5px solid " + (checked ? "var(--brand-solid)" : "var(--border)"), display: "grid", placeItems: "center" }}>
+                          {checked && <Check size={13} color="#fff" />}
+                        </div>
+                      </td>
+                    )}
+                    <td style={{ padding: "10px 14px", fontWeight: 700, color: "var(--info-fg)", fontSize: 12.5, whiteSpace: "nowrap" }}>{c.tracking}</td>
+                    <td style={{ padding: "10px 14px", color: "var(--text)", fontSize: 13 }}>{c.destinataire}</td>
+                    <td style={{ padding: "10px 14px", color: "var(--muted)", fontSize: 12.5, whiteSpace: "nowrap" }}>{routeLabel(c.pays, c.direction)}</td>
+                    <td style={{ padding: "10px 14px", color: "var(--text)", fontSize: 12.5, whiteSpace: "nowrap" }}>{c.poids} kg</td>
+                    <td style={{ padding: "10px 14px", color: "var(--muted)", fontSize: 12.5, whiteSpace: "nowrap" }}>{c.mode === "air" ? "Aérien" : "Maritime"}</td>
+                    <td style={{ padding: "10px 14px", color: "var(--text)", fontWeight: 600, fontSize: 12.5, whiteSpace: "nowrap" }}>{fmtGNF(c.prix * (LIVE_RATES.GNF || CURRENCIES.GNF))}</td>
+                    <td style={{ padding: "10px 14px" }}>
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 5, background: st.bg, color: st.fg, padding: "4px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}><Icon size={12} /> {c.status}</span>
+                    </td>
+                    <td style={{ padding: "10px 14px", color: "var(--muted)", fontSize: 12, whiteSpace: "nowrap" }}>{new Date(c.createdAt).toLocaleDateString("fr-FR")}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        {list.length === 0 && <div style={{ padding: 20, color: "var(--muted)", fontSize: 13.5 }}>Aucun colis à afficher.</div>}
         {list.length > listeVisible.length && (
-          <div style={{ gridColumn: "1 / -1", display: "flex", alignItems: "center", justifyContent: "center", gap: 12, padding: "6px 0", flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 12, padding: "14px 0", flexWrap: "wrap", borderTop: "1px solid var(--border)" }}>
             <span style={{ fontSize: 12.5, color: "var(--muted)" }}>{listeVisible.length} affichés sur {list.length}</span>
             <button onClick={() => setNbColisAffiches((n) => n + TAILLE_PAGE)} style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "7px 16px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
               Afficher {Math.min(TAILLE_PAGE, list.length - listeVisible.length)} de plus
@@ -6826,48 +6941,6 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
           </div>
         </Modal>
       )}
-    </div>
-  );
-}
-
-function TicketCard({ colis, onOpen, selectionMode, checked }) {
-  const st = STATUS_STYLE[colis.status];
-  const Icon = st.icon;
-  return (
-    <div onClick={onOpen} style={{ position: "relative", background: "var(--surface)", borderRadius: 16, overflow: "hidden", boxShadow: "0 3px 14px rgba(10,38,71,0.09)", cursor: "pointer", border: checked ? "2px solid var(--brand-solid)" : "1px solid var(--surface2)", transition: "box-shadow 0.15s, transform 0.15s" }}>
-      {selectionMode && (
-        <div style={{ position: "absolute", top: 12, right: 12, zIndex: 2, width: 24, height: 24, borderRadius: 7, background: checked ? "var(--brand-solid)" : "rgba(255,255,255,0.9)", border: "1.5px solid " + (checked ? "var(--brand-solid)" : "var(--border)"), display: "grid", placeItems: "center" }}>
-          {checked && <Check size={15} color="#fff" />}
-        </div>
-      )}
-      <div style={{ background: "#0A2647", padding: "14px 18px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <span style={{ color: "#fff", fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 15.5, letterSpacing: 0.3 }}>{colis.tracking}</span>
-        <span style={{ background: "rgba(255,255,255,0.15)", color: "#fff", fontSize: 11.5, fontWeight: 600, padding: "4px 10px", borderRadius: 20 }}>{colis.mode === "air" ? "AÉRIEN" : "MARITIME"}</span>
-      </div>
-      <div style={{ padding: "16px 18px" }}>
-        <div style={{ fontSize: 15, color: "var(--text)", fontWeight: 700 }}>{colis.destinataire}</div>
-        {colis.referenceCommande && (
-          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>réf. commande : <strong style={{ color: "var(--text)" }}>{colis.referenceCommande}</strong></div>
-        )}
-        {colis.emplacement && !colis.remise && (
-          <div style={{ display: "inline-flex", alignItems: "center", gap: 5, marginTop: 6, marginInlineEnd: 6,
-                        background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)",
-                        borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700 }}>
-            <MapPin size={10} /> {colis.emplacement}
-          </div>
-        )}
-        {colis.litige && (
-          <div style={{ display: "inline-flex", alignItems: "center", gap: 5, marginTop: 6,
-                        background: colis.litige.statut === "Ouvert" ? "var(--warn-bg)" : "var(--ok-bg)",
-                        border: "1px solid " + (colis.litige.statut === "Ouvert" ? "var(--warn-border)" : "var(--ok-border)"),
-                        color: colis.litige.statut === "Ouvert" ? "var(--warn-fg)" : "var(--ok-fg)",
-                        borderRadius: 20, padding: "3px 10px", fontSize: 11, fontWeight: 700 }}>
-            {colis.litige.type === "perdu" ? "Perdu" : "Endommagé"}{colis.litige.statut === "Résolu" ? " · réglé" : ""}
-          </div>
-        )}
-        <div style={{ fontSize: 13.5, color: "var(--muted)", marginTop: 4, fontWeight: 500 }}>{routeLabel(colis.pays, colis.direction)}</div>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 12, background: st.bg, color: st.fg, padding: "6px 12px", borderRadius: 20, fontSize: 12.5, fontWeight: 700, width: "fit-content" }}><Icon size={14} /> {colis.status}</div>
-      </div>
     </div>
   );
 }

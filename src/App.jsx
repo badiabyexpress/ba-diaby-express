@@ -4069,24 +4069,26 @@ function PartnerDashboard({ data, session }) {
 
       <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 10 }}>Vos colis</div>
       <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", marginBottom: 20 }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Destinataire", "Statut", "Poids", "Commission"].map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700 }}>{h}</th>)}</tr></thead>
+        <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", minWidth: 560, borderCollapse: "collapse" }}>
+          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Destinataire", "Statut", "Poids", "Commission"].map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
           <tbody>
             {colisPartenaire.length === 0 && <tr><td colSpan={5} style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucun colis ne vous est encore rattaché.</td></tr>}
             {colisPartenaire.map((c) => {
               const st = STATUS_STYLE[c.status];
               return (
                 <tr key={c.tracking} style={{ borderTop: "1px solid var(--border)" }}>
-                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>{c.tracking}</td>
-                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)" }}>{c.destinataire}</td>
-                  <td style={{ padding: "10px 14px" }}><span style={{ background: st?.bg, color: st?.fg, padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>{c.status}</span></td>
-                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)" }}>{c.poids} kg</td>
-                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--ok-fg)", fontWeight: 600 }}>{fmt(calcCommission(c, data.commissionConfig, data.categories), "EUR")}</td>
+                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.tracking}</td>
+                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{c.destinataire}</td>
+                  <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}><span style={{ background: st?.bg, color: st?.fg, padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>{c.status}</span></td>
+                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.poids} kg</td>
+                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--ok-fg)", fontWeight: 600, whiteSpace: "nowrap" }}>{fmt(calcCommission(c, data.commissionConfig, data.categories), "EUR")}</td>
                 </tr>
               );
             })}
           </tbody>
         </table>
+        </div>
       </div>
 
       <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 10 }}>Historique des paiements reçus par vos colis</div>
@@ -4561,7 +4563,8 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
           <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14 }}>Taux personnalisés par catégorie</div>
           <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>Laissez vide pour utiliser le taux général.</div>
         </div>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", minWidth: 460, borderCollapse: "collapse" }}>
           <thead>
             <tr style={{ textAlign: "left", background: "var(--surface2)" }}>
               <th style={{ padding: "10px 16px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700 }}>CATÉGORIE</th>
@@ -4595,6 +4598,7 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
 
       <div style={{ background: "var(--surface)", borderRadius: 14, padding: 20, border: "1px solid var(--border)", maxWidth: 320 }}>
@@ -4666,7 +4670,8 @@ function GestionDevisesPage({ data, persist, session, notify, onBack }) {
       <ConfigPageHeader title="Gestion des devises" desc="Un seul taux par devise — tous les pays qui la partagent sont mis à jour automatiquement." onBack={onBack} />
 
       <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", marginBottom: 22, maxWidth: 640 }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", minWidth: 520, borderCollapse: "collapse" }}>
           <thead>
             <tr style={{ textAlign: "left" }}>
               <th style={{ padding: "12px 16px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.5 }}>DEVISE</th>
@@ -4716,6 +4721,7 @@ function GestionDevisesPage({ data, persist, session, notify, onBack }) {
             })}
           </tbody>
         </table>
+        </div>
       </div>
 
       <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
@@ -6915,24 +6921,26 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
         )}
       </div>
       <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", marginBottom: modification ? 18 : 0 }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["ID Colis", "Destinataire", "Statut", "Poids", `Prix (${devise})`, modification ? "" : null].filter(Boolean).map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700 }}>{h}</th>)}</tr></thead>
+        <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", minWidth: 580, borderCollapse: "collapse" }}>
+          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["ID Colis", "Destinataire", "Statut", "Poids", `Prix (${devise})`, modification ? "" : null].filter(Boolean).map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
           <tbody>
             {colisInclus.map((c) => {
               const st = STATUS_STYLE[c.status];
               return (
                 <tr key={c.tracking} style={{ borderTop: "1px solid var(--border)" }}>
-                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>{c.tracking}</td>
-                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)" }}>{c.destinataire}</td>
-                  <td style={{ padding: "10px 14px" }}><span style={{ background: st.bg, color: st.fg, padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>{c.status}</span></td>
-                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)" }}>{c.poids} kg</td>
-                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)" }}>{fmt(c.prix, devise)}</td>
+                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.tracking}</td>
+                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{c.destinataire}</td>
+                  <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}><span style={{ background: st.bg, color: st.fg, padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>{c.status}</span></td>
+                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.poids} kg</td>
+                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{fmt(c.prix, devise)}</td>
                   {modification && <td style={{ padding: "10px 14px", textAlign: "right" }}><button onClick={() => retirer(c.tracking)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><X size={14} /></button></td>}
                 </tr>
               );
             })}
           </tbody>
         </table>
+        </div>
       </div>
 
       {modification && (
@@ -11531,21 +11539,23 @@ function ComptabilitePage({ data, persist, session, notify }) {
       )}
 
       <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["Type", "Libellé", "Montant", "Date", ""].map((h) => <th key={h} style={{ padding: "12px 16px", fontSize: 11.5, color: "var(--muted)", fontWeight: 700 }}>{h}</th>)}</tr></thead>
+        <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", minWidth: 520, borderCollapse: "collapse" }}>
+          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["Type", "Libellé", "Montant", "Date", ""].map((h) => <th key={h} style={{ padding: "12px 16px", fontSize: 11.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
           <tbody>
             {depensesPeriode.map((d) => (
               <tr key={d.id} style={{ borderTop: "1px solid var(--border)" }}>
-                <td style={{ padding: "12px 16px", fontSize: 12.5 }}><span style={{ background: "var(--surface2)", color: "var(--text)", padding: "3px 10px", borderRadius: 20, fontWeight: 600 }}>{d.type}</span></td>
-                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--text)" }}>{d.nom}</td>
-                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{fmtGNF(d.montant)}</td>
-                <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)" }}>{new Date(d.date).toLocaleDateString("fr-FR")}</td>
-                <td style={{ padding: "12px 16px", textAlign: "right" }}>{effectivePermission(session, "compta.gerer_depenses") && <button onClick={() => setDepenseASupprimer(d)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={14} /></button>}</td>
+                <td style={{ padding: "12px 16px", fontSize: 12.5, whiteSpace: "nowrap" }}><span style={{ background: "var(--surface2)", color: "var(--text)", padding: "3px 10px", borderRadius: 20, fontWeight: 600 }}>{d.type}</span></td>
+                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--text)", whiteSpace: "nowrap" }}>{d.nom}</td>
+                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" }}>{fmtGNF(d.montant)}</td>
+                <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{new Date(d.date).toLocaleDateString("fr-FR")}</td>
+                <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>{effectivePermission(session, "compta.gerer_depenses") && <button onClick={() => setDepenseASupprimer(d)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={14} /></button>}</td>
               </tr>
             ))}
             {depensesPeriode.length === 0 && <tr><td colSpan={5} style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucune dépense, salaire ou commission sur cette période.</td></tr>}
           </tbody>
         </table>
+        </div>
       </div>
 
       {form && (
@@ -11849,9 +11859,9 @@ function ImportExcelModal({ onClose, onImportMany, data, session }) {
       {rows && (
         <div>
           <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", marginBottom: 10 }}>{validRows.length} / {rows.length} lignes valides</div>
-          <div style={{ background: "var(--surface2)", borderRadius: 12, border: "1px solid var(--border)", overflow: "hidden", marginBottom: 16, maxHeight: 260, overflowY: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse" }}>
-              <thead><tr style={{ textAlign: "left" }}>{["", "Destinataire", "Téléphone", "Pays", "Poids", "Prix"].map((h) => <th key={h} style={{ padding: "8px 12px", fontSize: 10.5, color: "var(--muted)" }}>{h}</th>)}</tr></thead>
+          <div style={{ background: "var(--surface2)", borderRadius: 12, border: "1px solid var(--border)", marginBottom: 16, maxHeight: 260, overflowY: "auto", overflowX: "auto" }}>
+            <table style={{ width: "100%", minWidth: 460, borderCollapse: "collapse" }}>
+              <thead><tr style={{ textAlign: "left" }}>{["", "Destinataire", "Téléphone", "Pays", "Poids", "Prix"].map((h) => <th key={h} style={{ padding: "8px 12px", fontSize: 10.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
               <tbody>
                 {rows.map((r, i) => (
                   <tr key={i} style={{ borderTop: "1px solid var(--border)" }}>
@@ -12274,18 +12284,19 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
       </div>
 
       <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, overflow: "hidden" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", minWidth: 480, borderCollapse: "collapse" }}>
           <thead>
             <tr style={{ background: "var(--surface2)", textAlign: "left" }}>
-              <th style={{ padding: "12px 16px", fontSize: 11, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.5 }}>ÉVÉNEMENT</th>
-              <th style={{ padding: "12px 16px", fontSize: 11, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.5, textAlign: "center", width: 120 }}>EXPÉDITEUR</th>
-              <th style={{ padding: "12px 16px", fontSize: 11, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.5, textAlign: "center", width: 120 }}>DESTINATAIRE</th>
+              <th style={{ padding: "12px 16px", fontSize: 11, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.5, whiteSpace: "nowrap" }}>ÉVÉNEMENT</th>
+              <th style={{ padding: "12px 16px", fontSize: 11, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.5, textAlign: "center", width: 120, whiteSpace: "nowrap" }}>EXPÉDITEUR</th>
+              <th style={{ padding: "12px 16px", fontSize: 11, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.5, textAlign: "center", width: 120, whiteSpace: "nowrap" }}>DESTINATAIRE</th>
             </tr>
           </thead>
           <tbody>
             {EVENEMENTS_WHATSAPP.map((e) => (
               <tr key={e.cle} style={{ borderTop: "1px solid var(--surface2)" }}>
-                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--text)" }}>{e.label}</td>
+                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--text)", whiteSpace: "nowrap" }}>{e.label}</td>
                 <td style={{ padding: "12px 16px", textAlign: "center" }}>
                   <div style={{ display: "flex", justifyContent: "center" }}>
                     <Interrupteur actif={!!(brouillon[e.cle] || {}).expediteur} onClick={() => basculer(e.cle, "expediteur")} />
@@ -12300,6 +12311,7 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
             ))}
           </tbody>
         </table>
+        </div>
       </div>
 
       {/*
@@ -13139,22 +13151,24 @@ function PerformanceAgentsPage({ data, onBack }) {
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>Aucune activité sur cette période.</div>
       ) : (
         <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["Agent", "Colis enregistrés", "Poids total", "CA généré", "Paiements encaissés", "Montant encaissé", "Temps de réponse moyen"].map((h) => <th key={h} style={{ padding: "12px 16px", fontSize: 11.5, color: "var(--muted)", fontWeight: 700 }}>{h}</th>)}</tr></thead>
+          <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", minWidth: 820, borderCollapse: "collapse" }}>
+            <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["Agent", "Colis enregistrés", "Poids total", "CA généré", "Paiements encaissés", "Montant encaissé", "Temps de réponse moyen"].map((h) => <th key={h} style={{ padding: "12px 16px", fontSize: 11.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
             <tbody>
               {lignes.map((l) => (
                 <tr key={l.nom} style={{ borderTop: "1px solid var(--surface2)" }}>
-                  <td style={{ padding: "12px 16px", fontSize: 13.5, color: "var(--text)", fontWeight: 600 }}>{l.nom}</td>
-                  <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{l.colisCrees}</td>
-                  <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{l.poids.toFixed(1)} kg</td>
-                  <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{fmt(l.ca, "EUR")}</td>
-                  <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{l.nbPaiements}</td>
-                  <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{fmt(l.montantEncaisse, "EUR")}</td>
-                  <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{l.nbReponses > 0 ? formatDelai(l.tempsReponseTotalMin / l.nbReponses) : "—"}</td>
+                  <td style={{ padding: "12px 16px", fontSize: 13.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{l.nom}</td>
+                  <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" }}>{l.colisCrees}</td>
+                  <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" }}>{l.poids.toFixed(1)} kg</td>
+                  <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" }}>{fmt(l.ca, "EUR")}</td>
+                  <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" }}>{l.nbPaiements}</td>
+                  <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" }}>{fmt(l.montantEncaisse, "EUR")}</td>
+                  <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" }}>{l.nbReponses > 0 ? formatDelai(l.tempsReponseTotalMin / l.nbReponses) : "—"}</td>
                 </tr>
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
       <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 14 }}>Les colis créés avant cette mise à jour n’ont pas d’agent enregistré et apparaissent sous "Non renseigné". De même, le temps de réponse ne peut être calculé que pour les messages envoyés depuis cette mise à jour.</div>
@@ -13210,28 +13224,30 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
         {effectivePermission(session, "users.gerer") && <button onClick={() => setShowForm(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}><Plus size={16} /> Créer un compte</button>}
       </div>
       <div style={{ background: "var(--surface)", borderRadius: 14, boxShadow: "0 2px 10px rgba(10,38,71,0.06)", overflow: "hidden" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["Employé", "Identifiant", "Téléphone", "Rôle", "Destinations", "2FA", ""].map((h) => <th key={h} style={{ padding: "12px 16px", fontSize: 11.5, color: "var(--muted)", fontWeight: 700 }}>{h}</th>)}</tr></thead>
+        <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", minWidth: 760, borderCollapse: "collapse" }}>
+          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["Employé", "Identifiant", "Téléphone", "Rôle", "Destinations", "2FA", ""].map((h) => <th key={h} style={{ padding: "12px 16px", fontSize: 11.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
           <tbody>
             {data.users.map((u) => (
               <tr key={u.id} onClick={() => setEditingUser(u)} style={{ borderTop: "1px solid var(--surface2)", cursor: "pointer" }}>
                 <td style={{ padding: "12px 16px" }}>
-                  <div style={{ fontSize: 13.5, color: "var(--text)", fontWeight: 600, display: "flex", alignItems: "center", gap: 8 }}>{u.role === "Administrateur" && <Shield size={14} color="#E23F52" />} {u.prenom} {u.nom}</div>
-                  <div style={{ fontSize: 11.5, color: "var(--muted)" }}>{u.email}</div>
+                  <div style={{ fontSize: 13.5, color: "var(--text)", fontWeight: 600, display: "flex", alignItems: "center", gap: 8, whiteSpace: "nowrap" }}>{u.role === "Administrateur" && <Shield size={14} color="#E23F52" />} {u.prenom} {u.nom}</div>
+                  <div style={{ fontSize: 11.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{u.email}</div>
                 </td>
-                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{u.identifiant}</td>
-                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{u.telephone}</td>
-                <td style={{ padding: "12px 16px", fontSize: 13 }}>
+                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" }}>{u.identifiant}</td>
+                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" }}>{u.telephone}</td>
+                <td style={{ padding: "12px 16px", fontSize: 13, whiteSpace: "nowrap" }}>
                   <span style={{ background: "var(--surface2)", color: "var(--text)", padding: "4px 10px", borderRadius: 20, fontSize: 11.5, fontWeight: 600 }}>{u.role}</span>
                   {u.role !== "Administrateur" && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>{FLAGS[u.paysOperation || "GN"] || ""} basé {(COUNTRIES.find((c) => c.code === (u.paysOperation || "GN"))?.name) || "Guinée"}</div>}
                 </td>
-                <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)" }}>{u.role === "Administrateur" ? "Tous les pays" : (u.paysAutorises?.length ? u.paysAutorises.map((c) => FLAGS[c]).join(" ") : "Tous les pays")}</td>
-                <td style={{ padding: "12px 16px", fontSize: 13 }}>{u.twoFA ? <ShieldCheck size={15} color="var(--ok-fg)" /> : "—"}</td>
+                <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{u.role === "Administrateur" ? "Tous les pays" : (u.paysAutorises?.length ? u.paysAutorises.map((c) => FLAGS[c]).join(" ") : "Tous les pays")}</td>
+                <td style={{ padding: "12px 16px", fontSize: 13, whiteSpace: "nowrap" }}>{u.twoFA ? <ShieldCheck size={15} color="var(--ok-fg)" /> : "—"}</td>
                 <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>{effectivePermission(session, "users.gerer") && <button onClick={() => setUtilisateurAReinit(u)} title="Réinitialiser le mot de passe" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><Key size={15} /></button>}{u.id !== session?.id && (data.users || []).filter((x) => x.role === "Administrateur").length > 1 && effectivePermission(session, "users.gerer") && <button onClick={() => removeUser(u.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={15} /></button>}</td>
               </tr>
             ))}
           </tbody>
         </table>
+        </div>
       </div>
       {utilisateurAReinit && (
         <ConfirmerAction

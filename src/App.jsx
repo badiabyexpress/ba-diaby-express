@@ -2230,6 +2230,9 @@ function PublicTrackingPage({ data, loading }) {
   // au client, qui est toujours la Guinée.
   const destPaysCode = colis ? (colis.destinatairePays || colis.pays) : null;
   const dest = destPaysCode ? COUNTRIES.find((c) => c.code === destPaysCode) : null;
+  // colis.pays est le pays de route : pour un import (ex. Paris → Conakry), c'est le pays
+  // d'origine à l'étranger ; pour un export, l'origine est toujours la Guinée.
+  const origine = colis ? COUNTRIES.find((c) => c.code === (colis.direction === "import" ? colis.pays : "GN")) : null;
   const publicSteps = ["Enregistré", "En transit", "Arrivé", "Disponible au retrait", "Livré"];
   const curIdx = colis ? Math.max(publicSteps.indexOf(colis.status), 0) : 0;
   // La terminologie "espace client" (Reçu à l’entrepôt, Arrivé en Guinée...) ne concerne que
@@ -2314,6 +2317,7 @@ function PublicTrackingPage({ data, loading }) {
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12, marginBottom: 18 }}>
+            <Info label="Origine" value={`${FLAGS[origine?.code] || ""} ${origine?.name || "—"}`} />
             <Info label="Destination" value={`${FLAGS[destPaysCode] || ""} ${dest?.name || "—"}`} />
             <Info label="Mode" value={colis.mode === "air" ? "Aérien" : "Maritime"} />
             <Info label="Poids" value={`${colis.poids} kg`} />

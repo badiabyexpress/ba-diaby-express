@@ -7210,10 +7210,18 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
    * Demander à nouveau l'agence à chaque colis était une source d'erreur — un agent pressé
    * pouvait laisser la valeur par défaut et fausser les statistiques par site. Un administrateur
    * sans affectation garde le choix, puisqu'il peut enregistrer pour n'importe quelle agence.
+   *
+   * La notion d'« agence » n'existe que pour les points physiques tenus en Guinée (voir
+   * sitesLocaux) — un enregistrement fait depuis un autre pays n'a pas d'agence à choisir, il n'y
+   * a que le pays d'opération (déjà déterminé par le pays expéditeur, verrouillé plus haut).
    */
   const agenceImposee = session?.agence || "";
   const siteLocalParDefaut = sitesLocaux(sites)[0];
-  const [agence, setAgence] = useState(() => agenceImposee || brouillon?.agence || siteLocalParDefaut?.nom || "Bambeto");
+  const [agence, setAgence] = useState(() => {
+    if (agenceImposee) return agenceImposee;
+    if (brouillon?.agence) return brouillon.agence;
+    return expPays === "GN" ? (siteLocalParDefaut?.nom || "Bambeto") : "";
+  });
   const [partenaireId, setPartenaireId] = useState(() => brouillon?.partenaireId ?? "");
   // Le compte client et la pré-alerte rattachée ne sont volontairement PAS restaurés depuis un
   // brouillon : une pré-alerte marquée "Rapproché" entre-temps par un autre agent ne doit jamais
@@ -7602,9 +7610,6 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
         {step === 0 && (
           <div>
             <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 16 }}>Choisissez le pays d’expédition et le pays de destination — les tarifs et la devise seront calculés automatiquement.</div>
-            {availableCountries.length < COUNTRIES.length && (
-              <div style={{ fontSize: 11.5, color: "var(--warn-fg)", marginBottom: 12 }}>Votre compte est limité à certaines destinations par votre administrateur.</div>
-            )}
             <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: 10, alignItems: "end" }}>
               <Field label="Pays expéditeur *">
                 {paysExpediteurVerrouille ? (
@@ -7772,7 +7777,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
                   {[...new Set(["GNF", "EUR", expCountry?.currency, destCountry?.currency].filter(Boolean))].map((c) => <option key={c} value={c}>{c}</option>)}
                 </select>
               </Field>
-              {!agenceImposee && <Field label="Agence d’enregistrement">
+              {!agenceImposee && expPays === "GN" && <Field label="Agence d’enregistrement">
                 <select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>
                   {(() => {
                     const locaux = sitesLocaux(sites);

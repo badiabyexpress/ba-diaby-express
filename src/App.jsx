@@ -9662,7 +9662,7 @@ function EncaisserGroupeModal({ data, onEncaisser, onClose }) {
   );
 }
 
-function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeConfig, categories }) {
+function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeConfig, categories, session }) {
   const [expediteur, setExpediteur] = useState(colis.expediteur);
   // Le téléphone et l'adresse de l'expéditeur, ainsi que l'e-mail et l'adresse complète du
   // destinataire, n'étaient pas repris dans le formulaire de modification — seuls le nom, le
@@ -9685,6 +9685,9 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   const [paye, setPaye] = useState(String(colis.paye || ""));
   const [rabaisMontant, setRabaisMontant] = useState(String(colis.rabaisMontant || 0));
   const [rabaisDevise, setRabaisDevise] = useState(colis.rabaisDevise || "GNF");
+  // Contenu du colis (articles, prix). N'existe que pour les colis créés produit par produit —
+  // un colis tarifé aux paliers de réception ou au barème export n'a rien à détailler ici.
+  const [produits, setProduits] = useState(colis.produits && colis.produits.length ? colis.produits : []);
   const [err, setErr] = useState("");
   /*
    * Deux barèmes coexistent : le barème export (par pays et mode de transport) et les paliers
@@ -9704,7 +9707,10 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
    * silencieusement. Le prix facturé au client était multiplié par 4,75.
    */
   const auxPaliers = colis.tarification === "reception";
-  const valeurProduits = (colis.produits || []).reduce((somme, prod) => somme + produitValeurGNF(prod, categories || []), 0);
+  // La valeur des produits suit désormais l'état local `produits` (modifiable ci-dessous), et
+  // non plus colis.produits figé : corriger le prix d'un article recalcule immédiatement le
+  // total, exactement comme à la création.
+  const valeurProduits = produits.reduce((somme, prod) => somme + produitValeurGNF(prod, categories || []), 0);
   const prixBrut = auxPaliers
     ? +(calcReceptionFee(Number(poids) || 0, tarifsReception).total / (LIVE_RATES.GNF || CURRENCIES.GNF)).toFixed(2)
     : valeurProduits > 0
@@ -9718,9 +9724,24 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   const payeNum = Number(paye) || 0;
   const reste = Math.max(prix - payeNum, 0);
 
+  function updateProduit(id, patch) {
+    const propre = { ...patch };
+    if ("poids" in propre && propre.poids !== "" && Number(propre.poids) < 0) propre.poids = "0";
+    if ("quantite" in propre && propre.quantite !== "" && Number(propre.quantite) < 1) propre.quantite = "1";
+    setProduits((list) => list.map((p) => (p.id === id ? { ...p, ...propre } : p)));
+  }
+  function addProduit() { setProduits((list) => [...list, emptyProduit()]); }
+  function removeProduit(id) { setProduits((list) => list.filter((p) => p.id !== id)); }
+
   function submit(e) {
     e.preventDefault();
     if (!expediteur || !destinataire || !telephone) return;
+    if (produits.some((p) => !p.nom || !(Number(p.poids) > 0) || !(Number(p.quantite) >= 1))) {
+      setErr("Chaque article doit avoir un nom, une quantité et un poids supérieur à 0."); return;
+    }
+    if (produits.some((p) => !p.personnalise && !p.categorie)) {
+      setErr("Choisissez une catégorie pour chaque article (ou cochez « Prix personnalisé »)."); return;
+    }
     // Un colis de 0 kg n'existe pas : on refuse l'enregistrement plutôt que de créer une
     // ligne qui faussera ensuite les totaux de poids, le chiffre d'affaires et les commissions.
     if (!(Number(poids) > 0)) { setErr("Le poids doit être supérieur à 0 kg."); return; }
@@ -9730,6 +9751,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
       pays, direction,
       destinatairePays: direction === "import" ? "GN" : pays, mode,
       poids: Number(poids) || 0, volume: Number(volume) || 0,
+      produits, valeurDeclaree: produits.length ? valeurProduits : (colis.valeurDeclaree || 0),
       prixBrut, discountLoyalty, rabaisMontant: Number(rabaisMontant) || 0, rabaisDevise, rabaisEUR, prix, paye: payeNum, reste,
     });
   }
@@ -9740,7 +9762,8 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
       telephone !== colis.telephone || expediteurTelephone !== (colis.expediteurTelephone || "") ||
       expediteurEmail !== (colis.expediteurEmail || "") || expediteurAdresse !== (colis.expediteurAdresse || "") ||
       destinataireEmail !== (colis.destinataireEmail || "") || destinataireAdresse !== (colis.destinataireAdresse || "") ||
-      destinataireVille !== (colis.destinataireVille || "") || destinataireCodePostal !== (colis.destinataireCodePostal || "")
+      destinataireVille !== (colis.destinataireVille || "") || destinataireCodePostal !== (colis.destinataireCodePostal || "") ||
+      JSON.stringify(produits) !== JSON.stringify(colis.produits || [])
     }>
       <form onSubmit={submit} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14 }}>
         <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Expéditeur</div>
@@ -9769,12 +9792,56 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
         </div>
         <Field label="Poids (kg)"><input value={poids} onChange={(e) => setPoids(e.target.value)} style={inputStyle} /></Field>
         <Field label="Volume (m³, optionnel)"><input value={volume} onChange={(e) => setVolume(e.target.value)} style={inputStyle} /></Field>
-        <Field label="Mode de transport">
-          <div style={{ display: "flex", gap: 8 }}>
-            <button type="button" onClick={() => setMode("air")} style={{ ...toggleBtn, ...(mode === "air" ? toggleActive : {}) }}><Plane size={14} /> Aérien</button>
-            <button type="button" disabled title="Voie maritime temporairement indisponible" style={{ ...toggleBtn, opacity: 0.4, cursor: "not-allowed" }}><Ship size={14} /> Maritime</button>
-          </div>
-        </Field>
+
+        {produits.length > 0 && (
+          <>
+            <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)", marginTop: 4 }}>Contenu du colis</div>
+            <div style={{ gridColumn: "1 / -1" }}>
+              {produits.map((p, idx) => (
+                <div key={p.id} style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{idx + 1}. Article</div>
+                    <button type="button" onClick={() => removeProduit(p.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={14} /></button>
+                  </div>
+                  <Field label="Nom de l’article"><input value={p.nom} onChange={(e) => updateProduit(p.id, { nom: e.target.value })} style={inputStyle} /></Field>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10 }}>
+                    <Field label="Quantité"><input type="number" min="1" step="1" inputMode="numeric" value={p.quantite} onChange={(e) => updateProduit(p.id, { quantite: e.target.value })} style={inputStyle} /></Field>
+                    <Field label="Poids (kg)"><input type="number" min="0" step="0.1" inputMode="decimal" value={p.poids} onChange={(e) => updateProduit(p.id, { poids: e.target.value })} style={inputStyle} /></Field>
+                  </div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: 12 }}>
+                    <input type="checkbox" checked={p.personnalise} onChange={(e) => {
+                      const patch = { personnalise: e.target.checked };
+                      if (e.target.checked) { patch.prixModifiePar = `${session?.prenom || ""} ${session?.nom || ""}`.trim(); patch.prixModifieLe = new Date().toISOString(); }
+                      updateProduit(p.id, patch);
+                    }} />
+                    <span style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>Prix personnalisé</span>
+                  </label>
+                  {p.personnalise ? (
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10 }}>
+                      <Field label="Montant"><input value={p.montant} onChange={(e) => updateProduit(p.id, { montant: e.target.value, prixModifiePar: `${session?.prenom || ""} ${session?.nom || ""}`.trim(), prixModifieLe: new Date().toISOString() })} style={inputStyle} /></Field>
+                      <Field label="Devise"><select value={p.devise} onChange={(e) => updateProduit(p.id, { devise: e.target.value })} style={inputStyle}>{["GNF", "EUR", "USD"].map((d) => <option key={d} value={d}>{d}</option>)}</select></Field>
+                    </div>
+                  ) : (
+                    <Field label="Catégorie">
+                      <select value={p.categorie} onChange={(e) => updateProduit(p.id, { categorie: e.target.value })} style={inputStyle}>
+                        <option value="">-- Sélectionner une catégorie --</option>
+                        {(categories || []).filter((c) => c.visibiliteColis !== false && (!c.paysLimite || c.paysLimite === pays)).map((c) => <option key={c.id} value={c.nom}>{c.emoji} {c.nom} ({fmtGNF(catPriceGNF(c))}{c.type === "kg" ? "/kg" : "/unité"})</option>)}
+                      </select>
+                    </Field>
+                  )}
+                  {(() => {
+                    const val = produitValeurGNF(p, categories);
+                    if (!val) return null;
+                    return <div style={{ fontSize: 11.5, color: "var(--ok-fg)", marginTop: 8 }}>Valeur {p.personnalise ? "saisie" : "suggérée"} : {fmtGNF(val)}</div>;
+                  })()}
+                </div>
+              ))}
+              <button type="button" onClick={addProduit} style={{ width: "100%", border: "1.5px dashed var(--border)", borderRadius: 12, padding: "12px 0", background: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>+ Ajouter un article</button>
+            </div>
+          </>
+        )}
+
+        <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)", marginTop: 4 }}>Frais</div>
         <Field label="Montant du rabais"><input value={rabaisMontant} onChange={(e) => setRabaisMontant(e.target.value)} style={inputStyle} /></Field>
         <Field label="Devise du rabais">
           <select value={rabaisDevise} onChange={(e) => setRabaisDevise(e.target.value)} style={inputStyle}>
@@ -10621,7 +10688,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
           onAnnuler={() => setConfirmerSuppression(false)}
         />
       )}
-      {editing && <EditColisForm colis={colis} categories={data?.categories} remiseVolumeConfig={data?.remiseVolume} tarifsReception={data?.receptionTarifs} onClose={() => setEditing(false)} onSave={(patch) => { onUpdate(patch); setEditing(false); }} />}
+      {editing && <EditColisForm colis={colis} categories={data?.categories} remiseVolumeConfig={data?.remiseVolume} tarifsReception={data?.receptionTarifs} session={session} onClose={() => setEditing(false)} onSave={(patch) => { onUpdate(patch); setEditing(false); }} />}
       {showImpressionDirecte && <ImpressionDirecteModal colis={colis} onClose={() => setShowImpressionDirecte(false)} />}
       {bonSortieOuvert && (
         <Modal onClose={() => setBonSortieOuvert(false)} title="Enregistrer la remise du colis">

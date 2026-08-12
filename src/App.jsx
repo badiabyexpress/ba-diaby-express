@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue, memo } from "react";
-import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, ChevronDown, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell, SlidersHorizontal } from "lucide-react";
+import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, ChevronDown, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell, SlidersHorizontal, Copy, MoreHorizontal } from "lucide-react";
 import { storage, subscribeToChanges, flushOutbox, pendingSyncCount } from "./lib/storage.js";
 
 /* ---------- design tokens ----------
@@ -31,7 +31,7 @@ variable CSS), et les pastilles d'icônes qui reçoivent un fond plein via la pr
 ------------------------------------- */
 const BG = "var(--bg)", SURFACE = "var(--surface)", SURFACE2 = "var(--surface2)", BORDER = "var(--border)";
 const TEXT = "var(--text)", MUTED = "var(--muted)", BLUE = "#3D63FF", RED = "#E23F52", GREEN = "#2FAE73", AMBER = "#E0A63A";
-const FLAGS = { FR: "🇫🇷", BE: "🇧🇪", CA: "🇨🇦", US: "🇺🇸", US2: "🇺🇸", MA: "🇲🇦", GN: "🇬🇳", DE: "🇩🇪", IT: "🇮🇹", ES: "🇪🇸", SN: "🇸🇳" };
+const FLAGS = { FR: "🇫🇷", BE: "🇧🇪", CA: "🇨🇦", US: "🇺🇸", MA: "🇲🇦", GN: "🇬🇳", DE: "🇩🇪", IT: "🇮🇹", ES: "🇪🇸", SN: "🇸🇳" };
 
 const COUNTRIES = [
   { code: "GN", name: "Guinée", city: "Conakry", air: 0, sea: 0, delayAir: 0, delaySea: 0, currency: "GNF" },
@@ -41,8 +41,7 @@ const COUNTRIES = [
   { code: "IT", name: "Italie", city: "Milan", air: 13, sea: 6.5, delayAir: 5, delaySea: 36, currency: "EUR" },
   { code: "ES", name: "Espagne", city: "Madrid", air: 12.5, sea: 6.3, delayAir: 5, delaySea: 36, currency: "EUR" },
   { code: "CA", name: "Canada", city: "Montréal", air: 15, sea: 8, delayAir: 6, delaySea: 42, currency: "CAD" },
-  { code: "US", name: "États-Unis (New York)", city: "New York", air: 16, sea: 8.5, delayAir: 6, delaySea: 40, currency: "USD" },
-  { code: "US2", name: "États-Unis (Atlanta)", city: "Atlanta", air: 15.5, sea: 8, delayAir: 6, delaySea: 40, currency: "USD" },
+  { code: "US", name: "États-Unis", city: "New York", air: 16, sea: 8.5, delayAir: 6, delaySea: 40, currency: "USD" },
   { code: "MA", name: "Maroc", city: "Casablanca", air: 10, sea: 5, delayAir: 3, delaySea: 20, currency: "MAD" },
   { code: "SN", name: "Sénégal", city: "Dakar", air: 8, sea: 4, delayAir: 2, delaySea: 10, currency: "XOF" },
 ];
@@ -8091,8 +8090,10 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   const label = direction === "import" ? `${country.city} → Conakry` : `Conakry → ${country.city}`;
   const poidsTotal = colisRoute.reduce((s, c) => s + c.poids, 0);
 
-  // Bandeau d’en-tête
+  // Bandeau d’en-tête — filet rouge au pied de la bande navy, comme sur l'étiquette et le ticket
+  // d'envoi : même identité de marque bicolore sur tous les documents imprimés.
   doc.setFillColor(10, 38, 71); doc.rect(0, 0, 210, 30, "F");
+  doc.setFillColor(214, 39, 63); doc.rect(0, 28.6, 210, 1.4, "F");
   doc.setFillColor(255, 255, 255); doc.roundedRect(14, 5, 20, 20, 2.5, 2.5, "F");
   doc.addImage(DEFAULT_LOGO, "PNG", 15, 6, 18, 18);
   doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold"); doc.setFontSize(15);
@@ -8119,18 +8120,20 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
     doc.text(statutBadge.toUpperCase(), 183, 14.3, { align: "center" });
   }
 
-  // Cartes statistiques
+  // Cartes statistiques — liseré rouge sur celle du montant, le chiffre le plus regardé, comme
+  // sur le panneau des totaux du ticket d'envoi.
   let y = 38;
-  const stat = (x, label2, value) => {
+  const stat = (x, label2, value, accent) => {
     doc.setFillColor(240, 243, 250); doc.roundedRect(x, y, 58, 18, 2, 2, "F");
+    if (accent) { doc.setFillColor(214, 39, 63); doc.rect(x, y + 2, 1.4, 14, "F"); }
     doc.setFontSize(7.5); doc.setTextColor(120, 130, 150); doc.setFont(undefined, "normal");
-    doc.text(label2, x + 4, y + 6.5);
+    doc.text(label2, x + (accent ? 6.5 : 4), y + 6.5);
     doc.setFontSize(12); doc.setTextColor(10, 38, 71); doc.setFont(undefined, "bold");
-    doc.text(String(value), x + 4, y + 14);
+    doc.text(String(value), x + (accent ? 6.5 : 4), y + 14);
   };
   stat(14, "COLIS", colisRoute.length);
   stat(76, "POIDS TOTAL", `${poidsTotal.toFixed(1)} kg`);
-  stat(138, "MONTANT TOTAL", fmt(colisRoute.reduce((s, c) => s + c.prix, 0), cur));
+  stat(138, "MONTANT TOTAL", fmt(colisRoute.reduce((s, c) => s + c.prix, 0), cur), true);
   y += 26;
 
   const head = ["N° de suivi", "Destinataire", "Téléphone", "Mode", "Poids", "Statut", `Montant (${cur})`];
@@ -9900,6 +9903,8 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
   const [showLitige, setShowLitige] = useState(false);
   const [confirmerSuppression, setConfirmerSuppression] = useState(false);
   const [showImpressionDirecte, setShowImpressionDirecte] = useState(false);
+  const [showDocMenu, setShowDocMenu] = useState(false);
+  const [showPlusMenu, setShowPlusMenu] = useState(false);
   const [emplacement, setEmplacement] = useState(colis.emplacement || "");
   const [waState, setWaState] = useState("");
   const [waErreur, setWaErreur] = useState("");
@@ -10111,16 +10116,132 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
           )}
         </div>
       ))}
-      <div style={{ background: "#0A2647", borderRadius: 14, padding: "20px 22px", color: "#fff", marginBottom: 20 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-          <div><div style={{ fontSize: 11, color: "var(--muted)" }}>N° DE SUIVI</div><div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 22, fontWeight: 700 }}>{colis.tracking}</div>{colis.provenance && <span style={{ display: "inline-block", marginTop: 4, background: "rgba(255,255,255,0.12)", borderRadius: 6, padding: "2px 8px", fontSize: 11, fontWeight: 600 }}>{colis.provenance}</span>}</div>
-          <div style={{ textAlign: "right" }}>
-            <div style={{ fontSize: 11, color: "var(--muted)" }}>ROUTE</div>
-            <div style={{ fontSize: 15, fontWeight: 700 }}>{routeLabel(colis.pays, colis.direction)}</div>
-            <span style={{ display: "inline-block", marginTop: 6, background: "rgba(255,255,255,0.12)", borderRadius: 20, padding: "3px 10px", fontSize: 10.5, fontWeight: 700, letterSpacing: 0.4 }}>{colis.mode === "air" ? "AÉRIEN" : "MARITIME"}</span>
+      {/*
+        En-tête compact orienté action : le numéro de suivi et les actions les plus fréquentes
+        (encaisser, documents, statut suivant) tiennent sur une seule ligne au lieu d'être
+        dispersées dans une longue liste de boutons plus bas. Les menus "Ticket d'envoi" et "•••"
+        regroupent ce qui reste — mêmes actions qu'avant, juste rangées.
+      */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 14, marginBottom: 18 }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 20, fontWeight: 700, color: "var(--text)" }}>{colis.tracking}</span>
+            <button onClick={() => { navigator.clipboard?.writeText(colis.tracking); notify?.("Numéro copié"); }} title="Copier le numéro" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", display: "flex", padding: 2 }}><Copy size={14} /></button>
+            <span style={{ background: "var(--surface2)", borderRadius: 6, width: 24, height: 24, display: "grid", placeItems: "center", flexShrink: 0 }}>
+              {colis.mode === "air" ? <Plane size={12} color="var(--muted)" /> : <Ship size={12} color="var(--muted)" />}
+            </span>
+            {colis.provenance && <span style={{ background: "var(--surface2)", borderRadius: 6, padding: "2px 8px", fontSize: 10.5, fontWeight: 600, color: "var(--muted)" }}>{colis.provenance}</span>}
+          </div>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 4 }}>
+            {FLAGS[colis.expediteurPays || "GN"] || ""} → {FLAGS[colis.destinatairePays || colis.pays] || ""} · {routeLabel(colis.pays, colis.direction)} · {colis.destinataire}
           </div>
         </div>
+
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-start" }}>
+          {colis.reste > 0 && effectivePermission(session, "colis.enregistrer_paiement") && (
+            <button onClick={() => setPayerOuvert(true)} style={{ background: "#16A163", color: "#fff", border: "none", borderRadius: 8, padding: "9px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+              Encaisser {fmtGNF(colis.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}
+            </button>
+          )}
+          {isAdmin && <button onClick={() => setEditing(true)} style={smallBtn}>Modifier</button>}
+
+          <div style={{ position: "relative" }}>
+            <button onClick={() => { setShowDocMenu((s) => !s); setShowPlusMenu(false); }} style={smallBtn}>Ticket d’envoi <ChevronDown size={13} /></button>
+            {showDocMenu && (
+              <>
+                <div onClick={() => setShowDocMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 19 }} />
+                <div style={{ position: "absolute", top: "110%", insetInlineEnd: 0, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: 6, boxShadow: "0 10px 30px rgba(0,0,0,0.18)", zIndex: 20, minWidth: 230 }}>
+                  <button onClick={handleDownloadLabel} disabled={labelState === "loading"} style={menuItemStyle}>
+                    {labelState === "loading" ? "Génération…" : "Télécharger l’étiquette"}
+                    {labelState === "error" && <span style={menuItemHint}>Échec — réessayez</span>}
+                  </button>
+                  <button onClick={() => { setShowImpressionDirecte(true); setShowDocMenu(false); }} style={menuItemStyle}>Imprimer l’étiquette (imprimante connectée)</button>
+                  <div style={{ height: 1, background: "var(--border)", margin: "4px 2px" }} />
+                  <button onClick={handleDownloadInvoice} disabled={invoiceState === "loading"} style={menuItemStyle}>
+                    {invoiceState === "loading" ? "Génération…" : "Télécharger la facture"}
+                    {invoiceState === "error" && <span style={menuItemHint}>Échec — réessayez</span>}
+                  </button>
+                  {(colis.destinataireEmail || colis.email) && (
+                    <button onClick={handleEnvoyerFacture} disabled={emailState === "loading"} style={menuItemStyle}>
+                      {emailState === "loading" ? "Envoi…" : emailState === "envoye" ? "Facture envoyée" : emailState === "brouillon" ? "Brouillon e-mail ouvert" : "Renvoyer la facture par e-mail"}
+                    </button>
+                  )}
+                  <button onClick={handleDownloadTicketThermal} disabled={ticketThermalState === "loading"} style={menuItemStyle}>
+                    {ticketThermalState === "loading" ? "Génération…" : "Ticket thermique 80 mm"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+
+          <div style={{ position: "relative" }}>
+            <button onClick={() => { setShowPlusMenu((s) => !s); setShowDocMenu(false); }} title="Plus d’actions" style={{ ...smallBtn, padding: "9px 10px" }}><MoreHorizontal size={15} /></button>
+            {showPlusMenu && (
+              <>
+                <div onClick={() => setShowPlusMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 19 }} />
+                <div style={{ position: "absolute", top: "110%", insetInlineEnd: 0, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: 6, boxShadow: "0 10px 30px rgba(0,0,0,0.18)", zIndex: 20, minWidth: 230 }}>
+                  <button onClick={notifierWhatsApp} disabled={waState === "envoi"} style={menuItemStyle}>
+                    {waState === "envoi" ? "Envoi…" : waState === "envoye" ? "Message envoyé" : "Notifier par WhatsApp"}
+                    {waState === "brouillon" && <span style={menuItemHint}>Brouillon ouvert — appuyez sur Envoyer</span>}
+                    {waErreur && <span style={{ ...menuItemHint, color: "var(--warn-fg)" }}>{waErreur}</span>}
+                  </button>
+                  {canManage && <button onClick={() => { setShowLitige(true); setShowPlusMenu(false); }} style={menuItemStyle}>{colis.litige?.statut === "Ouvert" ? "Résoudre le litige" : "Signaler un litige"}</button>}
+                  {canManage && (
+                    <label style={{ ...menuItemStyle, cursor: "pointer" }}>
+                      {uploadingPhoto ? "Envoi…" : colis.photoEntrepot ? "Changer la photo entrepôt" : "Ajouter une photo entrepôt"}
+                      <input type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        setShowPlusMenu(false);
+                        if (!file) return;
+                        setUploadingPhoto(true);
+                        try { const dataUrl = await resizeImageToDataUrl(file); onUpdate({ photoEntrepot: dataUrl }); }
+                        catch (err) { console.error("Échec du traitement de la photo", err); }
+                        setUploadingPhoto(false);
+                        e.target.value = "";
+                      }} />
+                    </label>
+                  )}
+                  <div style={{ height: 1, background: "var(--border)", margin: "4px 2px" }} />
+                  {effectivePermission(session, "colis.annuler") && colis.status !== "Annulé" && colis.status !== "Livré" && colis.status !== "Refusé" && (
+                    <button onClick={() => { setCancelling(true); setShowPlusMenu(false); }} style={{ ...menuItemStyle, color: "var(--warn-fg)" }}>Annuler le colis</button>
+                  )}
+                  {effectivePermission(session, "colis.annuler") && ["Disponible au retrait", "Arrivé"].includes(colis.status) && (
+                    <button onClick={() => { setRefusing(true); setShowPlusMenu(false); }} style={{ ...menuItemStyle, color: "var(--danger-fg)" }}>Marquer refusé / retourné</button>
+                  )}
+                  {effectivePermission(session, "colis.supprimer") && (
+                    <button onClick={() => { setConfirmerSuppression(true); setShowPlusMenu(false); }} style={{ ...menuItemStyle, color: "var(--danger-fg)" }}>Supprimer</button>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+
+          {canManage && !isLast && colis.status !== "Annulé" && colis.status !== "Refusé" && (
+            <button onClick={onAdvance} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+              Statut suivant <ChevronRight size={14} />
+            </button>
+          )}
+        </div>
       </div>
+
+      {colis.status !== "Annulé" && colis.status !== "Refusé" && (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "16px 18px", marginBottom: 20 }}>
+          <div style={{ display: "flex", alignItems: "center" }}>
+            {STATUSES.map((s, i) => {
+              const curIdx = STATUSES.indexOf(colis.status);
+              return (
+                <React.Fragment key={s}>
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 5, flex: i === 0 || i === STATUSES.length - 1 ? "0 0 auto" : 1 }}>
+                    <div style={{ width: 13, height: 13, borderRadius: "50%", background: i <= curIdx ? "#3ECB84" : "var(--border)", flexShrink: 0 }} />
+                    <div style={{ fontSize: 10.5, color: i <= curIdx ? "var(--text)" : "var(--muted)", fontWeight: i === curIdx ? 700 : 500, whiteSpace: "nowrap" }}>{s}</div>
+                  </div>
+                  {i < STATUSES.length - 1 && <div style={{ height: 2, flex: 1, background: i < curIdx ? "#3ECB84" : "var(--border)", marginBottom: 15 }} />}
+                </React.Fragment>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 18 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 12 }}>Expéditeur &amp; Destinataire</div>
@@ -10290,29 +10411,6 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
       {/*
         Emplacement physique du colis.
 
-        Savoir qu'un colis est « à Bambeto » ne dit pas sur quelle étagère. Avec plusieurs
-        centaines de colis en attente, l'agent fouille à chaque client. Le champ est libre :
-        chaque agence a sa façon de ranger (A3, étagère 2, palette 7…), lui imposer un format
-        serait la meilleure façon qu'il ne soit jamais rempli.
-      */}
-      {["Arrivé", "Disponible au retrait"].includes(colis.status) && !colis.remise && canManage && (
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: "10px 14px", marginBottom: 18 }}>
-          <MapPin size={14} color="var(--muted)" />
-          <span style={{ fontSize: 12.5, color: "var(--muted)", flexShrink: 0 }}>Emplacement</span>
-          <input
-            defaultValue={colis.emplacement || ""}
-            onBlur={(e) => {
-              const v = e.target.value.trim();
-              if (v !== (colis.emplacement || "")) onUpdate({ emplacement: v });
-            }}
-            placeholder="A3, étagère 2, palette 7…"
-            style={{ ...inputStyle, marginBottom: 0, flex: 1, minWidth: 140 }} />
-        </div>
-      )}
-
-      {/*
-        Emplacement physique du colis.
-
         Savoir qu'un colis est « à Bambeto » ne dit pas sur quelle étagère il se trouve. Avec
         plusieurs centaines de colis en attente, l'agent fouille à chaque client. Le champ se
         modifie directement ici, sans passer par la fenêtre de modification : c'est un geste
@@ -10409,48 +10507,6 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
         </div>
       )}
 
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
-        <div style={{ display: "flex", gap: 14 }}>
-          {canManage && <button onClick={() => setShowLitige(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "1px solid var(--warn-border)", color: "var(--warn-fg)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}><AlertTriangle size={14} /> {colis.litige?.statut === "Ouvert" ? "Résoudre le litige" : "Signaler un litige"}</button>}
-          {isAdmin && <button onClick={() => setEditing(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--text)", fontSize: 13, cursor: "pointer" }}><Settings size={14} /> Modifier</button>}
-          {effectivePermission(session, "colis.supprimer") && <button onClick={() => setConfirmerSuppression(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--danger-fg)", fontSize: 13, cursor: "pointer" }}><Trash2 size={14} /> Supprimer</button>}
-          {effectivePermission(session, "colis.annuler") && colis.status !== "Annulé" && colis.status !== "Livré" && colis.status !== "Refusé" && <button onClick={() => setCancelling(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--warn-fg)", fontSize: 13, cursor: "pointer" }}><AlertTriangle size={14} /> Annuler le colis</button>}
-          {effectivePermission(session, "colis.annuler") && ["Disponible au retrait", "Arrivé"].includes(colis.status) && <button onClick={() => setRefusing(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "var(--danger-fg)", fontSize: 13, cursor: "pointer" }}><X size={14} /> Marquer refusé / retourné</button>}
-          {canManage && (
-            <label style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--text)", fontSize: 13, cursor: "pointer" }}>
-              <Camera size={14} /> {uploadingPhoto ? "Envoi…" : colis.photoEntrepot ? "Changer la photo" : "Ajouter une photo"}
-              <input type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={async (e) => {
-                const file = e.target.files?.[0];
-                if (!file) return;
-                setUploadingPhoto(true);
-                try { const dataUrl = await resizeImageToDataUrl(file); onUpdate({ photoEntrepot: dataUrl }); }
-                catch (err) { console.error("Échec du traitement de la photo", err); }
-                setUploadingPhoto(false);
-                e.target.value = "";
-              }} />
-            </label>
-          )}
-        </div>
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <button onClick={notifierWhatsApp} disabled={waState === "envoi"} style={{ ...smallBtn, background: "#16A163", color: "#fff", borderColor: "#16A163" }}>
-            <MessageCircle size={13} /> {waState === "envoi" ? "Envoi…" : waState === "envoye" ? "Message envoyé" : "Notifier WhatsApp"}
-          </button>
-          {waState === "brouillon" && <span style={{ fontSize: 11, color: "var(--muted)", alignSelf: "center" }}>Brouillon WhatsApp ouvert — appuyez sur Envoyer</span>}
-          {waErreur && <span style={{ fontSize: 11, color: "var(--warn-fg)", alignSelf: "center" }}>{waErreur}</span>}
-          <button onClick={handleDownloadLabel} disabled={labelState === "loading"} style={smallBtn}><Printer size={13} /> {labelState === "loading" ? "Génération…" : "Étiquette QR"}</button>
-          {labelState === "error" && <span style={{ fontSize: 11, color: "var(--danger-fg)", alignSelf: "center" }}>Échec — réessayez</span>}
-          <button onClick={() => setShowImpressionDirecte(true)} style={smallBtn}><Printer size={13} /> Imprimante connectée</button>
-          <button onClick={handleDownloadInvoice} disabled={invoiceState === "loading"} style={smallBtn}><Download size={13} /> {invoiceState === "loading" ? "Génération…" : "Facture PDF"}</button>
-          {(colis.destinataireEmail || colis.email) && (
-            <button onClick={handleEnvoyerFacture} disabled={emailState === "loading"} style={smallBtn}>
-              <Mail size={13} /> {emailState === "loading" ? "Envoi…" : emailState === "envoye" ? "Facture envoyée" : emailState === "brouillon" ? "Brouillon ouvert" : "Envoyer par e-mail"}
-            </button>
-          )}
-          <button onClick={handleDownloadTicketThermal} disabled={ticketThermalState === "loading"} style={smallBtn}><Receipt size={13} /> {ticketThermalState === "loading" ? "Génération…" : "Ticket thermique 80mm"}</button>
-          {invoiceState === "error" && <span style={{ fontSize: 11, color: "var(--danger-fg)", alignSelf: "center" }}>Échec — réessayez</span>}
-          {canManage && !isLast && colis.status !== "Annulé" && colis.status !== "Refusé" && <button onClick={onAdvance} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Statut suivant <ChevronRight size={14} /></button>}
-        </div>
-      </div>
       {cancelling && (
         <div style={{ marginTop: 14, background: "var(--danger-bg)", borderRadius: 12, padding: 14 }}>
           <div style={{ fontSize: 12.5, color: "var(--danger-fg)", fontWeight: 700, marginBottom: 8 }}>Confirmer l’annulation du colis</div>
@@ -10522,6 +10578,8 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
   );
 }
 const smallBtn = { display: "flex", alignItems: "center", gap: 6, padding: "9px 14px", borderRadius: 8, border: `1.5px solid ${BORDER}`, background: SURFACE2, color: MUTED, fontSize: 12.5, cursor: "pointer" };
+const menuItemStyle = { display: "flex", flexDirection: "column", alignItems: "flex-start", width: "100%", textAlign: "start", background: "none", border: "none", borderRadius: 6, padding: "8px 10px", fontSize: 12.5, color: TEXT, cursor: "pointer" };
+const menuItemHint = { fontSize: 10.5, color: MUTED, fontWeight: 500, marginTop: 1 };
 
 const Info = memo(function Info({ label, value, accent }) {
   return <div><div style={{ fontSize: 11, color: MUTED }}>{label}</div><div style={{ fontSize: 14, color: accent ? RED : TEXT, fontWeight: 600 }}>{value}</div></div>;

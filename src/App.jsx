@@ -3862,7 +3862,7 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
   const { colis, total, thisMonth, enTransit, aExpedier, ca, encaisse, parPays, recent, parAgence, oublies, parProvenance, parRoute, impayesARelancer, centreClientsEnAttente } = stats;
 
   const quickActions = [
-    { label: "Nouveau Colis", desc: "Créer une étiquette pour un client", icon: Plus, tint: "var(--danger-fg)", view: "colis" },
+    { label: "Nouveau Colis", desc: "Créer une étiquette pour un client", icon: Plus, tint: "var(--danger-fg)", action: onNouveauColis },
     { label: "Générer un bordereau", desc: "Expéditions maritimes ou aériennes", icon: FileStack, tint: "#3D63FF", view: "bordereaux" },
     { label: "Rechercher un colis", desc: "Par numéro de suivi ou nom", icon: Search, tint: "#16A163", view: "colis" },
     { label: "Consulter les paiements", desc: "Transactions et factures", icon: Receipt, tint: "#B8801C", view: "paiements" },
@@ -3878,7 +3878,7 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
         </div>
         <div style={{ display: "flex", gap: 10 }}>
           <button onClick={() => onNavigate("admin")} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "11px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer" }}><Settings size={16} /> Configuration</button>
-          <button onClick={() => onNavigate("colis")} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}><Plus size={16} /> Nouveau Colis</button>
+          <button onClick={onNouveauColis} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}><Plus size={16} /> Nouveau Colis</button>
         </div>
       </div>
 
@@ -3943,7 +3943,7 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 14 }}>
           {quickActions.map((a) => (
-            <button key={a.label} onClick={() => onNavigate(a.view)} style={{ display: "flex", alignItems: "center", gap: 14, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 13, padding: "16px 18px", cursor: "pointer", textAlign: "start" }}>
+            <button key={a.label} onClick={() => (a.action ? a.action() : onNavigate(a.view))} style={{ display: "flex", alignItems: "center", gap: 14, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 13, padding: "16px 18px", cursor: "pointer", textAlign: "start" }}>
               <div style={{ width: 44, height: 44, borderRadius: 13, background: a.tint, display: "grid", placeItems: "center", flexShrink: 0 }}><a.icon size={19} color="#fff" /></div>
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)" }}>{a.label}</div>

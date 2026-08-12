@@ -5732,6 +5732,17 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
   const [showScanner, setShowScanner] = useState(false);
   const [colonnes, setColonnes] = useState(lireColonnesColis);
   const [showColonnes, setShowColonnes] = useState(false);
+  const [colonnesMenuPos, setColonnesMenuPos] = useState(null);
+  const colonnesBtnRef = useRef(null);
+  const LARGEUR_MENU_COLONNES = 206;
+  function toggleColonnes() {
+    if (!showColonnes) {
+      const rect = colonnesBtnRef.current.getBoundingClientRect();
+      const left = Math.min(Math.max(8, rect.right - LARGEUR_MENU_COLONNES), window.innerWidth - LARGEUR_MENU_COLONNES - 8);
+      setColonnesMenuPos({ top: rect.bottom + 6, left });
+    }
+    setShowColonnes((s) => !s);
+  }
   function toggleColonne(cle) {
     setColonnes((c) => {
       const next = { ...c, [cle]: !c[cle] };
@@ -6308,13 +6319,13 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
               </div>
             </div>
             <div style={{ position: "relative" }}>
-              <button onClick={() => setShowColonnes((s) => !s)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "7px 12px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
+              <button ref={colonnesBtnRef} onClick={toggleColonnes} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "7px 12px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
                 <SlidersHorizontal size={13} /> Colonnes
               </button>
-              {showColonnes && (
+              {showColonnes && colonnesMenuPos && (
                 <>
                   <div onClick={() => setShowColonnes(false)} style={{ position: "fixed", inset: 0, zIndex: 19 }} />
-                  <div style={{ position: "absolute", top: "115%", right: 0, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: 8, boxShadow: "0 10px 30px rgba(0,0,0,0.18)", zIndex: 20, minWidth: 190 }}>
+                  <div style={{ position: "fixed", top: colonnesMenuPos.top, left: colonnesMenuPos.left, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: 8, boxShadow: "0 10px 30px rgba(0,0,0,0.18)", zIndex: 20, minWidth: 190 }}>
                     {COLIS_COLONNES_OPTIONS.map(([cle, label]) => (
                       <label key={cle} style={{ display: "flex", alignItems: "center", gap: 9, padding: "7px 8px", fontSize: 12.5, color: "var(--text)", cursor: "pointer", borderRadius: 6 }}>
                         <input type="checkbox" checked={colonnes[cle]} onChange={() => toggleColonne(cle)} style={{ width: 14, height: 14 }} />

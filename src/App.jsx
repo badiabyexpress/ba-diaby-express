@@ -6341,7 +6341,14 @@ function genBordereauNumero(bordereaux) {
 function BordereauxPage({ data, persist, session, notify }) {
   const [mode, setMode] = useState("liste"); // liste | creation | detail
   const [selectedId, setSelectedId] = useState(null);
+  const [statutFiltreBord, setStatutFiltreBord] = useState(null);
   const bordereaux = data.bordereaux || [];
+  const bordereauxParStatut = useMemo(() => {
+    const compte = { "Brouillon": 0, "Acheminement": 0, "Validé": 0, "Arrivé": 0, "Livré": 0 };
+    bordereaux.forEach((b) => { compte[normalizeBordereauStatut(b.statut)]++; });
+    return compte;
+  }, [bordereaux]);
+  const bordereauxAffiches = statutFiltreBord ? bordereaux.filter((b) => normalizeBordereauStatut(b.statut) === statutFiltreBord) : bordereaux;
 
   /*
    * Stock en attente d'expédition, par entrepôt.
@@ -6441,6 +6448,18 @@ function BordereauxPage({ data, persist, session, notify }) {
         {effectivePermission(session, "bordereaux.creer") && <button onClick={() => setMode("creation")} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}><Plus size={16} /> Nouveau bordereau</button>}
       </div>
 
+      {bordereaux.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 12, marginBottom: 20 }}>
+          <ColisStatCard label="Total bordereaux" value={bordereaux.length} icon={FileStack} tint="#3D63FF"
+            active={!statutFiltreBord} onFiltrer={statutFiltreBord ? () => setStatutFiltreBord(null) : null} />
+          {BORDEREAU_STATUSES.map((s) => (
+            <ColisStatCard key={s} label={s} value={bordereauxParStatut[s]} icon={FileStack}
+              tint={{ "Brouillon": "#6B7A99", "Acheminement": "#5B8DEF", "Validé": "#D6A22E", "Arrivé": "#16A163", "Livré": "#3ECB84" }[s]}
+              active={statutFiltreBord === s} onFiltrer={() => setStatutFiltreBord(statutFiltreBord === s ? null : s)} />
+          ))}
+        </div>
+      )}
+
       {stockEntrepots.length > 0 && (
         <div style={{ marginBottom: 20 }}>
           <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>En attente d’expédition</div>
@@ -6491,7 +6510,7 @@ function BordereauxPage({ data, persist, session, notify }) {
       )}
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {bordereaux.map((b) => {
+        {bordereauxAffiches.map((b) => {
           const colisInclus = data.colis.filter((c) => b.colisTrackings.includes(c.tracking));
           const poids = colisInclus.reduce((s, c) => s + c.poids, 0);
           const montant = colisInclus.reduce((s, c) => s + c.prix, 0);
@@ -6511,6 +6530,7 @@ function BordereauxPage({ data, persist, session, notify }) {
           );
         })}
         {bordereaux.length === 0 && <div style={{ color: "var(--muted)", fontSize: 13 }}>Aucun bordereau créé pour le moment.</div>}
+        {bordereaux.length > 0 && bordereauxAffiches.length === 0 && <div style={{ color: "var(--muted)", fontSize: 13 }}>Aucun bordereau avec ce statut.</div>}
       </div>
     </div>
   );
@@ -10961,6 +10981,13 @@ function Clients({ data }) {
       <p style={{ color: "var(--muted)", fontSize: 14.5, marginTop: 0, marginBottom: 5 }}>{clients.length} clients · Base de données et historique d’envoi</p>
       <p style={{ color: "var(--muted)", fontSize: 12.5, marginTop: 0, marginBottom: 20 }}>Astuce : dans "Nouveau colis", tapez le numéro de téléphone d’un client existant pour remplir automatiquement ses informations.</p>
 
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 12, marginBottom: 20 }}>
+        <StatCard label="Total clients" value={clients.length} icon={Users} tint="#3D63FF" />
+        <StatCard label="Nouveaux (30 j)" value={clients.filter((c) => c.date && new Date(c.date).getTime() > trenteJours).length} icon={Sparkles} tint="#8B5CF6" />
+        <StatCard label="Clients réguliers" value={clients.filter((c) => c.count >= 3).length} icon={CheckCircle2} tint="#16A163" />
+        <StatCard label="Doublons possibles" value={doublons.length} icon={AlertTriangle} tint={doublons.length > 0 ? "#D6A22E" : "#6B7A99"} />
+      </div>
+
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
         {tabs.map(([k, label]) => (
           <button key={k} onClick={() => setFiltre(k)} style={{ padding: "9px 16px", borderRadius: 20, border: "1.5px solid " + (filtre === k ? "var(--brand-solid)" : "var(--border)"), background: filtre === k ? "var(--brand-solid)" : "var(--surface)", color: filtre === k ? "#fff" : "var(--muted)", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>{label}</button>
@@ -11012,23 +11039,24 @@ function Clients({ data }) {
         )
       ) : (
       <div style={{ background: "var(--surface)", borderRadius: 14, boxShadow: "0 2px 10px rgba(10,38,71,0.06)", overflow: "hidden" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["Client", "Contact", "Expéditions", "Total dépensé", "Prochain palier", "Remise applicable"].map((h) => <th key={h} style={{ padding: "12px 16px", fontSize: 11.5, color: "var(--muted)", fontWeight: 700 }}>{h}</th>)}</tr></thead>
+        <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", minWidth: 680, borderCollapse: "collapse" }}>
+          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["Client", "Contact", "Expéditions", "Total dépensé", "Prochain palier", "Remise applicable"].map((h) => <th key={h} style={{ padding: "12px 16px", fontSize: 11.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
           <tbody>
             {clientsVisibles.map((c) => (
               <tr key={c.telephone} style={{ borderTop: "1px solid var(--surface2)" }}>
-                <td style={{ padding: "12px 16px", fontSize: 13.5, color: "var(--text)", fontWeight: 600 }}>
+                <td style={{ padding: "12px 16px", fontSize: 13.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>
                   {c.nomComplet}
                   {c.aVerifier && <span title="Numéro repris de l’ancienne plateforme — à confirmer au premier contact" style={{ marginInlineStart: 8, background: "var(--warn-bg)", border: "1px solid var(--warn-border)", color: "var(--warn-fg)", padding: "1px 8px", borderRadius: 20, fontSize: 10, fontWeight: 700 }}>à vérifier</span>}
                   {c.date && new Date(c.date).getTime() > trenteJours && <span style={{ marginLeft: 8, background: "var(--info-bg)", color: "var(--info-fg)", padding: "2px 7px", borderRadius: 12, fontSize: 10 }}>nouveau</span>}
                 </td>
-                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{c.telephone}{c.email ? ` · ${c.email}` : ""}</td>
-                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{c.count}</td>
-                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{fmt(c.total, "EUR")}</td>
-                <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)" }}>
+                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.telephone}{c.email ? ` · ${c.email}` : ""}</td>
+                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.count}</td>
+                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" }}>{fmt(c.total, "EUR")}</td>
+                <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>
                   {(() => { const p = prochainSeuilInfo(c.count); return p ? `${p.reste} envoi${p.reste > 1 ? "s" : ""} avant -${loyaltyDiscount(p.seuil)}%` : "Palier maximum atteint"; })()}
                 </td>
-                <td style={{ padding: "12px 16px", fontSize: 13 }}>
+                <td style={{ padding: "12px 16px", fontSize: 13, whiteSpace: "nowrap" }}>
                   {loyaltyDiscount(c.count) > 0
                     ? <span style={{ background: "var(--ok-bg-soft)", color: "var(--ok-fg)", padding: "3px 9px", borderRadius: 20, fontSize: 11.5, fontWeight: 700 }}>-{loyaltyDiscount(c.count)}%</span>
                     : <span style={{ color: "var(--muted)" }}>—</span>}
@@ -11038,6 +11066,7 @@ function Clients({ data }) {
             {filtered.length === 0 && <tr><td colSpan={6} style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucun client ne correspond.</td></tr>}
           </tbody>
         </table>
+        </div>
         {filtered.length > clientsVisibles.length && (
           <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 12, padding: "14px 16px", borderTop: "1px solid var(--border)", flexWrap: "wrap" }}>
             <span style={{ fontSize: 12.5, color: "var(--muted)" }}>{clientsVisibles.length} affichés sur {filtered.length}</span>
@@ -11166,18 +11195,19 @@ function PaiementsPage({ data, notify }) {
       </div>
 
       <div style={{ background: "var(--surface)", borderRadius: 14, boxShadow: "0 2px 10px rgba(10,38,71,0.06)", overflow: "hidden" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Client", "Total", "Payé", "Reste", "Statut", ""].map((h) => <th key={h} style={{ padding: "12px 16px", fontSize: 11.5, color: "var(--muted)", fontWeight: 700 }}>{h}</th>)}</tr></thead>
+        <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", minWidth: 640, borderCollapse: "collapse" }}>
+          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Client", "Total", "Payé", "Reste", "Statut", ""].map((h) => <th key={h} style={{ padding: "12px 16px", fontSize: 11.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
           <tbody>
             {visibles.map((c) => (
               <tr key={c.tracking} style={{ borderTop: "1px solid var(--surface2)" }}>
-                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--text)", fontWeight: 600 }}>{c.tracking}</td>
-                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{c.destinataire}</td>
-                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{fmt(c.prix, "EUR")}</td>
-                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)" }}>{fmt(c.paye, "EUR")}</td>
-                <td style={{ padding: "12px 16px", fontSize: 13, color: c.reste > 0 ? "var(--danger-fg)" : "var(--muted)" }}>{fmt(c.reste, "EUR")}</td>
-                <td style={{ padding: "12px 16px", fontSize: 12.5 }}><span style={{ background: colors[c.payStatus].bg, color: colors[c.payStatus].fg, padding: "3px 10px", borderRadius: 20, fontWeight: 700 }}>{labels[c.payStatus]}</span></td>
-                <td style={{ padding: "12px 16px", textAlign: "right" }}>
+                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.tracking}</td>
+                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.destinataire}</td>
+                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" }}>{fmt(c.prix, "EUR")}</td>
+                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" }}>{fmt(c.paye, "EUR")}</td>
+                <td style={{ padding: "12px 16px", fontSize: 13, color: c.reste > 0 ? "var(--danger-fg)" : "var(--muted)", whiteSpace: "nowrap" }}>{fmt(c.reste, "EUR")}</td>
+                <td style={{ padding: "12px 16px", fontSize: 12.5, whiteSpace: "nowrap" }}><span style={{ background: colors[c.payStatus].bg, color: colors[c.payStatus].fg, padding: "3px 10px", borderRadius: 20, fontWeight: 700 }}>{labels[c.payStatus]}</span></td>
+                <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>
                   <button onClick={() => downloadInvoice(c, data).catch((e) => { console.error(e); notify?.("Échec de génération du PDF — réessayez"); })} style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: "var(--text)", cursor: "pointer", fontSize: 12.5 }}><Download size={13} /> PDF</button>
                 </td>
               </tr>
@@ -11185,6 +11215,7 @@ function PaiementsPage({ data, notify }) {
             {filtered.length === 0 && <tr><td colSpan={7} style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucun colis dans cette catégorie.</td></tr>}
           </tbody>
         </table>
+        </div>
         {filtered.length > visibles.length && (
           <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 12, padding: "14px 16px", borderTop: "1px solid var(--border)", flexWrap: "wrap" }}>
             <span style={{ fontSize: 12.5, color: "var(--muted)" }}>{visibles.length} affichés sur {filtered.length}</span>

@@ -2317,7 +2317,7 @@ function PublicTrackingPage({ data, loading }) {
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12, marginBottom: 18 }}>
-            <Info label="Origine" value={`${FLAGS[origine?.code] || ""} ${origine?.name || "—"}`} />
+            <Info label="Départ" value={`${FLAGS[origine?.code] || ""} ${origine?.name || "—"}`} />
             <Info label="Destination" value={`${FLAGS[destPaysCode] || ""} ${dest?.name || "—"}`} />
             <Info label="Mode" value={colis.mode === "air" ? "Aérien" : "Maritime"} />
             <Info label="Poids" value={`${colis.poids} kg`} />

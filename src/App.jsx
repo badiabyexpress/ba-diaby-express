@@ -31,7 +31,7 @@ variable CSS), et les pastilles d'icônes qui reçoivent un fond plein via la pr
 ------------------------------------- */
 const BG = "var(--bg)", SURFACE = "var(--surface)", SURFACE2 = "var(--surface2)", BORDER = "var(--border)";
 const TEXT = "var(--text)", MUTED = "var(--muted)", BLUE = "#3D63FF", RED = "#E23F52", GREEN = "#2FAE73", AMBER = "#E0A63A";
-const FLAGS = { FR: "🇫🇷", BE: "🇧🇪", CA: "🇨🇦", US: "🇺🇸", US2: "🇺🇸", MA: "🇲🇦", GN: "🇬🇳", DE: "🇩🇪", IT: "🇮🇹", ES: "🇪🇸", SN: "🇸🇳" };
+const FLAGS = { FR: "🇫🇷", BE: "🇧🇪", CA: "🇨🇦", US: "🇺🇸", MA: "🇲🇦", GN: "🇬🇳", DE: "🇩🇪", IT: "🇮🇹", ES: "🇪🇸", SN: "🇸🇳" };
 
 const COUNTRIES = [
   { code: "GN", name: "Guinée", city: "Conakry", air: 0, sea: 0, delayAir: 0, delaySea: 0, currency: "GNF" },
@@ -41,8 +41,7 @@ const COUNTRIES = [
   { code: "IT", name: "Italie", city: "Milan", air: 13, sea: 6.5, delayAir: 5, delaySea: 36, currency: "EUR" },
   { code: "ES", name: "Espagne", city: "Madrid", air: 12.5, sea: 6.3, delayAir: 5, delaySea: 36, currency: "EUR" },
   { code: "CA", name: "Canada", city: "Montréal", air: 15, sea: 8, delayAir: 6, delaySea: 42, currency: "CAD" },
-  { code: "US", name: "États-Unis (New York)", city: "New York", air: 16, sea: 8.5, delayAir: 6, delaySea: 40, currency: "USD" },
-  { code: "US2", name: "États-Unis (Atlanta)", city: "Atlanta", air: 15.5, sea: 8, delayAir: 6, delaySea: 40, currency: "USD" },
+  { code: "US", name: "États-Unis", city: "New York", air: 16, sea: 8.5, delayAir: 6, delaySea: 40, currency: "USD" },
   { code: "MA", name: "Maroc", city: "Casablanca", air: 10, sea: 5, delayAir: 3, delaySea: 20, currency: "MAD" },
   { code: "SN", name: "Sénégal", city: "Dakar", air: 8, sea: 4, delayAir: 2, delaySea: 10, currency: "XOF" },
 ];

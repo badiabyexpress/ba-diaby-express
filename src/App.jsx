@@ -10436,6 +10436,28 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
         </div>
       </div>
 
+      {colis.produits && colis.produits.length > 0 && (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 18 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 12 }}>Contenu du colis <span style={{ color: "var(--muted)", fontWeight: 600 }}>· {colis.produits.length} article{colis.produits.length > 1 ? "s" : ""}</span></div>
+          {colis.produits.map((p, idx) => {
+            const val = produitValeurGNF(p, data?.categories);
+            return (
+              <div key={p.id || idx} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "9px 0", borderTop: idx === 0 ? "none" : "1px solid var(--border)" }}>
+                <div>
+                  <div style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>{p.nom || "—"}</div>
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
+                    Qté {p.quantite || 1} · {p.poids ? `${p.poids} kg` : "—"}{!p.personnalise && p.categorie ? ` · ${p.categorie}` : ""}
+                  </div>
+                </div>
+                <div style={{ fontSize: 12, color: "var(--muted)", textAlign: "right", flexShrink: 0, marginLeft: 12 }}>
+                  {val ? `${fmtGNF(val)}` : "—"}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       <div style={{ background: "var(--surface)", border: `1.5px solid ${statutFg}`, borderRadius: 12, padding: 16, marginBottom: 18 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Paiements</div>

@@ -7111,34 +7111,68 @@ function splitNom(full) {
   return { prenom: parts[0], nom: parts.slice(1).join(" ") };
 }
 
+/*
+ * Brouillon du formulaire Nouveau Colis, sauvegardé au fil de la saisie.
+ *
+ * Le même redémarrage silencieux de l'application (onglet déchargé par le navigateur mobile en
+ * arrière-plan) qui ramenait auparavant l'agent au tableau de bord faisait aussi disparaître tout
+ * ce qu'il avait déjà saisi — un colis à moitié rempli, souvent avec le client encore en face du
+ * comptoir. Le brouillon expire après 24 h pour ne pas ressusciter une saisie abandonnée depuis
+ * longtemps, et n'est jamais réutilisé pour un compte de suivi (le numéro de suivi est régénéré
+ * à l'enregistrement, il n'est donc pas sauvegardé).
+ */
+const CLE_BROUILLON_COLIS = "bde-brouillon-colis";
+const DUREE_BROUILLON_COLIS_MS = 24 * 60 * 60 * 1000;
+function lireBrouillonColis() {
+  try {
+    const brut = localStorage.getItem(CLE_BROUILLON_COLIS);
+    if (!brut) return null;
+    const d = JSON.parse(brut);
+    if (!d.savedAt || Date.now() - d.savedAt > DUREE_BROUILLON_COLIS_MS) return null;
+    return d;
+  } catch (e) { return null; }
+}
+function ecrireBrouillonColis(champs) {
+  try { localStorage.setItem(CLE_BROUILLON_COLIS, JSON.stringify({ ...champs, savedAt: Date.now() })); } catch (e) { /* pas grave */ }
+}
+function effacerBrouillonColis() {
+  try { localStorage.removeItem(CLE_BROUILLON_COLIS); } catch (e) { /* pas grave */ }
+}
+
 function ColisForm({ onClose, onSave, existingColis, categories, session, sites, partenaires, clientAccounts, preAlertes, remiseVolumeConfig, repertoire, notify }) {
   const availableCountries = allowedCountries(session);
+  const [brouillon] = useState(() => lireBrouillonColis());
   const clientDirectory = useMemo(() => buildClientDirectory(existingColis || [], repertoire), [existingColis, repertoire]);
-  const [step, setStep] = useState(0);
-  const [expPrenom, setExpPrenom] = useState("");
-  const [expNom, setExpNom] = useState("");
-  const [expTelephone, setExpTelephone] = useState("");
-  const [expEmail, setExpEmail] = useState("");
-  const [expAdresse, setExpAdresse] = useState("");
-  const [expPays, setExpPays] = useState("GN");
+  const [step, setStep] = useState(() => brouillon?.step ?? 0);
+  const [expPrenom, setExpPrenom] = useState(() => brouillon?.expPrenom ?? "");
+  const [expNom, setExpNom] = useState(() => brouillon?.expNom ?? "");
+  const [expTelephone, setExpTelephone] = useState(() => brouillon?.expTelephone ?? "");
+  const [expEmail, setExpEmail] = useState(() => brouillon?.expEmail ?? "");
+  const [expAdresse, setExpAdresse] = useState(() => brouillon?.expAdresse ?? "");
+  const [expPays, setExpPays] = useState(() => brouillon?.expPays ?? "GN");
   const [expClientTrouve, setExpClientTrouve] = useState(null);
-  const [destPrenom, setDestPrenom] = useState("");
-  const [destNom, setDestNom] = useState("");
-  const [destTelephone, setDestTelephone] = useState("");
-  const [destEmail, setDestEmail] = useState("");
-  const [destAdresse, setDestAdresse] = useState("");
-  const [destVille, setDestVille] = useState("");
-  const [destCodePostal, setDestCodePostal] = useState("");
-  const [destPays, setDestPays] = useState(availableCountries.find((c) => c.code !== "GN")?.code || "FR");
+  const [destPrenom, setDestPrenom] = useState(() => brouillon?.destPrenom ?? "");
+  const [destNom, setDestNom] = useState(() => brouillon?.destNom ?? "");
+  const [destTelephone, setDestTelephone] = useState(() => brouillon?.destTelephone ?? "");
+  const [destEmail, setDestEmail] = useState(() => brouillon?.destEmail ?? "");
+  const [destAdresse, setDestAdresse] = useState(() => brouillon?.destAdresse ?? "");
+  const [destVille, setDestVille] = useState(() => brouillon?.destVille ?? "");
+  const [destCodePostal, setDestCodePostal] = useState(() => brouillon?.destCodePostal ?? "");
+  const [destPays, setDestPays] = useState(() => {
+    // Un brouillon peut dater d'avant un changement de permissions : on ne restaure le pays
+    // que s'il reste bien autorisé pour cette session, sinon on retombe sur le défaut habituel.
+    if (brouillon?.destPays && availableCountries.some((c) => c.code === brouillon.destPays)) return brouillon.destPays;
+    return availableCountries.find((c) => c.code !== "GN")?.code || "FR";
+  });
   const [destClientTrouve, setDestClientTrouve] = useState(null);
-  const [mode, setMode] = useState("air");
-  const [produits, setProduits] = useState([emptyProduit()]);
-  const [paye, setPaye] = useState("");
+  const [mode, setMode] = useState(() => brouillon?.mode ?? "air");
+  const [produits, setProduits] = useState(() => (brouillon?.produits?.length ? brouillon.produits : [emptyProduit()]));
+  const [paye, setPaye] = useState(() => brouillon?.paye ?? "");
   // Devise dans laquelle l'agent saisit l'acompte. Le franc guinéen par défaut : c'est ce que le
   // client remet au comptoir. Le montant est converti pour être stocké dans la devise de référence.
-  const [payeDevise, setPayeDevise] = useState("GNF");
-  const [rabaisMontant, setRabaisMontant] = useState("0");
-  const [rabaisDevise, setRabaisDevise] = useState("GNF");
+  const [payeDevise, setPayeDevise] = useState(() => brouillon?.payeDevise ?? "GNF");
+  const [rabaisMontant, setRabaisMontant] = useState(() => brouillon?.rabaisMontant ?? "0");
+  const [rabaisDevise, setRabaisDevise] = useState(() => brouillon?.rabaisDevise ?? "GNF");
   /*
    * Agence d'enregistrement : déduite du compte de l'agent, plus saisie à la main.
    *
@@ -7149,11 +7183,14 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
    */
   const agenceImposee = session?.agence || "";
   const siteLocalParDefaut = sitesLocaux(sites)[0];
-  const [agence, setAgence] = useState(agenceImposee || siteLocalParDefaut?.nom || "Bambeto");
-  const [partenaireId, setPartenaireId] = useState("");
+  const [agence, setAgence] = useState(() => agenceImposee || brouillon?.agence || siteLocalParDefaut?.nom || "Bambeto");
+  const [partenaireId, setPartenaireId] = useState(() => brouillon?.partenaireId ?? "");
+  // Le compte client et la pré-alerte rattachée ne sont volontairement PAS restaurés depuis un
+  // brouillon : une pré-alerte marquée "Rapproché" entre-temps par un autre agent ne doit jamais
+  // être re-consommée à l'aveugle. L'agent les re-sélectionne, ce qui ne prend qu'un instant.
   const [clientAccountId, setClientAccountId] = useState("");
   const [preAlerteRapprochee, setPreAlerteRapprochee] = useState("");
-  const [provenance, setProvenance] = useState("");
+  const [provenance, setProvenance] = useState(() => brouillon?.provenance ?? "");
   /*
    * Recherche d'un client par son nom.
    *
@@ -7473,6 +7510,32 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
   }
   function prev() { setErr(""); setStep((s) => Math.max(s - 1, 0)); }
 
+  // Réutilisé à la fois pour l'avertissement "abandonner la saisie ?" du Modal et pour décider
+  // s'il y a quelque chose à sauvegarder dans le brouillon : pas la peine d'écrire dans le
+  // stockage local tant que le formulaire est encore vide.
+  const saisieEnCours = !!expPrenom || !!expNom || !!destPrenom || !!destNom || produits.some((p) => p.nom);
+
+  useEffect(() => {
+    if (!saisieEnCours) return;
+    // Débit léger : écrire à chaque frappe rendrait la saisie saccadée sur un téléphone d'entrée
+    // de gamme. Un quart de seconde de pause suffit largement pour ne rien perdre d'utile.
+    const t = setTimeout(() => {
+      ecrireBrouillonColis({
+        step, expPrenom, expNom, expTelephone, expEmail, expAdresse, expPays,
+        destPrenom, destNom, destTelephone, destEmail, destAdresse, destVille, destCodePostal, destPays,
+        mode, produits, paye, payeDevise, rabaisMontant, rabaisDevise, agence, partenaireId, provenance,
+      });
+    }, 250);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saisieEnCours, step, expPrenom, expNom, expTelephone, expEmail, expAdresse, expPays,
+      destPrenom, destNom, destTelephone, destEmail, destAdresse, destVille, destCodePostal, destPays,
+      mode, produits, paye, payeDevise, rabaisMontant, rabaisDevise, agence, partenaireId, provenance]);
+
+  /** Fermeture volontaire (bouton "Annuler", croix, clic à côté, Échap) : le brouillon ne doit
+   * pas reproposer une saisie que l'agent vient explicitement de refuser. */
+  function fermerFormulaire() { effacerBrouillonColis(); onClose(); }
+
   function submit(e) {
     e.preventDefault();
     if (!expNom || !destNom || !destTelephone) return;
@@ -7481,6 +7544,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
     // permettent de sauter directement au résumé sans repasser par la validation de next().
     if (produits.some((p) => !p.personnalise && !p.categorie)) { setErr("Choisissez une catégorie pour chaque produit (ou cochez « Utiliser un prix personnalisé »)."); return; }
     if (!(valeurDeclaree > 0)) { setErr("Le montant total du colis doit être supérieur à 0 — vérifiez le prix de chaque produit."); return; }
+    effacerBrouillonColis();
     onSave({
       tracking: genTracking((existingColis || []).map((c) => c.tracking)),
       expediteur: `${expPrenom} ${expNom}`.trim(), expediteurTelephone: expTelephone, expediteurEmail: expEmail, expediteurAdresse: expAdresse, expediteurPays: expPays,
@@ -7496,7 +7560,12 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
   }
 
   return (
-    <Modal onClose={onClose} title="Nouveau Colis" wide saisieEnCours={!!expPrenom || !!expNom || !!destPrenom || !!destNom || produits.some((p) => p.nom)}>
+    <Modal onClose={fermerFormulaire} title="Nouveau Colis" wide saisieEnCours={saisieEnCours}>
+      {brouillon && step === 0 && (
+        <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 8, padding: "9px 12px", marginBottom: 14, fontSize: 12, color: "var(--info-fg)" }}>
+          Brouillon restauré — reprise de votre saisie précédente.
+        </div>
+      )}
       <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14 }}>📍 Envoi de {expCountry?.name.toUpperCase()} {FLAGS[expPays]} vers {destCountry?.name.toUpperCase()} {FLAGS[destPays]}</div>
       <StepIndicator step={step} onStepClick={(i) => { setErr(""); setStep(i); }} />
       <div>
@@ -7798,7 +7867,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
         {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginTop: 12 }}>{err}</div>}
 
         <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 22 }}>
-          <button type="button" onClick={step === 0 ? onClose : prev} style={{ padding: "10px 18px", borderRadius: 8, border: "1.5px solid var(--border)", background: "var(--surface)", color: "var(--muted)", fontSize: 13.5, cursor: "pointer" }}>
+          <button type="button" onClick={step === 0 ? fermerFormulaire : prev} style={{ padding: "10px 18px", borderRadius: 8, border: "1.5px solid var(--border)", background: "var(--surface)", color: "var(--muted)", fontSize: 13.5, cursor: "pointer" }}>
             {step === 0 ? "Annuler" : "Précédent"}
           </button>
           {step < WIZARD_STEPS.length - 1 ? (

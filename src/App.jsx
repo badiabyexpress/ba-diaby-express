@@ -9664,8 +9664,19 @@ function EncaisserGroupeModal({ data, onEncaisser, onClose }) {
 
 function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeConfig, categories }) {
   const [expediteur, setExpediteur] = useState(colis.expediteur);
+  // Le téléphone et l'adresse de l'expéditeur, ainsi que l'e-mail et l'adresse complète du
+  // destinataire, n'étaient pas repris dans le formulaire de modification — seuls le nom, le
+  // téléphone du destinataire et la destination l'étaient. Un agent qui devait corriger une
+  // adresse mal orthographiée ou un numéro d'expéditeur erroné ne pouvait pas le faire ici.
+  const [expediteurTelephone, setExpediteurTelephone] = useState(colis.expediteurTelephone || "");
+  const [expediteurEmail, setExpediteurEmail] = useState(colis.expediteurEmail || "");
+  const [expediteurAdresse, setExpediteurAdresse] = useState(colis.expediteurAdresse || "");
   const [destinataire, setDestinataire] = useState(colis.destinataire);
   const [telephone, setTelephone] = useState(colis.telephone);
+  const [destinataireEmail, setDestinataireEmail] = useState(colis.destinataireEmail || "");
+  const [destinataireAdresse, setDestinataireAdresse] = useState(colis.destinataireAdresse || "");
+  const [destinataireVille, setDestinataireVille] = useState(colis.destinataireVille || "");
+  const [destinataireCodePostal, setDestinataireCodePostal] = useState(colis.destinataireCodePostal || "");
   const [pays, setPays] = useState(colis.pays);
   const [direction, setDirection] = useState(colis.direction || "export");
   const [mode, setMode] = useState(colis.mode);
@@ -9714,7 +9725,9 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
     // ligne qui faussera ensuite les totaux de poids, le chiffre d'affaires et les commissions.
     if (!(Number(poids) > 0)) { setErr("Le poids doit être supérieur à 0 kg."); return; }
     onSave({
-      expediteur, destinataire, telephone, pays, direction,
+      expediteur, expediteurTelephone, expediteurEmail, expediteurAdresse,
+      destinataire, telephone, destinataireEmail, destinataireAdresse, destinataireVille, destinataireCodePostal,
+      pays, direction,
       destinatairePays: direction === "import" ? "GN" : pays, mode,
       poids: Number(poids) || 0, volume: Number(volume) || 0,
       prixBrut, discountLoyalty, rabaisMontant: Number(rabaisMontant) || 0, rabaisDevise, rabaisEUR, prix, paye: payeNum, reste,
@@ -9722,11 +9735,29 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   }
 
   return (
-    <Modal onClose={onClose} title={`Modifier le colis ${colis.tracking}`} wide saisieEnCours={poids !== String(colis.poids) || destinataire !== colis.destinataire}>
+    <Modal onClose={onClose} title={`Modifier le colis ${colis.tracking}`} wide saisieEnCours={
+      poids !== String(colis.poids) || destinataire !== colis.destinataire || expediteur !== colis.expediteur ||
+      telephone !== colis.telephone || expediteurTelephone !== (colis.expediteurTelephone || "") ||
+      expediteurEmail !== (colis.expediteurEmail || "") || expediteurAdresse !== (colis.expediteurAdresse || "") ||
+      destinataireEmail !== (colis.destinataireEmail || "") || destinataireAdresse !== (colis.destinataireAdresse || "") ||
+      destinataireVille !== (colis.destinataireVille || "") || destinataireCodePostal !== (colis.destinataireCodePostal || "")
+    }>
       <form onSubmit={submit} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14 }}>
-        <Field label="Expéditeur"><input value={expediteur} onChange={(e) => setExpediteur(e.target.value)} style={inputStyle} /></Field>
-        <Field label="Destinataire"><input value={destinataire} onChange={(e) => setDestinataire(e.target.value)} style={inputStyle} /></Field>
+        <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Expéditeur</div>
+        <Field label="Nom"><input value={expediteur} onChange={(e) => setExpediteur(e.target.value)} style={inputStyle} /></Field>
+        <Field label="Téléphone"><PhoneInput value={expediteurTelephone} onChange={setExpediteurTelephone} /></Field>
+        <Field label="E-mail (optionnel)"><input type="email" value={expediteurEmail} onChange={(e) => setExpediteurEmail(e.target.value)} style={inputStyle} /></Field>
+        <Field label="Adresse (optionnel)"><input value={expediteurAdresse} onChange={(e) => setExpediteurAdresse(e.target.value)} style={inputStyle} /></Field>
+
+        <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)", marginTop: 4 }}>Destinataire</div>
+        <Field label="Nom"><input value={destinataire} onChange={(e) => setDestinataire(e.target.value)} style={inputStyle} /></Field>
         <Field label="Téléphone (WhatsApp)"><PhoneInput value={telephone} onChange={setTelephone} /></Field>
+        <Field label="E-mail (optionnel)"><input type="email" value={destinataireEmail} onChange={(e) => setDestinataireEmail(e.target.value)} style={inputStyle} /></Field>
+        <Field label="Adresse (optionnel)"><input value={destinataireAdresse} onChange={(e) => setDestinataireAdresse(e.target.value)} style={inputStyle} /></Field>
+        <Field label="Ville (optionnel)"><input value={destinataireVille} onChange={(e) => setDestinataireVille(e.target.value)} style={inputStyle} /></Field>
+        <Field label="Code postal (optionnel)"><input value={destinataireCodePostal} onChange={(e) => setDestinataireCodePostal(e.target.value)} style={inputStyle} /></Field>
+
+        <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)", marginTop: 4 }}>Route &amp; tarif</div>
         <Field label="Destination"><select value={pays} onChange={(e) => setPays(e.target.value)} style={inputStyle}>{COUNTRIES.map((c) => <option key={c.code} value={c.code}>{c.name} — {c.city}</option>)}</select></Field>
         <div style={{ gridColumn: "1 / -1" }}>
           <Field label="Sens de la route">
@@ -9903,8 +9934,38 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
   const [showLitige, setShowLitige] = useState(false);
   const [confirmerSuppression, setConfirmerSuppression] = useState(false);
   const [showImpressionDirecte, setShowImpressionDirecte] = useState(false);
+  /*
+   * Les menus "Ticket d'envoi" et "•••" sont positionnés en `position: fixed`, calculée à
+   * l'ouverture à partir de la position réelle du bouton (getBoundingClientRect), plutôt qu'en
+   * `position: absolute` ancrée au bouton. La fenêtre modale ayant un défilement vertical
+   * (overflow-y: auto), son overflow-x devient automatiquement "auto" lui aussi (règle du CSS
+   * pour la propriété overflow) : un menu simplement ancré au bouton se retrouvait tronqué sur
+   * mobile dès que le bouton n'était pas assez à droite pour lui laisser la place. Une position
+   * fixe calculée par rapport à la fenêtre du navigateur, et bornée pour ne jamais dépasser l'écran,
+   * n'a plus ce problème.
+   */
   const [showDocMenu, setShowDocMenu] = useState(false);
   const [showPlusMenu, setShowPlusMenu] = useState(false);
+  const [docMenuPos, setDocMenuPos] = useState(null);
+  const [plusMenuPos, setPlusMenuPos] = useState(null);
+  const docBtnRef = useRef(null);
+  const plusBtnRef = useRef(null);
+  const LARGEUR_MENU = 240;
+  function positionMenu(ref) {
+    const rect = ref.current.getBoundingClientRect();
+    const left = Math.min(Math.max(8, rect.left), window.innerWidth - LARGEUR_MENU - 8);
+    return { top: rect.bottom + 6, left };
+  }
+  function toggleDocMenu() {
+    if (!showDocMenu) setDocMenuPos(positionMenu(docBtnRef));
+    setShowDocMenu((s) => !s);
+    setShowPlusMenu(false);
+  }
+  function togglePlusMenu() {
+    if (!showPlusMenu) setPlusMenuPos(positionMenu(plusBtnRef));
+    setShowPlusMenu((s) => !s);
+    setShowDocMenu(false);
+  }
   const [emplacement, setEmplacement] = useState(colis.emplacement || "");
   const [waState, setWaState] = useState("");
   const [waErreur, setWaErreur] = useState("");
@@ -10146,11 +10207,11 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
           {isAdmin && <button onClick={() => setEditing(true)} style={smallBtn}>Modifier</button>}
 
           <div style={{ position: "relative" }}>
-            <button onClick={() => { setShowDocMenu((s) => !s); setShowPlusMenu(false); }} style={smallBtn}>Ticket d’envoi <ChevronDown size={13} /></button>
-            {showDocMenu && (
+            <button ref={docBtnRef} onClick={toggleDocMenu} style={smallBtn}>Ticket d’envoi <ChevronDown size={13} /></button>
+            {showDocMenu && docMenuPos && (
               <>
                 <div onClick={() => setShowDocMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 19 }} />
-                <div style={{ position: "absolute", top: "110%", insetInlineEnd: 0, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: 6, boxShadow: "0 10px 30px rgba(0,0,0,0.18)", zIndex: 20, minWidth: 230 }}>
+                <div style={{ position: "fixed", top: docMenuPos.top, left: docMenuPos.left, width: LARGEUR_MENU, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: 6, boxShadow: "0 10px 30px rgba(0,0,0,0.18)", zIndex: 20 }}>
                   <button onClick={handleDownloadLabel} disabled={labelState === "loading"} style={menuItemStyle}>
                     {labelState === "loading" ? "Génération…" : "Télécharger l’étiquette"}
                     {labelState === "error" && <span style={menuItemHint}>Échec — réessayez</span>}
@@ -10175,11 +10236,11 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
           </div>
 
           <div style={{ position: "relative" }}>
-            <button onClick={() => { setShowPlusMenu((s) => !s); setShowDocMenu(false); }} title="Plus d’actions" style={{ ...smallBtn, padding: "9px 10px" }}><MoreHorizontal size={15} /></button>
-            {showPlusMenu && (
+            <button ref={plusBtnRef} onClick={togglePlusMenu} title="Plus d’actions" style={{ ...smallBtn, padding: "9px 10px" }}><MoreHorizontal size={15} /></button>
+            {showPlusMenu && plusMenuPos && (
               <>
                 <div onClick={() => setShowPlusMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 19 }} />
-                <div style={{ position: "absolute", top: "110%", insetInlineEnd: 0, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: 6, boxShadow: "0 10px 30px rgba(0,0,0,0.18)", zIndex: 20, minWidth: 230 }}>
+                <div style={{ position: "fixed", top: plusMenuPos.top, left: plusMenuPos.left, width: LARGEUR_MENU, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: 6, boxShadow: "0 10px 30px rgba(0,0,0,0.18)", zIndex: 20 }}>
                   <button onClick={notifierWhatsApp} disabled={waState === "envoi"} style={menuItemStyle}>
                     {waState === "envoi" ? "Envoi…" : waState === "envoye" ? "Message envoyé" : "Notifier par WhatsApp"}
                     {waState === "brouillon" && <span style={menuItemHint}>Brouillon ouvert — appuyez sur Envoyer</span>}

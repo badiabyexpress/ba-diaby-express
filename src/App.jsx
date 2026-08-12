@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue, memo } from "react";
-import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell } from "lucide-react";
+import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, ChevronDown, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell, SlidersHorizontal } from "lucide-react";
 import { storage, subscribeToChanges, flushOutbox, pendingSyncCount } from "./lib/storage.js";
 
 /* ---------- design tokens ----------
@@ -5650,6 +5650,21 @@ function CentreClientsPage({ data, persist, notify, session }) {
 
 const colisThStyle = { padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" };
 
+/** Colonnes optionnelles du tableau Colis — Code de suivi et Statut restent toujours visibles. */
+const COLIS_COLONNES_OPTIONS = [
+  ["destinataire", "Destinataire"], ["route", "Route"], ["poids", "Poids"],
+  ["type", "Type"], ["frais", "Frais d’expédition"], ["date", "Date"],
+];
+const COLIS_COLONNES_KEY = "bde-colis-colonnes";
+const COLIS_COLONNES_DEFAUT = { destinataire: true, route: true, poids: true, type: true, frais: true, date: true };
+/** Préférence par appareil (pas partagée entre agents) : chacun garde le tableau à sa taille d’écran. */
+function lireColonnesColis() {
+  try { return { ...COLIS_COLONNES_DEFAUT, ...JSON.parse(localStorage.getItem(COLIS_COLONNES_KEY) || "{}") }; }
+  catch (e) { return COLIS_COLONNES_DEFAUT; }
+}
+
+const TAILLES_PAGE_COLIS = [20, 50, 100, "tout"];
+
 /**
  * Carte de statistiques de la page Colis, avec lien "Filtrer" qui applique/retire le filtre de
  * statut correspondant sur la liste juste en dessous. `highlight` met la carte en évidence
@@ -5692,6 +5707,16 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
   const [selectionLot, setSelectionLot] = useState([]);
   const [impressionLot, setImpressionLot] = useState(false);
   const [showScanner, setShowScanner] = useState(false);
+  const [colonnes, setColonnes] = useState(lireColonnesColis);
+  const [showColonnes, setShowColonnes] = useState(false);
+  function toggleColonne(cle) {
+    setColonnes((c) => {
+      const next = { ...c, [cle]: !c[cle] };
+      try { localStorage.setItem(COLIS_COLONNES_KEY, JSON.stringify(next)); } catch (e) { /* pas grave */ }
+      return next;
+    });
+  }
+  const [taillePage, setTaillePage] = useState(20);
   const isChauffeur = session.role === "Chauffeur";
   const peutCreer = effectivePermission(session, "colis.creer");
   // Portée avant recherche/filtre de statut : sert à la fois de base à la liste affichée et au
@@ -5715,10 +5740,9 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     return compte;
   }, [baseList]);
   // Affichage progressif : la recherche porte toujours sur TOUS les colis, seul le nombre de
-  // lignes rendues d'un coup est limité, pour que la page reste rapide même avec des milliers
-  // de colis en base.
-  const [nbColisAffiches, setNbColisAffiches] = useState(TAILLE_PAGE);
-  useEffect(() => { setNbColisAffiches(TAILLE_PAGE); }, [deferredQuery, statutFiltre]);
+  // lignes rendues d'un coup est limité (choisi par l'agent via le sélecteur "Affichage"), pour
+  // que la page reste rapide même avec des milliers de colis en base.
+  const nbColisAffiches = taillePage === "tout" ? list.length : taillePage;
   const listeVisible = useMemo(() => list.slice(0, nbColisAffiches), [list, nbColisAffiches]);
 
   /*
@@ -6247,8 +6271,38 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
         }} />
       )}
       <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16, overflow: "hidden", marginBottom: modeSelection && selectionLot.length > 0 ? 90 : 0 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 18px", borderBottom: "1px solid var(--border)", flexWrap: "wrap", gap: 8 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 18px", borderBottom: "1px solid var(--border)", flexWrap: "wrap", gap: 10 }}>
           <span style={{ fontWeight: 700, color: "var(--text)", fontSize: 14 }}>Liste des colis <span style={{ color: "var(--muted)", fontWeight: 600 }}>· {list.length}</span></span>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+              <span style={{ fontSize: 12, color: "var(--muted)" }}>Affichage</span>
+              <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
+                <select value={taillePage} onChange={(e) => setTaillePage(e.target.value === "tout" ? "tout" : Number(e.target.value))}
+                  style={{ appearance: "none", background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "7px 26px 7px 12px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
+                  {TAILLES_PAGE_COLIS.map((n) => <option key={n} value={n}>{n === "tout" ? "Tout" : n}</option>)}
+                </select>
+                <ChevronDown size={13} color="var(--muted)" style={{ position: "absolute", right: 9, pointerEvents: "none" }} />
+              </div>
+            </div>
+            <div style={{ position: "relative" }}>
+              <button onClick={() => setShowColonnes((s) => !s)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "7px 12px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
+                <SlidersHorizontal size={13} /> Colonnes
+              </button>
+              {showColonnes && (
+                <>
+                  <div onClick={() => setShowColonnes(false)} style={{ position: "fixed", inset: 0, zIndex: 19 }} />
+                  <div style={{ position: "absolute", top: "115%", right: 0, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: 8, boxShadow: "0 10px 30px rgba(0,0,0,0.18)", zIndex: 20, minWidth: 190 }}>
+                    {COLIS_COLONNES_OPTIONS.map(([cle, label]) => (
+                      <label key={cle} style={{ display: "flex", alignItems: "center", gap: 9, padding: "7px 8px", fontSize: 12.5, color: "var(--text)", cursor: "pointer", borderRadius: 6 }}>
+                        <input type="checkbox" checked={colonnes[cle]} onChange={() => toggleColonne(cle)} style={{ width: 14, height: 14 }} />
+                        {label}
+                      </label>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
         </div>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", minWidth: 760, borderCollapse: "collapse" }}>
@@ -6256,13 +6310,13 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
               <tr style={{ background: "var(--surface2)", textAlign: "start" }}>
                 {modeSelection && <th style={{ padding: "10px 14px", width: 36 }} />}
                 <th style={colisThStyle}>Code de suivi</th>
-                <th style={colisThStyle}>Destinataire</th>
-                <th style={colisThStyle}>Route</th>
-                <th style={colisThStyle}>Poids</th>
-                <th style={colisThStyle}>Type</th>
-                <th style={colisThStyle}>Frais d’expédition</th>
+                {colonnes.destinataire && <th style={colisThStyle}>Destinataire</th>}
+                {colonnes.route && <th style={colisThStyle}>Route</th>}
+                {colonnes.poids && <th style={colisThStyle}>Poids</th>}
+                {colonnes.type && <th style={colisThStyle}>Type</th>}
+                {colonnes.frais && <th style={colisThStyle}>Frais d’expédition</th>}
                 <th style={colisThStyle}>Statut</th>
-                <th style={colisThStyle}>Date</th>
+                {colonnes.date && <th style={colisThStyle}>Date</th>}
               </tr>
             </thead>
             <tbody>
@@ -6281,15 +6335,15 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
                       </td>
                     )}
                     <td style={{ padding: "10px 14px", fontWeight: 700, color: "var(--info-fg)", fontSize: 12.5, whiteSpace: "nowrap" }}>{c.tracking}</td>
-                    <td style={{ padding: "10px 14px", color: "var(--text)", fontSize: 13 }}>{c.destinataire}</td>
-                    <td style={{ padding: "10px 14px", color: "var(--muted)", fontSize: 12.5, whiteSpace: "nowrap" }}>{routeLabel(c.pays, c.direction)}</td>
-                    <td style={{ padding: "10px 14px", color: "var(--text)", fontSize: 12.5, whiteSpace: "nowrap" }}>{c.poids} kg</td>
-                    <td style={{ padding: "10px 14px", color: "var(--muted)", fontSize: 12.5, whiteSpace: "nowrap" }}>{c.mode === "air" ? "Aérien" : "Maritime"}</td>
-                    <td style={{ padding: "10px 14px", color: "var(--text)", fontWeight: 600, fontSize: 12.5, whiteSpace: "nowrap" }}>{fmtGNF(c.prix * (LIVE_RATES.GNF || CURRENCIES.GNF))}</td>
+                    {colonnes.destinataire && <td style={{ padding: "10px 14px", color: "var(--text)", fontSize: 13 }}>{c.destinataire}</td>}
+                    {colonnes.route && <td style={{ padding: "10px 14px", color: "var(--muted)", fontSize: 12.5, whiteSpace: "nowrap" }}>{routeLabel(c.pays, c.direction)}</td>}
+                    {colonnes.poids && <td style={{ padding: "10px 14px", color: "var(--text)", fontSize: 12.5, whiteSpace: "nowrap" }}>{c.poids} kg</td>}
+                    {colonnes.type && <td style={{ padding: "10px 14px", color: "var(--muted)", fontSize: 12.5, whiteSpace: "nowrap" }}>{c.mode === "air" ? "Aérien" : "Maritime"}</td>}
+                    {colonnes.frais && <td style={{ padding: "10px 14px", color: "var(--text)", fontWeight: 600, fontSize: 12.5, whiteSpace: "nowrap" }}>{fmtGNF(c.prix * (LIVE_RATES.GNF || CURRENCIES.GNF))}</td>}
                     <td style={{ padding: "10px 14px" }}>
                       <span style={{ display: "inline-flex", alignItems: "center", gap: 5, background: st.bg, color: st.fg, padding: "4px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}><Icon size={12} /> {c.status}</span>
                     </td>
-                    <td style={{ padding: "10px 14px", color: "var(--muted)", fontSize: 12, whiteSpace: "nowrap" }}>{new Date(c.createdAt).toLocaleDateString("fr-FR")}</td>
+                    {colonnes.date && <td style={{ padding: "10px 14px", color: "var(--muted)", fontSize: 12, whiteSpace: "nowrap" }}>{new Date(c.createdAt).toLocaleDateString("fr-FR")}</td>}
                   </tr>
                 );
               })}
@@ -6297,15 +6351,9 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
           </table>
         </div>
         {list.length === 0 && <div style={{ padding: 20, color: "var(--muted)", fontSize: 13.5 }}>Aucun colis à afficher.</div>}
-        {list.length > listeVisible.length && (
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 12, padding: "14px 0", flexWrap: "wrap", borderTop: "1px solid var(--border)" }}>
-            <span style={{ fontSize: 12.5, color: "var(--muted)" }}>{listeVisible.length} affichés sur {list.length}</span>
-            <button onClick={() => setNbColisAffiches((n) => n + TAILLE_PAGE)} style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "7px 16px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
-              Afficher {Math.min(TAILLE_PAGE, list.length - listeVisible.length)} de plus
-            </button>
-            <button onClick={() => setNbColisAffiches(list.length)} style={{ background: "none", border: "none", color: "var(--info-fg)", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
-              Tout afficher
-            </button>
+        {list.length > 0 && (
+          <div style={{ padding: "12px 18px", borderTop: "1px solid var(--border)", fontSize: 12, color: "var(--muted)" }}>
+            {listeVisible.length} affiché{listeVisible.length > 1 ? "s" : ""} sur {list.length}
           </div>
         )}
       </div>

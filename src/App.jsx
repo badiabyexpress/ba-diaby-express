@@ -7167,7 +7167,16 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
   const [expTelephone, setExpTelephone] = useState(() => brouillon?.expTelephone ?? "");
   const [expEmail, setExpEmail] = useState(() => brouillon?.expEmail ?? "");
   const [expAdresse, setExpAdresse] = useState(() => brouillon?.expAdresse ?? "");
-  const [expPays, setExpPays] = useState(() => brouillon?.expPays ?? "GN");
+  // Un agent non-admin enregistre les colis remis EN PERSONNE à son propre point d'opération —
+  // un agent basé à Paris ne reçoit pas de colis au comptoir de Conakry. Le pays expéditeur par
+  // défaut (et verrouillé, voir paysExpediteurVerrouille plus bas) est donc le sien, pas Guinée
+  // systématiquement comme avant, ce qui créait par défaut des envois dans le mauvais sens pour
+  // tout agent basé à l'étranger.
+  const paysExpediteurVerrouille = !!session && session.role !== "Administrateur";
+  const [expPays, setExpPays] = useState(() => {
+    if (brouillon?.expPays) return brouillon.expPays;
+    return paysExpediteurVerrouille ? (session.paysOperation || "GN") : "GN";
+  });
   const [expClientTrouve, setExpClientTrouve] = useState(null);
   const [destPrenom, setDestPrenom] = useState(() => brouillon?.destPrenom ?? "");
   const [destNom, setDestNom] = useState(() => brouillon?.destNom ?? "");
@@ -7180,6 +7189,9 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
     // Un brouillon peut dater d'avant un changement de permissions : on ne restaure le pays
     // que s'il reste bien autorisé pour cette session, sinon on retombe sur le défaut habituel.
     if (brouillon?.destPays && availableCountries.some((c) => c.code === brouillon.destPays)) return brouillon.destPays;
+    // Un agent basé à l'étranger enregistre par défaut un envoi vers la Guinée (le cas courant) ;
+    // un agent basé en Guinée, un envoi vers le premier pays étranger autorisé (comme avant).
+    if (paysExpediteurVerrouille && expPays !== "GN") return "GN";
     return availableCountries.find((c) => c.code !== "GN")?.code || "FR";
   });
   const [destClientTrouve, setDestClientTrouve] = useState(null);
@@ -7595,9 +7607,15 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
             )}
             <div style={{ display: "grid", gridTemplateColumns: "1fr auto 1fr", gap: 10, alignItems: "end" }}>
               <Field label="Pays expéditeur *">
-                <select value={expPays} onChange={(e) => setExpPays(e.target.value)} style={inputStyle}>
-                  {availableCountries.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code]} {c.name} ({c.city})</option>)}
-                </select>
+                {paysExpediteurVerrouille ? (
+                  <div style={{ ...inputStyle, display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", color: "var(--muted)", cursor: "not-allowed" }}>
+                    {FLAGS[expPays]} {expCountry?.name} ({expCountry?.city})
+                  </div>
+                ) : (
+                  <select value={expPays} onChange={(e) => setExpPays(e.target.value)} style={inputStyle}>
+                    {availableCountries.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code]} {c.name} ({c.city})</option>)}
+                  </select>
+                )}
               </Field>
               <div style={{ paddingBottom: 10 }}><ChevronRight size={18} color="var(--muted)" /></div>
               <Field label="Pays destinataire *">
@@ -7606,6 +7624,9 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
                 </select>
               </Field>
             </div>
+            {paysExpediteurVerrouille && (
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -6 }}>Pays expéditeur verrouillé sur votre pays d’opération — seul un administrateur peut le changer.</div>
+            )}
             <div style={{ marginTop: 16, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px", display: "flex", alignItems: "center", justifyContent: "center", gap: 12, fontSize: 15, fontWeight: 700, color: "var(--text)" }}>
               {FLAGS[expPays]} {expCountry?.city} <ChevronRight size={16} color="var(--danger-fg)" /> {FLAGS[destPays]} {destCountry?.city}
             </div>

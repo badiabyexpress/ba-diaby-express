@@ -687,12 +687,20 @@ async function notifierEvenement(data, evenement, colis, message) {
   if (!prefs) return { envoyes: 0 };
   let envoyes = 0;
 
+  // Réglage « Joindre l'étiquette PDF » (Configuration → Notifications clients) : uniquement à
+  // l'enregistrement, seul moment où l'étiquette existe déjà. Un échec de génération/upload ne
+  // doit jamais empêcher l'envoi du message texte — on retombe simplement sans pièce jointe.
+  let mediaUrl = null;
+  if (evenement === "enregistrement" && data?.notificationSettings?.joindreEtiquette) {
+    try { mediaUrl = await genererUrlEtiquette(colis); } catch (e) { /* le message texte part quand même */ }
+  }
+
   const destinations = [];
   if (prefs.destinataire && colis.telephone) destinations.push(colis.telephone);
   if (prefs.expediteur && colis.expediteurTelephone) destinations.push(colis.expediteurTelephone);
   for (const tel of destinations) {
     try {
-      const { envoye } = await envoyerWhatsApp(tel, message);
+      const { envoye } = await envoyerWhatsApp(tel, message, mediaUrl);
       if (envoye) envoyes++;
     } catch (e) { /* une notification ne doit jamais bloquer l'action en cours */ }
   }
@@ -8432,23 +8440,29 @@ async function downloadLabel(colis) {
 }
 
 /**
- * Envoie l'étiquette du colis au destinataire sur WhatsApp, en pièce jointe.
- *
- * Twilio n'accepte pas d'envoyer les octets du PDF directement : il faut une URL PUBLIQUE que
- * Twilio va lui-même récupérer (MediaUrl). Le PDF est donc généré comme pour le téléchargement,
- * puis déposé dans le bucket Supabase Storage "colis-documents" (public en lecture) avant l'appel
- * à l'API WhatsApp. Le fichier est réécrit à chaque envoi (upsert) : il n'y a pas besoin d'historiser
- * les étiquettes, seule la dernière version compte.
+ * Génère le PDF de l'étiquette et le dépose dans le bucket Supabase Storage "colis-documents"
+ * (public en lecture), pour obtenir une URL PUBLIQUE — Twilio n'accepte pas d'envoyer les octets
+ * du PDF directement, il faut qu'il puisse aller la chercher lui-même (MediaUrl). Le fichier est
+ * réécrit à chaque appel (upsert) : il n'y a pas besoin d'historiser les étiquettes, seule la
+ * dernière version compte. Lève une erreur si l'upload échoue — à l'appelant de décider quoi faire.
  */
-async function envoyerEtiquetteWhatsApp(colis) {
+async function genererUrlEtiquette(colis) {
   const doc = await construireEtiquetteDoc(colis);
   const blob = doc.output("blob");
   const chemin = `etiquettes/${colis.tracking}.pdf`;
   const { error: erreurUpload } = await supabase.storage
     .from("colis-documents")
     .upload(chemin, blob, { contentType: "application/pdf", upsert: true });
-  if (erreurUpload) return { envoye: false, raison: "Échec de l’envoi du PDF vers le stockage." };
+  if (erreurUpload) throw erreurUpload;
   const { data: { publicUrl } } = supabase.storage.from("colis-documents").getPublicUrl(chemin);
+  return publicUrl;
+}
+
+/** Envoi manuel de l'étiquette au destinataire sur WhatsApp (bouton "Ticket d'envoi" de la fiche colis). */
+async function envoyerEtiquetteWhatsApp(colis) {
+  let publicUrl;
+  try { publicUrl = await genererUrlEtiquette(colis); }
+  catch (e) { return { envoye: false, raison: "Échec de l’envoi du PDF vers le stockage." }; }
   const message = `Bonjour ${colis.destinataire}, voici l’étiquette de votre colis Ba-Diaby Express (${colis.tracking}).`;
   const resultat = await envoyerWhatsApp(colis.telephone, message, publicUrl);
   // Contrairement à notifierWhatsApp() (message texte), il n'existe pas de brouillon WhatsApp de
@@ -12773,6 +12787,27 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
             onClick={() => {
               const s = data.notificationSettings || {};
               persist({ ...data, notificationSettings: { ...s, ouvertureAutoWhatsApp: !s.ouvertureAutoWhatsApp } });
+              notify?.("Préférence enregistrée");
+            }}
+          />
+        </div>
+      </div>
+
+      <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: "16px 18px", marginTop: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 220 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Joindre l’étiquette PDF à l’enregistrement</div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 }}>
+              Quand un colis est enregistré et que la notification WhatsApp « À l’enregistrement du colis » est activée
+              ci-dessus, l’étiquette part directement en pièce jointe. Nécessite un compte WhatsApp Business Twilio
+              validé par Meta — sans quoi seul le message texte part, comme d’habitude.
+            </div>
+          </div>
+          <Interrupteur
+            actif={!!data.notificationSettings?.joindreEtiquette}
+            onClick={() => {
+              const s = data.notificationSettings || {};
+              persist({ ...data, notificationSettings: { ...s, joindreEtiquette: !s.joindreEtiquette } });
               notify?.("Préférence enregistrée");
             }}
           />

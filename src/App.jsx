@@ -7198,9 +7198,14 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
   const [mode, setMode] = useState(() => brouillon?.mode ?? "air");
   const [produits, setProduits] = useState(() => (brouillon?.produits?.length ? brouillon.produits : [emptyProduit()]));
   const [paye, setPaye] = useState(() => brouillon?.paye ?? "");
-  // Devise dans laquelle l'agent saisit l'acompte. Le franc guinéen par défaut : c'est ce que le
-  // client remet au comptoir. Le montant est converti pour être stocké dans la devise de référence.
-  const [payeDevise, setPayeDevise] = useState(() => brouillon?.payeDevise ?? "GNF");
+  // Devise dans laquelle l'agent saisit l'acompte : toujours celle du pays expéditeur, puisque
+  // c'est la monnaie que le client a en poche au comptoir où le colis est remis (des euros à
+  // Paris, des francs guinéens à Conakry, des dollars aux États-Unis...) — jamais un choix libre.
+  const [payeDevise, setPayeDevise] = useState(() => brouillon?.payeDevise ?? COUNTRIES.find((c) => c.code === expPays)?.currency ?? "GNF");
+  useEffect(() => {
+    const devise = COUNTRIES.find((c) => c.code === expPays)?.currency;
+    if (devise) setPayeDevise(devise);
+  }, [expPays]);
   const [rabaisMontant, setRabaisMontant] = useState(() => brouillon?.rabaisMontant ?? "0");
   const [rabaisDevise, setRabaisDevise] = useState(() => brouillon?.rabaisDevise ?? "GNF");
   /*
@@ -7794,9 +7799,9 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
               <Field label="Montant payé à l’enregistrement">
                 <div style={{ display: "flex", gap: 8 }}>
                   <input type="number" step="0.01" min="0" value={paye} onChange={(e) => setPaye(e.target.value)} style={{ ...inputStyle, flex: 1, marginBottom: 0 }} placeholder="0" />
-                  <select value={payeDevise} onChange={(e) => setPayeDevise(e.target.value)} style={{ ...inputStyle, width: 100, marginBottom: 0 }}>
-                    {Object.keys(CURRENCIES).map((d) => <option key={d} value={d}>{d}</option>)}
-                  </select>
+                  <div title="Devise du pays expéditeur — non modifiable" style={{ ...inputStyle, width: 70, marginBottom: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "var(--surface2)", color: "var(--muted)", cursor: "not-allowed" }}>
+                    {payeDevise}
+                  </div>
                 </div>
               </Field>
             </div>

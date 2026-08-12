@@ -10446,7 +10446,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
                 <div>
                   <div style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>{p.nom || "—"}</div>
                   <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
-                    Qté {p.quantite || 1} · {p.poids ? `${p.poids} kg` : "—"}{!p.personnalise && p.categorie ? ` · ${p.categorie}` : ""}
+                    Qté {p.quantite || 1} · {p.poids ? `${p.poids} kg` : "—"}
                   </div>
                 </div>
                 <div style={{ fontSize: 12, color: "var(--muted)", textAlign: "right", flexShrink: 0, marginLeft: 12 }}>

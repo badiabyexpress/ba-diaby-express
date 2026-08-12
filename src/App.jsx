@@ -1055,30 +1055,6 @@ async function loadBackup(key) {
   return JSON.parse(r.value);
 }
 
-/** QR code affiché à l’écran, généré localement, avec repli visuel en cas d’échec. */
-const QRCodeImg = memo(function QRCodeImg({ value, size = 70 }) {
-  const [src, setSrc] = useState(null);
-  const [failed, setFailed] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    generateQRDataUrl(value, size * 3).then((url) => { if (!cancelled) setSrc(url); }).catch(() => { if (!cancelled) setFailed(true); });
-    return () => { cancelled = true; };
-  }, [value, size]);
-  if (failed) return <div style={{ width: size, height: size, background: "var(--surface2)", borderRadius: 6, display: "grid", placeItems: "center", fontSize: 9, color: "var(--muted)", textAlign: "center" }}>QR indisponible</div>;
-  if (!src) return <div style={{ width: size, height: size, background: "var(--surface2)", borderRadius: 6 }} />;
-  return <img src={src} alt="QR" width={size} height={size} style={{ background: "#fff", borderRadius: 6, padding: 4 }} />;
-});
-
-function Barcode({ value }) {
-  return (
-    <div style={{ height: 40, background: "var(--surface)", padding: "4px 8px", borderRadius: 6, display: "flex", alignItems: "center", gap: 1 }}>
-      {value.split("").map((ch, i) => (
-        <div key={i} style={{ width: (ch.charCodeAt(0) % 3) + 1, height: 28 + (ch.charCodeAt(0) % 8), background: "#0A2647" }} />
-      ))}
-    </div>
-  );
-}
-
 /** Détecte si l’écran est de taille mobile, et se met à jour de façon fiable — y compris dans un
  * aperçu intégré (iframe) où l’événement "resize" classique du navigateur ne se déclenche pas toujours. */
 function useIsMobile() {
@@ -10026,13 +10002,11 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
       <div style={{ background: "#0A2647", borderRadius: 14, padding: "20px 22px", color: "#fff", marginBottom: 20 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
           <div><div style={{ fontSize: 11, color: "var(--muted)" }}>N° DE SUIVI</div><div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 22, fontWeight: 700 }}>{colis.tracking}</div>{colis.provenance && <span style={{ display: "inline-block", marginTop: 4, background: "rgba(255,255,255,0.12)", borderRadius: 6, padding: "2px 8px", fontSize: 11, fontWeight: 600 }}>{colis.provenance}</span>}</div>
-          <div style={{ textAlign: "right" }}><div style={{ fontSize: 11, color: "var(--muted)" }}>ROUTE</div><div style={{ fontSize: 15, fontWeight: 700 }}>{routeLabel(colis.pays, colis.direction)}</div></div>
-        </div>
-        <div style={{ borderTop: "1.5px dashed rgba(255,255,255,0.3)", margin: "16px 0" }} />
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14 }}>
-          <QRCodeImg value={colis.tracking} size={70} />
-          <Barcode value={colis.tracking} />
-          <span style={{ fontSize: 10.5, color: "var(--muted)" }}>{colis.mode === "air" ? "AÉRIEN" : "MARITIME"}</span>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 11, color: "var(--muted)" }}>ROUTE</div>
+            <div style={{ fontSize: 15, fontWeight: 700 }}>{routeLabel(colis.pays, colis.direction)}</div>
+            <span style={{ display: "inline-block", marginTop: 6, background: "rgba(255,255,255,0.12)", borderRadius: 20, padding: "3px 10px", fontSize: 10.5, fontWeight: 700, letterSpacing: 0.4 }}>{colis.mode === "air" ? "AÉRIEN" : "MARITIME"}</span>
+          </div>
         </div>
       </div>
 

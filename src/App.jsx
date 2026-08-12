@@ -8037,7 +8037,11 @@ async function downloadReceptionBordereau(compte, colisSelectionnes, tarifs) {
   if (hasAutoTable && doc.autoTable) {
     doc.autoTable({
       startY: y + 4, head: [["N° de suivi", "Destinataire", "Route", "Poids"]], body: rows,
-      theme: "grid", headStyles: { fillColor: [10, 38, 71], textColor: 255, fontSize: 8.5 }, styles: { fontSize: 8.5, textColor: [40, 40, 40] },
+      theme: "grid", headStyles: { fillColor: [10, 38, 71], textColor: 255, fontSize: 8.5 }, styles: { fontSize: 8.5, textColor: [40, 40, 40], overflow: "linebreak" },
+      // Largeurs fixes (somme = 182 mm, la largeur utile) : sans elles, autoTable peut sous-estimer
+      // une colonne et laisser son contenu empiéter sur la suivante — déjà observé sur le bordereau
+      // d'expédition avec un statut long.
+      columnStyles: { 0: { cellWidth: 26 }, 1: { cellWidth: 66 }, 2: { cellWidth: 50 }, 3: { cellWidth: 40 } },
       margin: { left: 14, right: 14 },
     });
     y = doc.lastAutoTable.finalY + 10;
@@ -8138,11 +8142,29 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   const hasAutoTable = await ensureAutoTable();
   let finalY = y;
   if (hasAutoTable && doc.autoTable) {
+    /*
+     * Sans largeurs explicites, autoTable calcule chaque colonne à partir d'un échantillon du
+     * contenu : la colonne "Statut" paraît étroite tant que la plupart des colis sont
+     * "Enregistré" ou "Arrivé", puis un statut plus long comme "Disponible au retrait" déborde
+     * dans la colonne "Montant" juste à côté — observé sur un vrai bordereau. Des largeurs fixes,
+     * dimensionnées pour le plus long texte réaliste de chaque colonne (somme = 182 mm, la
+     * largeur utile entre les marges), éliminent le problème : un contenu malgré tout trop long
+     * passe à la ligne dans sa cellule au lieu d'empiéter sur la suivante.
+     */
     doc.autoTable({
       startY: y, head: [head], body,
       headStyles: { fillColor: [10, 38, 71], fontSize: 8.5 },
-      bodyStyles: { fontSize: 8.5, textColor: [30, 40, 55] },
+      bodyStyles: { fontSize: 8.5, textColor: [30, 40, 55], overflow: "linebreak" },
       alternateRowStyles: { fillColor: [238, 243, 250] },
+      columnStyles: {
+        0: { cellWidth: 26 },  // N° de suivi
+        1: { cellWidth: 34 },  // Destinataire
+        2: { cellWidth: 26 },  // Téléphone
+        3: { cellWidth: 18 },  // Mode
+        4: { cellWidth: 14 },  // Poids
+        5: { cellWidth: 34 },  // Statut
+        6: { cellWidth: 30 },  // Montant
+      },
       margin: { left: 14, right: 14 },
     });
     finalY = doc.lastAutoTable.finalY || y + 8;
@@ -11540,7 +11562,10 @@ function ComptabilitePage({ data, persist, session, notify }) {
       if (hasAutoTable && doc.autoTable && rows.length > 0) {
         doc.autoTable({
           startY: y + 4, head: [["N° de suivi", "Destinataire", "Route", "Montant", "Solde"]], body: rows,
-          theme: "grid", headStyles: { fillColor: [10, 38, 71], textColor: 255, fontSize: 8.5 }, styles: { fontSize: 8.5, textColor: [40, 40, 40] },
+          theme: "grid", headStyles: { fillColor: [10, 38, 71], textColor: 255, fontSize: 8.5 }, styles: { fontSize: 8.5, textColor: [40, 40, 40], overflow: "linebreak" },
+          // Largeurs fixes (somme = 182 mm), même raison que sur le bordereau d'expédition et le
+          // bordereau de réception : éviter qu'autoTable ne laisse une colonne empiéter sur la suivante.
+          columnStyles: { 0: { cellWidth: 26 }, 1: { cellWidth: 60 }, 2: { cellWidth: 46 }, 3: { cellWidth: 26 }, 4: { cellWidth: 24 } },
           margin: { left: 14, right: 14 },
         });
       } else if (rows.length === 0) {

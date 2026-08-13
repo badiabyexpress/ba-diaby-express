@@ -9124,19 +9124,23 @@ async function downloadInvoice(colis, data, options = {}) {
   champ("Date d'enregistrement", new Date(colis.createdAt).toLocaleDateString("fr-FR"), M + 60, 40);
   champ("Statut", clientStatusLabel(colis.status), M + 104, 40);
   champ("Mode", colis.mode === "air" ? "Aérien" : "Maritime", W - M - 24, 24);
+  // Cette ligne partage sa zone avec le filet séparateur qui commence juste en dessous
+  // (Z.parties - 6) : un caractère trop grand ou une position trop basse fait passer le filet en
+  // plein milieu du texte, comme constaté avec "ENREGISTRÉ PAR" à la taille précédente (9 pt).
+  // Remontée et réduite pour laisser une vraie marge avant le filet.
   if (colis.referenceCommande) {
-    doc.setFont(undefined, "normal"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
-    doc.text("RÉFÉRENCE COMMANDE", M, y + 12);
-    doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...INK);
-    doc.text(couper(colis.referenceCommande, 80), M, y + 16.5);
+    doc.setFont(undefined, "normal"); doc.setFontSize(6.5); doc.setTextColor(...MUTED);
+    doc.text("RÉFÉRENCE COMMANDE", M, y + 9);
+    doc.setFont(undefined, "bold"); doc.setFontSize(8); doc.setTextColor(...INK);
+    doc.text(couper(colis.referenceCommande, 80), M, y + 13);
   }
   // Traçabilité : quel agent a enregistré ce colis — en petit, mais lisible, pour pouvoir
   // retrouver rapidement qui contacter en cas de question sur la saisie.
   if (colis.agentCreation) {
-    doc.setFont(undefined, "normal"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
-    doc.text("ENREGISTRÉ PAR", W - M, y + 12, { align: "right" });
-    doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...INK);
-    doc.text(couper(colis.agentCreation, 80), W - M, y + 16.5, { align: "right" });
+    doc.setFont(undefined, "normal"); doc.setFontSize(6.5); doc.setTextColor(...MUTED);
+    doc.text("ENREGISTRÉ PAR", W - M, y + 9, { align: "right" });
+    doc.setFont(undefined, "bold"); doc.setFontSize(8); doc.setTextColor(...INK);
+    doc.text(couper(colis.agentCreation, 80), W - M, y + 13, { align: "right" });
   }
 
   // ── Expéditeur / Destinataire ─────────────────────────────────────────────

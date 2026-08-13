@@ -9130,6 +9130,14 @@ async function downloadInvoice(colis, data, options = {}) {
     doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...INK);
     doc.text(couper(colis.referenceCommande, 80), M, y + 16.5);
   }
+  // Traçabilité : quel agent a enregistré ce colis — en petit, mais lisible, pour pouvoir
+  // retrouver rapidement qui contacter en cas de question sur la saisie.
+  if (colis.agentCreation) {
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
+    doc.text("ENREGISTRÉ PAR", W - M, y + 12, { align: "right" });
+    doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...INK);
+    doc.text(couper(colis.agentCreation, 80), W - M, y + 16.5, { align: "right" });
+  }
 
   // ── Expéditeur / Destinataire ─────────────────────────────────────────────
   y = Z.parties;

@@ -211,6 +211,26 @@ function siteRetraitPourColis(colis, data) {
   if (versEtranger) return sites.find((s) => s.pays === colis.pays) || null;
   return sites.find((s) => s.id === (data?.agenceRetraitClient || "site-bambeto")) || sitesLocaux(sites)[0] || sites[0];
 }
+/**
+ * Site où le colis a été physiquement remis par l'expéditeur.
+ *
+ * En Guinée, c'est l'agence choisie à l'enregistrement (colis.site — voir ColisForm : ce champ ne
+ * s'affiche que pour un enregistrement fait depuis la Guinée). À l'étranger, il n'existe pas
+ * d'agence à proprement parler, seulement le point de dépôt déclaré pour ce pays dans
+ * Configuration → Agences de réception ; on le reformate au même format que les sites Guinée pour
+ * l'affichage, ou on renvoie null s'il n'est pas configuré plutôt que d'annoncer Bambeto à tort.
+ */
+function siteEnregistrementPourColis(colis, data) {
+  const sites = data?.sites || [];
+  const paysEnregistrement = colis.expediteurPays || "GN";
+  if (paysEnregistrement === "GN") {
+    return sites.find((s) => s.nom === colis.site) || sitesLocaux(sites)[0] || sites[0];
+  }
+  const agence = (data?.agencesReception || {})[paysEnregistrement];
+  if (!agence) return null;
+  const pays = COUNTRIES.find((c) => c.code === paysEnregistrement);
+  return { nom: pays?.city || pays?.name || paysEnregistrement, adresse: agence.adresse, telephone: agence.telephone, horaires: agence.horaires };
+}
 function routeLabel(pays, direction) {
   const c = COUNTRIES.find((x) => x.code === pays);
   if (!c) return "";
@@ -9242,8 +9262,11 @@ async function downloadInvoice(colis, data, options = {}) {
   // ── Agences ───────────────────────────────────────────────────────────────
   y = Z.agences;
   doc.setDrawColor(...LINE); doc.setLineWidth(0.3); doc.line(M, y - 8, W - M, y - 8);
-  const sites = data?.sites || [];
-  const siteDepot = sites.find((s) => s.nom === colis.site) || sitesLocaux(sites)[0] || sites[0];
+  // Le dépôt n'a lieu à une agence Guinée (Bambeto par défaut) que pour un colis enregistré en
+  // Guinée ; à l'étranger, siteEnregistrementPourColis() renvoie le point de dépôt déclaré pour ce
+  // pays s'il existe, sinon null — le bloc est alors simplement omis plutôt que d'afficher Bambeto
+  // à tort (c'était le bug : un colis enregistré à Paris affichait "Bambeto, Conakry").
+  const siteDepot = siteEnregistrementPourColis(colis, data);
   // Le retrait n'a lieu à une agence Guinée (Bambeto par défaut) que pour les colis livrés en
   // Guinée ; pour un export vers l'étranger, siteRetraitPourColis() renvoie le site déclaré pour
   // ce pays s'il existe, sinon null — le bloc est alors simplement omis plutôt que d'afficher
@@ -9259,7 +9282,7 @@ async function downloadInvoice(colis, data, options = {}) {
     doc.text(couper(site?.telephone || "", 80), x, y + 15);
     if (site?.horaires) doc.text(couper(site.horaires, 80), x, y + 19.5);
   };
-  bloc("Site d'enregistrement", siteDepot, M);
+  if (siteDepot) bloc("Site d'enregistrement", siteDepot, M);
   if (siteRetrait) bloc("Site de retrait", siteRetrait, W / 2 + 2);
 
   // ── Pied de page ──────────────────────────────────────────────────────────

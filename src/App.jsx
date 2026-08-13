@@ -585,6 +585,19 @@ function catPriceGNF(cat) {
   const eurBase = montant / (LIVE_RATES[devise] || CURRENCIES[devise] || 1);
   return Math.round(eurBase * (LIVE_RATES.GNF || CURRENCIES.GNF));
 }
+/**
+ * Libellé d'une catégorie pour la liste déroulante de sélection : prix en GNF, plus son équivalent
+ * dans la devise de l'expéditeur et celle du destinataire quand elles diffèrent du GNF — l'agent
+ * n'a ainsi pas besoin de convertir de tête pour savoir ce que ça représente pour le client en face
+ * de lui (qui paie souvent en euros, dollars...) ni pour celui qui réceptionnera en Guinée.
+ */
+function libelleCategoriePrix(c, ...devises) {
+  const gnf = catPriceGNF(c);
+  const autres = [...new Set(devises.filter((d) => d && d !== "GNF"))];
+  const equiv = autres.map((d) => fmt(gnf / (LIVE_RATES.GNF || CURRENCIES.GNF || 9500), d)).join(" · ");
+  const unite = c.type === "kg" ? "kg" : "unité";
+  return `${c.emoji} ${c.nom} (${fmtGNF(gnf)}${equiv ? ` ~ ${equiv}` : ""}/${unite})`;
+}
 /** Calcule la commission d’agence gagnée sur un colis, en EUR, selon les taux (globaux ou par catégorie). */
 function calcCommission(colis, commissionConfig, categories) {
   const cfg = commissionConfig || { parKg: 2, parUnite: 5 };
@@ -7739,7 +7752,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
                   <Field label="Catégorie">
                     <select value={p.categorie} onChange={(e) => updateProduit(p.id, { categorie: e.target.value })} style={inputStyle}>
                       <option value="">-- Sélectionner une catégorie --</option>
-                      {(categories || []).filter((c) => c.visibiliteColis !== false && (!c.paysLimite || c.paysLimite === pays)).map((c) => <option key={c.id} value={c.nom}>{c.emoji} {c.nom} ({fmtGNF(catPriceGNF(c))}{c.type === "kg" ? "/kg" : "/unité"})</option>)}
+                      {(categories || []).filter((c) => c.visibiliteColis !== false && (!c.paysLimite || c.paysLimite === pays)).map((c) => <option key={c.id} value={c.nom}>{libelleCategoriePrix(c, expCountry?.currency, destCurrency)}</option>)}
                     </select>
                   </Field>
                 )}
@@ -9772,6 +9785,8 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   const [pays, setPays] = useState(colis.pays);
   const [direction, setDirection] = useState(colis.direction || "export");
   const [mode, setMode] = useState(colis.mode);
+  const expCurrency = COUNTRIES.find((c) => c.code === (colis.expediteurPays || "GN"))?.currency;
+  const destCurrency = COUNTRIES.find((c) => c.code === (colis.destinatairePays || colis.pays))?.currency;
   const [poids, setPoids] = useState(String(colis.poids));
   const [volume, setVolume] = useState(String(colis.volume || ""));
   const [paye, setPaye] = useState(String(colis.paye || ""));
@@ -9930,7 +9945,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
                     <Field label="Catégorie">
                       <select value={p.categorie} onChange={(e) => updateProduit(p.id, { categorie: e.target.value })} style={inputStyle}>
                         <option value="">-- Sélectionner une catégorie --</option>
-                        {(categories || []).filter((c) => c.visibiliteColis !== false && (!c.paysLimite || c.paysLimite === pays)).map((c) => <option key={c.id} value={c.nom}>{c.emoji} {c.nom} ({fmtGNF(catPriceGNF(c))}{c.type === "kg" ? "/kg" : "/unité"})</option>)}
+                        {(categories || []).filter((c) => c.visibiliteColis !== false && (!c.paysLimite || c.paysLimite === pays)).map((c) => <option key={c.id} value={c.nom}>{libelleCategoriePrix(c, expCurrency, destCurrency)}</option>)}
                       </select>
                     </Field>
                   )}

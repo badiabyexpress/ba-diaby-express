@@ -9259,31 +9259,7 @@ async function downloadInvoice(colis, data, options = {}) {
     doc.text(fmtMontant(solde, primaryCur), W - M, y, { align: "right" });
   }
 
-  // ── Agences ───────────────────────────────────────────────────────────────
-  y = Z.agences;
-  doc.setDrawColor(...LINE); doc.setLineWidth(0.3); doc.line(M, y - 8, W - M, y - 8);
-  // Le dépôt n'a lieu à une agence Guinée (Bambeto par défaut) que pour un colis enregistré en
-  // Guinée ; à l'étranger, siteEnregistrementPourColis() renvoie le point de dépôt déclaré pour ce
-  // pays s'il existe, sinon null — le bloc est alors simplement omis plutôt que d'afficher Bambeto
-  // à tort (c'était le bug : un colis enregistré à Paris affichait "Bambeto, Conakry").
-  const siteDepot = siteEnregistrementPourColis(colis, data);
-  // Le retrait n'a lieu à une agence Guinée (Bambeto par défaut) que pour les colis livrés en
-  // Guinée ; pour un export vers l'étranger, siteRetraitPourColis() renvoie le site déclaré pour
-  // ce pays s'il existe, sinon null — le bloc est alors simplement omis plutôt que d'afficher
-  // Bambeto à tort.
-  const siteRetrait = siteRetraitPourColis(colis, data);
-  const bloc = (titre, site, x) => {
-    doc.setFont(undefined, "bold"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
-    doc.text(titre.toUpperCase(), x, y);
-    doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...INK);
-    doc.text(couper(site?.nom || "—", 80), x, y + 5.5);
-    doc.setFont(undefined, "normal"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
-    doc.text(couper(site?.adresse || "", 80), x, y + 10.5);
-    doc.text(couper(site?.telephone || "", 80), x, y + 15);
-    if (site?.horaires) doc.text(couper(site.horaires, 80), x, y + 19.5);
-  };
-  if (siteDepot) bloc("Site d'enregistrement", siteDepot, M);
-  if (siteRetrait) bloc("Site de retrait", siteRetrait, W / 2 + 2);
+  // Bloc "Site d'enregistrement / Site de retrait" retiré du ticket, sur demande.
 
   // ── Pied de page ──────────────────────────────────────────────────────────
   doc.setDrawColor(...LINE); doc.line(M, Z.pied - 8, W - M, Z.pied - 8);

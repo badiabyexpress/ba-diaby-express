@@ -9256,7 +9256,8 @@ async function downloadInvoice(colis, data, options = {}) {
     doc.text(couper(site?.nom || "—", 80), x, y + 5.5);
     doc.setFont(undefined, "normal"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
     doc.text(couper(site?.adresse || "", 80), x, y + 10.5);
-    doc.text(couper(`${site?.telephone || ""}${site?.horaires ? " · " + site.horaires : ""}`, 80), x, y + 15);
+    doc.text(couper(site?.telephone || "", 80), x, y + 15);
+    if (site?.horaires) doc.text(couper(site.horaires, 80), x, y + 19.5);
   };
   bloc("Site d'enregistrement", siteDepot, M);
   if (siteRetrait) bloc("Site de retrait", siteRetrait, W / 2 + 2);

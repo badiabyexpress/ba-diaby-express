@@ -9798,6 +9798,11 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
    * « Bateau » et enregistrer sans rien changer faisait passer son prix de 26,32 à 125,00 EUR,
    * silencieusement. Le prix facturé au client était multiplié par 4,75.
    */
+  // Une fois le colis expédié (tout statut après "Enregistré"), le poids, le contenu et le tarif
+  // ont déjà servi à générer le bordereau et l'étiquette — les modifier après coup créerait un
+  // écart avec les documents déjà imprimés/remis. Seules les coordonnées expéditeur/destinataire
+  // restent corrigibles à ce stade (numéro erroné, adresse à préciser...).
+  const modifiableComplet = colis.status === "Enregistré";
   const auxPaliers = colis.tarification === "reception";
   // La valeur des produits suit désormais l'état local `produits` (modifiable ci-dessous), et
   // non plus colis.produits figé : corriger le prix d'un article recalcule immédiatement le
@@ -9872,6 +9877,14 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
         <Field label="Ville (optionnel)"><input value={destinataireVille} onChange={(e) => setDestinataireVille(e.target.value)} style={inputStyle} /></Field>
         <Field label="Code postal (optionnel)"><input value={destinataireCodePostal} onChange={(e) => setDestinataireCodePostal(e.target.value)} style={inputStyle} /></Field>
 
+        {!modifiableComplet && (
+          <div style={{ gridColumn: "1 / -1", background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "var(--warn-fg)", marginTop: 4 }}>
+            Colis déjà expédié ({colis.status}) — le poids, le contenu, la route et le tarif ne sont plus modifiables ici, pour rester cohérents avec le bordereau et l’étiquette déjà émis. Seules les coordonnées expéditeur et destinataire restent corrigibles.
+          </div>
+        )}
+
+        {modifiableComplet && (
+          <>
         <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)", marginTop: 4 }}>Route &amp; tarif</div>
         <Field label="Destination"><select value={pays} onChange={(e) => setPays(e.target.value)} style={inputStyle}>{COUNTRIES.map((c) => <option key={c.code} value={c.code}>{c.name} — {c.city}</option>)}</select></Field>
         <div style={{ gridColumn: "1 / -1" }}>
@@ -9941,11 +9954,14 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
           </select>
         </Field>
         <Field label="Montant payé (EUR)"><input value={paye} onChange={(e) => setPaye(e.target.value)} style={inputStyle} /></Field>
-        {err && <div style={{ gridColumn: "1 / -1", color: "var(--danger-fg)", fontSize: 12.5 }}>{err}</div>}
         <div style={{ gridColumn: "1 / -1", background: "var(--surface2)", borderRadius: 12, padding: "12px 16px", display: "flex", justifyContent: "space-between" }}>
           <div style={{ fontSize: 13, color: "var(--text)" }}>Total recalculé : <strong>{fmt(prix, "EUR")}</strong></div>
           <div style={{ fontSize: 13, color: reste > 0 ? "var(--danger-fg)" : "var(--ok-fg)" }}>Reste à payer : <strong>{fmt(reste, "EUR")}</strong></div>
         </div>
+          </>
+        )}
+
+        {err && <div style={{ gridColumn: "1 / -1", color: "var(--danger-fg)", fontSize: 12.5 }}>{err}</div>}
         <div style={{ gridColumn: "1 / -1", display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 4 }}>
           <button type="button" onClick={onClose} style={{ padding: "10px 18px", borderRadius: 8, border: "1.5px solid var(--border)", background: "var(--surface)", color: "var(--muted)", fontSize: 13.5, cursor: "pointer" }}>Annuler</button>
           <button type="submit" style={{ padding: "10px 18px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>Enregistrer les modifications</button>

@@ -1469,6 +1469,7 @@ function App() {
     { key: "bordereaux", label: t.bordereaux, icon: FileStack, show: perm("bordereaux.consulter") },
     { key: "paiements", label: t.paiements, icon: Receipt, show: perm("factures.consulter"), badge: declarationsEnAttente },
     { key: "caisse", label: "Caisse", icon: Wallet, show: perm("paiements.voir_propres") || perm("factures.consulter") || perm("compta.consulter") },
+    { key: "voyages", label: "Voyages", icon: Plane, show: perm("compta.consulter") },
     { key: "comptabilite", label: "Comptabilité", icon: DollarSign, show: perm("compta.consulter") },
     { key: "ia", label: t.ia, icon: Sparkles, show: perm("ia.utiliser") },
     { key: "admin", label: t.admin, icon: Settings, show: perm("config.acceder") },
@@ -1587,6 +1588,7 @@ function App() {
             {view === "bordereaux" && <BordereauxPage data={data} persist={persist} session={session} notify={notify} />}
             {view === "paiements" && <PaiementsPage data={data} notify={notify} />}
             {view === "caisse" && <CaissePage data={data} persist={persist} session={session} notify={notify} />}
+            {view === "voyages" && perm("compta.consulter") && <VoyagesPage data={data} persist={persist} session={session} notify={notify} />}
             {view === "comptabilite" && <ComptabilitePage data={data} persist={persist} session={session} notify={notify} />}
             {view === "ia" && <AiAssistant data={data} />}
             {view === "admin" && perm("config.acceder") && <ConfigurationHub key={adminResetKey} data={data} persist={persist} session={session} notify={notify} onNavigateApp={setView} offline={offline} />}
@@ -4284,11 +4286,17 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
 }
 
 
-function ConfigPageHeader({ title, desc, onBack }) {
+/**
+ * En-tête d'une sous-page avec son bouton retour.
+ *
+ * `retour` nomme l'écran vers lequel on revient : il valait toujours « Configuration », y compris
+ * depuis la création d'un bordereau ou une fiche de voyage, où ce n'est pas là qu'on retourne.
+ */
+function ConfigPageHeader({ title, desc, onBack, retour = "Configuration" }) {
   return (
     <div style={{ display: "flex", alignItems: "flex-start", gap: 16, marginBottom: 24 }}>
       <button onClick={onBack} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 14px", color: "var(--text)", fontSize: 13.5, fontWeight: 600, cursor: "pointer", flexShrink: 0, marginTop: 2 }}>
-        <ChevronLeft size={15} /> Configuration
+        <ChevronLeft size={15} /> {retour}
       </button>
       <div>
         <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: 0 }}>{title}</h1>
@@ -6731,7 +6739,7 @@ function BordereauCreation({ data, session, onCancel, onCreate }) {
 
   return (
     <div>
-      <ConfigPageHeader title="Nouveau bordereau" desc="Sélectionnez la route puis choisissez précisément les colis à expédier." onBack={onCancel} />
+      <ConfigPageHeader title="Nouveau bordereau" desc="Sélectionnez la route puis choisissez précisément les colis à expédier." onBack={onCancel} retour="Bordereaux" />
       <div style={{ display: "flex", gap: 14, marginBottom: 18, flexWrap: "wrap" }}>
         <div style={{ width: 260 }}>
           <Field label="Pays"><select value={pays} onChange={(e) => { setPays(e.target.value); setSelectedTrackings([]); }} style={inputStyle}>{COUNTRIES.filter((c) => c.code !== "GN").map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code]} {c.name}</option>)}</select></Field>
@@ -12754,6 +12762,569 @@ function CaissePage({ data, persist, session, notify }) {
   );
 }
 CaissePage = memo(CaissePage);
+
+/** Numérote les fiches de voyage par année : VOY-2026-0001, VOY-2026-0002... */
+function genNumeroVoyage(voyagesExistants) {
+  const annee = new Date().getFullYear();
+  const dejaCetteAnnee = (voyagesExistants || []).filter((v) => new Date(v.creeLe).getFullYear() === annee).length;
+  return `VOY-${annee}-${String(dejaCetteAnnee + 1).padStart(4, "0")}`;
+}
+
+/** Libellé lisible d'une route de voyage : « Conakry → Paris ». */
+function libelleVoyage(pays, direction) {
+  const ville = COUNTRIES.find((c) => c.code === pays)?.city || pays;
+  return direction === "export" ? `Conakry → ${ville}` : `${ville} → Conakry`;
+}
+
+/** Convertit un montant saisi dans une devise vers l'équivalent euro utilisé par tous les totaux. */
+function versEUR(montant, devise) {
+  return (Number(montant) || 0) / (LIVE_RATES[devise] || CURRENCIES[devise] || 1);
+}
+
+/** Totaux d'un voyage : ce que les colis rapportent, ce qu'ils coûtent, ce qu'il en reste. */
+function totauxVoyage(colisInclus, depenses) {
+  const facture = colisInclus.reduce((s, c) => s + (Number(c.prix) || 0), 0);
+  const encaisse = colisInclus.reduce((s, c) => s + (Number(c.paye) || 0), 0);
+  const depensesEUR = (depenses || []).reduce((s, d) => s + versEUR(d.montant, d.devise), 0);
+  return {
+    nbColis: colisInclus.length,
+    poids: colisInclus.reduce((s, c) => s + (Number(c.poids) || 0), 0),
+    facture, encaisse,
+    resteAEncaisser: Math.max(+(facture - encaisse).toFixed(2), 0),
+    depensesEUR,
+    resultat: +(facture - depensesEUR).toFixed(2),
+  };
+}
+
+/**
+ * Fiche de voyage en PDF — la pièce qui arrête les comptes d'une rotation.
+ *
+ * Elle reprend les colis embarqués, les dépenses engagées et le résultat, avec une ligne de
+ * signature : c'est ce document qu'on valide, et à partir duquel les colis sortent du pool des
+ * voyages à venir.
+ */
+function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable) {
+  const INK = [26, 30, 38], MUTED = [122, 130, 142], RED = [214, 39, 63], NAVY = [10, 38, 71];
+  const t = totauxVoyage(colisInclus, voyage.depenses);
+  let y = 20;
+  doc.addImage(DEFAULT_LOGO, "PNG", 14, y - 6, 16, 16);
+  doc.setFont(undefined, "bold"); doc.setFontSize(16); doc.setTextColor(...INK);
+  doc.text("BA-DIABY EXPRESS", 34, y);
+  doc.setFont(undefined, "normal"); doc.setFontSize(10); doc.setTextColor(...MUTED);
+  doc.text(`Fiche de voyage — ${libelleVoyage(voyage.pays, voyage.direction)}`, 34, y + 6);
+  doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(...INK);
+  doc.text(voyage.numero, 196, y, { align: "right" });
+  if (voyage.statut !== "Validé") {
+    doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...RED);
+    doc.text("BROUILLON", 196, y + 6, { align: "right" });
+  }
+  y += 20;
+  doc.setDrawColor(...RED); doc.setLineWidth(0.6); doc.line(14, y, 196, y);
+  y += 10;
+
+  const infos = [
+    ["Route", libelleVoyage(voyage.pays, voyage.direction)],
+    ["Départ", voyage.dateDepart ? new Date(`${voyage.dateDepart}T00:00:00`).toLocaleDateString("fr-FR") : "—"],
+    ["Colis embarqués", `${t.nbColis} · ${t.poids.toFixed(1)} kg`],
+    ["Validée le", voyage.valideeLe ? new Date(voyage.valideeLe).toLocaleString("fr-FR") : "—"],
+    ["Validée par", voyage.valideePar || "..............................."],
+  ];
+  doc.setFontSize(10);
+  infos.forEach(([label, valeur]) => {
+    doc.setFont(undefined, "bold"); doc.setTextColor(...INK); doc.text(label, 14, y);
+    doc.setFont(undefined, "normal"); doc.text(String(valeur), 196, y, { align: "right" });
+    y += 6.5;
+  });
+  y += 6;
+
+  const head = ["N° de suivi", "Destinataire", "Poids", "Facturé", "Reste dû"];
+  const body = colisInclus.map((c) => [
+    c.tracking, c.destinataire || "—", `${(Number(c.poids) || 0).toFixed(1)} kg`,
+    fmt(c.prix, "EUR"), (Number(c.reste) || 0) > 0 ? fmt(c.reste, "EUR") : "Payé",
+  ]);
+  if (hasAutoTable && doc.autoTable && body.length > 0) {
+    doc.autoTable({
+      startY: y, head: [head], body,
+      theme: "grid", headStyles: { fillColor: NAVY, textColor: 255, fontSize: 8.5 },
+      styles: { fontSize: 8.5, textColor: [40, 40, 40], overflow: "linebreak" },
+      columnStyles: { 0: { cellWidth: 30 }, 1: { cellWidth: 62 }, 2: { cellWidth: 22 }, 3: { cellWidth: 34 }, 4: { cellWidth: 34 } },
+      margin: { left: 14, right: 14 },
+    });
+    y = doc.lastAutoTable.finalY + 10;
+  } else {
+    const colX = [14, 46, 110, 134, 166];
+    doc.setFontSize(8); doc.setTextColor(255, 255, 255); doc.setFillColor(...NAVY);
+    doc.rect(14, y, 182, 7, "F");
+    head.forEach((h, i) => doc.text(h, colX[i] + 1, y + 5));
+    y += 9;
+    doc.setTextColor(40, 40, 40);
+    body.forEach((row, i) => {
+      if (y > 250) { doc.addPage(); y = 20; }
+      if (i % 2 === 1) { doc.setFillColor(238, 243, 250); doc.rect(14, y - 4.5, 182, 6.5, "F"); }
+      doc.setFontSize(8);
+      row.forEach((cell, j) => doc.text(String(cell).slice(0, 26), colX[j] + 1, y));
+      y += 6.5;
+    });
+    y += 10;
+  }
+
+  if ((voyage.depenses || []).length > 0) {
+    if (y > 235) { doc.addPage(); y = 20; }
+    doc.setFont(undefined, "bold"); doc.setFontSize(10.5); doc.setTextColor(...INK);
+    doc.text("Dépenses du voyage", 14, y);
+    y += 6;
+    doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(60, 66, 78);
+    voyage.depenses.forEach((d) => {
+      if (y > 268) { doc.addPage(); y = 20; }
+      doc.text(d.libelle || "Dépense", 16, y);
+      doc.text(`${fmt(versEUR(d.montant, d.devise), d.devise)}`, 196, y, { align: "right" });
+      y += 6;
+    });
+    y += 6;
+  }
+
+  // Le panneau de résultat et la signature ont besoin d'environ 58 mm : on ne les laisse jamais
+  // déborder sous le pied de page.
+  if (y > 222) { doc.addPage(); y = 20; }
+  doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, 34, "F");
+  doc.setFontSize(10); doc.setTextColor(...NAVY); doc.setFont(undefined, "bold");
+  doc.text("Recettes (chiffre d’affaires)", 18, y + 9);
+  doc.text(fmt(t.facture, "EUR"), 192, y + 9, { align: "right" });
+  doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
+  doc.text("Dépenses du voyage", 18, y + 17);
+  doc.text(`- ${fmt(t.depensesEUR, "EUR")}`, 192, y + 17, { align: "right" });
+  doc.setFont(undefined, "bold"); doc.setFontSize(12);
+  doc.setTextColor(...(t.resultat >= 0 ? [22, 161, 99] : [214, 39, 63]));
+  doc.text("Résultat du voyage", 18, y + 28);
+  doc.text(fmt(t.resultat, "EUR"), 192, y + 28, { align: "right" });
+  y += 42;
+
+  doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
+  doc.text(`Soit ${fmtGNF(t.resultat * (LIVE_RATES.GNF || CURRENCIES.GNF))} · encaissé à ce jour ${fmt(t.encaisse, "EUR")} · reste à encaisser ${fmt(t.resteAEncaisser, "EUR")}`, 14, y);
+  y += 16;
+  doc.setFontSize(9); doc.setTextColor(90, 100, 120);
+  doc.text("Signature du responsable :", 14, y);
+  doc.setDrawColor(180); doc.line(14, y + 16, 85, y + 16);
+
+  doc.setFontSize(7.3); doc.setTextColor(150, 150, 150);
+  doc.text(`Édité le ${new Date().toLocaleString("fr-FR")} — Ba-Diaby Express`, 14, 288);
+}
+
+/**
+ * Voyages — le rendement d'une rotation, colis par colis.
+ *
+ * On choisit une route (Conakry → Paris ou l'inverse), on coche les colis embarqués, on saisit les
+ * dépenses engagées (fret, douane, manutention...), et la page affiche ce que le voyage rapporte
+ * vraiment. La validation fige la fiche, l'édite en PDF, et surtout retire ces colis de la liste
+ * proposée aux voyages suivants : un colis ne peut être compté que dans un seul voyage.
+ *
+ * Le résultat est calculé sur le chiffre d'affaires FACTURÉ, comme en Comptabilité : un colis
+ * impayé a bien voyagé et coûté du fret, ce n'est pas une raison pour effacer sa recette. Ce qui
+ * a réellement été encaissé est affiché à côté, avec le reste à encaisser.
+ */
+function VoyagesPage({ data, persist, session, notify }) {
+  const voyages = data.voyages || [];
+  const [ouvert, setOuvert] = useState(null); // id du voyage affiché, ou "nouveau"
+  const [pays, setPays] = useState("FR");
+  const [direction, setDirection] = useState("export");
+  const [dateDepart, setDateDepart] = useState("");
+  const [trackings, setTrackings] = useState([]);
+  const [depenses, setDepenses] = useState([]);
+  const [depLibelle, setDepLibelle] = useState("");
+  const [depMontant, setDepMontant] = useState("");
+  const [depDevise, setDepDevise] = useState("GNF");
+  const [recherche, setRecherche] = useState("");
+  const [confirmation, setConfirmation] = useState(null);
+  const [voyageASupprimer, setVoyageASupprimer] = useState(null);
+
+  const voyageCourant = ouvert && ouvert !== "nouveau" ? voyages.find((v) => v.id === ouvert) : null;
+  const enLecture = !!voyageCourant && voyageCourant.statut === "Validé";
+  const monNom = `${session?.prenom || ""} ${session?.nom || ""}`.trim() || session?.identifiant || "";
+
+  /** Colis déjà rattachés à un autre voyage — brouillon compris, sinon on les compterait deux fois. */
+  const prisAilleurs = useMemo(() => {
+    const set = new Set();
+    voyages.forEach((v) => { if (v.id !== ouvert) (v.trackings || []).forEach((t) => set.add(t)); });
+    return set;
+  }, [voyages, ouvert]);
+
+  const eligibles = useMemo(() => {
+    const q = recherche.trim().toLowerCase();
+    return data.colis.filter((c) => {
+      if (c.pays !== pays || (c.direction || "export") !== direction) return false;
+      if (["Annulé", "Refusé"].includes(c.status)) return false;
+      if (prisAilleurs.has(c.tracking)) return false;
+      if (q && !`${c.tracking} ${c.destinataire || ""} ${c.expediteur || ""}`.toLowerCase().includes(q)) return false;
+      return true;
+    }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  }, [data.colis, pays, direction, prisAilleurs, recherche]);
+
+  const colisInclus = useMemo(() => {
+    const set = new Set(trackings);
+    return data.colis.filter((c) => set.has(c.tracking));
+  }, [data.colis, trackings]);
+  const totaux = useMemo(() => totauxVoyage(colisInclus, depenses), [colisInclus, depenses]);
+
+  function ouvrirNouveau() {
+    setOuvert("nouveau");
+    setPays("FR"); setDirection("export"); setDateDepart(""); setTrackings([]); setDepenses([]);
+    setDepLibelle(""); setDepMontant(""); setDepDevise("GNF"); setRecherche("");
+  }
+  function ouvrirVoyage(v) {
+    setOuvert(v.id);
+    setPays(v.pays); setDirection(v.direction); setDateDepart(v.dateDepart || "");
+    setTrackings(v.trackings || []); setDepenses(v.depenses || []); setRecherche("");
+  }
+  function fermer() { setOuvert(null); setConfirmation(null); }
+
+  function basculer(tracking) {
+    if (enLecture) return;
+    setTrackings((l) => (l.includes(tracking) ? l.filter((t) => t !== tracking) : [...l, tracking]));
+  }
+  function toutSelectionner() {
+    const cles = eligibles.map((c) => c.tracking);
+    const tout = cles.every((t) => trackings.includes(t));
+    setTrackings((l) => (tout ? l.filter((t) => !cles.includes(t)) : [...new Set([...l, ...cles])]));
+  }
+  function ajouterDepense() {
+    if (!depLibelle.trim() || !(Number(depMontant) > 0)) { notify?.("Indiquez un libellé et un montant de dépense"); return; }
+    setDepenses((l) => [...l, { id: `dv${Date.now()}`, libelle: depLibelle.trim(), montant: Number(depMontant), devise: depDevise }]);
+    setDepLibelle(""); setDepMontant("");
+  }
+  function retirerDepense(id) { setDepenses((l) => l.filter((d) => d.id !== id)); }
+
+  /** Construit l'objet enregistré à partir de l'écran, sans les totaux (toujours recalculés). */
+  function voyageDepuisEcran(statut) {
+    const base = voyageCourant || {};
+    return {
+      id: base.id || `voy${Date.now()}`,
+      numero: base.numero || genNumeroVoyage(voyages),
+      creeLe: base.creeLe || new Date().toISOString(),
+      creePar: base.creePar || monNom,
+      pays, direction, dateDepart, trackings, depenses, statut,
+      valideeLe: statut === "Validé" ? new Date().toISOString() : null,
+      valideePar: statut === "Validé" ? monNom : null,
+    };
+  }
+
+  function enregistrer(statut) {
+    const voyage = voyageDepuisEcran(statut);
+    const autres = voyages.filter((v) => v.id !== voyage.id);
+    persist({
+      ...data,
+      voyages: [voyage, ...autres],
+      activityLog: pushActivity(data, session,
+        statut === "Validé" ? "Voyage validé" : "Voyage enregistré",
+        `${voyage.numero} — ${libelleVoyage(pays, direction)} · ${totaux.nbColis} colis · résultat ${fmt(totaux.resultat, "EUR")}`),
+    });
+    return voyage;
+  }
+
+  function enregistrerBrouillon() {
+    const v = enregistrer("Brouillon");
+    notify?.(`Voyage ${v.numero} enregistré en brouillon`);
+    setOuvert(v.id);
+  }
+
+  function validerVoyage() {
+    setConfirmation(null);
+    const v = enregistrer("Validé");
+    notify?.(`Voyage ${v.numero} validé — ses colis sortent de la liste`);
+    setOuvert(v.id);
+    imprimerFiche(v);
+  }
+
+  function rouvrir(v) {
+    persist({
+      ...data,
+      voyages: voyages.map((x) => (x.id === v.id ? { ...x, statut: "Brouillon", valideeLe: null, valideePar: null } : x)),
+      activityLog: pushActivity(data, session, "Voyage rouvert", `${v.numero} — ${libelleVoyage(v.pays, v.direction)}`),
+    });
+    notify?.(`Voyage ${v.numero} rouvert — modifiable à nouveau`);
+  }
+
+  function supprimer(v) {
+    persist({
+      ...data,
+      voyages: voyages.filter((x) => x.id !== v.id),
+      activityLog: pushActivity(data, session, "Voyage supprimé", `${v.numero} — ${libelleVoyage(v.pays, v.direction)}`),
+    });
+    notify?.(`Voyage ${v.numero} supprimé — ses colis redeviennent disponibles`);
+    setVoyageASupprimer(null);
+    if (ouvert === v.id) setOuvert(null);
+  }
+
+  async function imprimerFiche(voyage) {
+    try {
+      const jspdf = await loadJsPDF();
+      const doc = preparerDocPdf(new jspdf.jsPDF());
+      const hasAutoTable = await ensureAutoTable();
+      const set = new Set(voyage.trackings || []);
+      dessinerFicheVoyage(doc, voyage, data.colis.filter((c) => set.has(c.tracking)), hasAutoTable);
+      openPdf(doc, `fiche-voyage-${voyage.numero}.pdf`);
+    } catch (e) {
+      console.error(e);
+      notify?.("Échec de génération du PDF — réessayez");
+    }
+  }
+
+  const carte = { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14 };
+
+  // ── Liste des voyages ────────────────────────────────────────────────────────
+  if (!ouvert) {
+    return (
+      <div>
+        <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 27, margin: "0 0 5px" }}>Voyages</h1>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12, marginBottom: 20 }}>
+          <p style={{ color: "var(--muted)", fontSize: 14.5, margin: 0, maxWidth: 640 }}>
+            Le rendement de chaque rotation : les colis embarqués, ce qu’ils rapportent, les dépenses engagées,
+            et ce qu’il en reste. Une fiche validée retire ses colis des voyages suivants.
+          </p>
+          <button onClick={ouvrirNouveau} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+            <Plus size={16} /> Nouveau voyage
+          </button>
+        </div>
+
+        {voyages.length === 0 ? (
+          <div style={{ ...carte, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>
+            Aucun voyage enregistré. Créez-en un pour mesurer ce que rapporte une rotation.
+          </div>
+        ) : voyages.map((v) => {
+          const set = new Set(v.trackings || []);
+          const t = totauxVoyage(data.colis.filter((c) => set.has(c.tracking)), v.depenses);
+          const valide = v.statut === "Validé";
+          return (
+            <div key={v.id} style={{ ...carte, marginBottom: 12, padding: "14px 16px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+                <button onClick={() => ouvrirVoyage(v)} style={{ background: "none", border: "none", padding: 0, textAlign: "start", cursor: "pointer", flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)" }}>{v.numero}</span>
+                    <span style={{ fontSize: 13, color: "var(--muted)" }}>{libelleVoyage(v.pays, v.direction)}</span>
+                    <span style={{
+                      background: valide ? "var(--ok-bg-soft)" : "var(--warn-bg)", color: valide ? "var(--ok-fg)" : "var(--warn-fg)",
+                      borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700,
+                    }}>{v.statut}</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 5 }}>
+                    {t.nbColis} colis · {t.poids.toFixed(1)} kg · recettes {fmt(t.facture, "EUR")} · dépenses {fmt(t.depensesEUR, "EUR")}
+                    {v.dateDepart ? ` · départ ${new Date(`${v.dateDepart}T00:00:00`).toLocaleDateString("fr-FR")}` : ""}
+                  </div>
+                </button>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 16, fontWeight: 700, color: t.resultat >= 0 ? "var(--ok-fg)" : "var(--danger-fg)" }}>
+                    {fmt(t.resultat, "EUR")}
+                  </div>
+                  <button onClick={() => imprimerFiche(v)} style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 11px", color: "var(--text)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                    <Printer size={13} /> Fiche
+                  </button>
+                  <button onClick={() => setVoyageASupprimer(v)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer", padding: 4 }} title="Supprimer ce voyage">
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+
+        {voyageASupprimer && (
+          <ConfirmerAction
+            titre="Supprimer ce voyage ?"
+            message={`${voyageASupprimer.numero} — ${libelleVoyage(voyageASupprimer.pays, voyageASupprimer.direction)}.`}
+            consequence="Ses colis redeviendront disponibles pour un autre voyage, et ses dépenses seront perdues. Les colis eux-mêmes ne sont pas supprimés."
+            onConfirmer={() => supprimer(voyageASupprimer)}
+            onAnnuler={() => setVoyageASupprimer(null)}
+          />
+        )}
+      </div>
+    );
+  }
+
+  // ── Création / consultation d'un voyage ──────────────────────────────────────
+  const titre = voyageCourant ? `${voyageCourant.numero} — ${libelleVoyage(pays, direction)}` : "Nouveau voyage";
+  return (
+    <div>
+      <ConfigPageHeader
+        title={titre}
+        desc={enLecture
+          ? "Voyage validé : la fiche est figée et ses colis n’apparaissent plus dans les autres voyages."
+          : "Choisissez la route, cochez les colis embarqués, ajoutez les dépenses, puis validez la fiche."}
+        onBack={fermer}
+        retour="Voyages"
+      />
+
+      <div style={{ ...carte, padding: 16, marginBottom: 18 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Pays</div>
+            <select value={pays} disabled={enLecture} onChange={(e) => { setPays(e.target.value); setTrackings([]); }} style={inputStyle}>
+              {COUNTRIES.filter((c) => c.code !== "GN").map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code]} {c.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Sens</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              {["export", "import"].map((sens) => (
+                <button key={sens} disabled={enLecture} onClick={() => { setDirection(sens); setTrackings([]); }}
+                  style={{ ...toggleBtn, ...(direction === sens ? toggleActive : {}), opacity: enLecture ? 0.6 : 1, fontSize: 12 }}>
+                  {libelleVoyage(pays, sens)}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Date de départ</div>
+            <input type="date" value={dateDepart} disabled={enLecture} onChange={(e) => setDateDepart(e.target.value)} style={inputStyle} />
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12, marginBottom: 18 }}>
+        {[
+          { label: "Colis embarqués", valeur: String(totaux.nbColis), sous: `${totaux.poids.toFixed(1)} kg au total`, icon: Package, tint: "#5B8DEF" },
+          { label: "Recettes (chiffre d’affaires)", valeur: fmt(totaux.facture, "EUR"), sous: `encaissé ${fmt(totaux.encaisse, "EUR")} · reste ${fmt(totaux.resteAEncaisser, "EUR")}`, icon: DollarSign, tint: "#0A2647" },
+          { label: "Dépenses du voyage", valeur: fmt(totaux.depensesEUR, "EUR"), sous: `${depenses.length} ligne${depenses.length > 1 ? "s" : ""}`, icon: Receipt, tint: "#B8801C" },
+          { label: "Résultat du voyage", valeur: fmt(totaux.resultat, "EUR"), sous: fmtGNF(totaux.resultat * (LIVE_RATES.GNF || CURRENCIES.GNF)), icon: Plane, tint: totaux.resultat >= 0 ? "#16A163" : "#E23F52" },
+        ].map((k) => (
+          <div key={k.label} style={{ ...carte, padding: "16px 18px" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+              <div style={{ fontSize: 12.5, color: "var(--muted)", fontWeight: 600 }}>{k.label}</div>
+              <div style={{ width: 32, height: 32, borderRadius: 9, background: k.tint, display: "grid", placeItems: "center", flexShrink: 0 }}><k.icon size={16} color="#fff" /></div>
+            </div>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 20, fontWeight: 700, color: "var(--text)", marginTop: 10, wordBreak: "break-word" }}>{k.valeur}</div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 5 }}>{k.sous}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ ...carte, marginBottom: 18, overflow: "hidden" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "14px 16px", flexWrap: "wrap" }}>
+          <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>
+            Colis du voyage — {trackings.length} sélectionné{trackings.length > 1 ? "s" : ""}
+            {!enLecture && <span style={{ color: "var(--muted)", fontWeight: 600 }}> / {eligibles.length} disponible{eligibles.length > 1 ? "s" : ""}</span>}
+          </div>
+          {!enLecture && eligibles.length > 0 && (
+            <button onClick={toutSelectionner} style={{ background: "none", border: "none", color: "var(--info-fg)", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
+              Tout sélectionner / désélectionner
+            </button>
+          )}
+        </div>
+        {!enLecture && (
+          <div style={{ padding: "0 16px 12px" }}>
+            <input value={recherche} onChange={(e) => setRecherche(e.target.value)} placeholder="Rechercher un n° de suivi, un client…" style={inputStyle} />
+          </div>
+        )}
+        <div style={{ borderTop: "1px solid var(--border)", maxHeight: 420, overflowY: "auto" }}>
+          {(enLecture ? colisInclus : eligibles).length === 0 ? (
+            <div style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>
+              Aucun colis disponible sur cette route — ils sont peut-être déjà rattachés à un autre voyage.
+            </div>
+          ) : (enLecture ? colisInclus : eligibles).map((c) => (
+            <label key={c.tracking} style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 16px", borderBottom: "1px solid var(--surface2)", cursor: enLecture ? "default" : "pointer" }}>
+              <input type="checkbox" checked={trackings.includes(c.tracking)} disabled={enLecture} onChange={() => basculer(c.tracking)} style={{ width: 16, height: 16, flexShrink: 0 }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{c.tracking} — {c.destinataire}</div>
+                <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                  {c.status} · {(Number(c.poids) || 0).toFixed(1)} kg · {new Date(c.createdAt).toLocaleDateString("fr-FR")}
+                </div>
+              </div>
+              <div style={{ textAlign: "end", flexShrink: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{fmt(c.prix, "EUR")}</div>
+                {(Number(c.reste) || 0) > 0 && <div style={{ fontSize: 11, color: "var(--danger-fg)" }}>reste {fmt(c.reste, "EUR")}</div>}
+              </div>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ ...carte, marginBottom: 18, padding: "14px 16px" }}>
+        <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)", marginBottom: 10 }}>Dépenses du voyage</div>
+        {depenses.length === 0 && <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10 }}>Fret, douane, manutention, transport local… tout ce que la rotation a coûté.</div>}
+        {depenses.map((d) => (
+          <div key={d.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid var(--surface2)" }}>
+            <div style={{ fontSize: 13, color: "var(--text)" }}>{d.libelle}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{fmt(versEUR(d.montant, d.devise), d.devise)}</div>
+              {!enLecture && (
+                <button onClick={() => retirerDepense(d.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer", padding: 2 }} title="Retirer cette dépense">
+                  <Trash2 size={13} />
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
+        {!enLecture && (
+          <div style={{ marginTop: 12 }}>
+            {/* Libellé sur toute la largeur, puis montant / devise / bouton : sur un téléphone,
+                les quatre champs côte à côte réduisaient le montant à une case illisible. */}
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Libellé</div>
+            <input value={depLibelle} onChange={(e) => setDepLibelle(e.target.value)} placeholder="ex: fret aérien" style={{ ...inputStyle, marginBottom: 0 }} />
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 100px auto", gap: 8, marginTop: 8, alignItems: "end" }}>
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Montant</div>
+                <input type="number" min="0" step="0.01" value={depMontant} onChange={(e) => setDepMontant(e.target.value)} placeholder="0" style={{ ...inputStyle, marginBottom: 0 }} />
+              </div>
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Devise</div>
+                <select value={depDevise} onChange={(e) => setDepDevise(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }}>
+                  {Object.keys(CURRENCIES).map((d) => <option key={d} value={d}>{d}</option>)}
+                </select>
+              </div>
+              <button onClick={ajouterDepense} style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "10px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                Ajouter
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 20 }}>
+        {!enLecture ? (
+          <>
+            <button onClick={enregistrerBrouillon} disabled={trackings.length === 0} style={{
+              background: "var(--surface)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 9,
+              padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: trackings.length ? "pointer" : "not-allowed", opacity: trackings.length ? 1 : 0.6,
+            }}>
+              Enregistrer le brouillon
+            </button>
+            <button onClick={() => setConfirmation(true)} disabled={trackings.length === 0} style={{
+              display: "flex", alignItems: "center", gap: 7, background: trackings.length ? "#16A163" : "var(--surface2)",
+              color: trackings.length ? "#fff" : "var(--muted)", border: "none", borderRadius: 9, padding: "11px 18px",
+              fontSize: 13.5, fontWeight: 700, cursor: trackings.length ? "pointer" : "not-allowed",
+            }}>
+              <CheckCircle2 size={16} /> Valider la fiche de voyage
+            </button>
+          </>
+        ) : (
+          <>
+            <button onClick={() => imprimerFiche(voyageCourant)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+              <Printer size={16} /> Rééditer la fiche (PDF)
+            </button>
+            <button onClick={() => rouvrir(voyageCourant)} style={{ background: "var(--surface)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+              Rouvrir pour modifier
+            </button>
+          </>
+        )}
+      </div>
+
+      {confirmation && (
+        <ConfirmerAction
+          titre="Valider cette fiche de voyage ?"
+          message={`${libelleVoyage(pays, direction)} — ${totaux.nbColis} colis, ${totaux.poids.toFixed(1)} kg, recettes ${fmt(totaux.facture, "EUR")}, dépenses ${fmt(totaux.depensesEUR, "EUR")}, résultat ${fmt(totaux.resultat, "EUR")}.`}
+          consequence="Ces colis n’apparaîtront plus dans la liste des voyages suivants, pour qu’aucun ne soit compté deux fois. La fiche s’ouvrira en PDF, et reste réouvrable si vous devez la corriger."
+          libelleAction="Valider la fiche"
+          onConfirmer={validerVoyage}
+          onAnnuler={() => setConfirmation(null)}
+        />
+      )}
+
+      <div style={{ fontSize: 11.5, color: "var(--muted)" }}>
+        Le résultat est calculé sur le chiffre d’affaires facturé : un colis impayé a voyagé et coûté du fret,
+        sa recette reste acquise. L’encaissement réel est suivi à part, dans Caisse et Comptabilité.
+      </div>
+    </div>
+  );
+}
+VoyagesPage = memo(VoyagesPage);
 
 function ComptabilitePage({ data, persist, session, notify }) {
   const [periode, setPeriode] = useState("mois");

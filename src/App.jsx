@@ -9914,6 +9914,26 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   const [poids, setPoids] = useState(String(colis.poids));
   const [volume, setVolume] = useState(String(colis.volume || ""));
   const [paye, setPaye] = useState(String(colis.paye || ""));
+  /*
+   * Le montant encaissé n'est plus un simple champ libre.
+   *
+   * Il l'était : on retapait un total, et le colis se retrouvait avec un « payé » qui ne
+   * correspondait à aucune ligne de son historique de paiements — donc sans mode, sans référence,
+   * sans agent, et invisible dans la caisse. Toute correction écrit maintenant une vraie ligne :
+   * un encaissement complémentaire quand le total monte, une correction motivée quand il baisse.
+   */
+  const paiementsExistants = colis.paiements || [];
+  const dernierPaiement = [...paiementsExistants].reverse().find((p) => (Number(p.montant) || 0) > 0) || null;
+  const [correctionOuverte, setCorrectionOuverte] = useState(false);
+  // Par défaut on repart du dernier paiement : une correction annule presque toujours celui-là,
+  // et un complément est le plus souvent réglé comme le précédent. L'agent peut changer les deux.
+  const [correctionMode, setCorrectionMode] = useState(dernierPaiement?.mode || MODE_ESPECES);
+  const [correctionDevise, setCorrectionDevise] = useState(dernierPaiement?.deviseSaisie || expCurrency || "GNF");
+  const [correctionReference, setCorrectionReference] = useState("");
+  const [correctionNumeroPayeur, setCorrectionNumeroPayeur] = useState("");
+  const [correctionNumeroReceveur, setCorrectionNumeroReceveur] = useState("");
+  const [correctionMotif, setCorrectionMotif] = useState("");
+  const correctionAvecReference = correctionMode === "Orange Money" || correctionMode === "MTN Money" || correctionMode === "Virement";
   const [rabaisMontant, setRabaisMontant] = useState(String(colis.rabaisMontant || 0));
   const [rabaisDevise, setRabaisDevise] = useState(colis.rabaisDevise || "GNF");
   // Contenu du colis (articles, prix). N'existe que pour les colis créés produit par produit —
@@ -9959,6 +9979,41 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   const prix = Math.max(+(prixApresFidelite - rabaisEUR).toFixed(2), 0);
   const payeNum = Number(paye) || 0;
   const reste = Math.max(prix - payeNum, 0);
+  /** Écart entre le total saisi et le total réellement encaissé jusqu'ici, en équivalent euro. */
+  const ecartPaye = +(payeNum - (Number(colis.paye) || 0)).toFixed(2);
+
+  /**
+   * Traduit la correction du total en une ligne de l'historique des paiements.
+   *
+   * À la hausse c'est un encaissement de plus : l'agent qui corrige l'a reçu, avec son mode et sa
+   * référence. À la baisse c'est une annulation partielle : elle est portée au compte de l'agent
+   * du dernier paiement — c'est bien sa caisse qui a été créditée à tort — tout en gardant le nom
+   * de la personne qui corrige et son motif.
+   */
+  function ligneAjustement() {
+    if (Math.abs(ecartPaye) < 0.005) return null;
+    const parCourant = session ? (`${session.prenom} ${session.nom}`.trim() || session.identifiant) : "";
+    const horodatage = new Date().toISOString();
+    if (ecartPaye > 0) {
+      const taux = LIVE_RATES[correctionDevise] || CURRENCIES[correctionDevise] || 1;
+      return {
+        id: `pay${Date.now()}`, montant: ecartPaye, montantSaisi: +(ecartPaye * taux).toFixed(2),
+        deviseSaisie: correctionDevise, mode: correctionMode, date: horodatage, par: parCourant,
+        ...(correctionAvecReference ? {
+          reference: correctionReference.trim(),
+          numeroPayeur: correctionNumeroPayeur.trim(),
+          numeroReceveur: correctionNumeroReceveur.trim(),
+        } : {}),
+      };
+    }
+    const taux = LIVE_RATES[correctionDevise] || CURRENCIES[correctionDevise] || 1;
+    return {
+      id: `pay${Date.now()}`, montant: ecartPaye, montantSaisi: +(ecartPaye * taux).toFixed(2),
+      deviseSaisie: correctionDevise, mode: correctionMode, date: horodatage,
+      par: dernierPaiement?.par || parCourant,
+      correction: true, motif: correctionMotif.trim(), parCorrection: parCourant,
+    };
+  }
 
   function updateProduit(id, patch) {
     const propre = { ...patch };
@@ -9991,6 +10046,12 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
     // Un colis de 0 kg n'existe pas : on refuse l'enregistrement plutôt que de créer une
     // ligne qui faussera ensuite les totaux de poids, le chiffre d'affaires et les commissions.
     if (!(Number(poids) > 0)) { setErr("Le poids doit être supérieur à 0 kg."); return; }
+    // Mêmes règles que sur l'encaissement d'un colis : on n'enregistre jamais plus que ce qui est
+    // dû (le surplus est de la monnaie à rendre, pas une recette), et une somme retirée de la
+    // caisse d'un agent doit être justifiée.
+    if (ecartPaye > 0 && payeNum > prix + 0.005) { setErr("Le montant encaissé ne peut pas dépasser le total à payer."); return; }
+    if (ecartPaye < 0 && !correctionMotif.trim()) { setErr("Indiquez le motif de la correction du montant encaissé."); return; }
+    const ajustement = ligneAjustement();
     onSave({
       expediteur, expediteurTelephone, expediteurEmail, expediteurAdresse,
       destinataire, telephone, destinataireEmail, destinataireAdresse, destinataireVille, destinataireCodePostal,
@@ -9999,6 +10060,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
       poids: Number(poids) || 0, volume: Number(volume) || 0,
       produits, valeurDeclaree: produits.length ? valeurProduits : (colis.valeurDeclaree || 0),
       prixBrut, discountLoyalty, rabaisMontant: Number(rabaisMontant) || 0, rabaisDevise, rabaisEUR, prix, paye: payeNum, reste,
+      ...(ajustement ? { paiements: [...paiementsExistants, ajustement] } : {}),
     });
   }
 
@@ -10009,6 +10071,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
       expediteurEmail !== (colis.expediteurEmail || "") || expediteurAdresse !== (colis.expediteurAdresse || "") ||
       destinataireEmail !== (colis.destinataireEmail || "") || destinataireAdresse !== (colis.destinataireAdresse || "") ||
       destinataireVille !== (colis.destinataireVille || "") || destinataireCodePostal !== (colis.destinataireCodePostal || "") ||
+      Math.abs(ecartPaye) >= 0.005 ||
       JSON.stringify(produits) !== JSON.stringify(colis.produits || [])
     }>
       <form onSubmit={submit} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14 }}>
@@ -10102,7 +10165,74 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
             {Object.keys(CURRENCIES).map((c) => <option key={c} value={c}>{c}</option>)}
           </select>
         </Field>
-        <Field label="Montant payé (EUR)"><input value={paye} onChange={(e) => setPaye(e.target.value)} style={inputStyle} /></Field>
+        <div style={{ gridColumn: "1 / -1" }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--muted)", marginBottom: 6 }}>Montant encaissé</div>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px" }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{fmt(Number(colis.paye) || 0, "EUR")}</div>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                {paiementsExistants.length > 0
+                  ? `${paiementsExistants.length} ligne${paiementsExistants.length > 1 ? "s" : ""} dans l’historique${dernierPaiement?.par ? ` · dernier encaissé par ${dernierPaiement.par}` : ""}`
+                  : "Aucun paiement enregistré sur ce colis"}
+              </div>
+            </div>
+            {!correctionOuverte && (
+              <button type="button" onClick={() => setCorrectionOuverte(true)} style={{ background: "var(--surface)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, color: "var(--text)", cursor: "pointer" }}>
+                Corriger
+              </button>
+            )}
+          </div>
+          {!correctionOuverte && (
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6 }}>
+              Pour encaisser normalement, utilisez « Encaisser » sur la fiche du colis. Cette correction est réservée aux erreurs de saisie.
+            </div>
+          )}
+          {correctionOuverte && (
+            <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "12px 14px", marginTop: 10 }}>
+              <Field label="Nouveau total encaissé (EUR)">
+                <input type="number" step="0.01" min="0" value={paye} onChange={(e) => setPaye(e.target.value)} style={inputStyle} autoFocus />
+              </Field>
+              {Math.abs(ecartPaye) >= 0.005 && (
+                <>
+                  <div style={{ fontSize: 12, color: ecartPaye > 0 ? "var(--ok-fg)" : "var(--warn-fg)", fontWeight: 600, marginBottom: 10 }}>
+                    {ecartPaye > 0
+                      ? `Encaissement complémentaire de ${fmt(ecartPaye, "EUR")} — enregistré à votre nom.`
+                      : `Correction de ${fmt(ecartPaye, "EUR")}${dernierPaiement?.par ? ` — retirée de la caisse de ${dernierPaiement.par}` : ""}.`}
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+                    <Field label={ecartPaye > 0 ? "Mode de paiement" : "Mode corrigé"}>
+                      <select value={correctionMode} onChange={(e) => setCorrectionMode(e.target.value)} style={inputStyle}>
+                        {MODES_PAIEMENT.map((m) => <option key={m} value={m}>{m}</option>)}
+                      </select>
+                    </Field>
+                    <Field label={ecartPaye > 0 ? "Devise reçue" : "Devise corrigée"}>
+                      <select value={correctionDevise} onChange={(e) => setCorrectionDevise(e.target.value)} style={inputStyle}>
+                        {Object.keys(CURRENCIES).map((d) => <option key={d} value={d}>{d}</option>)}
+                      </select>
+                    </Field>
+                  </div>
+                  {ecartPaye > 0 && correctionAvecReference && (
+                    <>
+                      <Field label="Référence de la transaction"><input value={correctionReference} onChange={(e) => setCorrectionReference(e.target.value)} style={inputStyle} placeholder="ex: MP240726.1234.A56789" /></Field>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+                        <Field label="Numéro qui a payé"><input value={correctionNumeroPayeur} onChange={(e) => setCorrectionNumeroPayeur(e.target.value)} style={inputStyle} placeholder="+224 6XX XXX XXX" /></Field>
+                        <Field label="Numéro qui a reçu"><input value={correctionNumeroReceveur} onChange={(e) => setCorrectionNumeroReceveur(e.target.value)} style={inputStyle} placeholder="+224 6XX XXX XXX" /></Field>
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
+              {ecartPaye < 0 && (
+                <Field label="Motif de la correction *">
+                  <input value={correctionMotif} onChange={(e) => setCorrectionMotif(e.target.value)} style={inputStyle} placeholder="ex: montant saisi avec un zéro de trop" />
+                </Field>
+              )}
+              <button type="button" onClick={() => { setPaye(String(colis.paye || "")); setCorrectionMotif(""); setCorrectionOuverte(false); }} style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 12.5, cursor: "pointer", padding: 0 }}>
+                Annuler la correction
+              </button>
+            </div>
+          )}
+        </div>
         <div style={{ gridColumn: "1 / -1", background: "var(--surface2)", borderRadius: 12, padding: "12px 16px", display: "flex", justifyContent: "space-between" }}>
           <div style={{ fontSize: 13, color: "var(--text)" }}>Total recalculé : <strong>{fmt(prix, "EUR")}</strong></div>
           <div style={{ fontSize: 13, color: reste > 0 ? "var(--danger-fg)" : "var(--ok-fg)" }}>Reste à payer : <strong>{fmt(reste, "EUR")}</strong></div>
@@ -10797,6 +10927,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
                 <div>
                   <div>{p.deviseSaisie ? fmt(p.montant, p.deviseSaisie) : fmt(p.montant, "EUR")}{p.deviseSaisie && p.deviseSaisie !== "EUR" ? ` (≈ ${fmt(p.montant, "EUR")})` : ""} · {p.mode}</div>
                   {p.reference && <div style={{ fontSize: 10.5, color: "var(--muted)" }}>Réf. {p.reference}{p.numeroPayeur ? ` · payeur ${p.numeroPayeur}` : ""}{p.numeroReceveur ? ` · reçu sur ${p.numeroReceveur}` : ""}</div>}
+                  {p.correction && <div style={{ fontSize: 10.5, color: "var(--warn-fg)" }}>Correction{p.motif ? ` : ${p.motif}` : ""}{p.parCorrection ? ` · par ${p.parCorrection}` : ""}</div>}
                   <div style={{ fontSize: 10.5, color: "var(--muted)" }}>{new Date(p.date).toLocaleDateString("fr-FR")}{p.par ? ` · ${p.par}` : ""}</div>
                 </div>
                 <button onClick={() => handleDownloadRecu(p)} disabled={recuState === p.id} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 6, padding: "4px 8px", color: "var(--muted)", cursor: "pointer", fontSize: 10.5, display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
@@ -12118,6 +12249,7 @@ function CaissePage({ data, persist, session, notify }) {
       reference: p.reference || "",
       agent: agentBrut && agentBrut.trim() ? agentBrut.trim() : "Non renseigné",
       acompte: !!p.acompte || p.par === "Enregistrement initial",
+      correction: !!p.correction, motif: p.motif || "", parCorrection: p.parCorrection || "",
       remise: remiseParCle.get(cle) || null,
     };
   })), [data.colis, remiseParCle]);
@@ -12488,6 +12620,7 @@ function CaissePage({ data, persist, session, notify }) {
                         {new Date(l.date).toLocaleString("fr-FR")} · {l.mode} · {l.site}
                         {l.acompte && " · acompte à l’enregistrement"}
                         {l.reference && ` · réf. ${l.reference}`}
+                        {l.correction && ` · correction${l.motif ? ` : ${l.motif}` : ""}${l.parCorrection ? ` (par ${l.parCorrection})` : ""}`}
                       </div>
                       {l.remise && (
                         <div style={{ display: "inline-block", marginTop: 5, background: "var(--ok-bg-soft)", color: "var(--ok-fg)", borderRadius: 20, padding: "2px 9px", fontSize: 11, fontWeight: 700 }}>

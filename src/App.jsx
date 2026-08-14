@@ -1586,7 +1586,7 @@ function App() {
             {view === "clients" && <Clients data={data} />}
             {view === "bordereaux" && <BordereauxPage data={data} persist={persist} session={session} notify={notify} />}
             {view === "paiements" && <PaiementsPage data={data} notify={notify} />}
-            {view === "caisse" && <CaissePage data={data} session={session} notify={notify} />}
+            {view === "caisse" && <CaissePage data={data} persist={persist} session={session} notify={notify} />}
             {view === "comptabilite" && <ComptabilitePage data={data} persist={persist} session={session} notify={notify} />}
             {view === "ia" && <AiAssistant data={data} />}
             {view === "admin" && perm("config.acceder") && <ConfigurationHub key={adminResetKey} data={data} persist={persist} session={session} notify={notify} onNavigateApp={setView} offline={offline} />}
@@ -11868,6 +11868,108 @@ function ajouterDevise(acc, devise, montant) {
   acc[devise] = (acc[devise] || 0) + montant;
 }
 
+/** Numérote les bons de remise par année : RC-2026-0001, RC-2026-0002... */
+function genNumeroRemise(remisesExistantes, rang) {
+  const annee = new Date().getFullYear();
+  const dejaCetteAnnee = (remisesExistantes || []).filter((r) => new Date(r.date).getFullYear() === annee).length;
+  return `RC-${annee}-${String(dejaCetteAnnee + rang).padStart(4, "0")}`;
+}
+
+/**
+ * Dessine un bon de remise en caisse sur la page courante du document.
+ *
+ * C'est la pièce que l'agent et le caissier signent au moment où l'argent change de mains :
+ * elle doit tenir sur une page, lister les encaissements repris et afficher le montant remis
+ * dans la devise des billets. Le repli manuel (sans autoTable) est là pour la même raison que
+ * sur les autres documents : le plugin vient d'un CDN et peut ne pas se charger.
+ */
+function dessinerBonRemise(doc, remise, lignes, hasAutoTable) {
+  const INK = [26, 30, 38], MUTED = [122, 130, 142], RED = [214, 39, 63], NAVY = [10, 38, 71];
+  let y = 20;
+  doc.addImage(DEFAULT_LOGO, "PNG", 14, y - 6, 16, 16);
+  doc.setFont(undefined, "bold"); doc.setFontSize(16); doc.setTextColor(...INK);
+  doc.text("BA-DIABY EXPRESS", 34, y);
+  doc.setFont(undefined, "normal"); doc.setFontSize(10); doc.setTextColor(...MUTED);
+  doc.text("Bon de remise en caisse", 34, y + 6);
+  doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(...INK);
+  doc.text(remise.numero, 196, y, { align: "right" });
+  if (remise.provisoire) {
+    doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...RED);
+    doc.text("À FAIRE VALIDER", 196, y + 6, { align: "right" });
+  }
+  y += 20;
+  doc.setDrawColor(...RED); doc.setLineWidth(0.6); doc.line(14, y, 196, y);
+  y += 10;
+
+  const infos = [
+    ["Agent", remise.agent],
+    ["Période couverte", remise.periode || "—"],
+    [remise.provisoire ? "Date d’édition" : "Date de la remise", new Date(remise.date).toLocaleString("fr-FR")],
+    // Sur un bon provisoire, personne n'a encore reçu l'argent : la ligne reste à remplir à la main.
+    ["Reçu par", remise.recuPar || "..............................."],
+    ["Encaissements repris", `${remise.nbPaiements} · ${remise.nbColis} colis · ${remise.nbClients} client(s)`],
+  ];
+  doc.setFontSize(10);
+  infos.forEach(([label, valeur]) => {
+    doc.setFont(undefined, "bold"); doc.setTextColor(...INK); doc.text(label, 14, y);
+    doc.setFont(undefined, "normal"); doc.text(String(valeur), 196, y, { align: "right" });
+    y += 6.5;
+  });
+  y += 6;
+
+  const head = ["Date", "N° de suivi", "Client", "Site", "Montant"];
+  const body = lignes.map((l) => [
+    new Date(l.date).toLocaleDateString("fr-FR"), l.tracking, l.client, l.site,
+    formaterDevises({ [l.deviseSaisie]: l.montantSaisi }),
+  ]);
+  if (hasAutoTable && doc.autoTable && body.length > 0) {
+    doc.autoTable({
+      startY: y, head: [head], body,
+      theme: "grid", headStyles: { fillColor: NAVY, textColor: 255, fontSize: 8.5 },
+      styles: { fontSize: 8.5, textColor: [40, 40, 40], overflow: "linebreak" },
+      columnStyles: { 0: { cellWidth: 24 }, 1: { cellWidth: 30 }, 2: { cellWidth: 58 }, 3: { cellWidth: 30 }, 4: { cellWidth: 40, halign: "right" } },
+      margin: { left: 14, right: 14 },
+    });
+    y = doc.lastAutoTable.finalY + 10;
+  } else {
+    const colX = [14, 40, 72, 132, 164];
+    doc.setFontSize(8); doc.setTextColor(255, 255, 255); doc.setFillColor(...NAVY);
+    doc.rect(14, y, 182, 7, "F");
+    head.forEach((h, i) => doc.text(h, colX[i] + 1, y + 5));
+    y += 9;
+    doc.setTextColor(40, 40, 40);
+    body.forEach((row, i) => {
+      if (y > 250) { doc.addPage(); y = 20; }
+      if (i % 2 === 1) { doc.setFillColor(238, 243, 250); doc.rect(14, y - 4.5, 182, 6.5, "F"); }
+      doc.setFontSize(8);
+      row.forEach((cell, j) => doc.text(String(cell).slice(0, 26), colX[j] + 1, y));
+      y += 6.5;
+    });
+    y += 10;
+  }
+
+  // Le bloc « montant remis » et les signatures ne doivent jamais déborder sous le pied de page :
+  // ils ont besoin d'environ 60 mm, sinon on les reporte sur une page propre.
+  if (y > 220) { doc.addPage(); y = 20; }
+  doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, 16, "F");
+  doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(...NAVY);
+  doc.text("Montant remis en espèces", 18, y + 10);
+  doc.text(formaterDevises(remise.devises), 192, y + 10, { align: "right" });
+  y += 24;
+  doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
+  doc.text(`Équivalent : ${fmt(remise.totalEUR, "EUR")} — seules les espèces figurent sur ce bon.`, 14, y);
+  y += 16;
+
+  doc.setFontSize(9); doc.setTextColor(90, 100, 120);
+  doc.text("Signature de l’agent :", 14, y);
+  doc.setDrawColor(180); doc.line(14, y + 16, 85, y + 16);
+  doc.text("Signature du caissier :", 110, y);
+  doc.line(110, y + 16, 181, y + 16);
+
+  doc.setFontSize(7.3); doc.setTextColor(150, 150, 150);
+  doc.text(`Édité le ${new Date().toLocaleString("fr-FR")} — Ba-Diaby Express`, 14, 288);
+}
+
 /**
  * Caisse — qui a encaissé quoi, et combien chaque agent doit remettre.
  *
@@ -11876,18 +11978,21 @@ function ajouterDevise(acc, devise, montant) {
  * client, son mode et sa devise réelle. C'est ce dont on a besoin en fin de journée pour
  * compter la caisse avec chaque agent.
  *
- * Trois partis pris importants :
+ * Quatre partis pris importants :
  *  — les totaux sont affichés dans la devise réellement encaissée (GNF, EUR...) et pas seulement
  *    en équivalent euro : un agent rend des billets, pas une conversion ;
  *  — seules les espèces sont comptées dans « à remettre en caisse » (voir MODES_PAIEMENT) ;
+ *  — une remise validée retire définitivement ces espèces de ce que l'agent doit : le montant dû
+ *    est un solde vivant, pas un simple cumul ;
  *  — l'acompte pris à l'enregistrement du colis compte comme un encaissement de l'agent qui a
  *    créé le colis. Les colis enregistrés avant cette mise à jour n'ont pas d'agent inscrit sur
  *    le paiement lui-même : on retombe alors sur l'agent de création du colis.
  */
-function CaissePage({ data, session, notify }) {
+function CaissePage({ data, persist, session, notify }) {
   const monNom = `${session?.prenom || ""} ${session?.nom || ""}`.trim() || session?.identifiant || "";
   // Un agent ne voit que sa propre caisse — il n'a pas à consulter les encaissements de ses
-  // collègues. Administrateur et Comptable voient tout le monde et peuvent filtrer par agent.
+  // collègues, et surtout il ne valide pas lui-même la remise de son propre argent : c'est le rôle
+  // de celui qui le reçoit (administrateur ou comptable).
   const voitTousLesAgents = session?.role === "Administrateur" || session?.role === "Comptable"
     || effectivePermission(session, "compta.consulter") || effectivePermission(session, "stats.globales");
 
@@ -11897,12 +12002,24 @@ function CaissePage({ data, session, notify }) {
   const [agentFiltre, setAgentFiltre] = useState("tous");
   const [modeFiltre, setModeFiltre] = useState("tous");
   const [siteFiltre, setSiteFiltre] = useState("tous");
+  const [statutFiltre, setStatutFiltre] = useState("tous");
   const [recherche, setRecherche] = useState("");
   const [selection, setSelection] = useState([]);
   const [ouverts, setOuverts] = useState([]);
   const [limites, setLimites] = useState({});
+  const [histoOuvert, setHistoOuvert] = useState(false);
+  const [confirmationRemise, setConfirmationRemise] = useState(null);
+  const [remiseAAnnuler, setRemiseAAnnuler] = useState(null);
 
   const agentActif = voitTousLesAgents ? agentFiltre : (monNom || "Non renseigné");
+  const remises = data.remisesCaisse || [];
+
+  /** Un encaissement déjà remis porte le bon qui l'a repris — il ne peut pas être remis deux fois. */
+  const remiseParCle = useMemo(() => {
+    const m = new Map();
+    remises.forEach((r) => (r.cles || []).forEach((c) => m.set(c, r)));
+    return m;
+  }, [remises]);
 
   /** Tous les encaissements de la base, à plat, enrichis du colis auquel ils se rattachent. */
   const lignes = useMemo(() => data.colis.flatMap((c) => (c.paiements || []).map((p, i) => {
@@ -11913,10 +12030,12 @@ function CaissePage({ data, session, notify }) {
     const montantSaisi = p.montantSaisi != null && p.montantSaisi !== ""
       ? Number(p.montantSaisi) || 0
       : montant * (LIVE_RATES[deviseSaisie] || CURRENCIES[deviseSaisie] || 1);
+    // `id` n'est unique que dans un colis (deux encaissements simultanés partagent l'horodatage) :
+    // on préfixe par le numéro de suivi pour obtenir une clé réellement unique, qui sert aussi bien
+    // à la sélection qu'au rattachement d'un bon de remise.
+    const cle = `${c.tracking}|${p.id || ""}|${i}`;
     return {
-      // `id` n'est unique que dans un colis (deux encaissements simultanés partagent l'horodatage) :
-      // on préfixe par le numéro de suivi pour obtenir une clé de sélection réellement unique.
-      cle: `${c.tracking}|${p.id || ""}|${i}`,
+      cle,
       tracking: c.tracking,
       client: c.destinataire || "—",
       clientKey: c.clientAccountId || normaliserTelephone(c.telephone) || (c.destinataire || "").toLowerCase(),
@@ -11928,8 +12047,9 @@ function CaissePage({ data, session, notify }) {
       reference: p.reference || "",
       agent: agentBrut && agentBrut.trim() ? agentBrut.trim() : "Non renseigné",
       acompte: !!p.acompte || p.par === "Enregistrement initial",
+      remise: remiseParCle.get(cle) || null,
     };
-  })), [data.colis]);
+  })), [data.colis, remiseParCle]);
 
   const agentsConnus = useMemo(() => [...new Set(lignes.map((l) => l.agent))].sort((a, b) => a.localeCompare(b, "fr")), [lignes]);
   const sitesConnus = useMemo(() => [...new Set(lignes.map((l) => l.site))].sort((a, b) => a.localeCompare(b, "fr")), [lignes]);
@@ -11956,24 +12076,34 @@ function CaissePage({ data, session, notify }) {
       if (agentActif !== "tous" && l.agent !== agentActif) return false;
       if (modeFiltre !== "tous" && l.mode !== modeFiltre) return false;
       if (siteFiltre !== "tous" && l.site !== siteFiltre) return false;
+      if (statutFiltre === "adu" && (l.mode !== MODE_ESPECES || l.remise)) return false;
+      if (statutFiltre === "remis" && !l.remise) return false;
       if (q && !`${l.tracking} ${l.client} ${l.reference}`.toLowerCase().includes(q)) return false;
       return true;
     }).sort((a, b) => new Date(b.date) - new Date(a.date));
-  }, [lignes, periode, du, au, agentActif, modeFiltre, siteFiltre, recherche]);
+  }, [lignes, periode, du, au, agentActif, modeFiltre, siteFiltre, statutFiltre, recherche]);
 
   /** Regroupe une liste d'encaissements : effectifs, clients, colis, et totaux par devise. */
   function regrouper(liste) {
     const colis = new Set(), clients = new Set();
-    const devises = {}, especesDevises = {};
-    let totalEUR = 0, especesEUR = 0, poids = 0;
+    const devises = {}, especesDevises = {}, dusDevises = {}, remisDevises = {};
+    let totalEUR = 0, especesEUR = 0, dusEUR = 0, remisEUR = 0, poids = 0;
     liste.forEach((l) => {
       if (!colis.has(l.tracking)) { colis.add(l.tracking); poids += l.poids; }
       clients.add(l.clientKey);
       totalEUR += l.montant;
       ajouterDevise(devises, l.deviseSaisie, l.montantSaisi);
-      if (l.mode === MODE_ESPECES) { especesEUR += l.montant; ajouterDevise(especesDevises, l.deviseSaisie, l.montantSaisi); }
+      if (l.mode === MODE_ESPECES) {
+        especesEUR += l.montant;
+        ajouterDevise(especesDevises, l.deviseSaisie, l.montantSaisi);
+        if (l.remise) { remisEUR += l.montant; ajouterDevise(remisDevises, l.deviseSaisie, l.montantSaisi); }
+        else { dusEUR += l.montant; ajouterDevise(dusDevises, l.deviseSaisie, l.montantSaisi); }
+      }
     });
-    return { nbPaiements: liste.length, nbColis: colis.size, nbClients: clients.size, poids, totalEUR, especesEUR, devises, especesDevises };
+    return {
+      nbPaiements: liste.length, nbColis: colis.size, nbClients: clients.size, poids,
+      totalEUR, especesEUR, dusEUR, remisEUR, devises, especesDevises, dusDevises, remisDevises,
+    };
   }
 
   const total = useMemo(() => regrouper(filtrees), [filtrees]);
@@ -11986,7 +12116,7 @@ function CaissePage({ data, session, notify }) {
     });
     return [...groupes.entries()]
       .map(([agent, liste]) => ({ agent, liste, ...regrouper(liste) }))
-      .sort((a, b) => b.totalEUR - a.totalEUR);
+      .sort((a, b) => b.dusEUR - a.dusEUR || b.totalEUR - a.totalEUR);
   }, [filtrees]);
 
   // La sélection est volontairement conservée quand on change de filtre, mais n'est comptée que
@@ -11997,6 +12127,8 @@ function CaissePage({ data, session, notify }) {
   }, [filtrees, selection]);
   const totalSelection = useMemo(() => regrouper(selectionnees), [selectionnees]);
   const selSet = useMemo(() => new Set(selection), [selection]);
+  /** Ce qui peut effectivement partir en remise : des espèces, pas encore remises. */
+  const aRemettre = useMemo(() => selectionnees.filter((l) => l.mode === MODE_ESPECES && !l.remise), [selectionnees]);
 
   function basculerLigne(cle) {
     setSelection((s) => (s.includes(cle) ? s.filter((x) => x !== cle) : [...s, cle]));
@@ -12014,16 +12146,96 @@ function CaissePage({ data, session, notify }) {
     ? `du ${du ? new Date(`${du}T00:00:00`).toLocaleDateString("fr-FR") : "début"} au ${au ? new Date(`${au}T00:00:00`).toLocaleDateString("fr-FR") : "aujourd’hui"}`
     : { jour: "aujourd’hui", semaine: "7 derniers jours", mois: "ce mois-ci", tout: "depuis le début" }[periode];
 
+  /** Retrouve les encaissements repris par un bon, même si les filtres actuels les excluent. */
+  function lignesDeRemise(remise) {
+    const cles = new Set(remise.cles || []);
+    return lignes.filter((l) => cles.has(l.cle)).sort((a, b) => new Date(a.date) - new Date(b.date));
+  }
+
+  async function imprimerBons(listeRemises) {
+    try {
+      const jspdf = await loadJsPDF();
+      const doc = preparerDocPdf(new jspdf.jsPDF());
+      const hasAutoTable = await ensureAutoTable();
+      listeRemises.forEach((r, i) => {
+        if (i > 0) doc.addPage();
+        dessinerBonRemise(doc, r, r.lignesPdf || lignesDeRemise(r), hasAutoTable);
+      });
+      openPdf(doc, `bon-remise-${listeRemises.map((r) => r.numero).join("-")}-${new Date().toISOString().slice(0, 10)}.pdf`);
+    } catch (e) {
+      console.error(e);
+      notify?.("Échec de génération du PDF — réessayez");
+    }
+  }
+
+  /** Découpe une liste d'encaissements en un bon par agent : un bon se signe à deux, pas à cinq. */
+  function bonsParAgent(liste, { provisoire }) {
+    const groupes = new Map();
+    liste.forEach((l) => {
+      if (!groupes.has(l.agent)) groupes.set(l.agent, []);
+      groupes.get(l.agent).push(l);
+    });
+    const maintenant = new Date().toISOString();
+    return [...groupes.entries()].map(([agent, sesLignes], index) => {
+      const t = regrouper(sesLignes);
+      return {
+        id: `rem${Date.now()}-${index}`,
+        numero: provisoire ? "BON PROVISOIRE" : genNumeroRemise(remises, index + 1),
+        provisoire: !!provisoire,
+        agent, date: maintenant, recuPar: provisoire ? "" : (monNom || "—"), periode: periodeLibelle,
+        cles: sesLignes.map((l) => l.cle),
+        nbPaiements: t.nbPaiements, nbColis: t.nbColis, nbClients: t.nbClients,
+        devises: t.especesDevises, totalEUR: t.especesEUR,
+        lignesPdf: sesLignes,
+      };
+    });
+  }
+
+  function imprimerBonProvisoire() {
+    if (aRemettre.length === 0) { notify?.("Aucune espèce à remettre dans la sélection"); return; }
+    imprimerBons(bonsParAgent(aRemettre, { provisoire: true }));
+  }
+
+  function validerRemise() {
+    const bons = confirmationRemise;
+    setConfirmationRemise(null);
+    if (!bons || bons.length === 0) return;
+    // `lignesPdf` ne sert qu'à l'impression immédiate : on ne recopie pas les encaissements dans
+    // la base, le bon garde seulement leurs clés.
+    const aEnregistrer = bons.map(({ lignesPdf, provisoire, ...reste }) => reste);
+    const detail = bons.map((b) => `${b.numero} — ${b.agent} : ${formaterDevises(b.devises)}`).join(" · ");
+    persist({
+      ...data,
+      remisesCaisse: [...aEnregistrer, ...remises],
+      activityLog: pushActivity(data, session, "Remise en caisse validée", detail),
+    });
+    notify?.(bons.length > 1 ? `${bons.length} remises enregistrées` : `Remise ${bons[0].numero} enregistrée`);
+    setSelection([]);
+    imprimerBons(bons);
+  }
+
+  function annulerRemise(remise) {
+    persist({
+      ...data,
+      remisesCaisse: remises.filter((r) => r.id !== remise.id),
+      activityLog: pushActivity(data, session, "Remise en caisse annulée", `${remise.numero} — ${remise.agent} : ${formaterDevises(remise.devises)}`),
+    });
+    notify?.(`Remise ${remise.numero} annulée — les espèces redeviennent dues`);
+    setRemiseAAnnuler(null);
+  }
+
   async function exporterExcel() {
     const aExporter = selectionnees.length > 0 ? selectionnees : filtrees;
     if (aExporter.length === 0) { notify?.("Rien à exporter sur cette sélection"); return; }
     const XLSX = await loadXLSXLib();
     const wb = XLSX.utils.book_new();
 
-    const headers = ["Agent", "Date", "N° de suivi", "Client", "Site", "Mode", "Montant encaissé", "Devise", "Équivalent EUR", "Référence", "Type"];
+    const headers = ["Agent", "Date", "N° de suivi", "Client", "Site", "Mode", "Montant encaissé", "Devise", "Équivalent EUR", "Référence", "Type", "Remise"];
     const rows = aExporter.map((l) => [
       l.agent, new Date(l.date).toLocaleString("fr-FR"), l.tracking, l.client, l.site, l.mode,
-      l.montantSaisi, l.deviseSaisie, +l.montant.toFixed(2), l.reference || "—", l.acompte ? "Acompte à l’enregistrement" : "Encaissement",
+      l.montantSaisi, l.deviseSaisie, +l.montant.toFixed(2), l.reference || "—",
+      l.acompte ? "Acompte à l’enregistrement" : "Encaissement",
+      l.remise ? `${l.remise.numero} (${new Date(l.remise.date).toLocaleDateString("fr-FR")})` : "—",
     ]);
     const ws = XLSX.utils.aoa_to_sheet([
       ["BA-DIABY EXPRESS — Caisse : encaissements par agent"],
@@ -12037,8 +12249,12 @@ function CaissePage({ data, session, notify }) {
     const recap = selectionnees.length > 0
       ? [{ agent: "Sélection", ...totalSelection }]
       : parAgent.map((g) => ({ agent: g.agent, ...g }));
-    const headers2 = ["Agent", "Paiements", "Clients", "Colis", "Poids (kg)", "Total encaissé", "Dont espèces (à remettre)", "Équivalent EUR"];
-    const rows2 = recap.map((g) => [g.agent, g.nbPaiements, g.nbClients, g.nbColis, +g.poids.toFixed(1), formaterDevises(g.devises), formaterDevises(g.especesDevises), +g.totalEUR.toFixed(2)]);
+    const headers2 = ["Agent", "Paiements", "Clients", "Colis", "Poids (kg)", "Total encaissé", "Espèces reçues", "Déjà remis", "Reste dû à la caisse", "Équivalent EUR"];
+    const rows2 = recap.map((g) => [
+      g.agent, g.nbPaiements, g.nbClients, g.nbColis, +g.poids.toFixed(1),
+      formaterDevises(g.devises), formaterDevises(g.especesDevises), formaterDevises(g.remisDevises), formaterDevises(g.dusDevises),
+      +g.totalEUR.toFixed(2),
+    ]);
     const ws2 = XLSX.utils.aoa_to_sheet([headers2, ...rows2]);
     ws2["!cols"] = headers2.map(() => ({ wch: 20 }));
     XLSX.utils.book_append_sheet(wb, ws2, "Récapitulatif par agent");
@@ -12053,14 +12269,15 @@ function CaissePage({ data, session, notify }) {
     background: actif ? "var(--brand-solid)" : "var(--surface)", color: actif ? "#fff" : "var(--muted)",
     fontSize: 12.5, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap",
   });
+  const mesRemises = voitTousLesAgents ? remises : remises.filter((r) => r.agent === monNom);
 
   return (
-    <div style={{ paddingBottom: selectionnees.length > 0 ? 120 : 0 }}>
+    <div style={{ paddingBottom: selectionnees.length > 0 ? 150 : 0 }}>
       <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 27, margin: "0 0 5px" }}>Caisse</h1>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12, marginBottom: 20 }}>
         <p style={{ color: "var(--muted)", fontSize: 14.5, margin: 0, maxWidth: 640 }}>
           Tous les paiements encaissés, agent par agent — ce qu’il a pris, pour combien de clients et de colis,
-          et ce qu’il doit remettre en caisse. Sélectionnez des lignes pour arrêter un montant précis.
+          et ce qu’il doit encore remettre. Sélectionnez des lignes pour éditer un bon de remise et solder le montant.
         </p>
         <button onClick={exporterExcel} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
           <Download size={16} /> Exporter (Excel)
@@ -12069,7 +12286,8 @@ function CaissePage({ data, session, notify }) {
 
       {!voitTousLesAgents && (
         <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 10, padding: "10px 14px", marginBottom: 16, fontSize: 12.5, color: "var(--info-fg)" }}>
-          Vous consultez votre propre caisse ({monNom || "vous"}). Seul un administrateur ou un comptable voit celle des autres agents.
+          Vous consultez votre propre caisse ({monNom || "vous"}). Vous pouvez éditer votre bon de remise ; sa validation
+          revient à la personne qui reçoit l’argent (administrateur ou comptable).
         </div>
       )}
 
@@ -12077,6 +12295,11 @@ function CaissePage({ data, session, notify }) {
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
           {[["jour", "Aujourd’hui"], ["semaine", "7 derniers jours"], ["mois", "Ce mois-ci"], ["tout", "Depuis le début"]].map(([k, label]) => (
             <button key={k} onClick={() => { setPeriode(k); setDu(""); setAu(""); }} style={pilule(!du && !au && periode === k)}>{label}</button>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+          {[["tous", "Tous les encaissements"], ["adu", "Reste à remettre"], ["remis", "Déjà remis"]].map(([k, label]) => (
+            <button key={k} onClick={() => setStatutFiltre(k)} style={{ ...pilule(statutFiltre === k), fontSize: 12 }}>{label}</button>
           ))}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 10 }}>
@@ -12121,7 +12344,7 @@ function CaissePage({ data, session, notify }) {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(190px,1fr))", gap: 12, marginBottom: 20 }}>
         {[
           { label: `Encaissé — ${periodeLibelle}`, valeur: formaterDevises(total.devises), sous: `≈ ${fmt(total.totalEUR, "EUR")} · ${total.nbPaiements} paiement${total.nbPaiements > 1 ? "s" : ""}`, icon: DollarSign, tint: "#0A2647" },
-          { label: "À remettre en caisse (espèces)", valeur: formaterDevises(total.especesDevises), sous: `≈ ${fmt(total.especesEUR, "EUR")}`, icon: Wallet, tint: "#16A163" },
+          { label: "Reste à remettre (espèces)", valeur: formaterDevises(total.dusDevises), sous: total.remisEUR > 0 ? `déjà remis : ${formaterDevises(total.remisDevises)}` : `≈ ${fmt(total.dusEUR, "EUR")}`, icon: Wallet, tint: "#16A163" },
           { label: "Clients", valeur: String(total.nbClients), sous: "clients distincts ayant payé", icon: Users, tint: "#B8801C" },
           { label: "Volume", valeur: `${total.nbColis} colis`, sous: `${total.poids.toFixed(1)} kg au total`, icon: Package, tint: "#5B8DEF" },
         ].map((k) => (
@@ -12147,6 +12370,7 @@ function CaissePage({ data, session, notify }) {
         const ouvert = ouverts.includes(g.agent);
         const limite = limites[g.agent] || TAILLE_PAGE;
         const visibles = g.liste.slice(0, limite);
+        const solde = g.dusEUR > 0;
         return (
           <div key={g.agent} style={{ ...carte, marginBottom: 12, overflow: "hidden" }}>
             <div style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "14px 16px" }}>
@@ -12164,9 +12388,13 @@ function CaissePage({ data, session, notify }) {
                   {g.nbPaiements} paiement{g.nbPaiements > 1 ? "s" : ""} · {g.nbClients} client{g.nbClients > 1 ? "s" : ""} · {g.nbColis} colis · {g.poids.toFixed(1)} kg
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
-                  <span style={{ background: "var(--ok-bg-soft)", color: "var(--ok-fg)", borderRadius: 20, padding: "3px 10px", fontSize: 11.5, fontWeight: 700 }}>
-                    À remettre : {formaterDevises(g.especesDevises)}
+                  <span style={{
+                    background: solde ? "var(--warn-bg)" : "var(--ok-bg-soft)", color: solde ? "var(--warn-fg)" : "var(--ok-fg)",
+                    borderRadius: 20, padding: "3px 10px", fontSize: 11.5, fontWeight: 700,
+                  }}>
+                    {solde ? `Doit ${formaterDevises(g.dusDevises)}` : "Caisse à jour"}
                   </span>
+                  {g.remisEUR > 0 && <span style={{ fontSize: 11.5, color: "var(--muted)" }}>déjà remis : {formaterDevises(g.remisDevises)}</span>}
                   <span style={{ fontSize: 11.5, color: "var(--muted)" }}>{ouvert ? "Masquer le détail" : "Voir le détail"}</span>
                   <ChevronRight size={13} color="var(--muted)" style={{ transform: ouvert ? "rotate(90deg)" : "none" }} />
                 </div>
@@ -12190,6 +12418,11 @@ function CaissePage({ data, session, notify }) {
                         {l.acompte && " · acompte à l’enregistrement"}
                         {l.reference && ` · réf. ${l.reference}`}
                       </div>
+                      {l.remise && (
+                        <div style={{ display: "inline-block", marginTop: 5, background: "var(--ok-bg-soft)", color: "var(--ok-fg)", borderRadius: 20, padding: "2px 9px", fontSize: 11, fontWeight: 700 }}>
+                          Remis — {l.remise.numero} le {new Date(l.remise.date).toLocaleDateString("fr-FR")}
+                        </div>
+                      )}
                     </div>
                   </label>
                 ))}
@@ -12206,10 +12439,44 @@ function CaissePage({ data, session, notify }) {
         );
       })}
 
+      {mesRemises.length > 0 && (
+        <div style={{ ...carte, marginTop: 18, overflow: "hidden" }}>
+          <button onClick={() => setHistoOuvert((o) => !o)} style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", background: "none", border: "none", padding: "14px 16px", cursor: "pointer" }}>
+            <span style={{ fontWeight: 700, color: "var(--text)", fontSize: 14 }}>Remises enregistrées ({mesRemises.length})</span>
+            <ChevronRight size={16} color="var(--muted)" style={{ transform: histoOuvert ? "rotate(90deg)" : "none" }} />
+          </button>
+          {histoOuvert && (
+            <div style={{ borderTop: "1px solid var(--border)" }}>
+              {mesRemises.slice(0, 40).map((r) => (
+                <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "11px 16px", borderBottom: "1px solid var(--surface2)", flexWrap: "wrap" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{r.numero} — {r.agent}</div>
+                    <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                      {new Date(r.date).toLocaleString("fr-FR")} · {r.nbPaiements} encaissement{r.nbPaiements > 1 ? "s" : ""} · reçu par {r.recuPar}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "var(--ok-fg)" }}>{formaterDevises(r.devises)}</span>
+                    <button onClick={() => imprimerBons([r])} style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 11px", color: "var(--text)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                      <Printer size={13} /> Bon
+                    </button>
+                    {voitTousLesAgents && (
+                      <button onClick={() => setRemiseAAnnuler(r)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer", padding: 4 }} title="Annuler cette remise">
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {selectionnees.length > 0 && (
         <div style={{
           // Au-dessus du bandeau de synchronisation (z-index 60), qui est centré en bas et
-          // recouvrirait sinon le total et le bouton d'export au moment précis où on compte.
+          // recouvrirait sinon le total et les boutons au moment précis où on compte.
           position: "fixed", insetInlineStart: 0, insetInlineEnd: 0, bottom: 0, zIndex: 62,
           background: "var(--surface)", borderTop: "1.5px solid var(--border)", boxShadow: "0 -4px 18px rgba(10,38,71,0.16)",
           padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "center", gap: 14, flexWrap: "wrap",
@@ -12222,23 +12489,62 @@ function CaissePage({ data, session, notify }) {
               {formaterDevises(totalSelection.devises)}
             </div>
             <div style={{ fontSize: 12, color: "var(--ok-fg)", fontWeight: 700, marginTop: 2 }}>
-              Dû à la caisse (espèces) : {formaterDevises(totalSelection.especesDevises)}
+              Dû à la caisse (espèces) : {formaterDevises(totalSelection.dusDevises)}
             </div>
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button onClick={exporterExcel} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
-              <Download size={15} /> Exporter la sélection
+            <button onClick={imprimerBonProvisoire} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+              <Printer size={15} /> Bon de remise (PDF)
             </button>
-            <button onClick={() => setSelection([])} style={{ background: "var(--surface2)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+            {voitTousLesAgents && (
+              <button
+                onClick={() => setConfirmationRemise(bonsParAgent(aRemettre, { provisoire: false }))}
+                disabled={aRemettre.length === 0}
+                style={{
+                  display: "flex", alignItems: "center", gap: 6, border: "none", borderRadius: 9, padding: "10px 16px",
+                  fontSize: 13, fontWeight: 700, cursor: aRemettre.length === 0 ? "not-allowed" : "pointer",
+                  background: aRemettre.length === 0 ? "var(--surface2)" : "#16A163",
+                  color: aRemettre.length === 0 ? "var(--muted)" : "#fff",
+                }}
+              >
+                <CheckCircle2 size={15} /> Marquer comme remis
+              </button>
+            )}
+            <button onClick={exporterExcel} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+              <Download size={15} /> Excel
+            </button>
+            <button onClick={() => setSelection([])} style={{ background: "none", color: "var(--muted)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
               Vider
             </button>
           </div>
         </div>
       )}
 
+      {confirmationRemise && (
+        <ConfirmerAction
+          titre="Enregistrer la remise en caisse ?"
+          message={`${confirmationRemise.map((b) => `${b.agent} : ${formaterDevises(b.devises)} (${b.nbPaiements} encaissement${b.nbPaiements > 1 ? "s" : ""})`).join(" · ")}. Vous confirmez avoir reçu cet argent.`}
+          consequence="Ces espèces ne seront plus comptées comme dues par l’agent, et le bon de remise à signer s’ouvrira en PDF. Une remise enregistrée par erreur peut être annulée depuis « Remises enregistrées »."
+          libelleAction="Confirmer la remise"
+          onConfirmer={validerRemise}
+          onAnnuler={() => setConfirmationRemise(null)}
+        />
+      )}
+
+      {remiseAAnnuler && (
+        <ConfirmerAction
+          titre="Annuler cette remise ?"
+          message={`${remiseAAnnuler.numero} — ${remiseAAnnuler.agent} : ${formaterDevises(remiseAAnnuler.devises)}.`}
+          consequence="Les espèces de ce bon redeviendront dues par l’agent. À n’utiliser que si la remise a été enregistrée par erreur."
+          libelleAction="Annuler la remise"
+          onConfirmer={() => annulerRemise(remiseAAnnuler)}
+          onAnnuler={() => setRemiseAAnnuler(null)}
+        />
+      )}
+
       <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 14 }}>
-        Les montants sont affichés dans la devise réellement encaissée. « À remettre en caisse » ne compte que les
-        espèces : le Mobile Money, la carte et les virements arrivent directement sur les comptes de l’entreprise.
+        Les montants sont affichés dans la devise réellement encaissée. Seules les espèces sont dues à la caisse :
+        le Mobile Money, la carte et les virements arrivent directement sur les comptes de l’entreprise.
       </div>
     </div>
   );

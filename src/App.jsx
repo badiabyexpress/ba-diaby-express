@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue, memo } from "react";
-import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, ChevronDown, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell, SlidersHorizontal, Copy, MoreHorizontal } from "lucide-react";
+import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, ChevronDown, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell, SlidersHorizontal, Copy, MoreHorizontal, Wallet } from "lucide-react";
 import { storage, supabase, subscribeToChanges, flushOutbox, pendingSyncCount } from "./lib/storage.js";
 
 /* ---------- design tokens ----------
@@ -46,6 +46,15 @@ const COUNTRIES = [
   { code: "SN", name: "Sénégal", city: "Dakar", air: 8, sea: 4, delayAir: 2, delaySea: 10, currency: "XOF" },
 ];
 const CURRENCIES = { EUR: 1, USD: 1.08, CAD: 1.47, GNF: 9500, MAD: 10.9, XOF: 655.957, GBP: 0.86 };
+
+/**
+ * Modes d'encaissement proposés à l'agent.
+ * ESPECES est traité à part partout où l'on compte la caisse : c'est le seul mode où l'argent
+ * passe physiquement par les mains de l'agent et doit ensuite être remis. Le Mobile Money, la
+ * carte et le virement arrivent directement sur les comptes de l'entreprise.
+ */
+const MODES_PAIEMENT = ["Espèces", "Orange Money", "MTN Money", "Carte bancaire", "Virement"];
+const MODE_ESPECES = "Espèces";
 
 /** Logo officiel Ba-Diaby Express — utilisé par défaut dans la barre latérale et sur tous les documents PDF (facture, reçu, bordereau, étiquette, bon de sortie). */
 const DEFAULT_LOGO = "data:image/png;base64,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";
@@ -1459,6 +1468,7 @@ function App() {
     { key: "clients", label: t.clients, icon: Users, show: perm("clients.consulter") },
     { key: "bordereaux", label: t.bordereaux, icon: FileStack, show: perm("bordereaux.consulter") },
     { key: "paiements", label: t.paiements, icon: Receipt, show: perm("factures.consulter"), badge: declarationsEnAttente },
+    { key: "caisse", label: "Caisse", icon: Wallet, show: perm("paiements.voir_propres") || perm("factures.consulter") || perm("compta.consulter") },
     { key: "comptabilite", label: "Comptabilité", icon: DollarSign, show: perm("compta.consulter") },
     { key: "ia", label: t.ia, icon: Sparkles, show: perm("ia.utiliser") },
     { key: "admin", label: t.admin, icon: Settings, show: perm("config.acceder") },
@@ -1576,6 +1586,7 @@ function App() {
             {view === "clients" && <Clients data={data} />}
             {view === "bordereaux" && <BordereauxPage data={data} persist={persist} session={session} notify={notify} />}
             {view === "paiements" && <PaiementsPage data={data} notify={notify} />}
+            {view === "caisse" && <CaissePage data={data} session={session} notify={notify} />}
             {view === "comptabilite" && <ComptabilitePage data={data} persist={persist} session={session} notify={notify} />}
             {view === "ia" && <AiAssistant data={data} />}
             {view === "admin" && perm("config.acceder") && <ConfigurationHub key={adminResetKey} data={data} persist={persist} session={session} notify={notify} onNavigateApp={setView} offline={offline} />}
@@ -7630,7 +7641,15 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
       pays, direction, mode, produits, poids: +poidsTotal.toFixed(2), volume: 0, valeurDeclaree, site: agence, partenaireId: partenaireId || null, clientAccountId: clientAccountId || null, provenance: provenance || null, preAlerteRapprochee: preAlerteRapprochee || null,
       agentCreation: session ? `${session.prenom} ${session.nom}`.trim() || session.identifiant : "",
       prixBrut, discountLoyalty, rabaisMontant: Number(rabaisMontant) || 0, rabaisDevise, rabaisEUR, prix, paye: payeNum, reste, photos,
-      paiements: payeNum > 0 ? [{ id: `pay${Date.now()}`, montant: payeNum, mode: "Espèces", date: new Date().toISOString(), par: "Enregistrement initial" }] : [],
+      // L'acompte pris au comptoir est un encaissement comme un autre : il est nommé (l'agent qui
+      // enregistre le colis) et garde sa devise de saisie, sinon cet argent — souvent la plus grosse
+      // part de la journée — n'apparaissait dans aucune caisse et restait un simple montant en euros.
+      paiements: payeNum > 0 ? [{
+        id: `pay${Date.now()}`, montant: payeNum, montantSaisi: Number(paye) || 0, deviseSaisie: payeDevise,
+        mode: MODE_ESPECES, date: new Date().toISOString(),
+        par: session ? (`${session.prenom} ${session.nom}`.trim() || session.identifiant) : "Enregistrement initial",
+        acompte: true,
+      }] : [],
       notesInternes: "",
       status: "Enregistré", historique: [{ status: "Enregistré", date: new Date().toISOString() }],
       createdAt: new Date().toISOString(), pod: null, signature: null, driverLoc: null,
@@ -9776,7 +9795,7 @@ function EncaisserGroupeModal({ data, onEncaisser, onClose }) {
             </Field>
             <Field label="Mode de paiement">
               <select value={mode} onChange={(e) => setMode(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }}>
-                {["Espèces", "Orange Money", "MTN Money", "Carte bancaire", "Virement"].map((m) => <option key={m} value={m}>{m}</option>)}
+                {MODES_PAIEMENT.map((m) => <option key={m} value={m}>{m}</option>)}
               </select>
             </Field>
           </div>
@@ -10676,7 +10695,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
                   else if (e.target.value === "MTN Money") setNumeroReceveur(cfg.mtnMoney || "");
                   else setNumeroReceveur("");
                 }} style={inputStyle}>
-                  {["Espèces", "Orange Money", "MTN Money", "Carte bancaire", "Virement"].map((m) => <option key={m} value={m}>{m}</option>)}
+                  {MODES_PAIEMENT.map((m) => <option key={m} value={m}>{m}</option>)}
                 </select>
               </Field>
               {(modePaiement === "Orange Money" || modePaiement === "MTN Money" || modePaiement === "Virement") && (
@@ -11830,6 +11849,402 @@ function PaiementsPage({ data, notify }) {
 
 
 PaiementsPage = memo(PaiementsPage);
+
+/** Formate une répartition { devise: montant } dans les devises réellement encaissées. */
+function formaterDevises(parDevise) {
+  const entrees = Object.entries(parDevise || {}).filter(([, v]) => Math.abs(v) >= 0.005);
+  if (entrees.length === 0) return "—";
+  return entrees
+    .sort((a, b) => b[1] - a[1])
+    .map(([devise, v]) => {
+      const dec = devise === "GNF" || devise === "XOF" ? 0 : 2;
+      return `${v.toLocaleString("fr-FR", { minimumFractionDigits: dec, maximumFractionDigits: dec })} ${devise}`;
+    })
+    .join(" · ");
+}
+
+/** Ajoute un montant à une répartition par devise, sans muter l'objet d'origine du colis. */
+function ajouterDevise(acc, devise, montant) {
+  acc[devise] = (acc[devise] || 0) + montant;
+}
+
+/**
+ * Caisse — qui a encaissé quoi, et combien chaque agent doit remettre.
+ *
+ * La page « Paiements & Factures » raisonne par COLIS (« ce colis est-il soldé ? »). Ici on
+ * raisonne par ENCAISSEMENT : une ligne = un paiement reçu, avec son agent, son colis, son
+ * client, son mode et sa devise réelle. C'est ce dont on a besoin en fin de journée pour
+ * compter la caisse avec chaque agent.
+ *
+ * Trois partis pris importants :
+ *  — les totaux sont affichés dans la devise réellement encaissée (GNF, EUR...) et pas seulement
+ *    en équivalent euro : un agent rend des billets, pas une conversion ;
+ *  — seules les espèces sont comptées dans « à remettre en caisse » (voir MODES_PAIEMENT) ;
+ *  — l'acompte pris à l'enregistrement du colis compte comme un encaissement de l'agent qui a
+ *    créé le colis. Les colis enregistrés avant cette mise à jour n'ont pas d'agent inscrit sur
+ *    le paiement lui-même : on retombe alors sur l'agent de création du colis.
+ */
+function CaissePage({ data, session, notify }) {
+  const monNom = `${session?.prenom || ""} ${session?.nom || ""}`.trim() || session?.identifiant || "";
+  // Un agent ne voit que sa propre caisse — il n'a pas à consulter les encaissements de ses
+  // collègues. Administrateur et Comptable voient tout le monde et peuvent filtrer par agent.
+  const voitTousLesAgents = session?.role === "Administrateur" || session?.role === "Comptable"
+    || effectivePermission(session, "compta.consulter") || effectivePermission(session, "stats.globales");
+
+  const [periode, setPeriode] = useState("jour");
+  const [du, setDu] = useState("");
+  const [au, setAu] = useState("");
+  const [agentFiltre, setAgentFiltre] = useState("tous");
+  const [modeFiltre, setModeFiltre] = useState("tous");
+  const [siteFiltre, setSiteFiltre] = useState("tous");
+  const [recherche, setRecherche] = useState("");
+  const [selection, setSelection] = useState([]);
+  const [ouverts, setOuverts] = useState([]);
+  const [limites, setLimites] = useState({});
+
+  const agentActif = voitTousLesAgents ? agentFiltre : (monNom || "Non renseigné");
+
+  /** Tous les encaissements de la base, à plat, enrichis du colis auquel ils se rattachent. */
+  const lignes = useMemo(() => data.colis.flatMap((c) => (c.paiements || []).map((p, i) => {
+    const agentBrut = (p.par && p.par !== "Enregistrement initial") ? p.par : c.agentCreation;
+    // Les paiements d'avant la gestion multi-devises n'ont que `montant`, déjà en équivalent euro.
+    const deviseSaisie = p.deviseSaisie || "EUR";
+    const montant = Number(p.montant) || 0;
+    const montantSaisi = p.montantSaisi != null && p.montantSaisi !== ""
+      ? Number(p.montantSaisi) || 0
+      : montant * (LIVE_RATES[deviseSaisie] || CURRENCIES[deviseSaisie] || 1);
+    return {
+      // `id` n'est unique que dans un colis (deux encaissements simultanés partagent l'horodatage) :
+      // on préfixe par le numéro de suivi pour obtenir une clé de sélection réellement unique.
+      cle: `${c.tracking}|${p.id || ""}|${i}`,
+      tracking: c.tracking,
+      client: c.destinataire || "—",
+      clientKey: c.clientAccountId || normaliserTelephone(c.telephone) || (c.destinataire || "").toLowerCase(),
+      site: c.site || "Bambeto",
+      poids: Number(c.poids) || 0,
+      date: p.date,
+      mode: p.mode || MODE_ESPECES,
+      montant, montantSaisi, deviseSaisie,
+      reference: p.reference || "",
+      agent: agentBrut && agentBrut.trim() ? agentBrut.trim() : "Non renseigné",
+      acompte: !!p.acompte || p.par === "Enregistrement initial",
+    };
+  })), [data.colis]);
+
+  const agentsConnus = useMemo(() => [...new Set(lignes.map((l) => l.agent))].sort((a, b) => a.localeCompare(b, "fr")), [lignes]);
+  const sitesConnus = useMemo(() => [...new Set(lignes.map((l) => l.site))].sort((a, b) => a.localeCompare(b, "fr")), [lignes]);
+
+  const filtrees = useMemo(() => {
+    const now = new Date();
+    const debut = du ? new Date(`${du}T00:00:00`) : null;
+    const fin = au ? new Date(`${au}T23:59:59`) : null;
+    const q = recherche.trim().toLowerCase();
+    return lignes.filter((l) => {
+      const d = new Date(l.date);
+      // Des dates saisies à la main l'emportent sur le raccourci de période : c'est le cas quand
+      // on recompte la caisse d'un jour passé, ou d'un intervalle (une tournée, une semaine).
+      if (debut || fin) {
+        if (debut && d < debut) return false;
+        if (fin && d > fin) return false;
+      } else if (periode === "jour") {
+        if (d.toDateString() !== now.toDateString()) return false;
+      } else if (periode === "semaine") {
+        if ((now - d) / 86400000 > 7) return false;
+      } else if (periode === "mois") {
+        if (d.getMonth() !== now.getMonth() || d.getFullYear() !== now.getFullYear()) return false;
+      }
+      if (agentActif !== "tous" && l.agent !== agentActif) return false;
+      if (modeFiltre !== "tous" && l.mode !== modeFiltre) return false;
+      if (siteFiltre !== "tous" && l.site !== siteFiltre) return false;
+      if (q && !`${l.tracking} ${l.client} ${l.reference}`.toLowerCase().includes(q)) return false;
+      return true;
+    }).sort((a, b) => new Date(b.date) - new Date(a.date));
+  }, [lignes, periode, du, au, agentActif, modeFiltre, siteFiltre, recherche]);
+
+  /** Regroupe une liste d'encaissements : effectifs, clients, colis, et totaux par devise. */
+  function regrouper(liste) {
+    const colis = new Set(), clients = new Set();
+    const devises = {}, especesDevises = {};
+    let totalEUR = 0, especesEUR = 0, poids = 0;
+    liste.forEach((l) => {
+      if (!colis.has(l.tracking)) { colis.add(l.tracking); poids += l.poids; }
+      clients.add(l.clientKey);
+      totalEUR += l.montant;
+      ajouterDevise(devises, l.deviseSaisie, l.montantSaisi);
+      if (l.mode === MODE_ESPECES) { especesEUR += l.montant; ajouterDevise(especesDevises, l.deviseSaisie, l.montantSaisi); }
+    });
+    return { nbPaiements: liste.length, nbColis: colis.size, nbClients: clients.size, poids, totalEUR, especesEUR, devises, especesDevises };
+  }
+
+  const total = useMemo(() => regrouper(filtrees), [filtrees]);
+
+  const parAgent = useMemo(() => {
+    const groupes = new Map();
+    filtrees.forEach((l) => {
+      if (!groupes.has(l.agent)) groupes.set(l.agent, []);
+      groupes.get(l.agent).push(l);
+    });
+    return [...groupes.entries()]
+      .map(([agent, liste]) => ({ agent, liste, ...regrouper(liste) }))
+      .sort((a, b) => b.totalEUR - a.totalEUR);
+  }, [filtrees]);
+
+  // La sélection est volontairement conservée quand on change de filtre, mais n'est comptée que
+  // sur les lignes visibles : on ne veut pas annoncer un total qui inclurait des lignes cachées.
+  const selectionnees = useMemo(() => {
+    const set = new Set(selection);
+    return filtrees.filter((l) => set.has(l.cle));
+  }, [filtrees, selection]);
+  const totalSelection = useMemo(() => regrouper(selectionnees), [selectionnees]);
+  const selSet = useMemo(() => new Set(selection), [selection]);
+
+  function basculerLigne(cle) {
+    setSelection((s) => (s.includes(cle) ? s.filter((x) => x !== cle) : [...s, cle]));
+  }
+  function basculerAgent(groupe) {
+    const cles = groupe.liste.map((l) => l.cle);
+    const toutCoche = cles.every((c) => selSet.has(c));
+    setSelection((s) => (toutCoche ? s.filter((c) => !cles.includes(c)) : [...new Set([...s, ...cles])]));
+  }
+  function basculerOuvert(agent) {
+    setOuverts((o) => (o.includes(agent) ? o.filter((a) => a !== agent) : [...o, agent]));
+  }
+
+  const periodeLibelle = du || au
+    ? `du ${du ? new Date(`${du}T00:00:00`).toLocaleDateString("fr-FR") : "début"} au ${au ? new Date(`${au}T00:00:00`).toLocaleDateString("fr-FR") : "aujourd’hui"}`
+    : { jour: "aujourd’hui", semaine: "7 derniers jours", mois: "ce mois-ci", tout: "depuis le début" }[periode];
+
+  async function exporterExcel() {
+    const aExporter = selectionnees.length > 0 ? selectionnees : filtrees;
+    if (aExporter.length === 0) { notify?.("Rien à exporter sur cette sélection"); return; }
+    const XLSX = await loadXLSXLib();
+    const wb = XLSX.utils.book_new();
+
+    const headers = ["Agent", "Date", "N° de suivi", "Client", "Site", "Mode", "Montant encaissé", "Devise", "Équivalent EUR", "Référence", "Type"];
+    const rows = aExporter.map((l) => [
+      l.agent, new Date(l.date).toLocaleString("fr-FR"), l.tracking, l.client, l.site, l.mode,
+      l.montantSaisi, l.deviseSaisie, +l.montant.toFixed(2), l.reference || "—", l.acompte ? "Acompte à l’enregistrement" : "Encaissement",
+    ]);
+    const ws = XLSX.utils.aoa_to_sheet([
+      ["BA-DIABY EXPRESS — Caisse : encaissements par agent"],
+      [`Période : ${periodeLibelle}${selectionnees.length > 0 ? " — sélection" : ""}`],
+      [], headers, ...rows,
+    ]);
+    ws["!cols"] = headers.map(() => ({ wch: 18 }));
+    ws["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: headers.length - 1 } }];
+    XLSX.utils.book_append_sheet(wb, ws, "Encaissements");
+
+    const recap = selectionnees.length > 0
+      ? [{ agent: "Sélection", ...totalSelection }]
+      : parAgent.map((g) => ({ agent: g.agent, ...g }));
+    const headers2 = ["Agent", "Paiements", "Clients", "Colis", "Poids (kg)", "Total encaissé", "Dont espèces (à remettre)", "Équivalent EUR"];
+    const rows2 = recap.map((g) => [g.agent, g.nbPaiements, g.nbClients, g.nbColis, +g.poids.toFixed(1), formaterDevises(g.devises), formaterDevises(g.especesDevises), +g.totalEUR.toFixed(2)]);
+    const ws2 = XLSX.utils.aoa_to_sheet([headers2, ...rows2]);
+    ws2["!cols"] = headers2.map(() => ({ wch: 20 }));
+    XLSX.utils.book_append_sheet(wb, ws2, "Récapitulatif par agent");
+
+    XLSX.writeFile(wb, `ba-diaby-express-caisse-${new Date().toISOString().slice(0, 10)}.xlsx`);
+    notify?.("Export Excel téléchargé");
+  }
+
+  const carte = { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14 };
+  const pilule = (actif) => ({
+    padding: "7px 14px", borderRadius: 20, border: "1.5px solid " + (actif ? "var(--brand-solid)" : "var(--border)"),
+    background: actif ? "var(--brand-solid)" : "var(--surface)", color: actif ? "#fff" : "var(--muted)",
+    fontSize: 12.5, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap",
+  });
+
+  return (
+    <div style={{ paddingBottom: selectionnees.length > 0 ? 120 : 0 }}>
+      <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 27, margin: "0 0 5px" }}>Caisse</h1>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12, marginBottom: 20 }}>
+        <p style={{ color: "var(--muted)", fontSize: 14.5, margin: 0, maxWidth: 640 }}>
+          Tous les paiements encaissés, agent par agent — ce qu’il a pris, pour combien de clients et de colis,
+          et ce qu’il doit remettre en caisse. Sélectionnez des lignes pour arrêter un montant précis.
+        </p>
+        <button onClick={exporterExcel} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+          <Download size={16} /> Exporter (Excel)
+        </button>
+      </div>
+
+      {!voitTousLesAgents && (
+        <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 10, padding: "10px 14px", marginBottom: 16, fontSize: 12.5, color: "var(--info-fg)" }}>
+          Vous consultez votre propre caisse ({monNom || "vous"}). Seul un administrateur ou un comptable voit celle des autres agents.
+        </div>
+      )}
+
+      <div style={{ ...carte, padding: 16, marginBottom: 18 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+          {[["jour", "Aujourd’hui"], ["semaine", "7 derniers jours"], ["mois", "Ce mois-ci"], ["tout", "Depuis le début"]].map(([k, label]) => (
+            <button key={k} onClick={() => { setPeriode(k); setDu(""); setAu(""); }} style={pilule(!du && !au && periode === k)}>{label}</button>
+          ))}
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 10 }}>
+          <div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Du</div>
+            <input type="date" value={du} onChange={(e) => setDu(e.target.value)} style={inputStyle} />
+          </div>
+          <div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Au</div>
+            <input type="date" value={au} onChange={(e) => setAu(e.target.value)} style={inputStyle} />
+          </div>
+          {voitTousLesAgents && (
+            <div>
+              <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Agent</div>
+              <select value={agentFiltre} onChange={(e) => setAgentFiltre(e.target.value)} style={inputStyle}>
+                <option value="tous">Tous les agents</option>
+                {agentsConnus.map((a) => <option key={a} value={a}>{a}</option>)}
+              </select>
+            </div>
+          )}
+          <div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Mode</div>
+            <select value={modeFiltre} onChange={(e) => setModeFiltre(e.target.value)} style={inputStyle}>
+              <option value="tous">Tous les modes</option>
+              {MODES_PAIEMENT.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+          <div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Site</div>
+            <select value={siteFiltre} onChange={(e) => setSiteFiltre(e.target.value)} style={inputStyle}>
+              <option value="tous">Tous les sites</option>
+              {sitesConnus.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Rechercher</div>
+            <input value={recherche} onChange={(e) => setRecherche(e.target.value)} placeholder="N° de suivi, client, référence" style={inputStyle} />
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(190px,1fr))", gap: 12, marginBottom: 20 }}>
+        {[
+          { label: `Encaissé — ${periodeLibelle}`, valeur: formaterDevises(total.devises), sous: `≈ ${fmt(total.totalEUR, "EUR")} · ${total.nbPaiements} paiement${total.nbPaiements > 1 ? "s" : ""}`, icon: DollarSign, tint: "#0A2647" },
+          { label: "À remettre en caisse (espèces)", valeur: formaterDevises(total.especesDevises), sous: `≈ ${fmt(total.especesEUR, "EUR")}`, icon: Wallet, tint: "#16A163" },
+          { label: "Clients", valeur: String(total.nbClients), sous: "clients distincts ayant payé", icon: Users, tint: "#B8801C" },
+          { label: "Volume", valeur: `${total.nbColis} colis`, sous: `${total.poids.toFixed(1)} kg au total`, icon: Package, tint: "#5B8DEF" },
+        ].map((k) => (
+          <div key={k.label} style={{ ...carte, padding: "16px 18px" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+              <div style={{ fontSize: 12.5, color: "var(--muted)", fontWeight: 600 }}>{k.label}</div>
+              <div style={{ width: 32, height: 32, borderRadius: 9, background: k.tint, display: "grid", placeItems: "center", flexShrink: 0 }}><k.icon size={16} color="#fff" /></div>
+            </div>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 19, fontWeight: 700, color: "var(--text)", marginTop: 10, lineHeight: 1.25, wordBreak: "break-word" }}>{k.valeur}</div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 5 }}>{k.sous}</div>
+          </div>
+        ))}
+      </div>
+
+      {parAgent.length === 0 ? (
+        <div style={{ ...carte, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>
+          Aucun encaissement sur cette période. Changez de période ou retirez un filtre.
+        </div>
+      ) : parAgent.map((g) => {
+        const cles = g.liste.map((l) => l.cle);
+        const toutCoche = cles.every((c) => selSet.has(c));
+        const partiel = !toutCoche && cles.some((c) => selSet.has(c));
+        const ouvert = ouverts.includes(g.agent);
+        const limite = limites[g.agent] || TAILLE_PAGE;
+        const visibles = g.liste.slice(0, limite);
+        return (
+          <div key={g.agent} style={{ ...carte, marginBottom: 12, overflow: "hidden" }}>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "14px 16px" }}>
+              <input
+                type="checkbox" checked={toutCoche} ref={(el) => { if (el) el.indeterminate = partiel; }}
+                onChange={() => basculerAgent(g)} title="Tout sélectionner pour cet agent"
+                style={{ width: 17, height: 17, marginTop: 3, flexShrink: 0, cursor: "pointer" }}
+              />
+              <button onClick={() => basculerOuvert(g.agent)} style={{ flex: 1, background: "none", border: "none", padding: 0, textAlign: "start", cursor: "pointer", minWidth: 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+                  <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)" }}>{g.agent}</div>
+                  <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif" }}>{formaterDevises(g.devises)}</div>
+                </div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
+                  {g.nbPaiements} paiement{g.nbPaiements > 1 ? "s" : ""} · {g.nbClients} client{g.nbClients > 1 ? "s" : ""} · {g.nbColis} colis · {g.poids.toFixed(1)} kg
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                  <span style={{ background: "var(--ok-bg-soft)", color: "var(--ok-fg)", borderRadius: 20, padding: "3px 10px", fontSize: 11.5, fontWeight: 700 }}>
+                    À remettre : {formaterDevises(g.especesDevises)}
+                  </span>
+                  <span style={{ fontSize: 11.5, color: "var(--muted)" }}>{ouvert ? "Masquer le détail" : "Voir le détail"}</span>
+                  <ChevronRight size={13} color="var(--muted)" style={{ transform: ouvert ? "rotate(90deg)" : "none" }} />
+                </div>
+              </button>
+            </div>
+
+            {ouvert && (
+              <div style={{ borderTop: "1px solid var(--border)" }}>
+                {visibles.map((l) => (
+                  <label key={l.cle} style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "11px 16px", borderBottom: "1px solid var(--surface2)", cursor: "pointer" }}>
+                    <input type="checkbox" checked={selSet.has(l.cle)} onChange={() => basculerLigne(l.cle)} style={{ width: 16, height: 16, marginTop: 2, flexShrink: 0, cursor: "pointer" }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{l.tracking} — {l.client}</div>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: l.mode === MODE_ESPECES ? "var(--ok-fg)" : "var(--text)", whiteSpace: "nowrap" }}>
+                          {formaterDevises({ [l.deviseSaisie]: l.montantSaisi })}
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3 }}>
+                        {new Date(l.date).toLocaleString("fr-FR")} · {l.mode} · {l.site}
+                        {l.acompte && " · acompte à l’enregistrement"}
+                        {l.reference && ` · réf. ${l.reference}`}
+                      </div>
+                    </div>
+                  </label>
+                ))}
+                {g.liste.length > visibles.length && (
+                  <div style={{ padding: "12px 16px", textAlign: "center" }}>
+                    <button onClick={() => setLimites((m) => ({ ...m, [g.agent]: limite + TAILLE_PAGE }))} style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "7px 16px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
+                      Afficher {Math.min(TAILLE_PAGE, g.liste.length - visibles.length)} de plus ({visibles.length}/{g.liste.length})
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {selectionnees.length > 0 && (
+        <div style={{
+          // Au-dessus du bandeau de synchronisation (z-index 60), qui est centré en bas et
+          // recouvrirait sinon le total et le bouton d'export au moment précis où on compte.
+          position: "fixed", insetInlineStart: 0, insetInlineEnd: 0, bottom: 0, zIndex: 62,
+          background: "var(--surface)", borderTop: "1.5px solid var(--border)", boxShadow: "0 -4px 18px rgba(10,38,71,0.16)",
+          padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "center", gap: 14, flexWrap: "wrap",
+        }}>
+          <div>
+            <div style={{ fontSize: 12, color: "var(--muted)", fontWeight: 600 }}>
+              {totalSelection.nbPaiements} paiement{totalSelection.nbPaiements > 1 ? "s" : ""} sélectionné{totalSelection.nbPaiements > 1 ? "s" : ""} · {totalSelection.nbColis} colis · {totalSelection.nbClients} client{totalSelection.nbClients > 1 ? "s" : ""}
+            </div>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 18, fontWeight: 700, color: "var(--text)", marginTop: 2 }}>
+              {formaterDevises(totalSelection.devises)}
+            </div>
+            <div style={{ fontSize: 12, color: "var(--ok-fg)", fontWeight: 700, marginTop: 2 }}>
+              Dû à la caisse (espèces) : {formaterDevises(totalSelection.especesDevises)}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={exporterExcel} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+              <Download size={15} /> Exporter la sélection
+            </button>
+            <button onClick={() => setSelection([])} style={{ background: "var(--surface2)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+              Vider
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 14 }}>
+        Les montants sont affichés dans la devise réellement encaissée. « À remettre en caisse » ne compte que les
+        espèces : le Mobile Money, la carte et les virements arrivent directement sur les comptes de l’entreprise.
+      </div>
+    </div>
+  );
+}
+CaissePage = memo(CaissePage);
+
 function ComptabilitePage({ data, persist, session, notify }) {
   const [periode, setPeriode] = useState("mois");
   const [form, setForm] = useState(null);

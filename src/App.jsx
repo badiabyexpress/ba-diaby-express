@@ -596,6 +596,16 @@ function fmtRaw(n, cur) {
 function fmtGNF(n) {
   return `${Math.round(n || 0).toLocaleString("fr-FR")} GNF`;
 }
+/**
+ * Une catégorie peut être universelle (paysLimite null/absent), ou restreinte à un ou plusieurs
+ * pays. Les données existantes stockent encore paysLimite comme une simple chaîne (ancien format
+ * un-seul-pays) : on l'accepte transparemment aux côtés du nouveau format tableau, sans migration.
+ */
+function paysAutorisePourCategorie(cat, pays) {
+  if (!cat?.paysLimite) return true;
+  const liste = Array.isArray(cat.paysLimite) ? cat.paysLimite : [cat.paysLimite];
+  return liste.includes(pays);
+}
 /** Calcule en direct l’équivalent GNF d’une catégorie à partir du taux de change actuel — se met à jour automatiquement si le taux change. */
 function catPriceGNF(cat) {
   if (!cat) return 0;
@@ -4936,14 +4946,28 @@ function CategoriesProduitsPage({ data, persist, session, notify, onBack }) {
               <input type="checkbox" checked={form.visibiliteFactures} onChange={(e) => setForm({ ...form, visibiliteFactures: e.target.checked })} /> Factures commerciales
             </label>
             <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, cursor: "pointer", fontSize: 13, color: "var(--text)" }}>
-              <input type="checkbox" checked={!!form.paysLimite} onChange={(e) => setForm({ ...form, paysLimite: e.target.checked ? "FR" : null })} />
-              <span>Limiter à un pays spécifique<br /><span style={{ fontSize: 11, color: "var(--muted)" }}>Par défaut universelle, activez pour un pays unique</span></span>
+              <input type="checkbox" checked={!!form.paysLimite} onChange={(e) => setForm({ ...form, paysLimite: e.target.checked ? [] : null })} />
+              <span>Limiter à un ou plusieurs pays<br /><span style={{ fontSize: 11, color: "var(--muted)" }}>Par défaut universelle (tous les pays) — activez pour la réserver à une ou plusieurs destinations</span></span>
             </label>
-            {form.paysLimite && (
-              <select value={form.paysLimite} onChange={(e) => setForm({ ...form, paysLimite: e.target.value })} style={{ ...inputStyle, marginBottom: 14 }}>
-                {COUNTRIES.filter((c) => c.code !== "GN").map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code]} {c.name}</option>)}
-              </select>
-            )}
+            {form.paysLimite && (() => {
+              const liste = Array.isArray(form.paysLimite) ? form.paysLimite : [form.paysLimite];
+              return (
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(150px,1fr))", gap: 8 }}>
+                    {COUNTRIES.filter((c) => c.code !== "GN").map((c) => {
+                      const coche = liste.includes(c.code);
+                      return (
+                        <label key={c.code} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", borderRadius: 8, padding: "6px 9px", cursor: "pointer", fontSize: 12, color: "var(--text)" }}>
+                          <input type="checkbox" checked={coche} onChange={() => setForm({ ...form, paysLimite: coche ? liste.filter((code) => code !== c.code) : [...liste, c.code] })} />
+                          {FLAGS[c.code]} {c.name}
+                        </label>
+                      );
+                    })}
+                  </div>
+                  {liste.length === 0 && <div style={{ fontSize: 11, color: "var(--warn-fg)", marginTop: 8 }}>Aucun pays coché = catégorie invisible partout tant qu'aucun n'est sélectionné.</div>}
+                </div>
+              );
+            })()}
 
             <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", letterSpacing: 0.5, margin: "18px 0 10px" }}>OPTIONS AVANCÉES</div>
             <label style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12, cursor: "pointer", fontSize: 13, color: "var(--text)" }}>
@@ -4991,7 +5015,15 @@ function CategoriesProduitsPage({ data, persist, session, notify, onBack }) {
                 )}
               </div>
               {c.description && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8 }}>{c.description}</div>}
-              {c.paysLimite && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6 }}>{FLAGS[c.paysLimite]} Limité à {COUNTRIES.find((x) => x.code === c.paysLimite)?.name}</div>}
+              {c.paysLimite && (() => {
+                const liste = Array.isArray(c.paysLimite) ? c.paysLimite : [c.paysLimite];
+                if (liste.length === 0) return null;
+                return (
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6 }}>
+                    {liste.map((code) => FLAGS[code]).join(" ")} Limité à {liste.map((code) => COUNTRIES.find((x) => x.code === code)?.name || code).join(", ")}
+                  </div>
+                );
+              })()}
               {c.motsCles?.length > 0 && <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 6 }}>🔑 {c.motsCles.slice(0, 4).join(", ")}{c.motsCles.length > 4 ? "…" : ""}</div>}
             </div>
           ))}
@@ -7772,7 +7804,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
                   <Field label="Catégorie">
                     <select value={p.categorie} onChange={(e) => updateProduit(p.id, { categorie: e.target.value })} style={inputStyle}>
                       <option value="">-- Sélectionner une catégorie --</option>
-                      {(categories || []).filter((c) => c.visibiliteColis !== false && (!c.paysLimite || c.paysLimite === pays)).map((c) => <option key={c.id} value={c.nom}>{libelleCategoriePrix(c, expCountry?.currency, destCurrency)}</option>)}
+                      {(categories || []).filter((c) => c.visibiliteColis !== false && paysAutorisePourCategorie(c, pays)).map((c) => <option key={c.id} value={c.nom}>{libelleCategoriePrix(c, expCountry?.currency, destCurrency)}</option>)}
                     </select>
                   </Field>
                 )}
@@ -9977,7 +10009,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
                     <Field label="Catégorie">
                       <select value={p.categorie} onChange={(e) => updateProduit(p.id, { categorie: e.target.value })} style={inputStyle}>
                         <option value="">-- Sélectionner une catégorie --</option>
-                        {(categories || []).filter((c) => c.visibiliteColis !== false && (!c.paysLimite || c.paysLimite === pays)).map((c) => <option key={c.id} value={c.nom}>{libelleCategoriePrix(c, expCurrency, destCurrency)}</option>)}
+                        {(categories || []).filter((c) => c.visibiliteColis !== false && paysAutorisePourCategorie(c, pays)).map((c) => <option key={c.id} value={c.nom}>{libelleCategoriePrix(c, expCurrency, destCurrency)}</option>)}
                       </select>
                     </Field>
                   )}

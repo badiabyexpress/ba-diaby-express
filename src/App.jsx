@@ -12770,10 +12770,52 @@ function genNumeroVoyage(voyagesExistants) {
   return `VOY-${annee}-${String(dejaCetteAnnee + 1).padStart(4, "0")}`;
 }
 
-/** Libellé lisible d'une route de voyage : « Conakry → Paris ». */
+/**
+ * Libellé lisible d'une route de voyage.
+ *
+ * Un billet d'avion s'achète aller-retour : un même voyage embarque donc les colis partis de
+ * Conakry ET ceux ramenés de l'étranger. Le sens « aller-retour » couvre les deux.
+ * La mention « (aller-retour) » est écrite en toutes lettres parce que les flèches ne survivent
+ * pas à l'export PDF (voir nettoyerTextePdf).
+ */
 function libelleVoyage(pays, direction) {
   const ville = COUNTRIES.find((c) => c.code === pays)?.city || pays;
+  if (direction === "allerRetour") return `Conakry ⇄ ${ville} (aller-retour)`;
   return direction === "export" ? `Conakry → ${ville}` : `${ville} → Conakry`;
+}
+
+/** Un colis part-il dans le sens couvert par le voyage ? */
+function voyageCouvre(direction, sensColis) {
+  return direction === "allerRetour" || direction === sensColis;
+}
+
+/**
+ * Ventile les encaissements d'un voyage par lieu, d'après la devise réellement reçue.
+ *
+ * C'est le marqueur dont on dispose et il colle à la réalité : on encaisse des francs au comptoir
+ * de Conakry et des euros à celui de Paris. Un règlement dans une autre devise est montré à part
+ * plutôt que rangé de force d'un côté. Les vieux colis dont le « payé » ne correspond à aucune
+ * ligne de paiement détaillée sont comptés comme « non ventilés » : ils existent, on ne sait
+ * simplement pas où l'argent est entré.
+ */
+function ventilerEncaissements(colisInclus, devisePays) {
+  const res = { conakry: 0, etranger: 0, autres: {}, nonVentileEUR: 0 };
+  colisInclus.forEach((c) => {
+    let sommeEUR = 0;
+    (c.paiements || []).forEach((p) => {
+      const devise = p.deviseSaisie || "EUR";
+      const montant = p.montantSaisi != null && p.montantSaisi !== ""
+        ? Number(p.montantSaisi) || 0
+        : (Number(p.montant) || 0) * (LIVE_RATES[devise] || CURRENCIES[devise] || 1);
+      sommeEUR += Number(p.montant) || 0;
+      if (devise === "GNF") res.conakry += montant;
+      else if (devise === devisePays) res.etranger += montant;
+      else ajouterDevise(res.autres, devise, montant);
+    });
+    const ecart = +((Number(c.paye) || 0) - sommeEUR).toFixed(2);
+    if (ecart > 0.005) res.nonVentileEUR += ecart;
+  });
+  return res;
 }
 
 /** Convertit un montant saisi dans une devise vers l'équivalent euro utilisé par tous les totaux. */
@@ -12782,18 +12824,33 @@ function versEUR(montant, devise) {
 }
 
 /** Totaux d'un voyage : ce que les colis rapportent, ce qu'ils coûtent, ce qu'il en reste. */
-function totauxVoyage(colisInclus, depenses) {
+function totauxVoyage(colisInclus, depenses, devisePays = "EUR") {
   const facture = colisInclus.reduce((s, c) => s + (Number(c.prix) || 0), 0);
   const encaisse = colisInclus.reduce((s, c) => s + (Number(c.paye) || 0), 0);
   const depensesEUR = (depenses || []).reduce((s, d) => s + versEUR(d.montant, d.devise), 0);
+  const payes = colisInclus.filter((c) => (Number(c.reste) || 0) <= 0.005);
+  const impayes = colisInclus.filter((c) => (Number(c.reste) || 0) > 0.005 && (Number(c.paye) || 0) <= 0.005);
   return {
     nbColis: colisInclus.length,
     poids: colisInclus.reduce((s, c) => s + (Number(c.poids) || 0), 0),
     facture, encaisse,
     resteAEncaisser: Math.max(+(facture - encaisse).toFixed(2), 0),
+    nbPayes: payes.length,
+    nbImpayes: impayes.length,
+    nbPartiels: colisInclus.length - payes.length - impayes.length,
+    encaissements: ventilerEncaissements(colisInclus, devisePays),
     depensesEUR,
     resultat: +(facture - depensesEUR).toFixed(2),
+    // Ce qui est réellement dans les caisses une fois le voyage payé, par opposition au résultat
+    // calculé sur le facturé : c'est le chiffre qui dit si la rotation a rapporté de l'argent frais.
+    tresorerie: +(encaisse - depensesEUR).toFixed(2),
   };
+}
+
+/** Étiquette de règlement d'un colis, telle qu'elle apparaît sur la liste et sur la fiche. */
+function statutPaiementColis(c) {
+  if ((Number(c.reste) || 0) <= 0.005) return "Payé";
+  return (Number(c.paye) || 0) > 0.005 ? "Partiel" : "Impayé";
 }
 
 /**
@@ -12805,7 +12862,10 @@ function totauxVoyage(colisInclus, depenses) {
  */
 function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable) {
   const INK = [26, 30, 38], MUTED = [122, 130, 142], RED = [214, 39, 63], NAVY = [10, 38, 71];
-  const t = totauxVoyage(colisInclus, voyage.depenses);
+  const paysInfo = COUNTRIES.find((c) => c.code === voyage.pays);
+  const devisePays = paysInfo?.currency || "EUR";
+  const villePays = paysInfo?.city || voyage.pays;
+  const t = totauxVoyage(colisInclus, voyage.depenses, devisePays);
   let y = 20;
   doc.addImage(DEFAULT_LOGO, "PNG", 14, y - 6, 16, 16);
   doc.setFont(undefined, "bold"); doc.setFontSize(16); doc.setTextColor(...INK);
@@ -12826,6 +12886,7 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable) {
     ["Route", libelleVoyage(voyage.pays, voyage.direction)],
     ["Départ", voyage.dateDepart ? new Date(`${voyage.dateDepart}T00:00:00`).toLocaleDateString("fr-FR") : "—"],
     ["Colis embarqués", `${t.nbColis} · ${t.poids.toFixed(1)} kg`],
+    ["Règlements", `${t.nbPayes} payés · ${t.nbPartiels} partiels · ${t.nbImpayes} impayés`],
     ["Validée le", voyage.valideeLe ? new Date(voyage.valideeLe).toLocaleString("fr-FR") : "—"],
     ["Validée par", voyage.valideePar || "..............................."],
   ];
@@ -12837,22 +12898,25 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable) {
   });
   y += 6;
 
-  const head = ["N° de suivi", "Destinataire", "Poids", "Facturé", "Reste dû"];
+  const head = ["N° de suivi", "Destinataire", "Sens", "Poids", "Facturé", "Payé", "Reste"];
   const body = colisInclus.map((c) => [
-    c.tracking, c.destinataire || "—", `${(Number(c.poids) || 0).toFixed(1)} kg`,
-    fmt(c.prix, "EUR"), (Number(c.reste) || 0) > 0 ? fmt(c.reste, "EUR") : "Payé",
+    c.tracking, c.destinataire || "—",
+    (c.direction || "export") === "export" ? "Aller" : "Retour",
+    `${(Number(c.poids) || 0).toFixed(1)} kg`,
+    fmt(c.prix, "EUR"), fmt(c.paye, "EUR"),
+    (Number(c.reste) || 0) > 0 ? fmt(c.reste, "EUR") : "Payé",
   ]);
   if (hasAutoTable && doc.autoTable && body.length > 0) {
     doc.autoTable({
       startY: y, head: [head], body,
-      theme: "grid", headStyles: { fillColor: NAVY, textColor: 255, fontSize: 8.5 },
-      styles: { fontSize: 8.5, textColor: [40, 40, 40], overflow: "linebreak" },
-      columnStyles: { 0: { cellWidth: 30 }, 1: { cellWidth: 62 }, 2: { cellWidth: 22 }, 3: { cellWidth: 34 }, 4: { cellWidth: 34 } },
+      theme: "grid", headStyles: { fillColor: NAVY, textColor: 255, fontSize: 8 },
+      styles: { fontSize: 8, textColor: [40, 40, 40], overflow: "linebreak" },
+      columnStyles: { 0: { cellWidth: 26 }, 1: { cellWidth: 44 }, 2: { cellWidth: 16 }, 3: { cellWidth: 18 }, 4: { cellWidth: 26 }, 5: { cellWidth: 26 }, 6: { cellWidth: 26 } },
       margin: { left: 14, right: 14 },
     });
     y = doc.lastAutoTable.finalY + 10;
   } else {
-    const colX = [14, 46, 110, 134, 166];
+    const colX = [14, 40, 84, 100, 118, 144, 170];
     doc.setFontSize(8); doc.setTextColor(255, 255, 255); doc.setFillColor(...NAVY);
     doc.rect(14, y, 182, 7, "F");
     head.forEach((h, i) => doc.text(h, colX[i] + 1, y + 5));
@@ -12861,12 +12925,34 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable) {
     body.forEach((row, i) => {
       if (y > 250) { doc.addPage(); y = 20; }
       if (i % 2 === 1) { doc.setFillColor(238, 243, 250); doc.rect(14, y - 4.5, 182, 6.5, "F"); }
-      doc.setFontSize(8);
-      row.forEach((cell, j) => doc.text(String(cell).slice(0, 26), colX[j] + 1, y));
+      doc.setFontSize(7.5);
+      row.forEach((cell, j) => doc.text(String(cell).slice(0, 22), colX[j] + 1, y));
       y += 6.5;
     });
     y += 10;
   }
+
+  // Où l'argent est réellement entré — le comptoir de Conakry et celui de l'escale n'ont pas la
+  // même caisse, et sur un aller-retour les deux ont encaissé.
+  if (y > 240) { doc.addPage(); y = 20; }
+  doc.setFont(undefined, "bold"); doc.setFontSize(10.5); doc.setTextColor(...INK);
+  doc.text("Encaissements du voyage", 14, y);
+  y += 7;
+  doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(60, 66, 78);
+  const lignesEncaissement = [
+    ["Encaissé à Conakry", formaterDevises({ GNF: t.encaissements.conakry })],
+    [`Encaissé à ${villePays}`, formaterDevises({ [devisePays]: t.encaissements.etranger })],
+    ...(Object.keys(t.encaissements.autres).length > 0 ? [["Autres devises", formaterDevises(t.encaissements.autres)]] : []),
+    ...(t.encaissements.nonVentileEUR > 0.005 ? [["Sans détail de paiement", fmt(t.encaissements.nonVentileEUR, "EUR")]] : []),
+    ["Reste à encaisser", fmt(t.resteAEncaisser, "EUR")],
+  ];
+  lignesEncaissement.forEach(([label, valeur]) => {
+    if (y > 268) { doc.addPage(); y = 20; }
+    doc.text(label, 16, y);
+    doc.text(String(valeur), 196, y, { align: "right" });
+    y += 6;
+  });
+  y += 4;
 
   if ((voyage.depenses || []).length > 0) {
     if (y > 235) { doc.addPage(); y = 20; }
@@ -12880,31 +12966,39 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable) {
       doc.text(`${fmt(versEUR(d.montant, d.devise), d.devise)}`, 196, y, { align: "right" });
       y += 6;
     });
-    y += 6;
+    y += 4;
   }
 
   // Le panneau de résultat et la signature ont besoin d'environ 58 mm : on ne les laisse jamais
   // déborder sous le pied de page.
-  if (y > 222) { doc.addPage(); y = 20; }
-  doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, 34, "F");
+  // Le panneau de résultat (44 mm), sa ligne d'explication et le bloc signature demandent environ
+  // 90 mm : en dessous de cette marge ils passeraient sous le pied de page, invisibles à l'impression.
+  if (y > 206) { doc.addPage(); y = 20; }
+  doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, 40, "F");
   doc.setFontSize(10); doc.setTextColor(...NAVY); doc.setFont(undefined, "bold");
   doc.text("Recettes (chiffre d’affaires)", 18, y + 9);
   doc.text(fmt(t.facture, "EUR"), 192, y + 9, { align: "right" });
   doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
   doc.text("Dépenses du voyage", 18, y + 17);
   doc.text(`- ${fmt(t.depensesEUR, "EUR")}`, 192, y + 17, { align: "right" });
-  doc.setFont(undefined, "bold"); doc.setFontSize(12);
+  doc.setFont(undefined, "bold"); doc.setFontSize(11);
   doc.setTextColor(...(t.resultat >= 0 ? [22, 161, 99] : [214, 39, 63]));
-  doc.text("Résultat du voyage", 18, y + 28);
-  doc.text(fmt(t.resultat, "EUR"), 192, y + 28, { align: "right" });
-  y += 42;
+  doc.text("Résultat sur le facturé", 18, y + 27);
+  doc.text(fmt(t.resultat, "EUR"), 192, y + 27, { align: "right" });
+  doc.setFontSize(12);
+  doc.setTextColor(...(t.tresorerie >= 0 ? [22, 161, 99] : [214, 39, 63]));
+  doc.text("Bilan final (argent rentré)", 18, y + 35);
+  doc.text(fmt(t.tresorerie, "EUR"), 192, y + 35, { align: "right" });
+  y += 47;
 
   doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
-  doc.text(`Soit ${fmtGNF(t.resultat * (LIVE_RATES.GNF || CURRENCIES.GNF))} · encaissé à ce jour ${fmt(t.encaisse, "EUR")} · reste à encaisser ${fmt(t.resteAEncaisser, "EUR")}`, 14, y);
-  y += 16;
+  doc.text(`Bilan final = encaissé ${fmt(t.encaisse, "EUR")} - dépenses ${fmt(t.depensesEUR, "EUR")}, soit ${fmtGNF(t.tresorerie * (LIVE_RATES.GNF || CURRENCIES.GNF))}.`, 14, y);
+  y += 14;
+  // Le pied de page est à 288 mm : la ligne de signature doit rester au-dessus.
+  if (y > 268) { doc.addPage(); y = 20; }
   doc.setFontSize(9); doc.setTextColor(90, 100, 120);
   doc.text("Signature du responsable :", 14, y);
-  doc.setDrawColor(180); doc.line(14, y + 16, 85, y + 16);
+  doc.setDrawColor(180); doc.line(14, y + 12, 85, y + 12);
 
   doc.setFontSize(7.3); doc.setTextColor(150, 150, 150);
   doc.text(`Édité le ${new Date().toLocaleString("fr-FR")} — Ba-Diaby Express`, 14, 288);
@@ -12948,10 +13042,13 @@ function VoyagesPage({ data, persist, session, notify }) {
     return set;
   }, [voyages, ouvert]);
 
+  const devisePays = COUNTRIES.find((c) => c.code === pays)?.currency || "EUR";
+  const villePays = COUNTRIES.find((c) => c.code === pays)?.city || pays;
+
   const eligibles = useMemo(() => {
     const q = recherche.trim().toLowerCase();
     return data.colis.filter((c) => {
-      if (c.pays !== pays || (c.direction || "export") !== direction) return false;
+      if (c.pays !== pays || !voyageCouvre(direction, c.direction || "export")) return false;
       if (["Annulé", "Refusé"].includes(c.status)) return false;
       if (prisAilleurs.has(c.tracking)) return false;
       if (q && !`${c.tracking} ${c.destinataire || ""} ${c.expediteur || ""}`.toLowerCase().includes(q)) return false;
@@ -12963,7 +13060,17 @@ function VoyagesPage({ data, persist, session, notify }) {
     const set = new Set(trackings);
     return data.colis.filter((c) => set.has(c.tracking));
   }, [data.colis, trackings]);
-  const totaux = useMemo(() => totauxVoyage(colisInclus, depenses), [colisInclus, depenses]);
+  const totaux = useMemo(() => totauxVoyage(colisInclus, depenses, devisePays), [colisInclus, depenses, devisePays]);
+  // Sur un aller-retour, chaque sens a son propre rendement : c'est souvent l'aller qui paie le
+  // billet et le retour qui fait la marge, ou l'inverse. On les affiche séparément.
+  const parSens = useMemo(() => {
+    if (direction !== "allerRetour") return null;
+    return ["export", "import"].map((sens) => ({
+      sens,
+      libelle: libelleVoyage(pays, sens),
+      ...totauxVoyage(colisInclus.filter((c) => (c.direction || "export") === sens), [], devisePays),
+    }));
+  }, [direction, colisInclus, pays, devisePays]);
 
   function ouvrirNouveau() {
     setOuvert("nouveau");
@@ -13091,7 +13198,8 @@ function VoyagesPage({ data, persist, session, notify }) {
           </div>
         ) : voyages.map((v) => {
           const set = new Set(v.trackings || []);
-          const t = totauxVoyage(data.colis.filter((c) => set.has(c.tracking)), v.depenses);
+          const t = totauxVoyage(data.colis.filter((c) => set.has(c.tracking)), v.depenses,
+            COUNTRIES.find((p) => p.code === v.pays)?.currency || "EUR");
           const valide = v.statut === "Validé";
           return (
             <div key={v.id} style={{ ...carte, marginBottom: 12, padding: "14px 16px" }}>
@@ -13106,7 +13214,8 @@ function VoyagesPage({ data, persist, session, notify }) {
                     }}>{v.statut}</span>
                   </div>
                   <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 5 }}>
-                    {t.nbColis} colis · {t.poids.toFixed(1)} kg · recettes {fmt(t.facture, "EUR")} · dépenses {fmt(t.depensesEUR, "EUR")}
+                    {t.nbColis} colis ({t.nbPayes} payés · {t.nbPartiels} partiels · {t.nbImpayes} impayés) · {t.poids.toFixed(1)} kg
+                    <br />recettes {fmt(t.facture, "EUR")} · dépenses {fmt(t.depensesEUR, "EUR")} · bilan {fmt(t.tresorerie, "EUR")}
                     {v.dateDepart ? ` · départ ${new Date(`${v.dateDepart}T00:00:00`).toLocaleDateString("fr-FR")}` : ""}
                   </div>
                 </button>
@@ -13162,11 +13271,20 @@ function VoyagesPage({ data, persist, session, notify }) {
           </div>
           <div>
             <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Sens</div>
-            <div style={{ display: "flex", gap: 8 }}>
-              {["export", "import"].map((sens) => (
-                <button key={sens} disabled={enLecture} onClick={() => { setDirection(sens); setTrackings([]); }}
-                  style={{ ...toggleBtn, ...(direction === sens ? toggleActive : {}), opacity: enLecture ? 0.6 : 1, fontSize: 12 }}>
-                  {libelleVoyage(pays, sens)}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {[["export", `Conakry → ${villePays}`], ["import", `${villePays} → Conakry`], ["allerRetour", "Aller-retour"]].map(([sens, label]) => (
+                <button key={sens} disabled={enLecture}
+                  onClick={() => {
+                    // On ne vide la sélection que si le nouveau sens ne couvre plus les colis déjà
+                    // cochés : passer d'un aller simple à l'aller-retour doit les conserver.
+                    setDirection(sens);
+                    setTrackings((l) => l.filter((t) => {
+                      const c = data.colis.find((x) => x.tracking === t);
+                      return c && voyageCouvre(sens, c.direction || "export");
+                    }));
+                  }}
+                  style={{ ...toggleBtn, ...(direction === sens ? toggleActive : {}), opacity: enLecture ? 0.6 : 1, fontSize: 12, flex: "1 1 auto" }}>
+                  {label}
                 </button>
               ))}
             </div>
@@ -13194,6 +13312,76 @@ function VoyagesPage({ data, persist, session, notify }) {
             <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 5 }}>{k.sous}</div>
           </div>
         ))}
+      </div>
+
+      {parSens && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 12, marginBottom: 18 }}>
+          {parSens.map((s) => (
+            <div key={s.sens} style={{ ...carte, padding: "14px 16px" }}>
+              <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text)" }}>{s.libelle}</div>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
+                {s.nbColis} colis · {s.poids.toFixed(1)} kg
+              </div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)", marginTop: 6 }}>{fmt(s.facture, "EUR")}</div>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                encaissé {fmt(s.encaisse, "EUR")} · reste {fmt(s.resteAEncaisser, "EUR")}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ ...carte, marginBottom: 18, padding: "14px 16px" }}>
+        <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)", marginBottom: 10 }}>Bilan des paiements</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 10, marginBottom: 14 }}>
+          {[
+            { label: "Payés", valeur: totaux.nbPayes, coul: "var(--ok-fg)", fond: "var(--ok-bg-soft)" },
+            { label: "Partiels", valeur: totaux.nbPartiels, coul: "var(--warn-fg)", fond: "var(--warn-bg)" },
+            { label: "Impayés", valeur: totaux.nbImpayes, coul: "var(--danger-fg)", fond: "var(--danger-bg)" },
+            { label: "Total colis", valeur: totaux.nbColis, coul: "var(--text)", fond: "var(--surface2)" },
+          ].map((k) => (
+            <div key={k.label} style={{ background: k.fond, borderRadius: 10, padding: "10px 12px" }}>
+              <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 20, fontWeight: 700, color: k.coul }}>{k.valeur}</div>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>{k.label}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "8px 0", borderTop: "1px solid var(--surface2)", flexWrap: "wrap" }}>
+          <span style={{ fontSize: 13, color: "var(--muted)" }}>Encaissé à Conakry</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{formaterDevises({ GNF: totaux.encaissements.conakry })}</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "8px 0", borderTop: "1px solid var(--surface2)", flexWrap: "wrap" }}>
+          <span style={{ fontSize: 13, color: "var(--muted)" }}>Encaissé à {villePays}</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{formaterDevises({ [devisePays]: totaux.encaissements.etranger })}</span>
+        </div>
+        {Object.keys(totaux.encaissements.autres).length > 0 && (
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "8px 0", borderTop: "1px solid var(--surface2)", flexWrap: "wrap" }}>
+            <span style={{ fontSize: 13, color: "var(--muted)" }}>Autres devises</span>
+            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{formaterDevises(totaux.encaissements.autres)}</span>
+          </div>
+        )}
+        {totaux.encaissements.nonVentileEUR > 0.005 && (
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "8px 0", borderTop: "1px solid var(--surface2)", flexWrap: "wrap" }}>
+            <span style={{ fontSize: 13, color: "var(--muted)" }}>Sans détail de paiement</span>
+            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--muted)" }}>{fmt(totaux.encaissements.nonVentileEUR, "EUR")}</span>
+          </div>
+        )}
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "8px 0", borderTop: "1px solid var(--surface2)", flexWrap: "wrap" }}>
+          <span style={{ fontSize: 13, color: "var(--muted)" }}>Reste à encaisser</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: totaux.resteAEncaisser > 0 ? "var(--danger-fg)" : "var(--ok-fg)" }}>{fmt(totaux.resteAEncaisser, "EUR")}</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "12px 0 0", borderTop: "1.5px solid var(--border)", marginTop: 6, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Bilan final — argent réellement rentré</div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>encaissé {fmt(totaux.encaisse, "EUR")} moins les dépenses {fmt(totaux.depensesEUR, "EUR")}</div>
+          </div>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 18, fontWeight: 700, color: totaux.tresorerie >= 0 ? "var(--ok-fg)" : "var(--danger-fg)" }}>
+            {fmt(totaux.tresorerie, "EUR")}
+          </div>
+        </div>
+        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 10 }}>
+          La répartition Conakry / {villePays} suit la devise réellement encaissée : les francs au comptoir de Conakry, les {devisePays} à celui de {villePays}.
+        </div>
       </div>
 
       <div style={{ ...carte, marginBottom: 18, overflow: "hidden" }}>
@@ -13225,6 +13413,18 @@ function VoyagesPage({ data, persist, session, notify }) {
                 <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{c.tracking} — {c.destinataire}</div>
                 <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
                   {c.status} · {(Number(c.poids) || 0).toFixed(1)} kg · {new Date(c.createdAt).toLocaleDateString("fr-FR")}
+                </div>
+                <div style={{ display: "flex", gap: 6, marginTop: 5, flexWrap: "wrap" }}>
+                  {(() => {
+                    const st = statutPaiementColis(c);
+                    const style = { "Payé": ["var(--ok-bg-soft)", "var(--ok-fg)"], "Partiel": ["var(--warn-bg)", "var(--warn-fg)"], "Impayé": ["var(--danger-bg)", "var(--danger-fg)"] }[st];
+                    return <span style={{ background: style[0], color: style[1], borderRadius: 20, padding: "2px 9px", fontSize: 10.5, fontWeight: 700 }}>{st}</span>;
+                  })()}
+                  {direction === "allerRetour" && (
+                    <span style={{ background: "var(--surface2)", color: "var(--muted)", borderRadius: 20, padding: "2px 9px", fontSize: 10.5, fontWeight: 700 }}>
+                      {(c.direction || "export") === "export" ? "Aller" : "Retour"}
+                    </span>
+                  )}
                 </div>
               </div>
               <div style={{ textAlign: "end", flexShrink: 0 }}>
@@ -13309,7 +13509,7 @@ function VoyagesPage({ data, persist, session, notify }) {
       {confirmation && (
         <ConfirmerAction
           titre="Valider cette fiche de voyage ?"
-          message={`${libelleVoyage(pays, direction)} — ${totaux.nbColis} colis, ${totaux.poids.toFixed(1)} kg, recettes ${fmt(totaux.facture, "EUR")}, dépenses ${fmt(totaux.depensesEUR, "EUR")}, résultat ${fmt(totaux.resultat, "EUR")}.`}
+          message={`${libelleVoyage(pays, direction)} — ${totaux.nbColis} colis (${totaux.nbPayes} payés, ${totaux.nbPartiels} partiels, ${totaux.nbImpayes} impayés), ${totaux.poids.toFixed(1)} kg. Recettes ${fmt(totaux.facture, "EUR")}, dépenses ${fmt(totaux.depensesEUR, "EUR")}, bilan final ${fmt(totaux.tresorerie, "EUR")}.`}
           consequence="Ces colis n’apparaîtront plus dans la liste des voyages suivants, pour qu’aucun ne soit compté deux fois. La fiche s’ouvrira en PDF, et reste réouvrable si vous devez la corriger."
           libelleAction="Valider la fiche"
           onConfirmer={validerVoyage}

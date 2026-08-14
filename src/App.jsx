@@ -6183,7 +6183,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
       };
       return { ...c, paye, reste, paiements: [...(c.paiements || []), paiement] };
     }) };
-    next.activityLog = logActivity("Encaissement groupé", `${nbColis} colis — ${montantSaisi} ${deviseSaisie} (${mode})`);
+    next.activityLog = logActivity("Encaissement groupé", `${nbColis} colis — ${montantSaisi} ${deviseSaisie} (${mode})${details?.reference ? ` réf. ${details.reference}` : ""}`);
     persist(next);
     notify(ajuste
       ? `Réparti sur ${nbColis} colis — limité au solde dû, pensez à rendre la monnaie`
@@ -6484,7 +6484,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
           <button onClick={() => imprimerLot("facture")} disabled={impressionLot} style={{ background: "var(--surface2)", color: "#fff", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>{impressionLot ? "Génération…" : "Factures A4"}</button>
         </div>
       )}
-      {showForm && <ColisForm remiseVolumeConfig={data.remiseVolume} repertoire={data.repertoire} onClose={() => setShowForm(false)} onSave={addColis} existingColis={data.colis} categories={data.categories || []} session={session} sites={data.sites} partenaires={(data.users || []).filter((u) => u.role === "Partenaire")} clientAccounts={data.clientAccounts || []} preAlertes={data.preAlertes || []} notify={notify} />}
+      {showForm && <ColisForm remiseVolumeConfig={data.remiseVolume} repertoire={data.repertoire} paymentConfig={data.paymentConfig} onClose={() => setShowForm(false)} onSave={addColis} existingColis={data.colis} categories={data.categories || []} session={session} sites={data.sites} partenaires={(data.users || []).filter((u) => u.role === "Partenaire")} clientAccounts={data.clientAccounts || []} preAlertes={data.preAlertes || []} notify={notify} />}
       {showAi && <AiColisModal onClose={() => setShowAi(false)} onCreate={addColis} data={data} session={session} />}
       {showImport && <ImportExcelModal onClose={() => setShowImport(false)} onImportMany={importerColisMany} data={data} session={session} />}
       {remiseEnCours && <RemiseColisModal colis={remiseEnCours} session={session}
@@ -7234,7 +7234,7 @@ function effacerBrouillonColis() {
   try { localStorage.removeItem(CLE_BROUILLON_COLIS); } catch (e) { /* pas grave */ }
 }
 
-function ColisForm({ onClose, onSave, existingColis, categories, session, sites, partenaires, clientAccounts, preAlertes, remiseVolumeConfig, repertoire, notify }) {
+function ColisForm({ onClose, onSave, existingColis, categories, session, sites, partenaires, clientAccounts, preAlertes, remiseVolumeConfig, repertoire, paymentConfig, notify }) {
   const availableCountries = allowedCountries(session);
   const [brouillon] = useState(() => lireBrouillonColis());
   const clientDirectory = useMemo(() => buildClientDirectory(existingColis || [], repertoire), [existingColis, repertoire]);
@@ -7283,6 +7283,18 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
     const devise = COUNTRIES.find((c) => c.code === expPays)?.currency;
     if (devise) setPayeDevise(devise);
   }, [expPays]);
+  /*
+   * Comment l'acompte est réglé au comptoir. Il était enregistré d'office en espèces : un client
+   * qui payait par Orange Money ou MTN se retrouvait dans la caisse de l'agent comme s'il lui
+   * avait remis des billets, et la référence de la transaction — la seule preuve du virement —
+   * n'était nulle part. L'agent choisit donc le mode, et saisit la référence pour tout paiement
+   * qui ne passe pas par ses mains.
+   */
+  const [payeMode, setPayeMode] = useState(() => brouillon?.payeMode ?? MODE_ESPECES);
+  const [payeReference, setPayeReference] = useState(() => brouillon?.payeReference ?? "");
+  const [payeNumeroPayeur, setPayeNumeroPayeur] = useState(() => brouillon?.payeNumeroPayeur ?? "");
+  const [payeNumeroReceveur, setPayeNumeroReceveur] = useState(() => brouillon?.payeNumeroReceveur ?? "");
+  const payeAvecReference = payeMode === "Orange Money" || payeMode === "MTN Money" || payeMode === "Virement";
   const [rabaisMontant, setRabaisMontant] = useState(() => brouillon?.rabaisMontant ?? "0");
   const [rabaisDevise, setRabaisDevise] = useState(() => brouillon?.rabaisDevise ?? "GNF");
   /*
@@ -7612,14 +7624,16 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
       ecrireBrouillonColis({
         step, expPrenom, expNom, expTelephone, expEmail, expAdresse, expPays,
         destPrenom, destNom, destTelephone, destEmail, destAdresse, destVille, destCodePostal, destPays,
-        mode, produits, paye, payeDevise, rabaisMontant, rabaisDevise, agence, partenaireId, provenance,
+        mode, produits, paye, payeDevise, payeMode, payeReference, payeNumeroPayeur, payeNumeroReceveur,
+        rabaisMontant, rabaisDevise, agence, partenaireId, provenance,
       });
     }, 250);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saisieEnCours, step, expPrenom, expNom, expTelephone, expEmail, expAdresse, expPays,
       destPrenom, destNom, destTelephone, destEmail, destAdresse, destVille, destCodePostal, destPays,
-      mode, produits, paye, payeDevise, rabaisMontant, rabaisDevise, agence, partenaireId, provenance]);
+      mode, produits, paye, payeDevise, payeMode, payeReference, payeNumeroPayeur, payeNumeroReceveur,
+      rabaisMontant, rabaisDevise, agence, partenaireId, provenance]);
 
   /** Fermeture volontaire (bouton "Annuler", croix, clic à côté, Échap) : le brouillon ne doit
    * pas reproposer une saisie que l'agent vient explicitement de refuser. */
@@ -7642,12 +7656,15 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
       agentCreation: session ? `${session.prenom} ${session.nom}`.trim() || session.identifiant : "",
       prixBrut, discountLoyalty, rabaisMontant: Number(rabaisMontant) || 0, rabaisDevise, rabaisEUR, prix, paye: payeNum, reste, photos,
       // L'acompte pris au comptoir est un encaissement comme un autre : il est nommé (l'agent qui
-      // enregistre le colis) et garde sa devise de saisie, sinon cet argent — souvent la plus grosse
-      // part de la journée — n'apparaissait dans aucune caisse et restait un simple montant en euros.
+      // enregistre le colis), garde sa devise de saisie, son mode et la référence de la transaction.
+      // Sans cela cet argent — souvent la plus grosse part de la journée — n'apparaissait dans
+      // aucune caisse, comptait comme des espèces même réglé par Mobile Money, et le seul justificatif
+      // d'un paiement Orange Money ou MTN était perdu.
       paiements: payeNum > 0 ? [{
         id: `pay${Date.now()}`, montant: payeNum, montantSaisi: Number(paye) || 0, deviseSaisie: payeDevise,
-        mode: MODE_ESPECES, date: new Date().toISOString(),
+        mode: payeMode, date: new Date().toISOString(),
         par: session ? (`${session.prenom} ${session.nom}`.trim() || session.identifiant) : "Enregistrement initial",
+        ...(payeAvecReference ? { reference: payeReference.trim(), numeroPayeur: payeNumeroPayeur.trim(), numeroReceveur: payeNumeroReceveur.trim() } : {}),
         acompte: true,
       }] : [],
       notesInternes: "",
@@ -7858,7 +7875,31 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
                   </div>
                 </div>
               </Field>
+              {payeNum > 0 && (
+                <Field label="Payé comment ?">
+                  <select value={payeMode} onChange={(e) => {
+                    setPayeMode(e.target.value);
+                    // Le numéro qui reçoit est celui de l'entreprise (Configuration → Paiement) :
+                    // le pré-remplir évite de le retaper, et de le retaper de travers.
+                    if (e.target.value === "Orange Money") setPayeNumeroReceveur(paymentConfig?.orangeMoney || "");
+                    else if (e.target.value === "MTN Money") setPayeNumeroReceveur(paymentConfig?.mtnMoney || "");
+                    else setPayeNumeroReceveur("");
+                  }} style={inputStyle}>
+                    {MODES_PAIEMENT.map((m) => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                </Field>
+              )}
             </div>
+            {payeNum > 0 && payeAvecReference && (
+              <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: "12px 14px", marginBottom: 14 }}>
+                <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 700, marginBottom: 8 }}>DÉTAILS DE LA TRANSACTION</div>
+                <Field label="Référence de la transaction"><input value={payeReference} onChange={(e) => setPayeReference(e.target.value)} style={inputStyle} placeholder="ex: MP240726.1234.A56789" /></Field>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 10 }}>
+                  <Field label="Numéro qui a payé"><input value={payeNumeroPayeur} onChange={(e) => setPayeNumeroPayeur(e.target.value)} style={inputStyle} placeholder="+224 6XX XXX XXX" /></Field>
+                  <Field label="Numéro qui a reçu"><input value={payeNumeroReceveur} onChange={(e) => setPayeNumeroReceveur(e.target.value)} style={inputStyle} placeholder="+224 6XX XXX XXX" /></Field>
+                </div>
+              </div>
+            )}
             {discountLoyalty > 0 && <div style={{ fontSize: 12, color: "var(--ok-fg)", marginBottom: 10 }}>Remise fidélité automatique : -{discountLoyalty}% ({previousCount} envois précédents)</div>}
             {discountVolume > 0 && <div style={{ fontSize: 12, color: "var(--ok-fg)", marginBottom: 10 }}>Remise volume : -{discountVolume}% ({poidsTotal.toFixed(1)} kg)</div>}
             <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px" }}>
@@ -9727,7 +9768,15 @@ function EncaisserGroupeModal({ data, onEncaisser, onClose }) {
   const [selection, setSelection] = useState([]);
   const [montant, setMontant] = useState("");
   const [devise, setDevise] = useState("GNF");
-  const [mode, setMode] = useState("Espèces");
+  const [mode, setMode] = useState(MODE_ESPECES);
+  // Un règlement groupé passe très souvent par Orange Money ou MTN : sa référence est le seul
+  // justificatif du virement. Elle était demandée sur l'encaissement d'un colis isolé, mais pas
+  // ici — l'argent rentrait sans aucune trace de la transaction.
+  const [reference, setReference] = useState("");
+  const [numeroPayeur, setNumeroPayeur] = useState("");
+  const [numeroReceveur, setNumeroReceveur] = useState("");
+  const avecReference = mode === "Orange Money" || mode === "MTN Money" || mode === "Virement";
+  const cfgPaiement = data.paymentConfig || {};
 
   const client = clients.find((c) => c.cle === clientCle);
   const colisClient = client ? client.colis : [];
@@ -9794,11 +9843,27 @@ function EncaisserGroupeModal({ data, onEncaisser, onClose }) {
               </select>
             </Field>
             <Field label="Mode de paiement">
-              <select value={mode} onChange={(e) => setMode(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }}>
+              <select value={mode} onChange={(e) => {
+                setMode(e.target.value);
+                if (e.target.value === "Orange Money") setNumeroReceveur(cfgPaiement.orangeMoney || "");
+                else if (e.target.value === "MTN Money") setNumeroReceveur(cfgPaiement.mtnMoney || "");
+                else setNumeroReceveur("");
+              }} style={{ ...inputStyle, marginBottom: 0 }}>
                 {MODES_PAIEMENT.map((m) => <option key={m} value={m}>{m}</option>)}
               </select>
             </Field>
           </div>
+
+          {avecReference && (
+            <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "12px 14px", marginTop: 12 }}>
+              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 700, marginBottom: 8 }}>DÉTAILS DE LA TRANSACTION</div>
+              <Field label="Référence de la transaction"><input value={reference} onChange={(e) => setReference(e.target.value)} style={inputStyle} placeholder="ex: MP240726.1234.A56789" /></Field>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
+                <Field label="Numéro qui a payé"><input value={numeroPayeur} onChange={(e) => setNumeroPayeur(e.target.value)} style={inputStyle} placeholder="+224 6XX XXX XXX" /></Field>
+                <Field label="Numéro qui a reçu"><input value={numeroReceveur} onChange={(e) => setNumeroReceveur(e.target.value)} style={inputStyle} placeholder="+224 6XX XXX XXX" /></Field>
+              </div>
+            </div>
+          )}
 
           {montantEUR > duSelection + 0.005 && (
             <div style={{ fontSize: 12, color: "var(--warn-fg)", marginTop: 10 }}>
@@ -9807,7 +9872,13 @@ function EncaisserGroupeModal({ data, onEncaisser, onClose }) {
           )}
 
           <button
-            onClick={() => { onEncaisser(coches.map((c) => c.tracking), montantEUR, mode, Number(montant) || 0, devise); onClose(); }}
+            onClick={() => {
+              const details = avecReference
+                ? { reference: reference.trim(), numeroPayeur: numeroPayeur.trim(), numeroReceveur: numeroReceveur.trim() }
+                : null;
+              onEncaisser(coches.map((c) => c.tracking), montantEUR, mode, Number(montant) || 0, devise, details);
+              onClose();
+            }}
             disabled={!(montantEUR > 0)}
             style={{ width: "100%", marginTop: 16, background: montantEUR > 0 ? "var(--brand-solid)" : "var(--surface2)",
                      color: montantEUR > 0 ? "#fff" : "var(--muted)", border: "none", borderRadius: 8,

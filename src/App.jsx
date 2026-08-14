@@ -6187,6 +6187,10 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
         montantSaisi: +(part * (LIVE_RATES[deviseSaisie] || CURRENCIES[deviseSaisie] || 1)).toFixed(2),
         deviseSaisie, mode, date: horodatage,
         par: `${session.prenom} ${session.nom}`.trim() || session.identifiant,
+        // Où l'argent est entré : là où se trouve l'agent qui l'encaisse. Sans cette marque, il
+        // fallait le deviner d'après la devise — un euro reçu à Conakry passait pour un euro reçu
+        // à Paris, et le rendement d'un voyage se retrouvait ventilé du mauvais côté.
+        parPays: session.paysOperation || "GN", parSite: session.agence || "",
         ...(details || {}), groupe: true,
       };
       return { ...c, paye, reste, paiements: [...(c.paiements || []), paiement] };
@@ -6227,7 +6231,10 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
       if (c.tracking !== tracking) return c;
       const paye = +(c.paye + applique).toFixed(2);
       const reste = Math.max(+(c.prix - paye).toFixed(2), 0);
-      const paiement = { id: `pay${Date.now()}`, montant: applique, montantSaisi, deviseSaisie, mode, date: new Date().toISOString(), par: `${session.prenom} ${session.nom}`, reference: details?.reference || "", numeroPayeur: details?.numeroPayeur || "", numeroReceveur: details?.numeroReceveur || "" };
+      const paiement = { id: `pay${Date.now()}`, montant: applique, montantSaisi, deviseSaisie, mode, date: new Date().toISOString(),
+        par: `${session.prenom} ${session.nom}`,
+        parPays: session.paysOperation || "GN", parSite: session.agence || "",
+        reference: details?.reference || "", numeroPayeur: details?.numeroPayeur || "", numeroReceveur: details?.numeroReceveur || "" };
       const declarationsPaiement = declarationId
         ? (c.declarationsPaiement || []).map((d) => (d.id === declarationId ? { ...d, statut: "Confirmé" } : d))
         : c.declarationsPaiement;
@@ -7672,6 +7679,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
         id: `pay${Date.now()}`, montant: payeNum, montantSaisi: Number(paye) || 0, deviseSaisie: payeDevise,
         mode: payeMode, date: new Date().toISOString(),
         par: session ? (`${session.prenom} ${session.nom}`.trim() || session.identifiant) : "Enregistrement initial",
+        parPays: session?.paysOperation || expPays || "GN", parSite: session?.agence || agence || "",
         ...(payeAvecReference ? { reference: payeReference.trim(), numeroPayeur: payeNumeroPayeur.trim(), numeroReceveur: payeNumeroReceveur.trim() } : {}),
         acompte: true,
       }] : [],
@@ -10007,6 +10015,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
       return {
         id: `pay${Date.now()}`, montant: ecartPaye, montantSaisi: +(ecartPaye * taux).toFixed(2),
         deviseSaisie: correctionDevise, mode: correctionMode, date: horodatage, par: parCourant,
+        parPays: session?.paysOperation || "GN", parSite: session?.agence || "",
         ...(correctionAvecReference ? {
           reference: correctionReference.trim(),
           numeroPayeur: correctionNumeroPayeur.trim(),
@@ -10019,6 +10028,9 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
       id: `pay${Date.now()}`, montant: ecartPaye, montantSaisi: +(ecartPaye * taux).toFixed(2),
       deviseSaisie: correctionDevise, mode: correctionMode, date: horodatage,
       par: dernierPaiement?.par || parCourant,
+      // La correction retire l'argent de la caisse où il était entré, pas de celle de qui corrige.
+      parPays: dernierPaiement?.parPays || session?.paysOperation || "GN",
+      parSite: dernierPaiement?.parSite || session?.agence || "",
       correction: true, motif: correctionMotif.trim(), parCorrection: parCourant,
     };
   }
@@ -12073,6 +12085,18 @@ function formaterDevises(parDevise) {
     .join(" · ");
 }
 
+/**
+ * Clé unique d'un encaissement, calculée de la même façon partout (caisse, voyages).
+ *
+ * `id` n'est unique qu'à l'intérieur d'un colis — deux encaissements simultanés partagent
+ * l'horodatage qui le compose — d'où le préfixe par le numéro de suivi. C'est cette clé que les
+ * bons de remise mémorisent : si les deux écrans ne la calculaient pas pareil, un encaissement
+ * déjà remis réapparaîtrait comme dû.
+ */
+function clePaiement(tracking, paiement, index) {
+  return `${tracking}|${paiement?.id || ""}|${index}`;
+}
+
 /** Ajoute un montant à une répartition par devise, sans muter l'objet d'origine du colis. */
 function ajouterDevise(acc, devise, montant) {
   acc[devise] = (acc[devise] || 0) + montant;
@@ -12240,10 +12264,7 @@ function CaissePage({ data, persist, session, notify }) {
     const montantSaisi = p.montantSaisi != null && p.montantSaisi !== ""
       ? Number(p.montantSaisi) || 0
       : montant * (LIVE_RATES[deviseSaisie] || CURRENCIES[deviseSaisie] || 1);
-    // `id` n'est unique que dans un colis (deux encaissements simultanés partagent l'horodatage) :
-    // on préfixe par le numéro de suivi pour obtenir une clé réellement unique, qui sert aussi bien
-    // à la sélection qu'au rattachement d'un bon de remise.
-    const cle = `${c.tracking}|${p.id || ""}|${i}`;
+    const cle = clePaiement(c.tracking, p, i);
     return {
       cle,
       tracking: c.tracking,
@@ -12789,33 +12810,85 @@ function voyageCouvre(direction, sensColis) {
   return direction === "allerRetour" || direction === sensColis;
 }
 
+/** Nom d'affichage d'un utilisateur, tel qu'il est estampillé sur les paiements. */
+function nomAffiche(u) {
+  return `${u?.prenom || ""} ${u?.nom || ""}`.trim() || u?.identifiant || "";
+}
+
 /**
- * Ventile les encaissements d'un voyage par lieu, d'après la devise réellement reçue.
+ * Où un encaissement a-t-il été fait ? Là où se trouve l'agent qui l'a reçu.
  *
- * C'est le marqueur dont on dispose et il colle à la réalité : on encaisse des francs au comptoir
- * de Conakry et des euros à celui de Paris. Un règlement dans une autre devise est montré à part
- * plutôt que rangé de force d'un côté. Les vieux colis dont le « payé » ne correspond à aucune
- * ligne de paiement détaillée sont comptés comme « non ventilés » : ils existent, on ne sait
- * simplement pas où l'argent est entré.
+ * Le pays est écrit sur le paiement depuis cette mise à jour. Pour les encaissements plus anciens
+ * on retrouve l'agent dans les comptes utilisateurs, et à défaut on retombe sur le pays où le colis
+ * a été déposé — ce qui est juste pour un acompte pris au comptoir. Si rien ne permet de trancher,
+ * on l'affiche comme non déterminé plutôt que de le ranger arbitrairement d'un côté.
  */
-function ventilerEncaissements(colisInclus, devisePays) {
-  const res = { conakry: 0, etranger: 0, autres: {}, nonVentileEUR: 0 };
+function paysDuPaiement(paiement, colis, users) {
+  if (paiement.parPays) return paiement.parPays;
+  const nom = (paiement.par || "").trim();
+  if (nom && nom !== "Enregistrement initial") {
+    const u = (users || []).find((x) => nomAffiche(x) === nom);
+    if (u) return u.paysOperation || "GN";
+  }
+  if (paiement.acompte || nom === "Enregistrement initial" || !nom) return colis?.expediteurPays || null;
+  return null;
+}
+
+/** Ville d'un code pays, pour nommer une caisse : GN → Conakry, FR → Paris. */
+function villeDuPays(code) {
+  if (!code) return "Lieu non déterminé";
+  return COUNTRIES.find((c) => c.code === code)?.city || code;
+}
+
+/**
+ * Qui a encaissé quoi sur ce voyage, et ce qu'il doit encore verser.
+ *
+ * Une ligne par agent et par lieu : ce qu'il a reçu, ce qu'il a déjà remis en caisse (bons de
+ * remise validés), et ce qu'il doit encore verser. Seules les espèces sont dues — le Mobile Money
+ * et les virements arrivent directement sur les comptes de l'entreprise.
+ */
+function encaissementsParAgent(colisInclus, users, remises) {
+  const remis = new Set((remises || []).flatMap((r) => r.cles || []));
+  const groupes = new Map();
+  let nonVentileEUR = 0;
   colisInclus.forEach((c) => {
     let sommeEUR = 0;
-    (c.paiements || []).forEach((p) => {
+    (c.paiements || []).forEach((p, i) => {
       const devise = p.deviseSaisie || "EUR";
-      const montant = p.montantSaisi != null && p.montantSaisi !== ""
+      const montantSaisi = p.montantSaisi != null && p.montantSaisi !== ""
         ? Number(p.montantSaisi) || 0
         : (Number(p.montant) || 0) * (LIVE_RATES[devise] || CURRENCIES[devise] || 1);
       sommeEUR += Number(p.montant) || 0;
-      if (devise === "GNF") res.conakry += montant;
-      else if (devise === devisePays) res.etranger += montant;
-      else ajouterDevise(res.autres, devise, montant);
+      const agentBrut = (p.par && p.par !== "Enregistrement initial") ? p.par : c.agentCreation;
+      const agent = agentBrut && agentBrut.trim() ? agentBrut.trim() : "Non renseigné";
+      const pays = paysDuPaiement(p, c, users);
+      const cle = `${agent}@${pays || "?"}`;
+      if (!groupes.has(cle)) {
+        groupes.set(cle, { agent, pays, lieu: villeDuPays(pays), totalEUR: 0, devises: {}, verse: {}, aVerser: {}, aVerserEUR: 0 });
+      }
+      const g = groupes.get(cle);
+      g.totalEUR += Number(p.montant) || 0;
+      ajouterDevise(g.devises, devise, montantSaisi);
+      if ((p.mode || MODE_ESPECES) === MODE_ESPECES) {
+        if (remis.has(clePaiement(c.tracking, p, i))) ajouterDevise(g.verse, devise, montantSaisi);
+        else { ajouterDevise(g.aVerser, devise, montantSaisi); g.aVerserEUR += Number(p.montant) || 0; }
+      }
     });
     const ecart = +((Number(c.paye) || 0) - sommeEUR).toFixed(2);
-    if (ecart > 0.005) res.nonVentileEUR += ecart;
+    if (ecart > 0.005) nonVentileEUR += ecart;
   });
-  return res;
+  const lignes = [...groupes.values()].sort((a, b) => b.totalEUR - a.totalEUR);
+  // Même chose regroupé par lieu : c'est le total de la caisse de Conakry, celui de Paris...
+  const parLieu = new Map();
+  lignes.forEach((l) => {
+    const cle = l.pays || "?";
+    if (!parLieu.has(cle)) parLieu.set(cle, { pays: l.pays, lieu: l.lieu, totalEUR: 0, devises: {}, aVerser: {} });
+    const g = parLieu.get(cle);
+    g.totalEUR += l.totalEUR;
+    Object.entries(l.devises).forEach(([d, v]) => ajouterDevise(g.devises, d, v));
+    Object.entries(l.aVerser).forEach(([d, v]) => ajouterDevise(g.aVerser, d, v));
+  });
+  return { lignes, parLieu: [...parLieu.values()].sort((a, b) => b.totalEUR - a.totalEUR), nonVentileEUR };
 }
 
 /** Convertit un montant saisi dans une devise vers l'équivalent euro utilisé par tous les totaux. */
@@ -12824,7 +12897,7 @@ function versEUR(montant, devise) {
 }
 
 /** Totaux d'un voyage : ce que les colis rapportent, ce qu'ils coûtent, ce qu'il en reste. */
-function totauxVoyage(colisInclus, depenses, devisePays = "EUR") {
+function totauxVoyage(colisInclus, depenses, users, remises) {
   const facture = colisInclus.reduce((s, c) => s + (Number(c.prix) || 0), 0);
   const encaisse = colisInclus.reduce((s, c) => s + (Number(c.paye) || 0), 0);
   const depensesEUR = (depenses || []).reduce((s, d) => s + versEUR(d.montant, d.devise), 0);
@@ -12838,7 +12911,7 @@ function totauxVoyage(colisInclus, depenses, devisePays = "EUR") {
     nbPayes: payes.length,
     nbImpayes: impayes.length,
     nbPartiels: colisInclus.length - payes.length - impayes.length,
-    encaissements: ventilerEncaissements(colisInclus, devisePays),
+    encaissements: encaissementsParAgent(colisInclus, users, remises),
     depensesEUR,
     resultat: +(facture - depensesEUR).toFixed(2),
     // Ce qui est réellement dans les caisses une fois le voyage payé, par opposition au résultat
@@ -12860,12 +12933,9 @@ function statutPaiementColis(c) {
  * signature : c'est ce document qu'on valide, et à partir duquel les colis sortent du pool des
  * voyages à venir.
  */
-function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable) {
+function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data) {
   const INK = [26, 30, 38], MUTED = [122, 130, 142], RED = [214, 39, 63], NAVY = [10, 38, 71];
-  const paysInfo = COUNTRIES.find((c) => c.code === voyage.pays);
-  const devisePays = paysInfo?.currency || "EUR";
-  const villePays = paysInfo?.city || voyage.pays;
-  const t = totauxVoyage(colisInclus, voyage.depenses, devisePays);
+  const t = totauxVoyage(colisInclus, voyage.depenses, data?.users, data?.remisesCaisse);
   let y = 20;
   doc.addImage(DEFAULT_LOGO, "PNG", 14, y - 6, 16, 16);
   doc.setFont(undefined, "bold"); doc.setFontSize(16); doc.setTextColor(...INK);
@@ -12885,18 +12955,15 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable) {
   const infos = [
     ["Route", libelleVoyage(voyage.pays, voyage.direction)],
     ["Départ", voyage.dateDepart ? new Date(`${voyage.dateDepart}T00:00:00`).toLocaleDateString("fr-FR") : "—"],
-    ["Colis embarqués", `${t.nbColis} · ${t.poids.toFixed(1)} kg`],
-    ["Règlements", `${t.nbPayes} payés · ${t.nbPartiels} partiels · ${t.nbImpayes} impayés`],
-    ["Validée le", voyage.valideeLe ? new Date(voyage.valideeLe).toLocaleString("fr-FR") : "—"],
-    ["Validée par", voyage.valideePar || "..............................."],
+    ["Colis embarqués", `${t.nbColis} · ${t.poids.toFixed(1)} kg · ${t.nbPayes} payés, ${t.nbPartiels} partiels, ${t.nbImpayes} impayés`],
   ];
   doc.setFontSize(10);
   infos.forEach(([label, valeur]) => {
     doc.setFont(undefined, "bold"); doc.setTextColor(...INK); doc.text(label, 14, y);
     doc.setFont(undefined, "normal"); doc.text(String(valeur), 196, y, { align: "right" });
-    y += 6.5;
+    y += 6;
   });
-  y += 6;
+  y += 4;
 
   const head = ["N° de suivi", "Destinataire", "Sens", "Poids", "Facturé", "Payé", "Reste"];
   const body = colisInclus.map((c) => [
@@ -12914,7 +12981,7 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable) {
       columnStyles: { 0: { cellWidth: 26 }, 1: { cellWidth: 44 }, 2: { cellWidth: 16 }, 3: { cellWidth: 18 }, 4: { cellWidth: 26 }, 5: { cellWidth: 26 }, 6: { cellWidth: 26 } },
       margin: { left: 14, right: 14 },
     });
-    y = doc.lastAutoTable.finalY + 10;
+    y = doc.lastAutoTable.finalY + 8;
   } else {
     const colX = [14, 40, 84, 100, 118, 144, 170];
     doc.setFontSize(8); doc.setTextColor(255, 255, 255); doc.setFillColor(...NAVY);
@@ -12936,23 +13003,39 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable) {
   // même caisse, et sur un aller-retour les deux ont encaissé.
   if (y > 240) { doc.addPage(); y = 20; }
   doc.setFont(undefined, "bold"); doc.setFontSize(10.5); doc.setTextColor(...INK);
-  doc.text("Encaissements du voyage", 14, y);
+  doc.text("Encaissements — qui a reçu l’argent, qui doit verser", 14, y);
   y += 7;
-  doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(60, 66, 78);
-  const lignesEncaissement = [
-    ["Encaissé à Conakry", formaterDevises({ GNF: t.encaissements.conakry })],
-    [`Encaissé à ${villePays}`, formaterDevises({ [devisePays]: t.encaissements.etranger })],
-    ...(Object.keys(t.encaissements.autres).length > 0 ? [["Autres devises", formaterDevises(t.encaissements.autres)]] : []),
-    ...(t.encaissements.nonVentileEUR > 0.005 ? [["Sans détail de paiement", fmt(t.encaissements.nonVentileEUR, "EUR")]] : []),
-    ["Reste à encaisser", fmt(t.resteAEncaisser, "EUR")],
-  ];
-  lignesEncaissement.forEach(([label, valeur]) => {
-    if (y > 268) { doc.addPage(); y = 20; }
-    doc.text(label, 16, y);
-    doc.text(String(valeur), 196, y, { align: "right" });
+  // Une seule section : le total de chaque caisse, et sous chacune les agents qui l'ont alimentée
+  // avec ce qu'ils doivent encore verser. C'est la partie qu'on relit avec chacun pour solder.
+  const sauterSiBesoin = () => { if (y > 268) { doc.addPage(); y = 20; } };
+  t.encaissements.parLieu.forEach((lieu) => {
+    sauterSiBesoin();
+    doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...INK);
+    doc.text(`Encaissé à ${lieu.lieu}`, 16, y);
+    doc.text(formaterDevises(lieu.devises), 196, y, { align: "right" });
     y += 6;
+    doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(90, 100, 115);
+    t.encaissements.lignes.filter((l) => (l.pays || "?") === (lieu.pays || "?")).forEach((l) => {
+      sauterSiBesoin();
+      const du = Object.values(l.aVerser).some((v) => Math.abs(v) >= 0.005) ? `à verser ${formaterDevises(l.aVerser)}` : "rien à verser";
+      const dejaVerse = Object.values(l.verse).some((v) => Math.abs(v) >= 0.005) ? ` · déjà versé ${formaterDevises(l.verse)}` : "";
+      doc.text(`   ${l.agent}`, 16, y);
+      doc.text(`${formaterDevises(l.devises)} · ${du}${dejaVerse}`, 196, y, { align: "right" });
+      y += 5.5;
+    });
+    y += 2;
   });
-  y += 4;
+  doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(60, 66, 78);
+  if (t.encaissements.nonVentileEUR > 0.005) {
+    sauterSiBesoin();
+    doc.text("Sans détail de paiement", 16, y);
+    doc.text(fmt(t.encaissements.nonVentileEUR, "EUR"), 196, y, { align: "right" });
+    y += 6;
+  }
+  sauterSiBesoin();
+  doc.text("Reste à encaisser auprès des clients", 16, y);
+  doc.text(fmt(t.resteAEncaisser, "EUR"), 196, y, { align: "right" });
+  y += 10;
 
   if ((voyage.depenses || []).length > 0) {
     if (y > 235) { doc.addPage(); y = 20; }
@@ -12971,32 +13054,36 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable) {
 
   // Le panneau de résultat et la signature ont besoin d'environ 58 mm : on ne les laisse jamais
   // déborder sous le pied de page.
-  // Le panneau de résultat (44 mm), sa ligne d'explication et le bloc signature demandent environ
-  // 90 mm : en dessous de cette marge ils passeraient sous le pied de page, invisibles à l'impression.
-  if (y > 206) { doc.addPage(); y = 20; }
-  doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, 40, "F");
+  // Le panneau de résultat (34 mm), sa ligne d'explication et le bloc signature demandent environ
+  // 80 mm : en dessous de cette marge ils passeraient sous le pied de page, invisibles à l'impression.
+  if (y > 205) { doc.addPage(); y = 20; }
+  doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, 34, "F");
   doc.setFontSize(10); doc.setTextColor(...NAVY); doc.setFont(undefined, "bold");
-  doc.text("Recettes (chiffre d’affaires)", 18, y + 9);
-  doc.text(fmt(t.facture, "EUR"), 192, y + 9, { align: "right" });
+  doc.text("Recettes (chiffre d’affaires)", 18, y + 8);
+  doc.text(fmt(t.facture, "EUR"), 192, y + 8, { align: "right" });
   doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
-  doc.text("Dépenses du voyage", 18, y + 17);
-  doc.text(`- ${fmt(t.depensesEUR, "EUR")}`, 192, y + 17, { align: "right" });
-  doc.setFont(undefined, "bold"); doc.setFontSize(11);
+  doc.text("Dépenses du voyage", 18, y + 15);
+  doc.text(`- ${fmt(t.depensesEUR, "EUR")}`, 192, y + 15, { align: "right" });
+  doc.setFont(undefined, "bold"); doc.setFontSize(10.5);
   doc.setTextColor(...(t.resultat >= 0 ? [22, 161, 99] : [214, 39, 63]));
-  doc.text("Résultat sur le facturé", 18, y + 27);
-  doc.text(fmt(t.resultat, "EUR"), 192, y + 27, { align: "right" });
+  doc.text("Résultat sur le facturé", 18, y + 23);
+  doc.text(fmt(t.resultat, "EUR"), 192, y + 23, { align: "right" });
   doc.setFontSize(12);
   doc.setTextColor(...(t.tresorerie >= 0 ? [22, 161, 99] : [214, 39, 63]));
-  doc.text("Bilan final (argent rentré)", 18, y + 35);
-  doc.text(fmt(t.tresorerie, "EUR"), 192, y + 35, { align: "right" });
-  y += 47;
+  doc.text("Bilan final (argent rentré)", 18, y + 31);
+  doc.text(fmt(t.tresorerie, "EUR"), 192, y + 31, { align: "right" });
+  y += 40;
 
   doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
   doc.text(`Bilan final = encaissé ${fmt(t.encaisse, "EUR")} - dépenses ${fmt(t.depensesEUR, "EUR")}, soit ${fmtGNF(t.tresorerie * (LIVE_RATES.GNF || CURRENCIES.GNF))}.`, 14, y);
   y += 14;
   // Le pied de page est à 288 mm : la ligne de signature doit rester au-dessus.
-  if (y > 268) { doc.addPage(); y = 20; }
+  if (y > 260) { doc.addPage(); y = 20; }
   doc.setFontSize(9); doc.setTextColor(90, 100, 120);
+  doc.text(voyage.valideeLe
+    ? `Validée le ${new Date(voyage.valideeLe).toLocaleString("fr-FR")}${voyage.valideePar ? ` par ${voyage.valideePar}` : ""}`
+    : "Fiche non encore validée", 14, y);
+  y += 8;
   doc.text("Signature du responsable :", 14, y);
   doc.setDrawColor(180); doc.line(14, y + 12, 85, y + 12);
 
@@ -13042,7 +13129,6 @@ function VoyagesPage({ data, persist, session, notify }) {
     return set;
   }, [voyages, ouvert]);
 
-  const devisePays = COUNTRIES.find((c) => c.code === pays)?.currency || "EUR";
   const villePays = COUNTRIES.find((c) => c.code === pays)?.city || pays;
 
   const eligibles = useMemo(() => {
@@ -13060,7 +13146,7 @@ function VoyagesPage({ data, persist, session, notify }) {
     const set = new Set(trackings);
     return data.colis.filter((c) => set.has(c.tracking));
   }, [data.colis, trackings]);
-  const totaux = useMemo(() => totauxVoyage(colisInclus, depenses, devisePays), [colisInclus, depenses, devisePays]);
+  const totaux = useMemo(() => totauxVoyage(colisInclus, depenses, data.users, data.remisesCaisse), [colisInclus, depenses, data.users, data.remisesCaisse]);
   // Sur un aller-retour, chaque sens a son propre rendement : c'est souvent l'aller qui paie le
   // billet et le retour qui fait la marge, ou l'inverse. On les affiche séparément.
   const parSens = useMemo(() => {
@@ -13068,9 +13154,9 @@ function VoyagesPage({ data, persist, session, notify }) {
     return ["export", "import"].map((sens) => ({
       sens,
       libelle: libelleVoyage(pays, sens),
-      ...totauxVoyage(colisInclus.filter((c) => (c.direction || "export") === sens), [], devisePays),
+      ...totauxVoyage(colisInclus.filter((c) => (c.direction || "export") === sens), [], data.users, data.remisesCaisse),
     }));
-  }, [direction, colisInclus, pays, devisePays]);
+  }, [direction, colisInclus, pays, data.users, data.remisesCaisse]);
 
   function ouvrirNouveau() {
     setOuvert("nouveau");
@@ -13167,7 +13253,7 @@ function VoyagesPage({ data, persist, session, notify }) {
       const doc = preparerDocPdf(new jspdf.jsPDF());
       const hasAutoTable = await ensureAutoTable();
       const set = new Set(voyage.trackings || []);
-      dessinerFicheVoyage(doc, voyage, data.colis.filter((c) => set.has(c.tracking)), hasAutoTable);
+      dessinerFicheVoyage(doc, voyage, data.colis.filter((c) => set.has(c.tracking)), hasAutoTable, data);
       openPdf(doc, `fiche-voyage-${voyage.numero}.pdf`);
     } catch (e) {
       console.error(e);
@@ -13198,8 +13284,7 @@ function VoyagesPage({ data, persist, session, notify }) {
           </div>
         ) : voyages.map((v) => {
           const set = new Set(v.trackings || []);
-          const t = totauxVoyage(data.colis.filter((c) => set.has(c.tracking)), v.depenses,
-            COUNTRIES.find((p) => p.code === v.pays)?.currency || "EUR");
+          const t = totauxVoyage(data.colis.filter((c) => set.has(c.tracking)), v.depenses, data.users, data.remisesCaisse);
           const valide = v.statut === "Validé";
           return (
             <div key={v.id} style={{ ...carte, marginBottom: 12, padding: "14px 16px" }}>
@@ -13346,20 +13431,12 @@ function VoyagesPage({ data, persist, session, notify }) {
             </div>
           ))}
         </div>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "8px 0", borderTop: "1px solid var(--surface2)", flexWrap: "wrap" }}>
-          <span style={{ fontSize: 13, color: "var(--muted)" }}>Encaissé à Conakry</span>
-          <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{formaterDevises({ GNF: totaux.encaissements.conakry })}</span>
-        </div>
-        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "8px 0", borderTop: "1px solid var(--surface2)", flexWrap: "wrap" }}>
-          <span style={{ fontSize: 13, color: "var(--muted)" }}>Encaissé à {villePays}</span>
-          <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{formaterDevises({ [devisePays]: totaux.encaissements.etranger })}</span>
-        </div>
-        {Object.keys(totaux.encaissements.autres).length > 0 && (
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "8px 0", borderTop: "1px solid var(--surface2)", flexWrap: "wrap" }}>
-            <span style={{ fontSize: 13, color: "var(--muted)" }}>Autres devises</span>
-            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{formaterDevises(totaux.encaissements.autres)}</span>
+        {totaux.encaissements.parLieu.map((l) => (
+          <div key={l.pays || "?"} style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "8px 0", borderTop: "1px solid var(--surface2)", flexWrap: "wrap" }}>
+            <span style={{ fontSize: 13, color: "var(--muted)" }}>Encaissé à {l.lieu}</span>
+            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{formaterDevises(l.devises)}</span>
           </div>
-        )}
+        ))}
         {totaux.encaissements.nonVentileEUR > 0.005 && (
           <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "8px 0", borderTop: "1px solid var(--surface2)", flexWrap: "wrap" }}>
             <span style={{ fontSize: 13, color: "var(--muted)" }}>Sans détail de paiement</span>
@@ -13379,8 +13456,43 @@ function VoyagesPage({ data, persist, session, notify }) {
             {fmt(totaux.tresorerie, "EUR")}
           </div>
         </div>
+      </div>
+
+      <div style={{ ...carte, marginBottom: 18, padding: "14px 16px" }}>
+        <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>Qui a encaissé, et qui doit verser</div>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 10 }}>
+          Chaque agent est rattaché à son lieu d’affectation : ce qu’il encaisse à Paris est dans la caisse de
+          Paris, ce qu’il encaisse en Guinée dans celle de Conakry. Seules les espèces sont à verser — le Mobile
+          Money et les virements arrivent directement sur les comptes de l’entreprise.
+        </div>
+        {totaux.encaissements.lignes.length === 0 ? (
+          <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Aucun encaissement sur les colis de ce voyage.</div>
+        ) : totaux.encaissements.lignes.map((l) => {
+          const doitVerser = Object.values(l.aVerser).some((v) => Math.abs(v) >= 0.005);
+          return (
+            <div key={`${l.agent}@${l.pays || "?"}`} style={{ padding: "10px 0", borderTop: "1px solid var(--surface2)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>
+                  {l.agent} <span style={{ fontWeight: 600, color: "var(--muted)" }}>· {l.lieu}</span>
+                </div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{formaterDevises(l.devises)}</div>
+              </div>
+              <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                <span style={{
+                  background: doitVerser ? "var(--warn-bg)" : "var(--ok-bg-soft)", color: doitVerser ? "var(--warn-fg)" : "var(--ok-fg)",
+                  borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700,
+                }}>
+                  {doitVerser ? `Doit verser ${formaterDevises(l.aVerser)}` : "Rien à verser"}
+                </span>
+                {Object.values(l.verse).some((v) => Math.abs(v) >= 0.005) && (
+                  <span style={{ fontSize: 11, color: "var(--muted)", alignSelf: "center" }}>déjà versé {formaterDevises(l.verse)}</span>
+                )}
+              </div>
+            </div>
+          );
+        })}
         <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 10 }}>
-          La répartition Conakry / {villePays} suit la devise réellement encaissée : les francs au comptoir de Conakry, les {devisePays} à celui de {villePays}.
+          « Versé » signifie repris sur un bon de remise en caisse validé — voir la page Caisse.
         </div>
       </div>
 

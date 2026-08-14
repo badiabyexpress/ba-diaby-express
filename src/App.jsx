@@ -4874,10 +4874,11 @@ function CategoriesProduitsPage({ data, persist, session, notify, onBack }) {
   function removeCategory(id) {
     persist({ ...data, categories: categories.filter((c) => c.id !== id) });
   }
+  // Même algorithme que la vraie suggestion à la création/modification d'un colis (devinerCategorie)
+  // — sinon un test "réussi" ici pourrait ne rien détecter en pratique, et inversement.
   function testDetection() {
-    const q = testInput.toLowerCase();
-    const match = categories.find((c) => c.motsCles?.some((k) => q.includes(k.toLowerCase())));
-    setTestResult(match ? match.nom : "Aucune catégorie détectée");
+    const match = devinerCategorie(testInput, categories);
+    setTestResult(match || "Aucune catégorie détectée");
   }
 
   return (
@@ -7500,38 +7501,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
   // Le poids et la quantité ne peuvent pas être négatifs : sans ce contrôle, un colis à -5 kg
   // pouvait être enregistré et faussait ensuite les totaux de poids et les commissions.
   // L'attribut min= du champ ne protège pas contre un collage ou une saisie programmée.
-  /*
-   * Suggestion automatique de la catégorie d'après le nom du produit.
-   *
-   * Chaque catégorie porte des mots-clés, souvent des expressions à plusieurs mots (« Médicaments
-   * liquide 1L », « Chaussure non marque »…). Comparer le nom du produit au mot-clé ENTIER
-   * échouait dès que le produit était décrit plus brièvement que le mot-clé (« Médicament » ne
-   * contient jamais la phrase complète « médicaments liquide 1l ») — la détection ne se
-   * déclenchait quasiment jamais en pratique. La comparaison se fait donc mot par mot : chaque
-   * mot du produit (3 lettres ou plus) est comparé à chaque mot de chaque mot-clé, dans les deux
-   * sens, pour couvrir aussi bien un produit plus court qu'un mot-clé (« médicament » face à
-   * « médicaments ») que l'inverse.
-   *
-   * Tolérance aux fautes de frappe : si aucun mot ne se contient exactement, on tolère quelques
-   * lettres d'écart (distance de Levenshtein) — assez pour rattraper « Meducament » face à
-   * « médicaments » (une lettre changée, une lettre en trop), pas assez pour confondre deux mots
-   * réellement différents. Réservé aux mots d'au moins 4 lettres : sur un mot de 3 lettres,
-   * tolérer un écart ferait correspondre presque n'importe quoi.
-   *
-   * On ne remplace jamais un choix déjà fait — l'agent garde la main.
-   */
-  function deviner(nomProduit) {
-    const motsTexte = pourRecherche(nomProduit).split(/\s+/).filter((m) => m.length >= 3);
-    if (motsTexte.length === 0) return null;
-    const trouvee = (categories || []).find((cat) =>
-      (cat.motsCles || []).some((motCle) =>
-        pourRecherche(motCle).split(/\s+/).filter((m) => m.length >= 3).some((mc) =>
-          motsTexte.some((mt) => mt.includes(mc) || mc.includes(mt) || motsProches(mt, mc))
-        )
-      )
-    );
-    return trouvee ? trouvee.nom : null;
-  }
+  const deviner = (nomProduit) => devinerCategorie(nomProduit, categories);
 
   function updateProduit(id, patch) {
     const propre = { ...patch };
@@ -9904,7 +9874,17 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
     const propre = { ...patch };
     if ("poids" in propre && propre.poids !== "" && Number(propre.poids) < 0) propre.poids = "0";
     if ("quantite" in propre && propre.quantite !== "" && Number(propre.quantite) < 1) propre.quantite = "1";
-    setProduits((list) => list.map((p) => (p.id === id ? { ...p, ...propre } : p)));
+    setProduits((list) => list.map((p) => {
+      if (p.id !== id) return p;
+      const maj = { ...p, ...propre };
+      // Même suggestion automatique qu'à la création — seulement si l'agent n'a pas déjà choisi
+      // de catégorie pour cet article, pour ne jamais écraser un choix fait à la main.
+      if ("nom" in propre && !p.categorie) {
+        const suggeree = devinerCategorie(propre.nom, categories);
+        if (suggeree) maj.categorie = suggeree;
+      }
+      return maj;
+    }));
   }
   function addProduit() { setProduits((list) => [...list, emptyProduit()]); }
   function removeProduit(id) { setProduits((list) => list.filter((p) => p.id !== id)); }
@@ -10983,6 +10963,37 @@ function motsProches(a, b) {
   if (a.length < 4 || b.length < 4) return false;
   const seuil = Math.max(a.length, b.length) <= 6 ? 1 : 2;
   return distanceLevenshtein(a, b) <= seuil;
+}
+
+/**
+ * Suggestion automatique de la catégorie d'après le nom du produit.
+ *
+ * Chaque catégorie porte des mots-clés, souvent des expressions à plusieurs mots (« Médicaments
+ * liquide 1L », « Chaussure non marque »…). Comparer le nom du produit au mot-clé ENTIER échouait
+ * dès que le produit était décrit plus brièvement que le mot-clé (« Médicament » ne contient
+ * jamais la phrase complète « médicaments liquide 1l ») — la détection ne se déclenchait presque
+ * jamais en pratique. La comparaison se fait donc mot par mot : chaque mot du produit (3 lettres
+ * ou plus) est comparé à chaque mot de chaque mot-clé, dans les deux sens, pour couvrir aussi bien
+ * un produit plus court qu'un mot-clé (« médicament » face à « médicaments ») que l'inverse.
+ *
+ * Tolérance aux fautes de frappe : si aucun mot ne se contient exactement, on tolère quelques
+ * lettres d'écart (distance de Levenshtein) — assez pour rattraper « Meducament » face à
+ * « médicaments », pas assez pour confondre deux mots réellement différents.
+ *
+ * Utilisée à la fois à la création (ColisForm) et à la modification (EditColisForm) d'un colis —
+ * ne remplace jamais un choix déjà fait, l'agent garde la main.
+ */
+function devinerCategorie(nomProduit, categories) {
+  const motsTexte = pourRecherche(nomProduit).split(/\s+/).filter((m) => m.length >= 3);
+  if (motsTexte.length === 0) return null;
+  const trouvee = (categories || []).find((cat) =>
+    (cat.motsCles || []).some((motCle) =>
+      pourRecherche(motCle).split(/\s+/).filter((m) => m.length >= 3).some((mc) =>
+        motsTexte.some((mt) => mt.includes(mc) || mc.includes(mt) || motsProches(mt, mc))
+      )
+    )
+  );
+  return trouvee ? trouvee.nom : null;
 }
 
 function normaliserTelephone(tel) {

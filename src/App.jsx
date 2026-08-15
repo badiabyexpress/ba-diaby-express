@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue, memo } from "react";
-import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, ChevronDown, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell, SlidersHorizontal, Copy, MoreHorizontal } from "lucide-react";
+import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, ChevronDown, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell, SlidersHorizontal, Copy, MoreHorizontal, Wallet } from "lucide-react";
 import { storage, supabase, subscribeToChanges, flushOutbox, pendingSyncCount } from "./lib/storage.js";
 
 /* ---------- design tokens ----------
@@ -46,6 +46,15 @@ const COUNTRIES = [
   { code: "SN", name: "Sénégal", city: "Dakar", air: 8, sea: 4, delayAir: 2, delaySea: 10, currency: "XOF" },
 ];
 const CURRENCIES = { EUR: 1, USD: 1.08, CAD: 1.47, GNF: 9500, MAD: 10.9, XOF: 655.957, GBP: 0.86 };
+
+/**
+ * Modes d'encaissement proposés à l'agent.
+ * ESPECES est traité à part partout où l'on compte la caisse : c'est le seul mode où l'argent
+ * passe physiquement par les mains de l'agent et doit ensuite être remis. Le Mobile Money, la
+ * carte et le virement arrivent directement sur les comptes de l'entreprise.
+ */
+const MODES_PAIEMENT = ["Espèces", "Orange Money", "MTN Money", "Carte bancaire", "Virement"];
+const MODE_ESPECES = "Espèces";
 
 /** Logo officiel Ba-Diaby Express — utilisé par défaut dans la barre latérale et sur tous les documents PDF (facture, reçu, bordereau, étiquette, bon de sortie). */
 const DEFAULT_LOGO = "data:image/png;base64,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";
@@ -1459,6 +1468,8 @@ function App() {
     { key: "clients", label: t.clients, icon: Users, show: perm("clients.consulter") },
     { key: "bordereaux", label: t.bordereaux, icon: FileStack, show: perm("bordereaux.consulter") },
     { key: "paiements", label: t.paiements, icon: Receipt, show: perm("factures.consulter"), badge: declarationsEnAttente },
+    { key: "caisse", label: "Caisse", icon: Wallet, show: perm("paiements.voir_propres") || perm("factures.consulter") || perm("compta.consulter") },
+    { key: "voyages", label: "Voyages", icon: Plane, show: perm("compta.consulter") },
     { key: "comptabilite", label: "Comptabilité", icon: DollarSign, show: perm("compta.consulter") },
     { key: "ia", label: t.ia, icon: Sparkles, show: perm("ia.utiliser") },
     { key: "admin", label: t.admin, icon: Settings, show: perm("config.acceder") },
@@ -1576,6 +1587,8 @@ function App() {
             {view === "clients" && <Clients data={data} />}
             {view === "bordereaux" && <BordereauxPage data={data} persist={persist} session={session} notify={notify} />}
             {view === "paiements" && <PaiementsPage data={data} notify={notify} />}
+            {view === "caisse" && <CaissePage data={data} persist={persist} session={session} notify={notify} />}
+            {view === "voyages" && perm("compta.consulter") && <VoyagesPage data={data} persist={persist} session={session} notify={notify} />}
             {view === "comptabilite" && <ComptabilitePage data={data} persist={persist} session={session} notify={notify} />}
             {view === "ia" && <AiAssistant data={data} />}
             {view === "admin" && perm("config.acceder") && <ConfigurationHub key={adminResetKey} data={data} persist={persist} session={session} notify={notify} onNavigateApp={setView} offline={offline} />}
@@ -4273,11 +4286,17 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
 }
 
 
-function ConfigPageHeader({ title, desc, onBack }) {
+/**
+ * En-tête d'une sous-page avec son bouton retour.
+ *
+ * `retour` nomme l'écran vers lequel on revient : il valait toujours « Configuration », y compris
+ * depuis la création d'un bordereau ou une fiche de voyage, où ce n'est pas là qu'on retourne.
+ */
+function ConfigPageHeader({ title, desc, onBack, retour = "Configuration" }) {
   return (
     <div style={{ display: "flex", alignItems: "flex-start", gap: 16, marginBottom: 24 }}>
       <button onClick={onBack} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 14px", color: "var(--text)", fontSize: 13.5, fontWeight: 600, cursor: "pointer", flexShrink: 0, marginTop: 2 }}>
-        <ChevronLeft size={15} /> Configuration
+        <ChevronLeft size={15} /> {retour}
       </button>
       <div>
         <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: 0 }}>{title}</h1>
@@ -6137,6 +6156,8 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
    * la comptabilité et les reçus restent exacts colis par colis.
    */
   function encaisserGroupe(trackings, montantEUR, mode, montantSaisi, deviseSaisie, details) {
+    const { percuPar, ...detailsPaiement } = details || {};
+    const receveur = receveurPaiement(session, data.users, percuPar);
     const cibles = data.colis
       .filter((c) => trackings.includes(c.tracking))
       .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
@@ -6167,12 +6188,15 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
         id: `pay${Date.now()}-${c.tracking}`, montant: part,
         montantSaisi: +(part * (LIVE_RATES[deviseSaisie] || CURRENCIES[deviseSaisie] || 1)).toFixed(2),
         deviseSaisie, mode, date: horodatage,
-        par: `${session.prenom} ${session.nom}`.trim() || session.identifiant,
-        ...(details || {}), groupe: true,
+        // Qui a reçu l'argent (pas forcément qui saisit) et où il se trouve : sans cette marque, la
+        // caisse réclamait la somme à la mauvaise personne, et le lieu se devinait d'après la devise
+        // — un euro reçu à Conakry passait pour un euro reçu à Paris.
+        ...receveur,
+        ...detailsPaiement, groupe: true,
       };
       return { ...c, paye, reste, paiements: [...(c.paiements || []), paiement] };
     }) };
-    next.activityLog = logActivity("Encaissement groupé", `${nbColis} colis — ${montantSaisi} ${deviseSaisie} (${mode})`);
+    next.activityLog = logActivity("Encaissement groupé", `${nbColis} colis — ${montantSaisi} ${deviseSaisie} (${mode})${detailsPaiement?.reference ? ` réf. ${detailsPaiement.reference}` : ""}${receveur.saisiPar ? ` — argent reçu par ${receveur.par}` : ""}`);
     persist(next);
     notify(ajuste
       ? `Réparti sur ${nbColis} colis — limité au solde dû, pensez à rendre la monnaie`
@@ -6180,6 +6204,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
   }
 
   function encaisser(tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId) {
+    const receveur = receveurPaiement(session, data.users, details?.percuPar);
     // Un encaissement ne peut jamais être négatif, ni dépasser le montant restant dû : sinon une
     // faute de frappe (un zéro de trop) gonflerait le chiffre d’affaires, car la comptabilité
     // additionne le champ « payé ». Si le client remet davantage, la différence est de la monnaie
@@ -6208,13 +6233,15 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
       if (c.tracking !== tracking) return c;
       const paye = +(c.paye + applique).toFixed(2);
       const reste = Math.max(+(c.prix - paye).toFixed(2), 0);
-      const paiement = { id: `pay${Date.now()}`, montant: applique, montantSaisi, deviseSaisie, mode, date: new Date().toISOString(), par: `${session.prenom} ${session.nom}`, reference: details?.reference || "", numeroPayeur: details?.numeroPayeur || "", numeroReceveur: details?.numeroReceveur || "" };
+      const paiement = { id: `pay${Date.now()}`, montant: applique, montantSaisi, deviseSaisie, mode, date: new Date().toISOString(),
+        ...receveur,
+        reference: details?.reference || "", numeroPayeur: details?.numeroPayeur || "", numeroReceveur: details?.numeroReceveur || "" };
       const declarationsPaiement = declarationId
         ? (c.declarationsPaiement || []).map((d) => (d.id === declarationId ? { ...d, statut: "Confirmé" } : d))
         : c.declarationsPaiement;
       return { ...c, paye, reste, paiements: [...(c.paiements || []), paiement], declarationsPaiement };
     }) };
-    next.activityLog = logActivity("Paiement encaissé", `${tracking} — ${montantSaisi} ${deviseSaisie} (${mode})${details?.reference ? ` réf. ${details.reference}` : ""}`);
+    next.activityLog = logActivity("Paiement encaissé", `${tracking} — ${montantSaisi} ${deviseSaisie} (${mode})${details?.reference ? ` réf. ${details.reference}` : ""}${receveur.saisiPar ? ` — argent reçu par ${receveur.par}` : ""}`);
     persist(next);
     notify(ajuste ? `Encaissement limité au solde dû (${fmt(applique, "EUR")}) — pensez à rendre la monnaie` : "Paiement encaissé");
     const colisPaye = next.colis.find((c) => c.tracking === tracking);
@@ -6473,7 +6500,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
           <button onClick={() => imprimerLot("facture")} disabled={impressionLot} style={{ background: "var(--surface2)", color: "#fff", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>{impressionLot ? "Génération…" : "Factures A4"}</button>
         </div>
       )}
-      {showForm && <ColisForm remiseVolumeConfig={data.remiseVolume} repertoire={data.repertoire} onClose={() => setShowForm(false)} onSave={addColis} existingColis={data.colis} categories={data.categories || []} session={session} sites={data.sites} partenaires={(data.users || []).filter((u) => u.role === "Partenaire")} clientAccounts={data.clientAccounts || []} preAlertes={data.preAlertes || []} notify={notify} />}
+      {showForm && <ColisForm remiseVolumeConfig={data.remiseVolume} repertoire={data.repertoire} paymentConfig={data.paymentConfig} onClose={() => setShowForm(false)} onSave={addColis} existingColis={data.colis} categories={data.categories || []} session={session} sites={data.sites} partenaires={(data.users || []).filter((u) => u.role === "Partenaire")} clientAccounts={data.clientAccounts || []} preAlertes={data.preAlertes || []} notify={notify} />}
       {showAi && <AiColisModal onClose={() => setShowAi(false)} onCreate={addColis} data={data} session={session} />}
       {showImport && <ImportExcelModal onClose={() => setShowImport(false)} onImportMany={importerColisMany} data={data} session={session} />}
       {remiseEnCours && <RemiseColisModal colis={remiseEnCours} session={session}
@@ -6484,7 +6511,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
           notify?.("Code renvoyé au client");
         }}
         onClose={() => setRemiseEnCours(null)} />}
-      {showEncaisseGroupe && <EncaisserGroupeModal data={data} onEncaisser={encaisserGroupe} onClose={() => setShowEncaisseGroupe(false)} />}
+      {showEncaisseGroupe && <EncaisserGroupeModal data={data} session={session} onEncaisser={encaisserGroupe} onClose={() => setShowEncaisseGroupe(false)} />}
       {showReception && <ReceptionBordereauModal onClose={() => setShowReception(false)} data={data} persist={persist} notify={notify} session={session} />}
       {selected && <ColisDetail colis={selected} onClose={() => setSelected(null)} onAdvance={() => advance(selected.tracking)} onDelete={() => remove(selected.tracking)} onCancel={(motif) => annuler(selected.tracking, motif)} onRefuser={(motif) => refuser(selected.tracking, motif)} onDeclarerLitige={(t, d) => declarerLitige(selected.tracking, t, d)} onResoudreLitige={(r, i) => resoudreLitige(selected.tracking, r, i)} onMajRetour={(statutRetour) => majRetour(selected.tracking, statutRetour)} onUpdate={(patch) => updateColis(selected.tracking, patch)} onEncaisser={(montant, mode, montantSaisi, deviseSaisie, details, declarationId) => encaisser(selected.tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId)} canManage={!isChauffeur} isAdmin={session.role === "Administrateur"} isChauffeur={isChauffeur} data={data} session={session} notify={notify} />}
     </div>
@@ -6720,7 +6747,7 @@ function BordereauCreation({ data, session, onCancel, onCreate }) {
 
   return (
     <div>
-      <ConfigPageHeader title="Nouveau bordereau" desc="Sélectionnez la route puis choisissez précisément les colis à expédier." onBack={onCancel} />
+      <ConfigPageHeader title="Nouveau bordereau" desc="Sélectionnez la route puis choisissez précisément les colis à expédier." onBack={onCancel} retour="Bordereaux" />
       <div style={{ display: "flex", gap: 14, marginBottom: 18, flexWrap: "wrap" }}>
         <div style={{ width: 260 }}>
           <Field label="Pays"><select value={pays} onChange={(e) => { setPays(e.target.value); setSelectedTrackings([]); }} style={inputStyle}>{COUNTRIES.filter((c) => c.code !== "GN").map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code]} {c.name}</option>)}</select></Field>
@@ -7223,7 +7250,7 @@ function effacerBrouillonColis() {
   try { localStorage.removeItem(CLE_BROUILLON_COLIS); } catch (e) { /* pas grave */ }
 }
 
-function ColisForm({ onClose, onSave, existingColis, categories, session, sites, partenaires, clientAccounts, preAlertes, remiseVolumeConfig, repertoire, notify }) {
+function ColisForm({ onClose, onSave, existingColis, categories, session, sites, partenaires, clientAccounts, preAlertes, remiseVolumeConfig, repertoire, paymentConfig, notify }) {
   const availableCountries = allowedCountries(session);
   const [brouillon] = useState(() => lireBrouillonColis());
   const clientDirectory = useMemo(() => buildClientDirectory(existingColis || [], repertoire), [existingColis, repertoire]);
@@ -7272,6 +7299,18 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
     const devise = COUNTRIES.find((c) => c.code === expPays)?.currency;
     if (devise) setPayeDevise(devise);
   }, [expPays]);
+  /*
+   * Comment l'acompte est réglé au comptoir. Il était enregistré d'office en espèces : un client
+   * qui payait par Orange Money ou MTN se retrouvait dans la caisse de l'agent comme s'il lui
+   * avait remis des billets, et la référence de la transaction — la seule preuve du virement —
+   * n'était nulle part. L'agent choisit donc le mode, et saisit la référence pour tout paiement
+   * qui ne passe pas par ses mains.
+   */
+  const [payeMode, setPayeMode] = useState(() => brouillon?.payeMode ?? MODE_ESPECES);
+  const [payeReference, setPayeReference] = useState(() => brouillon?.payeReference ?? "");
+  const [payeNumeroPayeur, setPayeNumeroPayeur] = useState(() => brouillon?.payeNumeroPayeur ?? "");
+  const [payeNumeroReceveur, setPayeNumeroReceveur] = useState(() => brouillon?.payeNumeroReceveur ?? "");
+  const payeAvecReference = payeMode === "Orange Money" || payeMode === "MTN Money" || payeMode === "Virement";
   const [rabaisMontant, setRabaisMontant] = useState(() => brouillon?.rabaisMontant ?? "0");
   const [rabaisDevise, setRabaisDevise] = useState(() => brouillon?.rabaisDevise ?? "GNF");
   /*
@@ -7601,14 +7640,16 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
       ecrireBrouillonColis({
         step, expPrenom, expNom, expTelephone, expEmail, expAdresse, expPays,
         destPrenom, destNom, destTelephone, destEmail, destAdresse, destVille, destCodePostal, destPays,
-        mode, produits, paye, payeDevise, rabaisMontant, rabaisDevise, agence, partenaireId, provenance,
+        mode, produits, paye, payeDevise, payeMode, payeReference, payeNumeroPayeur, payeNumeroReceveur,
+        rabaisMontant, rabaisDevise, agence, partenaireId, provenance,
       });
     }, 250);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [saisieEnCours, step, expPrenom, expNom, expTelephone, expEmail, expAdresse, expPays,
       destPrenom, destNom, destTelephone, destEmail, destAdresse, destVille, destCodePostal, destPays,
-      mode, produits, paye, payeDevise, rabaisMontant, rabaisDevise, agence, partenaireId, provenance]);
+      mode, produits, paye, payeDevise, payeMode, payeReference, payeNumeroPayeur, payeNumeroReceveur,
+      rabaisMontant, rabaisDevise, agence, partenaireId, provenance]);
 
   /** Fermeture volontaire (bouton "Annuler", croix, clic à côté, Échap) : le brouillon ne doit
    * pas reproposer une saisie que l'agent vient explicitement de refuser. */
@@ -7630,7 +7671,19 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
       pays, direction, mode, produits, poids: +poidsTotal.toFixed(2), volume: 0, valeurDeclaree, site: agence, partenaireId: partenaireId || null, clientAccountId: clientAccountId || null, provenance: provenance || null, preAlerteRapprochee: preAlerteRapprochee || null,
       agentCreation: session ? `${session.prenom} ${session.nom}`.trim() || session.identifiant : "",
       prixBrut, discountLoyalty, rabaisMontant: Number(rabaisMontant) || 0, rabaisDevise, rabaisEUR, prix, paye: payeNum, reste, photos,
-      paiements: payeNum > 0 ? [{ id: `pay${Date.now()}`, montant: payeNum, mode: "Espèces", date: new Date().toISOString(), par: "Enregistrement initial" }] : [],
+      // L'acompte pris au comptoir est un encaissement comme un autre : il est nommé (l'agent qui
+      // enregistre le colis), garde sa devise de saisie, son mode et la référence de la transaction.
+      // Sans cela cet argent — souvent la plus grosse part de la journée — n'apparaissait dans
+      // aucune caisse, comptait comme des espèces même réglé par Mobile Money, et le seul justificatif
+      // d'un paiement Orange Money ou MTN était perdu.
+      paiements: payeNum > 0 ? [{
+        id: `pay${Date.now()}`, montant: payeNum, montantSaisi: Number(paye) || 0, deviseSaisie: payeDevise,
+        mode: payeMode, date: new Date().toISOString(),
+        par: session ? (`${session.prenom} ${session.nom}`.trim() || session.identifiant) : "Enregistrement initial",
+        parPays: session?.paysOperation || expPays || "GN", parSite: session?.agence || agence || "",
+        ...(payeAvecReference ? { reference: payeReference.trim(), numeroPayeur: payeNumeroPayeur.trim(), numeroReceveur: payeNumeroReceveur.trim() } : {}),
+        acompte: true,
+      }] : [],
       notesInternes: "",
       status: "Enregistré", historique: [{ status: "Enregistré", date: new Date().toISOString() }],
       createdAt: new Date().toISOString(), pod: null, signature: null, driverLoc: null,
@@ -7839,7 +7892,31 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
                   </div>
                 </div>
               </Field>
+              {payeNum > 0 && (
+                <Field label="Payé comment ?">
+                  <select value={payeMode} onChange={(e) => {
+                    setPayeMode(e.target.value);
+                    // Le numéro qui reçoit est celui de l'entreprise (Configuration → Paiement) :
+                    // le pré-remplir évite de le retaper, et de le retaper de travers.
+                    if (e.target.value === "Orange Money") setPayeNumeroReceveur(paymentConfig?.orangeMoney || "");
+                    else if (e.target.value === "MTN Money") setPayeNumeroReceveur(paymentConfig?.mtnMoney || "");
+                    else setPayeNumeroReceveur("");
+                  }} style={inputStyle}>
+                    {MODES_PAIEMENT.map((m) => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                </Field>
+              )}
             </div>
+            {payeNum > 0 && payeAvecReference && (
+              <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: "12px 14px", marginBottom: 14 }}>
+                <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 700, marginBottom: 8 }}>DÉTAILS DE LA TRANSACTION</div>
+                <Field label="Référence de la transaction"><input value={payeReference} onChange={(e) => setPayeReference(e.target.value)} style={inputStyle} placeholder="ex: MP240726.1234.A56789" /></Field>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 10 }}>
+                  <Field label="Numéro qui a payé"><input value={payeNumeroPayeur} onChange={(e) => setPayeNumeroPayeur(e.target.value)} style={inputStyle} placeholder="+224 6XX XXX XXX" /></Field>
+                  <Field label="Numéro qui a reçu"><input value={payeNumeroReceveur} onChange={(e) => setPayeNumeroReceveur(e.target.value)} style={inputStyle} placeholder="+224 6XX XXX XXX" /></Field>
+                </div>
+              </div>
+            )}
             {discountLoyalty > 0 && <div style={{ fontSize: 12, color: "var(--ok-fg)", marginBottom: 10 }}>Remise fidélité automatique : -{discountLoyalty}% ({previousCount} envois précédents)</div>}
             {discountVolume > 0 && <div style={{ fontSize: 12, color: "var(--ok-fg)", marginBottom: 10 }}>Remise volume : -{discountVolume}% ({poidsTotal.toFixed(1)} kg)</div>}
             <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px" }}>
@@ -9691,7 +9768,7 @@ function RemiseColisModal({ colis, session, onConfirmer, onClose, onRenvoyerCode
   );
 }
 
-function EncaisserGroupeModal({ data, onEncaisser, onClose }) {
+function EncaisserGroupeModal({ data, session, onEncaisser, onClose }) {
   const impayes = (data.colis || []).filter((c) => c.reste > 0.005 && !["Annulé", "Refusé"].includes(c.status));
   const parClient = {};
   impayes.forEach((c) => {
@@ -9708,7 +9785,17 @@ function EncaisserGroupeModal({ data, onEncaisser, onClose }) {
   const [selection, setSelection] = useState([]);
   const [montant, setMontant] = useState("");
   const [devise, setDevise] = useState("GNF");
-  const [mode, setMode] = useState("Espèces");
+  const [mode, setMode] = useState(MODE_ESPECES);
+  // Un règlement groupé passe très souvent par Orange Money ou MTN : sa référence est le seul
+  // justificatif du virement. Elle était demandée sur l'encaissement d'un colis isolé, mais pas
+  // ici — l'argent rentrait sans aucune trace de la transaction.
+  const [reference, setReference] = useState("");
+  const [numeroPayeur, setNumeroPayeur] = useState("");
+  const [numeroReceveur, setNumeroReceveur] = useState("");
+  const [percuPar, setPercuPar] = useState("");
+  const [percuAutre, setPercuAutre] = useState("");
+  const avecReference = mode === "Orange Money" || mode === "MTN Money" || mode === "Virement";
+  const cfgPaiement = data.paymentConfig || {};
 
   const client = clients.find((c) => c.cle === clientCle);
   const colisClient = client ? client.colis : [];
@@ -9775,11 +9862,36 @@ function EncaisserGroupeModal({ data, onEncaisser, onClose }) {
               </select>
             </Field>
             <Field label="Mode de paiement">
-              <select value={mode} onChange={(e) => setMode(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }}>
-                {["Espèces", "Orange Money", "MTN Money", "Carte bancaire", "Virement"].map((m) => <option key={m} value={m}>{m}</option>)}
+              <select value={mode} onChange={(e) => {
+                setMode(e.target.value);
+                if (e.target.value === "Orange Money") setNumeroReceveur(cfgPaiement.orangeMoney || "");
+                else if (e.target.value === "MTN Money") setNumeroReceveur(cfgPaiement.mtnMoney || "");
+                else setNumeroReceveur("");
+              }} style={{ ...inputStyle, marginBottom: 0 }}>
+                {MODES_PAIEMENT.map((m) => <option key={m} value={m}>{m}</option>)}
               </select>
             </Field>
           </div>
+
+          <div style={{ marginTop: 12 }}>
+            <ChampPercuPar
+              users={data.users} session={session}
+              valeur={percuPar} onChange={setPercuPar}
+              autre={percuAutre} onChangeAutre={setPercuAutre}
+              client={client?.nom}
+            />
+          </div>
+
+          {avecReference && (
+            <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "12px 14px", marginTop: 12 }}>
+              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 700, marginBottom: 8 }}>DÉTAILS DE LA TRANSACTION</div>
+              <Field label="Référence de la transaction"><input value={reference} onChange={(e) => setReference(e.target.value)} style={inputStyle} placeholder="ex: MP240726.1234.A56789" /></Field>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
+                <Field label="Numéro qui a payé"><input value={numeroPayeur} onChange={(e) => setNumeroPayeur(e.target.value)} style={inputStyle} placeholder="+224 6XX XXX XXX" /></Field>
+                <Field label="Numéro qui a reçu"><input value={numeroReceveur} onChange={(e) => setNumeroReceveur(e.target.value)} style={inputStyle} placeholder="+224 6XX XXX XXX" /></Field>
+              </div>
+            </div>
+          )}
 
           {montantEUR > duSelection + 0.005 && (
             <div style={{ fontSize: 12, color: "var(--warn-fg)", marginTop: 10 }}>
@@ -9788,7 +9900,14 @@ function EncaisserGroupeModal({ data, onEncaisser, onClose }) {
           )}
 
           <button
-            onClick={() => { onEncaisser(coches.map((c) => c.tracking), montantEUR, mode, Number(montant) || 0, devise); onClose(); }}
+            onClick={() => {
+              const details = {
+                ...(avecReference ? { reference: reference.trim(), numeroPayeur: numeroPayeur.trim(), numeroReceveur: numeroReceveur.trim() } : {}),
+                percuPar: percuPar === "__autre" ? percuAutre.trim() : percuPar,
+              };
+              onEncaisser(coches.map((c) => c.tracking), montantEUR, mode, Number(montant) || 0, devise, details);
+              onClose();
+            }}
             disabled={!(montantEUR > 0)}
             style={{ width: "100%", marginTop: 16, background: montantEUR > 0 ? "var(--brand-solid)" : "var(--surface2)",
                      color: montantEUR > 0 ? "#fff" : "var(--muted)", border: "none", borderRadius: 8,
@@ -9824,6 +9943,26 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   const [poids, setPoids] = useState(String(colis.poids));
   const [volume, setVolume] = useState(String(colis.volume || ""));
   const [paye, setPaye] = useState(String(colis.paye || ""));
+  /*
+   * Le montant encaissé n'est plus un simple champ libre.
+   *
+   * Il l'était : on retapait un total, et le colis se retrouvait avec un « payé » qui ne
+   * correspondait à aucune ligne de son historique de paiements — donc sans mode, sans référence,
+   * sans agent, et invisible dans la caisse. Toute correction écrit maintenant une vraie ligne :
+   * un encaissement complémentaire quand le total monte, une correction motivée quand il baisse.
+   */
+  const paiementsExistants = colis.paiements || [];
+  const dernierPaiement = [...paiementsExistants].reverse().find((p) => (Number(p.montant) || 0) > 0) || null;
+  const [correctionOuverte, setCorrectionOuverte] = useState(false);
+  // Par défaut on repart du dernier paiement : une correction annule presque toujours celui-là,
+  // et un complément est le plus souvent réglé comme le précédent. L'agent peut changer les deux.
+  const [correctionMode, setCorrectionMode] = useState(dernierPaiement?.mode || MODE_ESPECES);
+  const [correctionDevise, setCorrectionDevise] = useState(dernierPaiement?.deviseSaisie || expCurrency || "GNF");
+  const [correctionReference, setCorrectionReference] = useState("");
+  const [correctionNumeroPayeur, setCorrectionNumeroPayeur] = useState("");
+  const [correctionNumeroReceveur, setCorrectionNumeroReceveur] = useState("");
+  const [correctionMotif, setCorrectionMotif] = useState("");
+  const correctionAvecReference = correctionMode === "Orange Money" || correctionMode === "MTN Money" || correctionMode === "Virement";
   const [rabaisMontant, setRabaisMontant] = useState(String(colis.rabaisMontant || 0));
   const [rabaisDevise, setRabaisDevise] = useState(colis.rabaisDevise || "GNF");
   // Contenu du colis (articles, prix). N'existe que pour les colis créés produit par produit —
@@ -9869,6 +10008,45 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   const prix = Math.max(+(prixApresFidelite - rabaisEUR).toFixed(2), 0);
   const payeNum = Number(paye) || 0;
   const reste = Math.max(prix - payeNum, 0);
+  /** Écart entre le total saisi et le total réellement encaissé jusqu'ici, en équivalent euro. */
+  const ecartPaye = +(payeNum - (Number(colis.paye) || 0)).toFixed(2);
+
+  /**
+   * Traduit la correction du total en une ligne de l'historique des paiements.
+   *
+   * À la hausse c'est un encaissement de plus : l'agent qui corrige l'a reçu, avec son mode et sa
+   * référence. À la baisse c'est une annulation partielle : elle est portée au compte de l'agent
+   * du dernier paiement — c'est bien sa caisse qui a été créditée à tort — tout en gardant le nom
+   * de la personne qui corrige et son motif.
+   */
+  function ligneAjustement() {
+    if (Math.abs(ecartPaye) < 0.005) return null;
+    const parCourant = session ? (`${session.prenom} ${session.nom}`.trim() || session.identifiant) : "";
+    const horodatage = new Date().toISOString();
+    if (ecartPaye > 0) {
+      const taux = LIVE_RATES[correctionDevise] || CURRENCIES[correctionDevise] || 1;
+      return {
+        id: `pay${Date.now()}`, montant: ecartPaye, montantSaisi: +(ecartPaye * taux).toFixed(2),
+        deviseSaisie: correctionDevise, mode: correctionMode, date: horodatage, par: parCourant,
+        parPays: session?.paysOperation || "GN", parSite: session?.agence || "",
+        ...(correctionAvecReference ? {
+          reference: correctionReference.trim(),
+          numeroPayeur: correctionNumeroPayeur.trim(),
+          numeroReceveur: correctionNumeroReceveur.trim(),
+        } : {}),
+      };
+    }
+    const taux = LIVE_RATES[correctionDevise] || CURRENCIES[correctionDevise] || 1;
+    return {
+      id: `pay${Date.now()}`, montant: ecartPaye, montantSaisi: +(ecartPaye * taux).toFixed(2),
+      deviseSaisie: correctionDevise, mode: correctionMode, date: horodatage,
+      par: dernierPaiement?.par || parCourant,
+      // La correction retire l'argent de la caisse où il était entré, pas de celle de qui corrige.
+      parPays: dernierPaiement?.parPays || session?.paysOperation || "GN",
+      parSite: dernierPaiement?.parSite || session?.agence || "",
+      correction: true, motif: correctionMotif.trim(), parCorrection: parCourant,
+    };
+  }
 
   function updateProduit(id, patch) {
     const propre = { ...patch };
@@ -9901,6 +10079,12 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
     // Un colis de 0 kg n'existe pas : on refuse l'enregistrement plutôt que de créer une
     // ligne qui faussera ensuite les totaux de poids, le chiffre d'affaires et les commissions.
     if (!(Number(poids) > 0)) { setErr("Le poids doit être supérieur à 0 kg."); return; }
+    // Mêmes règles que sur l'encaissement d'un colis : on n'enregistre jamais plus que ce qui est
+    // dû (le surplus est de la monnaie à rendre, pas une recette), et une somme retirée de la
+    // caisse d'un agent doit être justifiée.
+    if (ecartPaye > 0 && payeNum > prix + 0.005) { setErr("Le montant encaissé ne peut pas dépasser le total à payer."); return; }
+    if (ecartPaye < 0 && !correctionMotif.trim()) { setErr("Indiquez le motif de la correction du montant encaissé."); return; }
+    const ajustement = ligneAjustement();
     onSave({
       expediteur, expediteurTelephone, expediteurEmail, expediteurAdresse,
       destinataire, telephone, destinataireEmail, destinataireAdresse, destinataireVille, destinataireCodePostal,
@@ -9909,6 +10093,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
       poids: Number(poids) || 0, volume: Number(volume) || 0,
       produits, valeurDeclaree: produits.length ? valeurProduits : (colis.valeurDeclaree || 0),
       prixBrut, discountLoyalty, rabaisMontant: Number(rabaisMontant) || 0, rabaisDevise, rabaisEUR, prix, paye: payeNum, reste,
+      ...(ajustement ? { paiements: [...paiementsExistants, ajustement] } : {}),
     });
   }
 
@@ -9919,6 +10104,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
       expediteurEmail !== (colis.expediteurEmail || "") || expediteurAdresse !== (colis.expediteurAdresse || "") ||
       destinataireEmail !== (colis.destinataireEmail || "") || destinataireAdresse !== (colis.destinataireAdresse || "") ||
       destinataireVille !== (colis.destinataireVille || "") || destinataireCodePostal !== (colis.destinataireCodePostal || "") ||
+      Math.abs(ecartPaye) >= 0.005 ||
       JSON.stringify(produits) !== JSON.stringify(colis.produits || [])
     }>
       <form onSubmit={submit} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14 }}>
@@ -10012,7 +10198,74 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
             {Object.keys(CURRENCIES).map((c) => <option key={c} value={c}>{c}</option>)}
           </select>
         </Field>
-        <Field label="Montant payé (EUR)"><input value={paye} onChange={(e) => setPaye(e.target.value)} style={inputStyle} /></Field>
+        <div style={{ gridColumn: "1 / -1" }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: "var(--muted)", marginBottom: 6 }}>Montant encaissé</div>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px" }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{fmt(Number(colis.paye) || 0, "EUR")}</div>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                {paiementsExistants.length > 0
+                  ? `${paiementsExistants.length} ligne${paiementsExistants.length > 1 ? "s" : ""} dans l’historique${dernierPaiement?.par ? ` · dernier encaissé par ${dernierPaiement.par}` : ""}`
+                  : "Aucun paiement enregistré sur ce colis"}
+              </div>
+            </div>
+            {!correctionOuverte && (
+              <button type="button" onClick={() => setCorrectionOuverte(true)} style={{ background: "var(--surface)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, color: "var(--text)", cursor: "pointer" }}>
+                Corriger
+              </button>
+            )}
+          </div>
+          {!correctionOuverte && (
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6 }}>
+              Pour encaisser normalement, utilisez « Encaisser » sur la fiche du colis. Cette correction est réservée aux erreurs de saisie.
+            </div>
+          )}
+          {correctionOuverte && (
+            <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "12px 14px", marginTop: 10 }}>
+              <Field label="Nouveau total encaissé (EUR)">
+                <input type="number" step="0.01" min="0" value={paye} onChange={(e) => setPaye(e.target.value)} style={inputStyle} autoFocus />
+              </Field>
+              {Math.abs(ecartPaye) >= 0.005 && (
+                <>
+                  <div style={{ fontSize: 12, color: ecartPaye > 0 ? "var(--ok-fg)" : "var(--warn-fg)", fontWeight: 600, marginBottom: 10 }}>
+                    {ecartPaye > 0
+                      ? `Encaissement complémentaire de ${fmt(ecartPaye, "EUR")} — enregistré à votre nom.`
+                      : `Correction de ${fmt(ecartPaye, "EUR")}${dernierPaiement?.par ? ` — retirée de la caisse de ${dernierPaiement.par}` : ""}.`}
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+                    <Field label={ecartPaye > 0 ? "Mode de paiement" : "Mode corrigé"}>
+                      <select value={correctionMode} onChange={(e) => setCorrectionMode(e.target.value)} style={inputStyle}>
+                        {MODES_PAIEMENT.map((m) => <option key={m} value={m}>{m}</option>)}
+                      </select>
+                    </Field>
+                    <Field label={ecartPaye > 0 ? "Devise reçue" : "Devise corrigée"}>
+                      <select value={correctionDevise} onChange={(e) => setCorrectionDevise(e.target.value)} style={inputStyle}>
+                        {Object.keys(CURRENCIES).map((d) => <option key={d} value={d}>{d}</option>)}
+                      </select>
+                    </Field>
+                  </div>
+                  {ecartPaye > 0 && correctionAvecReference && (
+                    <>
+                      <Field label="Référence de la transaction"><input value={correctionReference} onChange={(e) => setCorrectionReference(e.target.value)} style={inputStyle} placeholder="ex: MP240726.1234.A56789" /></Field>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+                        <Field label="Numéro qui a payé"><input value={correctionNumeroPayeur} onChange={(e) => setCorrectionNumeroPayeur(e.target.value)} style={inputStyle} placeholder="+224 6XX XXX XXX" /></Field>
+                        <Field label="Numéro qui a reçu"><input value={correctionNumeroReceveur} onChange={(e) => setCorrectionNumeroReceveur(e.target.value)} style={inputStyle} placeholder="+224 6XX XXX XXX" /></Field>
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
+              {ecartPaye < 0 && (
+                <Field label="Motif de la correction *">
+                  <input value={correctionMotif} onChange={(e) => setCorrectionMotif(e.target.value)} style={inputStyle} placeholder="ex: montant saisi avec un zéro de trop" />
+                </Field>
+              )}
+              <button type="button" onClick={() => { setPaye(String(colis.paye || "")); setCorrectionMotif(""); setCorrectionOuverte(false); }} style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 12.5, cursor: "pointer", padding: 0 }}>
+                Annuler la correction
+              </button>
+            </div>
+          )}
+        </div>
         <div style={{ gridColumn: "1 / -1", background: "var(--surface2)", borderRadius: 12, padding: "12px 16px", display: "flex", justifyContent: "space-between" }}>
           <div style={{ fontSize: 13, color: "var(--text)" }}>Total recalculé : <strong>{fmt(prix, "EUR")}</strong></div>
           <div style={{ fontSize: 13, color: reste > 0 ? "var(--danger-fg)" : "var(--ok-fg)" }}>Reste à payer : <strong>{fmt(reste, "EUR")}</strong></div>
@@ -10238,6 +10491,10 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
   const [devisePaiement, setDevisePaiement] = useState("EUR");
   const [modePaiement, setModePaiement] = useState("Espèces");
   const [referenceTransaction, setReferenceTransaction] = useState("");
+  // Qui a réellement reçu l'argent. Vide = la personne connectée. Un comptable qui enregistre le
+  // paiement encaissé par un agent au comptoir désigne ici cet agent : la somme sera due par lui.
+  const [percuPar, setPercuPar] = useState("");
+  const [percuAutre, setPercuAutre] = useState("");
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [reponses, setReponses] = useState({});
   const [numeroPayeur, setNumeroPayeur] = useState(colis.telephone || "");
@@ -10316,9 +10573,10 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
     if (isNaN(n) || n <= 0) return;
     // convertit le montant saisi (dans devisePaiement) vers l’équivalent EUR, notre unité de référence interne
     const montantEUR = +(n / (LIVE_RATES[devisePaiement] || CURRENCIES[devisePaiement] || 1)).toFixed(2);
-    onEncaisser(montantEUR, modePaiement, n, devisePaiement, { reference: referenceTransaction, numeroPayeur, numeroReceveur });
+    const recu = percuPar === "__autre" ? percuAutre.trim() : percuPar;
+    onEncaisser(montantEUR, modePaiement, n, devisePaiement, { reference: referenceTransaction, numeroPayeur, numeroReceveur, percuPar: recu });
     setPayerOuvert(false);
-    setMontantPaye(""); setReferenceTransaction("");
+    setMontantPaye(""); setReferenceTransaction(""); setPercuPar(""); setPercuAutre("");
   }
   function validerBonSortie() {
     if (!recupNom.trim() || !recupTel.trim()) return;
@@ -10676,9 +10934,15 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
                   else if (e.target.value === "MTN Money") setNumeroReceveur(cfg.mtnMoney || "");
                   else setNumeroReceveur("");
                 }} style={inputStyle}>
-                  {["Espèces", "Orange Money", "MTN Money", "Carte bancaire", "Virement"].map((m) => <option key={m} value={m}>{m}</option>)}
+                  {MODES_PAIEMENT.map((m) => <option key={m} value={m}>{m}</option>)}
                 </select>
               </Field>
+              <ChampPercuPar
+                users={data?.users} session={session}
+                valeur={percuPar} onChange={setPercuPar}
+                autre={percuAutre} onChangeAutre={setPercuAutre}
+                client={colis.destinataire}
+              />
               {(modePaiement === "Orange Money" || modePaiement === "MTN Money" || modePaiement === "Virement") && (
                 <div style={{ background: "var(--surface)", borderRadius: 8, padding: 12, marginTop: 8 }}>
                   <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8 }}>DÉTAILS DE LA TRANSACTION (optionnel mais recommandé)</div>
@@ -10707,7 +10971,11 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
                 <div>
                   <div>{p.deviseSaisie ? fmt(p.montant, p.deviseSaisie) : fmt(p.montant, "EUR")}{p.deviseSaisie && p.deviseSaisie !== "EUR" ? ` (≈ ${fmt(p.montant, "EUR")})` : ""} · {p.mode}</div>
                   {p.reference && <div style={{ fontSize: 10.5, color: "var(--muted)" }}>Réf. {p.reference}{p.numeroPayeur ? ` · payeur ${p.numeroPayeur}` : ""}{p.numeroReceveur ? ` · reçu sur ${p.numeroReceveur}` : ""}</div>}
-                  <div style={{ fontSize: 10.5, color: "var(--muted)" }}>{new Date(p.date).toLocaleDateString("fr-FR")}{p.par ? ` · ${p.par}` : ""}</div>
+                  {p.correction && <div style={{ fontSize: 10.5, color: "var(--warn-fg)" }}>Correction{p.motif ? ` : ${p.motif}` : ""}{p.parCorrection ? ` · par ${p.parCorrection}` : ""}</div>}
+                  <div style={{ fontSize: 10.5, color: "var(--muted)" }}>
+                    {new Date(p.date).toLocaleDateString("fr-FR")}{p.par ? ` · reçu par ${p.par}` : ""}
+                    {p.saisiPar ? ` · saisi par ${p.saisiPar}` : ""}
+                  </div>
                 </div>
                 <button onClick={() => handleDownloadRecu(p)} disabled={recuState === p.id} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 6, padding: "4px 8px", color: "var(--muted)", cursor: "pointer", fontSize: 10.5, display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
                   <Download size={11} /> {recuState === p.id ? "…" : "Reçu"}
@@ -11830,6 +12098,1652 @@ function PaiementsPage({ data, notify }) {
 
 
 PaiementsPage = memo(PaiementsPage);
+
+/** Formate une répartition { devise: montant } dans les devises réellement encaissées. */
+function formaterDevises(parDevise) {
+  const entrees = Object.entries(parDevise || {}).filter(([, v]) => Math.abs(v) >= 0.005);
+  if (entrees.length === 0) return "—";
+  return entrees
+    .sort((a, b) => b[1] - a[1])
+    .map(([devise, v]) => {
+      const dec = devise === "GNF" || devise === "XOF" ? 0 : 2;
+      return `${v.toLocaleString("fr-FR", { minimumFractionDigits: dec, maximumFractionDigits: dec })} ${devise}`;
+    })
+    .join(" · ");
+}
+
+/**
+ * Clé unique d'un encaissement, calculée de la même façon partout (caisse, voyages).
+ *
+ * `id` n'est unique qu'à l'intérieur d'un colis — deux encaissements simultanés partagent
+ * l'horodatage qui le compose — d'où le préfixe par le numéro de suivi. C'est cette clé que les
+ * bons de remise mémorisent : si les deux écrans ne la calculaient pas pareil, un encaissement
+ * déjà remis réapparaîtrait comme dû.
+ */
+function clePaiement(tracking, paiement, index) {
+  return `${tracking}|${paiement?.id || ""}|${index}`;
+}
+
+/** Ajoute un montant à une répartition par devise, sans muter l'objet d'origine du colis. */
+function ajouterDevise(acc, devise, montant) {
+  acc[devise] = (acc[devise] || 0) + montant;
+}
+
+/** Numérote les bons de remise par année : RC-2026-0001, RC-2026-0002... */
+function genNumeroRemise(remisesExistantes, rang) {
+  const annee = new Date().getFullYear();
+  const dejaCetteAnnee = (remisesExistantes || []).filter((r) => new Date(r.date).getFullYear() === annee).length;
+  return `RC-${annee}-${String(dejaCetteAnnee + rang).padStart(4, "0")}`;
+}
+
+/**
+ * Dessine un bon de remise en caisse sur la page courante du document.
+ *
+ * C'est la pièce que l'agent et le caissier signent au moment où l'argent change de mains :
+ * elle doit tenir sur une page, lister les encaissements repris et afficher le montant remis
+ * dans la devise des billets. Le repli manuel (sans autoTable) est là pour la même raison que
+ * sur les autres documents : le plugin vient d'un CDN et peut ne pas se charger.
+ */
+function dessinerBonRemise(doc, remise, lignes, hasAutoTable) {
+  const INK = [26, 30, 38], MUTED = [122, 130, 142], RED = [214, 39, 63], NAVY = [10, 38, 71];
+  let y = 20;
+  doc.addImage(DEFAULT_LOGO, "PNG", 14, y - 6, 16, 16);
+  doc.setFont(undefined, "bold"); doc.setFontSize(16); doc.setTextColor(...INK);
+  doc.text("BA-DIABY EXPRESS", 34, y);
+  doc.setFont(undefined, "normal"); doc.setFontSize(10); doc.setTextColor(...MUTED);
+  doc.text("Bon de remise en caisse", 34, y + 6);
+  doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(...INK);
+  doc.text(remise.numero, 196, y, { align: "right" });
+  if (remise.provisoire) {
+    doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...RED);
+    doc.text("À FAIRE VALIDER", 196, y + 6, { align: "right" });
+  }
+  y += 20;
+  doc.setDrawColor(...RED); doc.setLineWidth(0.6); doc.line(14, y, 196, y);
+  y += 10;
+
+  const infos = [
+    ["Agent", remise.agent],
+    ["Période couverte", remise.periode || "—"],
+    [remise.provisoire ? "Date d’édition" : "Date de la remise", new Date(remise.date).toLocaleString("fr-FR")],
+    // Sur un bon provisoire, personne n'a encore reçu l'argent : la ligne reste à remplir à la main.
+    ["Reçu par", remise.recuPar || "..............................."],
+    ["Encaissements repris", `${remise.nbPaiements} · ${remise.nbColis} colis · ${remise.nbClients} client(s)`],
+  ];
+  doc.setFontSize(10);
+  infos.forEach(([label, valeur]) => {
+    doc.setFont(undefined, "bold"); doc.setTextColor(...INK); doc.text(label, 14, y);
+    doc.setFont(undefined, "normal"); doc.text(String(valeur), 196, y, { align: "right" });
+    y += 6.5;
+  });
+  y += 6;
+
+  const head = ["Date", "N° de suivi", "Client", "Site", "Montant"];
+  const body = lignes.map((l) => [
+    new Date(l.date).toLocaleDateString("fr-FR"), l.tracking, l.client, l.site,
+    formaterDevises({ [l.deviseSaisie]: l.montantSaisi }),
+  ]);
+  if (hasAutoTable && doc.autoTable && body.length > 0) {
+    doc.autoTable({
+      startY: y, head: [head], body,
+      theme: "grid", headStyles: { fillColor: NAVY, textColor: 255, fontSize: 8.5 },
+      styles: { fontSize: 8.5, textColor: [40, 40, 40], overflow: "linebreak" },
+      columnStyles: { 0: { cellWidth: 24 }, 1: { cellWidth: 30 }, 2: { cellWidth: 58 }, 3: { cellWidth: 30 }, 4: { cellWidth: 40, halign: "right" } },
+      margin: { left: 14, right: 14 },
+    });
+    y = doc.lastAutoTable.finalY + 10;
+  } else {
+    const colX = [14, 40, 72, 132, 164];
+    doc.setFontSize(8); doc.setTextColor(255, 255, 255); doc.setFillColor(...NAVY);
+    doc.rect(14, y, 182, 7, "F");
+    head.forEach((h, i) => doc.text(h, colX[i] + 1, y + 5));
+    y += 9;
+    doc.setTextColor(40, 40, 40);
+    body.forEach((row, i) => {
+      if (y > 250) { doc.addPage(); y = 20; }
+      if (i % 2 === 1) { doc.setFillColor(238, 243, 250); doc.rect(14, y - 4.5, 182, 6.5, "F"); }
+      doc.setFontSize(8);
+      row.forEach((cell, j) => doc.text(String(cell).slice(0, 26), colX[j] + 1, y));
+      y += 6.5;
+    });
+    y += 10;
+  }
+
+  // Le bloc « montant remis » et les signatures ne doivent jamais déborder sous le pied de page :
+  // ils ont besoin d'environ 60 mm, sinon on les reporte sur une page propre.
+  if (y > 220) { doc.addPage(); y = 20; }
+  doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, 16, "F");
+  doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(...NAVY);
+  doc.text("Montant remis en espèces", 18, y + 10);
+  doc.text(formaterDevises(remise.devises), 192, y + 10, { align: "right" });
+  y += 24;
+  doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
+  doc.text(`Équivalent : ${fmt(remise.totalEUR, "EUR")} — seules les espèces figurent sur ce bon.`, 14, y);
+  y += 16;
+
+  doc.setFontSize(9); doc.setTextColor(90, 100, 120);
+  doc.text("Signature de l’agent :", 14, y);
+  doc.setDrawColor(180); doc.line(14, y + 16, 85, y + 16);
+  doc.text("Signature du caissier :", 110, y);
+  doc.line(110, y + 16, 181, y + 16);
+
+  doc.setFontSize(7.3); doc.setTextColor(150, 150, 150);
+  doc.text(`Édité le ${new Date().toLocaleString("fr-FR")} — Ba-Diaby Express`, 14, 288);
+}
+
+/**
+ * Caisse — qui a encaissé quoi, et combien chaque agent doit remettre.
+ *
+ * La page « Paiements & Factures » raisonne par COLIS (« ce colis est-il soldé ? »). Ici on
+ * raisonne par ENCAISSEMENT : une ligne = un paiement reçu, avec son agent, son colis, son
+ * client, son mode et sa devise réelle. C'est ce dont on a besoin en fin de journée pour
+ * compter la caisse avec chaque agent.
+ *
+ * Quatre partis pris importants :
+ *  — les totaux sont affichés dans la devise réellement encaissée (GNF, EUR...) et pas seulement
+ *    en équivalent euro : un agent rend des billets, pas une conversion ;
+ *  — seules les espèces sont comptées dans « à remettre en caisse » (voir MODES_PAIEMENT) ;
+ *  — une remise validée retire définitivement ces espèces de ce que l'agent doit : le montant dû
+ *    est un solde vivant, pas un simple cumul ;
+ *  — l'acompte pris à l'enregistrement du colis compte comme un encaissement de l'agent qui a
+ *    créé le colis. Les colis enregistrés avant cette mise à jour n'ont pas d'agent inscrit sur
+ *    le paiement lui-même : on retombe alors sur l'agent de création du colis.
+ */
+function CaissePage({ data, persist, session, notify }) {
+  const monNom = `${session?.prenom || ""} ${session?.nom || ""}`.trim() || session?.identifiant || "";
+  // Un agent ne voit que sa propre caisse — il n'a pas à consulter les encaissements de ses
+  // collègues, et surtout il ne valide pas lui-même la remise de son propre argent : c'est le rôle
+  // de celui qui le reçoit (administrateur ou comptable).
+  const voitTousLesAgents = session?.role === "Administrateur" || session?.role === "Comptable"
+    || effectivePermission(session, "compta.consulter") || effectivePermission(session, "stats.globales");
+
+  const [periode, setPeriode] = useState("jour");
+  const [du, setDu] = useState("");
+  const [au, setAu] = useState("");
+  const [agentFiltre, setAgentFiltre] = useState("tous");
+  const [modeFiltre, setModeFiltre] = useState("tous");
+  const [siteFiltre, setSiteFiltre] = useState("tous");
+  const [statutFiltre, setStatutFiltre] = useState("tous");
+  const [recherche, setRecherche] = useState("");
+  const [selection, setSelection] = useState([]);
+  const [ouverts, setOuverts] = useState([]);
+  const [limites, setLimites] = useState({});
+  const [histoOuvert, setHistoOuvert] = useState(false);
+  const [confirmationRemise, setConfirmationRemise] = useState(null);
+  const [remiseAAnnuler, setRemiseAAnnuler] = useState(null);
+
+  const agentActif = voitTousLesAgents ? agentFiltre : (monNom || "Non renseigné");
+  const remises = data.remisesCaisse || [];
+
+  /** Un encaissement déjà remis porte le bon qui l'a repris — il ne peut pas être remis deux fois. */
+  const remiseParCle = useMemo(() => {
+    const m = new Map();
+    remises.forEach((r) => (r.cles || []).forEach((c) => m.set(c, r)));
+    return m;
+  }, [remises]);
+
+  /** Tous les encaissements de la base, à plat, enrichis du colis auquel ils se rattachent. */
+  const lignes = useMemo(() => data.colis.flatMap((c) => (c.paiements || []).map((p, i) => {
+    const agentBrut = (p.par && p.par !== "Enregistrement initial") ? p.par : c.agentCreation;
+    // Les paiements d'avant la gestion multi-devises n'ont que `montant`, déjà en équivalent euro.
+    const deviseSaisie = p.deviseSaisie || "EUR";
+    const montant = Number(p.montant) || 0;
+    const montantSaisi = p.montantSaisi != null && p.montantSaisi !== ""
+      ? Number(p.montantSaisi) || 0
+      : montant * (LIVE_RATES[deviseSaisie] || CURRENCIES[deviseSaisie] || 1);
+    const cle = clePaiement(c.tracking, p, i);
+    return {
+      cle,
+      tracking: c.tracking,
+      client: c.destinataire || "—",
+      clientKey: c.clientAccountId || normaliserTelephone(c.telephone) || (c.destinataire || "").toLowerCase(),
+      site: c.site || "Bambeto",
+      poids: Number(c.poids) || 0,
+      date: p.date,
+      mode: p.mode || MODE_ESPECES,
+      montant, montantSaisi, deviseSaisie,
+      reference: p.reference || "",
+      agent: agentBrut && agentBrut.trim() ? agentBrut.trim() : "Non renseigné",
+      acompte: !!p.acompte || p.par === "Enregistrement initial",
+      correction: !!p.correction, motif: p.motif || "", parCorrection: p.parCorrection || "",
+      saisiPar: p.saisiPar || "",
+      remise: remiseParCle.get(cle) || null,
+    };
+  })), [data.colis, remiseParCle]);
+
+  const agentsConnus = useMemo(() => [...new Set(lignes.map((l) => l.agent))].sort((a, b) => a.localeCompare(b, "fr")), [lignes]);
+  const sitesConnus = useMemo(() => [...new Set(lignes.map((l) => l.site))].sort((a, b) => a.localeCompare(b, "fr")), [lignes]);
+
+  const filtrees = useMemo(() => {
+    const now = new Date();
+    const debut = du ? new Date(`${du}T00:00:00`) : null;
+    const fin = au ? new Date(`${au}T23:59:59`) : null;
+    const q = recherche.trim().toLowerCase();
+    return lignes.filter((l) => {
+      const d = new Date(l.date);
+      // Des dates saisies à la main l'emportent sur le raccourci de période : c'est le cas quand
+      // on recompte la caisse d'un jour passé, ou d'un intervalle (une tournée, une semaine).
+      if (debut || fin) {
+        if (debut && d < debut) return false;
+        if (fin && d > fin) return false;
+      } else if (periode === "jour") {
+        if (d.toDateString() !== now.toDateString()) return false;
+      } else if (periode === "semaine") {
+        if ((now - d) / 86400000 > 7) return false;
+      } else if (periode === "mois") {
+        if (d.getMonth() !== now.getMonth() || d.getFullYear() !== now.getFullYear()) return false;
+      }
+      if (agentActif !== "tous" && l.agent !== agentActif) return false;
+      if (modeFiltre !== "tous" && l.mode !== modeFiltre) return false;
+      if (siteFiltre !== "tous" && l.site !== siteFiltre) return false;
+      if (statutFiltre === "adu" && (l.mode !== MODE_ESPECES || l.remise)) return false;
+      if (statutFiltre === "remis" && !l.remise) return false;
+      if (q && !`${l.tracking} ${l.client} ${l.reference}`.toLowerCase().includes(q)) return false;
+      return true;
+    }).sort((a, b) => new Date(b.date) - new Date(a.date));
+  }, [lignes, periode, du, au, agentActif, modeFiltre, siteFiltre, statutFiltre, recherche]);
+
+  /** Regroupe une liste d'encaissements : effectifs, clients, colis, et totaux par devise. */
+  function regrouper(liste) {
+    const colis = new Set(), clients = new Set();
+    const devises = {}, especesDevises = {}, dusDevises = {}, remisDevises = {};
+    let totalEUR = 0, especesEUR = 0, dusEUR = 0, remisEUR = 0, poids = 0;
+    liste.forEach((l) => {
+      if (!colis.has(l.tracking)) { colis.add(l.tracking); poids += l.poids; }
+      clients.add(l.clientKey);
+      totalEUR += l.montant;
+      ajouterDevise(devises, l.deviseSaisie, l.montantSaisi);
+      if (l.mode === MODE_ESPECES) {
+        especesEUR += l.montant;
+        ajouterDevise(especesDevises, l.deviseSaisie, l.montantSaisi);
+        if (l.remise) { remisEUR += l.montant; ajouterDevise(remisDevises, l.deviseSaisie, l.montantSaisi); }
+        else { dusEUR += l.montant; ajouterDevise(dusDevises, l.deviseSaisie, l.montantSaisi); }
+      }
+    });
+    return {
+      nbPaiements: liste.length, nbColis: colis.size, nbClients: clients.size, poids,
+      totalEUR, especesEUR, dusEUR, remisEUR, devises, especesDevises, dusDevises, remisDevises,
+    };
+  }
+
+  const total = useMemo(() => regrouper(filtrees), [filtrees]);
+
+  const parAgent = useMemo(() => {
+    const groupes = new Map();
+    filtrees.forEach((l) => {
+      if (!groupes.has(l.agent)) groupes.set(l.agent, []);
+      groupes.get(l.agent).push(l);
+    });
+    return [...groupes.entries()]
+      .map(([agent, liste]) => ({ agent, liste, ...regrouper(liste) }))
+      .sort((a, b) => b.dusEUR - a.dusEUR || b.totalEUR - a.totalEUR);
+  }, [filtrees]);
+
+  // La sélection est volontairement conservée quand on change de filtre, mais n'est comptée que
+  // sur les lignes visibles : on ne veut pas annoncer un total qui inclurait des lignes cachées.
+  const selectionnees = useMemo(() => {
+    const set = new Set(selection);
+    return filtrees.filter((l) => set.has(l.cle));
+  }, [filtrees, selection]);
+  const totalSelection = useMemo(() => regrouper(selectionnees), [selectionnees]);
+  const selSet = useMemo(() => new Set(selection), [selection]);
+  /** Ce qui peut effectivement partir en remise : des espèces, pas encore remises. */
+  const aRemettre = useMemo(() => selectionnees.filter((l) => l.mode === MODE_ESPECES && !l.remise), [selectionnees]);
+
+  function basculerLigne(cle) {
+    setSelection((s) => (s.includes(cle) ? s.filter((x) => x !== cle) : [...s, cle]));
+  }
+  function basculerAgent(groupe) {
+    const cles = groupe.liste.map((l) => l.cle);
+    const toutCoche = cles.every((c) => selSet.has(c));
+    setSelection((s) => (toutCoche ? s.filter((c) => !cles.includes(c)) : [...new Set([...s, ...cles])]));
+  }
+  function basculerOuvert(agent) {
+    setOuverts((o) => (o.includes(agent) ? o.filter((a) => a !== agent) : [...o, agent]));
+  }
+
+  const periodeLibelle = du || au
+    ? `du ${du ? new Date(`${du}T00:00:00`).toLocaleDateString("fr-FR") : "début"} au ${au ? new Date(`${au}T00:00:00`).toLocaleDateString("fr-FR") : "aujourd’hui"}`
+    : { jour: "aujourd’hui", semaine: "7 derniers jours", mois: "ce mois-ci", tout: "depuis le début" }[periode];
+
+  /** Retrouve les encaissements repris par un bon, même si les filtres actuels les excluent. */
+  function lignesDeRemise(remise) {
+    const cles = new Set(remise.cles || []);
+    return lignes.filter((l) => cles.has(l.cle)).sort((a, b) => new Date(a.date) - new Date(b.date));
+  }
+
+  async function imprimerBons(listeRemises) {
+    try {
+      const jspdf = await loadJsPDF();
+      const doc = preparerDocPdf(new jspdf.jsPDF());
+      const hasAutoTable = await ensureAutoTable();
+      listeRemises.forEach((r, i) => {
+        if (i > 0) doc.addPage();
+        dessinerBonRemise(doc, r, r.lignesPdf || lignesDeRemise(r), hasAutoTable);
+      });
+      openPdf(doc, `bon-remise-${listeRemises.map((r) => r.numero).join("-")}-${new Date().toISOString().slice(0, 10)}.pdf`);
+    } catch (e) {
+      console.error(e);
+      notify?.("Échec de génération du PDF — réessayez");
+    }
+  }
+
+  /** Découpe une liste d'encaissements en un bon par agent : un bon se signe à deux, pas à cinq. */
+  function bonsParAgent(liste, { provisoire }) {
+    const groupes = new Map();
+    liste.forEach((l) => {
+      if (!groupes.has(l.agent)) groupes.set(l.agent, []);
+      groupes.get(l.agent).push(l);
+    });
+    const maintenant = new Date().toISOString();
+    return [...groupes.entries()].map(([agent, sesLignes], index) => {
+      const t = regrouper(sesLignes);
+      return {
+        id: `rem${Date.now()}-${index}`,
+        numero: provisoire ? "BON PROVISOIRE" : genNumeroRemise(remises, index + 1),
+        provisoire: !!provisoire,
+        agent, date: maintenant, recuPar: provisoire ? "" : (monNom || "—"), periode: periodeLibelle,
+        cles: sesLignes.map((l) => l.cle),
+        nbPaiements: t.nbPaiements, nbColis: t.nbColis, nbClients: t.nbClients,
+        devises: t.especesDevises, totalEUR: t.especesEUR,
+        lignesPdf: sesLignes,
+      };
+    });
+  }
+
+  function imprimerBonProvisoire() {
+    if (aRemettre.length === 0) { notify?.("Aucune espèce à remettre dans la sélection"); return; }
+    imprimerBons(bonsParAgent(aRemettre, { provisoire: true }));
+  }
+
+  function validerRemise() {
+    const bons = confirmationRemise;
+    setConfirmationRemise(null);
+    if (!bons || bons.length === 0) return;
+    // `lignesPdf` ne sert qu'à l'impression immédiate : on ne recopie pas les encaissements dans
+    // la base, le bon garde seulement leurs clés.
+    const aEnregistrer = bons.map(({ lignesPdf, provisoire, ...reste }) => reste);
+    const detail = bons.map((b) => `${b.numero} — ${b.agent} : ${formaterDevises(b.devises)}`).join(" · ");
+    persist({
+      ...data,
+      remisesCaisse: [...aEnregistrer, ...remises],
+      activityLog: pushActivity(data, session, "Remise en caisse validée", detail),
+    });
+    notify?.(bons.length > 1 ? `${bons.length} remises enregistrées` : `Remise ${bons[0].numero} enregistrée`);
+    setSelection([]);
+    imprimerBons(bons);
+  }
+
+  function annulerRemise(remise) {
+    persist({
+      ...data,
+      remisesCaisse: remises.filter((r) => r.id !== remise.id),
+      activityLog: pushActivity(data, session, "Remise en caisse annulée", `${remise.numero} — ${remise.agent} : ${formaterDevises(remise.devises)}`),
+    });
+    notify?.(`Remise ${remise.numero} annulée — les espèces redeviennent dues`);
+    setRemiseAAnnuler(null);
+  }
+
+  async function exporterExcel() {
+    const aExporter = selectionnees.length > 0 ? selectionnees : filtrees;
+    if (aExporter.length === 0) { notify?.("Rien à exporter sur cette sélection"); return; }
+    const XLSX = await loadXLSXLib();
+    const wb = XLSX.utils.book_new();
+
+    const headers = ["Agent", "Date", "N° de suivi", "Client", "Site", "Mode", "Montant encaissé", "Devise", "Équivalent EUR", "Référence", "Type", "Remise"];
+    const rows = aExporter.map((l) => [
+      l.agent, new Date(l.date).toLocaleString("fr-FR"), l.tracking, l.client, l.site, l.mode,
+      l.montantSaisi, l.deviseSaisie, +l.montant.toFixed(2), l.reference || "—",
+      l.acompte ? "Acompte à l’enregistrement" : "Encaissement",
+      l.remise ? `${l.remise.numero} (${new Date(l.remise.date).toLocaleDateString("fr-FR")})` : "—",
+    ]);
+    const ws = XLSX.utils.aoa_to_sheet([
+      ["BA-DIABY EXPRESS — Caisse : encaissements par agent"],
+      [`Période : ${periodeLibelle}${selectionnees.length > 0 ? " — sélection" : ""}`],
+      [], headers, ...rows,
+    ]);
+    ws["!cols"] = headers.map(() => ({ wch: 18 }));
+    ws["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: headers.length - 1 } }];
+    XLSX.utils.book_append_sheet(wb, ws, "Encaissements");
+
+    const recap = selectionnees.length > 0
+      ? [{ agent: "Sélection", ...totalSelection }]
+      : parAgent.map((g) => ({ agent: g.agent, ...g }));
+    const headers2 = ["Agent", "Paiements", "Clients", "Colis", "Poids (kg)", "Total encaissé", "Espèces reçues", "Déjà remis", "Reste dû à la caisse", "Équivalent EUR"];
+    const rows2 = recap.map((g) => [
+      g.agent, g.nbPaiements, g.nbClients, g.nbColis, +g.poids.toFixed(1),
+      formaterDevises(g.devises), formaterDevises(g.especesDevises), formaterDevises(g.remisDevises), formaterDevises(g.dusDevises),
+      +g.totalEUR.toFixed(2),
+    ]);
+    const ws2 = XLSX.utils.aoa_to_sheet([headers2, ...rows2]);
+    ws2["!cols"] = headers2.map(() => ({ wch: 20 }));
+    XLSX.utils.book_append_sheet(wb, ws2, "Récapitulatif par agent");
+
+    XLSX.writeFile(wb, `ba-diaby-express-caisse-${new Date().toISOString().slice(0, 10)}.xlsx`);
+    notify?.("Export Excel téléchargé");
+  }
+
+  const carte = { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14 };
+  const pilule = (actif) => ({
+    padding: "7px 14px", borderRadius: 20, border: "1.5px solid " + (actif ? "var(--brand-solid)" : "var(--border)"),
+    background: actif ? "var(--brand-solid)" : "var(--surface)", color: actif ? "#fff" : "var(--muted)",
+    fontSize: 12.5, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap",
+  });
+  const mesRemises = voitTousLesAgents ? remises : remises.filter((r) => r.agent === monNom);
+
+  return (
+    <div style={{ paddingBottom: selectionnees.length > 0 ? 150 : 0 }}>
+      <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 27, margin: "0 0 5px" }}>Caisse</h1>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12, marginBottom: 20 }}>
+        <p style={{ color: "var(--muted)", fontSize: 14.5, margin: 0, maxWidth: 640 }}>
+          Tous les paiements encaissés, agent par agent — ce qu’il a pris, pour combien de clients et de colis,
+          et ce qu’il doit encore remettre. Sélectionnez des lignes pour éditer un bon de remise et solder le montant.
+        </p>
+        <button onClick={exporterExcel} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+          <Download size={16} /> Exporter (Excel)
+        </button>
+      </div>
+
+      {!voitTousLesAgents && (
+        <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 10, padding: "10px 14px", marginBottom: 16, fontSize: 12.5, color: "var(--info-fg)" }}>
+          Vous consultez votre propre caisse ({monNom || "vous"}). Vous pouvez éditer votre bon de remise ; sa validation
+          revient à la personne qui reçoit l’argent (administrateur ou comptable).
+        </div>
+      )}
+
+      <div style={{ ...carte, padding: 16, marginBottom: 18 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+          {[["jour", "Aujourd’hui"], ["semaine", "7 derniers jours"], ["mois", "Ce mois-ci"], ["tout", "Depuis le début"]].map(([k, label]) => (
+            <button key={k} onClick={() => { setPeriode(k); setDu(""); setAu(""); }} style={pilule(!du && !au && periode === k)}>{label}</button>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+          {[["tous", "Tous les encaissements"], ["adu", "Reste à remettre"], ["remis", "Déjà remis"]].map(([k, label]) => (
+            <button key={k} onClick={() => setStatutFiltre(k)} style={{ ...pilule(statutFiltre === k), fontSize: 12 }}>{label}</button>
+          ))}
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 10 }}>
+          <div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Du</div>
+            <input type="date" value={du} onChange={(e) => setDu(e.target.value)} style={inputStyle} />
+          </div>
+          <div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Au</div>
+            <input type="date" value={au} onChange={(e) => setAu(e.target.value)} style={inputStyle} />
+          </div>
+          {voitTousLesAgents && (
+            <div>
+              <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Agent</div>
+              <select value={agentFiltre} onChange={(e) => setAgentFiltre(e.target.value)} style={inputStyle}>
+                <option value="tous">Tous les agents</option>
+                {agentsConnus.map((a) => <option key={a} value={a}>{a}</option>)}
+              </select>
+            </div>
+          )}
+          <div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Mode</div>
+            <select value={modeFiltre} onChange={(e) => setModeFiltre(e.target.value)} style={inputStyle}>
+              <option value="tous">Tous les modes</option>
+              {MODES_PAIEMENT.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+          <div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Site</div>
+            <select value={siteFiltre} onChange={(e) => setSiteFiltre(e.target.value)} style={inputStyle}>
+              <option value="tous">Tous les sites</option>
+              {sitesConnus.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Rechercher</div>
+            <input value={recherche} onChange={(e) => setRecherche(e.target.value)} placeholder="N° de suivi, client, référence" style={inputStyle} />
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(190px,1fr))", gap: 12, marginBottom: 20 }}>
+        {[
+          { label: `Encaissé — ${periodeLibelle}`, valeur: formaterDevises(total.devises), sous: `≈ ${fmt(total.totalEUR, "EUR")} · ${total.nbPaiements} paiement${total.nbPaiements > 1 ? "s" : ""}`, icon: DollarSign, tint: "#0A2647" },
+          { label: "Reste à remettre (espèces)", valeur: formaterDevises(total.dusDevises), sous: total.remisEUR > 0 ? `déjà remis : ${formaterDevises(total.remisDevises)}` : `≈ ${fmt(total.dusEUR, "EUR")}`, icon: Wallet, tint: "#16A163" },
+          { label: "Clients", valeur: String(total.nbClients), sous: "clients distincts ayant payé", icon: Users, tint: "#B8801C" },
+          { label: "Volume", valeur: `${total.nbColis} colis`, sous: `${total.poids.toFixed(1)} kg au total`, icon: Package, tint: "#5B8DEF" },
+        ].map((k) => (
+          <div key={k.label} style={{ ...carte, padding: "16px 18px" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+              <div style={{ fontSize: 12.5, color: "var(--muted)", fontWeight: 600 }}>{k.label}</div>
+              <div style={{ width: 32, height: 32, borderRadius: 9, background: k.tint, display: "grid", placeItems: "center", flexShrink: 0 }}><k.icon size={16} color="#fff" /></div>
+            </div>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 19, fontWeight: 700, color: "var(--text)", marginTop: 10, lineHeight: 1.25, wordBreak: "break-word" }}>{k.valeur}</div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 5 }}>{k.sous}</div>
+          </div>
+        ))}
+      </div>
+
+      {parAgent.length === 0 ? (
+        <div style={{ ...carte, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>
+          Aucun encaissement sur cette période. Changez de période ou retirez un filtre.
+        </div>
+      ) : parAgent.map((g) => {
+        const cles = g.liste.map((l) => l.cle);
+        const toutCoche = cles.every((c) => selSet.has(c));
+        const partiel = !toutCoche && cles.some((c) => selSet.has(c));
+        const ouvert = ouverts.includes(g.agent);
+        const limite = limites[g.agent] || TAILLE_PAGE;
+        const visibles = g.liste.slice(0, limite);
+        const solde = g.dusEUR > 0;
+        return (
+          <div key={g.agent} style={{ ...carte, marginBottom: 12, overflow: "hidden" }}>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "14px 16px" }}>
+              <input
+                type="checkbox" checked={toutCoche} ref={(el) => { if (el) el.indeterminate = partiel; }}
+                onChange={() => basculerAgent(g)} title="Tout sélectionner pour cet agent"
+                style={{ width: 17, height: 17, marginTop: 3, flexShrink: 0, cursor: "pointer" }}
+              />
+              <button onClick={() => basculerOuvert(g.agent)} style={{ flex: 1, background: "none", border: "none", padding: 0, textAlign: "start", cursor: "pointer", minWidth: 0 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+                  <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)" }}>{g.agent}</div>
+                  <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif" }}>{formaterDevises(g.devises)}</div>
+                </div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
+                  {g.nbPaiements} paiement{g.nbPaiements > 1 ? "s" : ""} · {g.nbClients} client{g.nbClients > 1 ? "s" : ""} · {g.nbColis} colis · {g.poids.toFixed(1)} kg
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                  <span style={{
+                    background: solde ? "var(--warn-bg)" : "var(--ok-bg-soft)", color: solde ? "var(--warn-fg)" : "var(--ok-fg)",
+                    borderRadius: 20, padding: "3px 10px", fontSize: 11.5, fontWeight: 700,
+                  }}>
+                    {solde ? `Doit ${formaterDevises(g.dusDevises)}` : "Caisse à jour"}
+                  </span>
+                  {g.remisEUR > 0 && <span style={{ fontSize: 11.5, color: "var(--muted)" }}>déjà remis : {formaterDevises(g.remisDevises)}</span>}
+                  <span style={{ fontSize: 11.5, color: "var(--muted)" }}>{ouvert ? "Masquer le détail" : "Voir le détail"}</span>
+                  <ChevronRight size={13} color="var(--muted)" style={{ transform: ouvert ? "rotate(90deg)" : "none" }} />
+                </div>
+              </button>
+            </div>
+
+            {ouvert && (
+              <div style={{ borderTop: "1px solid var(--border)" }}>
+                {visibles.map((l) => (
+                  <label key={l.cle} style={{ display: "flex", alignItems: "flex-start", gap: 12, padding: "11px 16px", borderBottom: "1px solid var(--surface2)", cursor: "pointer" }}>
+                    <input type="checkbox" checked={selSet.has(l.cle)} onChange={() => basculerLigne(l.cle)} style={{ width: 16, height: 16, marginTop: 2, flexShrink: 0, cursor: "pointer" }} />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{l.tracking} — {l.client}</div>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: l.mode === MODE_ESPECES ? "var(--ok-fg)" : "var(--text)", whiteSpace: "nowrap" }}>
+                          {formaterDevises({ [l.deviseSaisie]: l.montantSaisi })}
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3 }}>
+                        {new Date(l.date).toLocaleString("fr-FR")} · {l.mode} · {l.site}
+                        {l.acompte && " · acompte à l’enregistrement"}
+                        {l.reference && ` · réf. ${l.reference}`}
+                        {l.correction && ` · correction${l.motif ? ` : ${l.motif}` : ""}${l.parCorrection ? ` (par ${l.parCorrection})` : ""}`}
+                        {l.saisiPar && ` · saisi par ${l.saisiPar}`}
+                      </div>
+                      {l.remise && (
+                        <div style={{ display: "inline-block", marginTop: 5, background: "var(--ok-bg-soft)", color: "var(--ok-fg)", borderRadius: 20, padding: "2px 9px", fontSize: 11, fontWeight: 700 }}>
+                          Remis — {l.remise.numero} le {new Date(l.remise.date).toLocaleDateString("fr-FR")}
+                        </div>
+                      )}
+                    </div>
+                  </label>
+                ))}
+                {g.liste.length > visibles.length && (
+                  <div style={{ padding: "12px 16px", textAlign: "center" }}>
+                    <button onClick={() => setLimites((m) => ({ ...m, [g.agent]: limite + TAILLE_PAGE }))} style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "7px 16px", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
+                      Afficher {Math.min(TAILLE_PAGE, g.liste.length - visibles.length)} de plus ({visibles.length}/{g.liste.length})
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {mesRemises.length > 0 && (
+        <div style={{ ...carte, marginTop: 18, overflow: "hidden" }}>
+          <button onClick={() => setHistoOuvert((o) => !o)} style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", background: "none", border: "none", padding: "14px 16px", cursor: "pointer" }}>
+            <span style={{ fontWeight: 700, color: "var(--text)", fontSize: 14 }}>Remises enregistrées ({mesRemises.length})</span>
+            <ChevronRight size={16} color="var(--muted)" style={{ transform: histoOuvert ? "rotate(90deg)" : "none" }} />
+          </button>
+          {histoOuvert && (
+            <div style={{ borderTop: "1px solid var(--border)" }}>
+              {mesRemises.slice(0, 40).map((r) => (
+                <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "11px 16px", borderBottom: "1px solid var(--surface2)", flexWrap: "wrap" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{r.numero} — {r.agent}</div>
+                    <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                      {new Date(r.date).toLocaleString("fr-FR")} · {r.nbPaiements} encaissement{r.nbPaiements > 1 ? "s" : ""} · reçu par {r.recuPar}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "var(--ok-fg)" }}>{formaterDevises(r.devises)}</span>
+                    <button onClick={() => imprimerBons([r])} style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 11px", color: "var(--text)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                      <Printer size={13} /> Bon
+                    </button>
+                    {voitTousLesAgents && (
+                      <button onClick={() => setRemiseAAnnuler(r)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer", padding: 4 }} title="Annuler cette remise">
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {selectionnees.length > 0 && (
+        <div style={{
+          // Au-dessus du bandeau de synchronisation (z-index 60), qui est centré en bas et
+          // recouvrirait sinon le total et les boutons au moment précis où on compte.
+          position: "fixed", insetInlineStart: 0, insetInlineEnd: 0, bottom: 0, zIndex: 62,
+          background: "var(--surface)", borderTop: "1.5px solid var(--border)", boxShadow: "0 -4px 18px rgba(10,38,71,0.16)",
+          padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "center", gap: 14, flexWrap: "wrap",
+        }}>
+          <div>
+            <div style={{ fontSize: 12, color: "var(--muted)", fontWeight: 600 }}>
+              {totalSelection.nbPaiements} paiement{totalSelection.nbPaiements > 1 ? "s" : ""} sélectionné{totalSelection.nbPaiements > 1 ? "s" : ""} · {totalSelection.nbColis} colis · {totalSelection.nbClients} client{totalSelection.nbClients > 1 ? "s" : ""}
+            </div>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 18, fontWeight: 700, color: "var(--text)", marginTop: 2 }}>
+              {formaterDevises(totalSelection.devises)}
+            </div>
+            <div style={{ fontSize: 12, color: "var(--ok-fg)", fontWeight: 700, marginTop: 2 }}>
+              Dû à la caisse (espèces) : {formaterDevises(totalSelection.dusDevises)}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={imprimerBonProvisoire} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+              <Printer size={15} /> Bon de remise (PDF)
+            </button>
+            {voitTousLesAgents && (
+              <button
+                onClick={() => setConfirmationRemise(bonsParAgent(aRemettre, { provisoire: false }))}
+                disabled={aRemettre.length === 0}
+                style={{
+                  display: "flex", alignItems: "center", gap: 6, border: "none", borderRadius: 9, padding: "10px 16px",
+                  fontSize: 13, fontWeight: 700, cursor: aRemettre.length === 0 ? "not-allowed" : "pointer",
+                  background: aRemettre.length === 0 ? "var(--surface2)" : "#16A163",
+                  color: aRemettre.length === 0 ? "var(--muted)" : "#fff",
+                }}
+              >
+                <CheckCircle2 size={15} /> Marquer comme remis
+              </button>
+            )}
+            <button onClick={exporterExcel} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+              <Download size={15} /> Excel
+            </button>
+            <button onClick={() => setSelection([])} style={{ background: "none", color: "var(--muted)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+              Vider
+            </button>
+          </div>
+        </div>
+      )}
+
+      {confirmationRemise && (
+        <ConfirmerAction
+          titre="Enregistrer la remise en caisse ?"
+          message={`${confirmationRemise.map((b) => `${b.agent} : ${formaterDevises(b.devises)} (${b.nbPaiements} encaissement${b.nbPaiements > 1 ? "s" : ""})`).join(" · ")}. Vous confirmez avoir reçu cet argent.`}
+          consequence="Ces espèces ne seront plus comptées comme dues par l’agent, et le bon de remise à signer s’ouvrira en PDF. Une remise enregistrée par erreur peut être annulée depuis « Remises enregistrées »."
+          libelleAction="Confirmer la remise"
+          onConfirmer={validerRemise}
+          onAnnuler={() => setConfirmationRemise(null)}
+        />
+      )}
+
+      {remiseAAnnuler && (
+        <ConfirmerAction
+          titre="Annuler cette remise ?"
+          message={`${remiseAAnnuler.numero} — ${remiseAAnnuler.agent} : ${formaterDevises(remiseAAnnuler.devises)}.`}
+          consequence="Les espèces de ce bon redeviendront dues par l’agent. À n’utiliser que si la remise a été enregistrée par erreur."
+          libelleAction="Annuler la remise"
+          onConfirmer={() => annulerRemise(remiseAAnnuler)}
+          onAnnuler={() => setRemiseAAnnuler(null)}
+        />
+      )}
+
+      <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 14 }}>
+        Les montants sont affichés dans la devise réellement encaissée. Seules les espèces sont dues à la caisse :
+        le Mobile Money, la carte et les virements arrivent directement sur les comptes de l’entreprise.
+      </div>
+    </div>
+  );
+}
+CaissePage = memo(CaissePage);
+
+/** Numérote les fiches de voyage par année : VOY-2026-0001, VOY-2026-0002... */
+function genNumeroVoyage(voyagesExistants) {
+  const annee = new Date().getFullYear();
+  const dejaCetteAnnee = (voyagesExistants || []).filter((v) => new Date(v.creeLe).getFullYear() === annee).length;
+  return `VOY-${annee}-${String(dejaCetteAnnee + 1).padStart(4, "0")}`;
+}
+
+/**
+ * Libellé lisible d'une route de voyage.
+ *
+ * Un billet d'avion s'achète aller-retour : un même voyage embarque donc les colis partis de
+ * Conakry ET ceux ramenés de l'étranger. Le sens « aller-retour » couvre les deux.
+ * La mention « (aller-retour) » est écrite en toutes lettres parce que les flèches ne survivent
+ * pas à l'export PDF (voir nettoyerTextePdf).
+ */
+function libelleVoyage(pays, direction) {
+  const ville = COUNTRIES.find((c) => c.code === pays)?.city || pays;
+  if (direction === "allerRetour") return `Conakry ⇄ ${ville} (aller-retour)`;
+  return direction === "export" ? `Conakry → ${ville}` : `${ville} → Conakry`;
+}
+
+/** Un colis part-il dans le sens couvert par le voyage ? */
+function voyageCouvre(direction, sensColis) {
+  return direction === "allerRetour" || direction === sensColis;
+}
+
+/** Nom d'affichage d'un utilisateur, tel qu'il est estampillé sur les paiements. */
+function nomAffiche(u) {
+  return `${u?.prenom || ""} ${u?.nom || ""}`.trim() || u?.identifiant || "";
+}
+
+/**
+ * Champ « Argent reçu par » des formulaires d'encaissement.
+ *
+ * Par défaut la personne connectée. Quand un comptable enregistre un paiement qu'un agent a
+ * encaissé au comptoir sans le saisir, il désigne ici cet agent : la somme est alors portée à la
+ * caisse de l'agent — perçue mais non reversée — et non à celle du comptable, qui n'a jamais eu
+ * l'argent en main. Une personne sans compte (chauffeur, partenaire de passage) peut être saisie
+ * au nom complet.
+ */
+function ChampPercuPar({ users, session, valeur, onChange, autre, onChangeAutre, client }) {
+  const moi = session ? (`${session.prenom} ${session.nom}`.trim() || session.identifiant) : "";
+  const autresPersonnes = encaisseursPossibles(users).filter((u) => nomAffiche(u) !== moi);
+  const delegue = valeur && valeur !== moi;
+  const nomFinal = valeur === "__autre" ? autre.trim() : valeur;
+  return (
+    <>
+      <Field label="Argent reçu par">
+        <select value={valeur} onChange={(e) => onChange(e.target.value)} style={inputStyle}>
+          <option value="">{moi || "Moi"} (moi)</option>
+          {autresPersonnes.map((u) => (
+            <option key={u.id} value={nomAffiche(u)}>
+              {nomAffiche(u)}{u.role ? ` — ${u.role}` : ""}{u.paysOperation ? ` ${FLAGS[u.paysOperation] || ""}` : ""}
+            </option>
+          ))}
+          <option value="__autre">Une autre personne…</option>
+        </select>
+      </Field>
+      {valeur === "__autre" && (
+        <Field label="Nom complet de la personne qui a reçu l’argent">
+          <input value={autre} onChange={(e) => onChangeAutre(e.target.value)} style={inputStyle} placeholder="Prénom et nom" />
+        </Field>
+      )}
+      {delegue && nomFinal && (
+        <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "9px 12px", marginBottom: 14, fontSize: 11.5, color: "var(--warn-fg)" }}>
+          L’argent est chez <strong>{nomFinal}</strong>{client ? `, encaissé pour ${client}` : ""} — il apparaîtra comme perçu et non reversé dans sa caisse, pas dans la vôtre.
+          Votre nom reste inscrit comme celui qui a saisi le paiement.
+        </div>
+      )}
+    </>
+  );
+}
+
+/** Personnes susceptibles d'encaisser de l'argent pour l'agence (les clients n'en font pas partie). */
+function encaisseursPossibles(users) {
+  return (users || [])
+    .filter((u) => ["Administrateur", "Agent", "Comptable", "Chauffeur", "Partenaire"].includes(u.role))
+    .sort((a, b) => nomAffiche(a).localeCompare(nomAffiche(b), "fr"));
+}
+
+/**
+ * Construit les informations « qui a reçu l'argent » d'un encaissement.
+ *
+ * Il arrive qu'un agent encaisse au comptoir sans rien saisir, et que le comptable enregistre le
+ * paiement plus tard, sur sa parole. L'argent est alors chez l'agent, pas chez le comptable : le
+ * paiement doit être porté au compte de celui qui l'a réellement perçu, sinon la caisse réclame la
+ * somme à la mauvaise personne. On garde aussi le nom de qui a saisi, pour que la ligne reste
+ * traçable.
+ *
+ * `percuPar` est le nom complet choisi dans le formulaire ; vide, c'est la personne connectée.
+ */
+function receveurPaiement(session, users, percuPar) {
+  const moi = session ? (`${session.prenom} ${session.nom}`.trim() || session.identifiant) : "";
+  const nom = (percuPar || "").trim();
+  if (!nom || nom === moi) {
+    return { par: moi, parPays: session?.paysOperation || "GN", parSite: session?.agence || "" };
+  }
+  const u = (users || []).find((x) => nomAffiche(x) === nom);
+  return {
+    par: nom,
+    // Si la personne n'a pas de compte (chauffeur occasionnel, partenaire...), on rattache la somme
+    // à la caisse de celui qui enregistre : c'est là que l'argent devra être rapporté.
+    parPays: u?.paysOperation || session?.paysOperation || "GN",
+    parSite: u?.agence || session?.agence || "",
+    saisiPar: moi,
+  };
+}
+
+/**
+ * Où un encaissement a-t-il été fait ? Là où se trouve l'agent qui l'a reçu.
+ *
+ * Le pays est écrit sur le paiement depuis cette mise à jour. Pour les encaissements plus anciens
+ * on retrouve l'agent dans les comptes utilisateurs, et à défaut on retombe sur le pays où le colis
+ * a été déposé — ce qui est juste pour un acompte pris au comptoir. Si rien ne permet de trancher,
+ * on l'affiche comme non déterminé plutôt que de le ranger arbitrairement d'un côté.
+ */
+function paysDuPaiement(paiement, colis, users) {
+  if (paiement.parPays) return paiement.parPays;
+  const nom = (paiement.par || "").trim();
+  if (nom && nom !== "Enregistrement initial") {
+    const u = (users || []).find((x) => nomAffiche(x) === nom);
+    if (u) return u.paysOperation || "GN";
+  }
+  if (paiement.acompte || nom === "Enregistrement initial" || !nom) return colis?.expediteurPays || null;
+  return null;
+}
+
+/** Ville d'un code pays, pour nommer une caisse : GN → Conakry, FR → Paris. */
+function villeDuPays(code) {
+  if (!code) return "Lieu non déterminé";
+  return COUNTRIES.find((c) => c.code === code)?.city || code;
+}
+
+/**
+ * Qui a encaissé quoi sur ce voyage, et ce qu'il doit encore verser.
+ *
+ * Une ligne par agent et par lieu : ce qu'il a reçu, ce qu'il a déjà remis en caisse (bons de
+ * remise validés), et ce qu'il doit encore verser. Seules les espèces sont dues — le Mobile Money
+ * et les virements arrivent directement sur les comptes de l'entreprise.
+ */
+function encaissementsParAgent(colisInclus, users, remises) {
+  const remis = new Set((remises || []).flatMap((r) => r.cles || []));
+  const groupes = new Map();
+  let nonVentileEUR = 0;
+  colisInclus.forEach((c) => {
+    let sommeEUR = 0;
+    (c.paiements || []).forEach((p, i) => {
+      const devise = p.deviseSaisie || "EUR";
+      const montantSaisi = p.montantSaisi != null && p.montantSaisi !== ""
+        ? Number(p.montantSaisi) || 0
+        : (Number(p.montant) || 0) * (LIVE_RATES[devise] || CURRENCIES[devise] || 1);
+      sommeEUR += Number(p.montant) || 0;
+      const agentBrut = (p.par && p.par !== "Enregistrement initial") ? p.par : c.agentCreation;
+      const agent = agentBrut && agentBrut.trim() ? agentBrut.trim() : "Non renseigné";
+      const pays = paysDuPaiement(p, c, users);
+      const cle = `${agent}@${pays || "?"}`;
+      if (!groupes.has(cle)) {
+        groupes.set(cle, { agent, pays, lieu: villeDuPays(pays), totalEUR: 0, devises: {}, verse: {}, aVerser: {}, aVerserEUR: 0 });
+      }
+      const g = groupes.get(cle);
+      g.totalEUR += Number(p.montant) || 0;
+      ajouterDevise(g.devises, devise, montantSaisi);
+      if ((p.mode || MODE_ESPECES) === MODE_ESPECES) {
+        if (remis.has(clePaiement(c.tracking, p, i))) ajouterDevise(g.verse, devise, montantSaisi);
+        else { ajouterDevise(g.aVerser, devise, montantSaisi); g.aVerserEUR += Number(p.montant) || 0; }
+      }
+    });
+    const ecart = +((Number(c.paye) || 0) - sommeEUR).toFixed(2);
+    if (ecart > 0.005) nonVentileEUR += ecart;
+  });
+  const lignes = [...groupes.values()].sort((a, b) => b.totalEUR - a.totalEUR);
+  // Même chose regroupé par lieu : c'est le total de la caisse de Conakry, celui de Paris...
+  const parLieu = new Map();
+  lignes.forEach((l) => {
+    const cle = l.pays || "?";
+    if (!parLieu.has(cle)) parLieu.set(cle, { pays: l.pays, lieu: l.lieu, totalEUR: 0, devises: {}, aVerser: {} });
+    const g = parLieu.get(cle);
+    g.totalEUR += l.totalEUR;
+    Object.entries(l.devises).forEach(([d, v]) => ajouterDevise(g.devises, d, v));
+    Object.entries(l.aVerser).forEach(([d, v]) => ajouterDevise(g.aVerser, d, v));
+  });
+  return { lignes, parLieu: [...parLieu.values()].sort((a, b) => b.totalEUR - a.totalEUR), nonVentileEUR };
+}
+
+/** Convertit un montant saisi dans une devise vers l'équivalent euro utilisé par tous les totaux. */
+function versEUR(montant, devise) {
+  return (Number(montant) || 0) / (LIVE_RATES[devise] || CURRENCIES[devise] || 1);
+}
+
+/** Totaux d'un voyage : ce que les colis rapportent, ce qu'ils coûtent, ce qu'il en reste. */
+function totauxVoyage(colisInclus, depenses, users, remises) {
+  const facture = colisInclus.reduce((s, c) => s + (Number(c.prix) || 0), 0);
+  const encaisse = colisInclus.reduce((s, c) => s + (Number(c.paye) || 0), 0);
+  const depensesEUR = (depenses || []).reduce((s, d) => s + versEUR(d.montant, d.devise), 0);
+  const payes = colisInclus.filter((c) => (Number(c.reste) || 0) <= 0.005);
+  const impayes = colisInclus.filter((c) => (Number(c.reste) || 0) > 0.005 && (Number(c.paye) || 0) <= 0.005);
+  return {
+    nbColis: colisInclus.length,
+    poids: colisInclus.reduce((s, c) => s + (Number(c.poids) || 0), 0),
+    facture, encaisse,
+    resteAEncaisser: Math.max(+(facture - encaisse).toFixed(2), 0),
+    nbPayes: payes.length,
+    nbImpayes: impayes.length,
+    nbPartiels: colisInclus.length - payes.length - impayes.length,
+    encaissements: encaissementsParAgent(colisInclus, users, remises),
+    depensesEUR,
+    resultat: +(facture - depensesEUR).toFixed(2),
+    // Ce qui est réellement dans les caisses une fois le voyage payé, par opposition au résultat
+    // calculé sur le facturé : c'est le chiffre qui dit si la rotation a rapporté de l'argent frais.
+    tresorerie: +(encaisse - depensesEUR).toFixed(2),
+  };
+}
+
+/** Étiquette de règlement d'un colis, telle qu'elle apparaît sur la liste et sur la fiche. */
+function statutPaiementColis(c) {
+  if ((Number(c.reste) || 0) <= 0.005) return "Payé";
+  return (Number(c.paye) || 0) > 0.005 ? "Partiel" : "Impayé";
+}
+
+/**
+ * Fiche de voyage en PDF — la pièce qui arrête les comptes d'une rotation.
+ *
+ * Elle reprend les colis embarqués, les dépenses engagées et le résultat, avec une ligne de
+ * signature : c'est ce document qu'on valide, et à partir duquel les colis sortent du pool des
+ * voyages à venir.
+ */
+function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data) {
+  const INK = [26, 30, 38], MUTED = [122, 130, 142], RED = [214, 39, 63], NAVY = [10, 38, 71];
+  const t = totauxVoyage(colisInclus, voyage.depenses, data?.users, data?.remisesCaisse);
+  let y = 20;
+  doc.addImage(DEFAULT_LOGO, "PNG", 14, y - 6, 16, 16);
+  doc.setFont(undefined, "bold"); doc.setFontSize(16); doc.setTextColor(...INK);
+  doc.text("BA-DIABY EXPRESS", 34, y);
+  doc.setFont(undefined, "normal"); doc.setFontSize(10); doc.setTextColor(...MUTED);
+  doc.text(`Fiche de voyage — ${libelleVoyage(voyage.pays, voyage.direction)}`, 34, y + 6);
+  doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(...INK);
+  doc.text(voyage.numero, 196, y, { align: "right" });
+  if (voyage.statut !== "Validé") {
+    doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...RED);
+    doc.text("BROUILLON", 196, y + 6, { align: "right" });
+  }
+  y += 20;
+  doc.setDrawColor(...RED); doc.setLineWidth(0.6); doc.line(14, y, 196, y);
+  y += 10;
+
+  const infos = [
+    ["Route", libelleVoyage(voyage.pays, voyage.direction)],
+    ["Départ", voyage.dateDepart ? new Date(`${voyage.dateDepart}T00:00:00`).toLocaleDateString("fr-FR") : "—"],
+    ["Colis embarqués", `${t.nbColis} · ${t.poids.toFixed(1)} kg · ${t.nbPayes} payés, ${t.nbPartiels} partiels, ${t.nbImpayes} impayés`],
+  ];
+  doc.setFontSize(10);
+  infos.forEach(([label, valeur]) => {
+    doc.setFont(undefined, "bold"); doc.setTextColor(...INK); doc.text(label, 14, y);
+    doc.setFont(undefined, "normal"); doc.text(String(valeur), 196, y, { align: "right" });
+    y += 6;
+  });
+  y += 4;
+
+  const head = ["N° de suivi", "Destinataire", "Sens", "Poids", "Facturé", "Payé", "Reste"];
+  const body = colisInclus.map((c) => [
+    c.tracking, c.destinataire || "—",
+    (c.direction || "export") === "export" ? "Aller" : "Retour",
+    `${(Number(c.poids) || 0).toFixed(1)} kg`,
+    fmt(c.prix, "EUR"), fmt(c.paye, "EUR"),
+    (Number(c.reste) || 0) > 0 ? fmt(c.reste, "EUR") : "Payé",
+  ]);
+  if (hasAutoTable && doc.autoTable && body.length > 0) {
+    doc.autoTable({
+      startY: y, head: [head], body,
+      theme: "grid", headStyles: { fillColor: NAVY, textColor: 255, fontSize: 8 },
+      styles: { fontSize: 8, textColor: [40, 40, 40], overflow: "linebreak" },
+      columnStyles: { 0: { cellWidth: 26 }, 1: { cellWidth: 44 }, 2: { cellWidth: 16 }, 3: { cellWidth: 18 }, 4: { cellWidth: 26 }, 5: { cellWidth: 26 }, 6: { cellWidth: 26 } },
+      margin: { left: 14, right: 14 },
+    });
+    y = doc.lastAutoTable.finalY + 8;
+  } else {
+    const colX = [14, 40, 84, 100, 118, 144, 170];
+    doc.setFontSize(8); doc.setTextColor(255, 255, 255); doc.setFillColor(...NAVY);
+    doc.rect(14, y, 182, 7, "F");
+    head.forEach((h, i) => doc.text(h, colX[i] + 1, y + 5));
+    y += 9;
+    doc.setTextColor(40, 40, 40);
+    body.forEach((row, i) => {
+      if (y > 250) { doc.addPage(); y = 20; }
+      if (i % 2 === 1) { doc.setFillColor(238, 243, 250); doc.rect(14, y - 4.5, 182, 6.5, "F"); }
+      doc.setFontSize(7.5);
+      row.forEach((cell, j) => doc.text(String(cell).slice(0, 22), colX[j] + 1, y));
+      y += 6.5;
+    });
+    y += 10;
+  }
+
+  // Où l'argent est réellement entré — le comptoir de Conakry et celui de l'escale n'ont pas la
+  // même caisse, et sur un aller-retour les deux ont encaissé.
+  if (y > 240) { doc.addPage(); y = 20; }
+  doc.setFont(undefined, "bold"); doc.setFontSize(10.5); doc.setTextColor(...INK);
+  doc.text("Encaissements — qui a reçu l’argent, qui doit verser", 14, y);
+  y += 7;
+  // Une seule section : le total de chaque caisse, et sous chacune les agents qui l'ont alimentée
+  // avec ce qu'ils doivent encore verser. C'est la partie qu'on relit avec chacun pour solder.
+  const sauterSiBesoin = () => { if (y > 268) { doc.addPage(); y = 20; } };
+  t.encaissements.parLieu.forEach((lieu) => {
+    sauterSiBesoin();
+    doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...INK);
+    doc.text(`Encaissé à ${lieu.lieu}`, 16, y);
+    doc.text(formaterDevises(lieu.devises), 196, y, { align: "right" });
+    y += 6;
+    doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(90, 100, 115);
+    t.encaissements.lignes.filter((l) => (l.pays || "?") === (lieu.pays || "?")).forEach((l) => {
+      sauterSiBesoin();
+      const du = Object.values(l.aVerser).some((v) => Math.abs(v) >= 0.005) ? `à verser ${formaterDevises(l.aVerser)}` : "rien à verser";
+      const dejaVerse = Object.values(l.verse).some((v) => Math.abs(v) >= 0.005) ? ` · déjà versé ${formaterDevises(l.verse)}` : "";
+      doc.text(`   ${l.agent}`, 16, y);
+      doc.text(`${formaterDevises(l.devises)} · ${du}${dejaVerse}`, 196, y, { align: "right" });
+      y += 5.5;
+    });
+    y += 2;
+  });
+  doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(60, 66, 78);
+  if (t.encaissements.nonVentileEUR > 0.005) {
+    sauterSiBesoin();
+    doc.text("Sans détail de paiement", 16, y);
+    doc.text(fmt(t.encaissements.nonVentileEUR, "EUR"), 196, y, { align: "right" });
+    y += 6;
+  }
+  sauterSiBesoin();
+  doc.text("Reste à encaisser auprès des clients", 16, y);
+  doc.text(fmt(t.resteAEncaisser, "EUR"), 196, y, { align: "right" });
+  y += 10;
+
+  if ((voyage.depenses || []).length > 0) {
+    if (y > 235) { doc.addPage(); y = 20; }
+    doc.setFont(undefined, "bold"); doc.setFontSize(10.5); doc.setTextColor(...INK);
+    doc.text("Dépenses du voyage", 14, y);
+    y += 6;
+    doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(60, 66, 78);
+    voyage.depenses.forEach((d) => {
+      if (y > 268) { doc.addPage(); y = 20; }
+      doc.text(d.libelle || "Dépense", 16, y);
+      doc.text(`${fmt(versEUR(d.montant, d.devise), d.devise)}`, 196, y, { align: "right" });
+      y += 6;
+    });
+    y += 4;
+  }
+
+  // Le panneau de résultat et la signature ont besoin d'environ 58 mm : on ne les laisse jamais
+  // déborder sous le pied de page.
+  // Le panneau de résultat (34 mm), sa ligne d'explication et le bloc signature demandent environ
+  // 80 mm : en dessous de cette marge ils passeraient sous le pied de page, invisibles à l'impression.
+  if (y > 205) { doc.addPage(); y = 20; }
+  doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, 34, "F");
+  doc.setFontSize(10); doc.setTextColor(...NAVY); doc.setFont(undefined, "bold");
+  doc.text("Recettes (chiffre d’affaires)", 18, y + 8);
+  doc.text(fmt(t.facture, "EUR"), 192, y + 8, { align: "right" });
+  doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
+  doc.text("Dépenses du voyage", 18, y + 15);
+  doc.text(`- ${fmt(t.depensesEUR, "EUR")}`, 192, y + 15, { align: "right" });
+  doc.setFont(undefined, "bold"); doc.setFontSize(10.5);
+  doc.setTextColor(...(t.resultat >= 0 ? [22, 161, 99] : [214, 39, 63]));
+  doc.text("Résultat sur le facturé", 18, y + 23);
+  doc.text(fmt(t.resultat, "EUR"), 192, y + 23, { align: "right" });
+  doc.setFontSize(12);
+  doc.setTextColor(...(t.tresorerie >= 0 ? [22, 161, 99] : [214, 39, 63]));
+  doc.text("Bilan final (argent rentré)", 18, y + 31);
+  doc.text(fmt(t.tresorerie, "EUR"), 192, y + 31, { align: "right" });
+  y += 40;
+
+  doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
+  doc.text(`Bilan final = encaissé ${fmt(t.encaisse, "EUR")} - dépenses ${fmt(t.depensesEUR, "EUR")}, soit ${fmtGNF(t.tresorerie * (LIVE_RATES.GNF || CURRENCIES.GNF))}.`, 14, y);
+  y += 14;
+  // Le pied de page est à 288 mm : la ligne de signature doit rester au-dessus.
+  if (y > 260) { doc.addPage(); y = 20; }
+  doc.setFontSize(9); doc.setTextColor(90, 100, 120);
+  doc.text(voyage.valideeLe
+    ? `Validée le ${new Date(voyage.valideeLe).toLocaleString("fr-FR")}${voyage.valideePar ? ` par ${voyage.valideePar}` : ""}`
+    : "Fiche non encore validée", 14, y);
+  y += 8;
+  doc.text("Signature du responsable :", 14, y);
+  doc.setDrawColor(180); doc.line(14, y + 12, 85, y + 12);
+
+  doc.setFontSize(7.3); doc.setTextColor(150, 150, 150);
+  doc.text(`Édité le ${new Date().toLocaleString("fr-FR")} — Ba-Diaby Express`, 14, 288);
+}
+
+/**
+ * Voyages — le rendement d'une rotation, colis par colis.
+ *
+ * On choisit une route (Conakry → Paris ou l'inverse), on coche les colis embarqués, on saisit les
+ * dépenses engagées (fret, douane, manutention...), et la page affiche ce que le voyage rapporte
+ * vraiment. La validation fige la fiche, l'édite en PDF, et surtout retire ces colis de la liste
+ * proposée aux voyages suivants : un colis ne peut être compté que dans un seul voyage.
+ *
+ * Le résultat est calculé sur le chiffre d'affaires FACTURÉ, comme en Comptabilité : un colis
+ * impayé a bien voyagé et coûté du fret, ce n'est pas une raison pour effacer sa recette. Ce qui
+ * a réellement été encaissé est affiché à côté, avec le reste à encaisser.
+ */
+function VoyagesPage({ data, persist, session, notify }) {
+  const voyages = data.voyages || [];
+  const [ouvert, setOuvert] = useState(null); // id du voyage affiché, ou "nouveau"
+  const [pays, setPays] = useState("FR");
+  const [direction, setDirection] = useState("export");
+  const [dateDepart, setDateDepart] = useState("");
+  const [trackings, setTrackings] = useState([]);
+  const [depenses, setDepenses] = useState([]);
+  const [depLibelle, setDepLibelle] = useState("");
+  const [depMontant, setDepMontant] = useState("");
+  const [depDevise, setDepDevise] = useState("GNF");
+  const [recherche, setRecherche] = useState("");
+  const [confirmation, setConfirmation] = useState(null);
+  const [voyageASupprimer, setVoyageASupprimer] = useState(null);
+
+  const voyageCourant = ouvert && ouvert !== "nouveau" ? voyages.find((v) => v.id === ouvert) : null;
+  const enLecture = !!voyageCourant && voyageCourant.statut === "Validé";
+  const monNom = `${session?.prenom || ""} ${session?.nom || ""}`.trim() || session?.identifiant || "";
+
+  /** Colis déjà rattachés à un autre voyage — brouillon compris, sinon on les compterait deux fois. */
+  const prisAilleurs = useMemo(() => {
+    const set = new Set();
+    voyages.forEach((v) => { if (v.id !== ouvert) (v.trackings || []).forEach((t) => set.add(t)); });
+    return set;
+  }, [voyages, ouvert]);
+
+  const villePays = COUNTRIES.find((c) => c.code === pays)?.city || pays;
+
+  const eligibles = useMemo(() => {
+    const q = recherche.trim().toLowerCase();
+    return data.colis.filter((c) => {
+      if (c.pays !== pays || !voyageCouvre(direction, c.direction || "export")) return false;
+      if (["Annulé", "Refusé"].includes(c.status)) return false;
+      if (prisAilleurs.has(c.tracking)) return false;
+      if (q && !`${c.tracking} ${c.destinataire || ""} ${c.expediteur || ""}`.toLowerCase().includes(q)) return false;
+      return true;
+    }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  }, [data.colis, pays, direction, prisAilleurs, recherche]);
+
+  const colisInclus = useMemo(() => {
+    const set = new Set(trackings);
+    return data.colis.filter((c) => set.has(c.tracking));
+  }, [data.colis, trackings]);
+  const totaux = useMemo(() => totauxVoyage(colisInclus, depenses, data.users, data.remisesCaisse), [colisInclus, depenses, data.users, data.remisesCaisse]);
+  // Sur un aller-retour, chaque sens a son propre rendement : c'est souvent l'aller qui paie le
+  // billet et le retour qui fait la marge, ou l'inverse. On les affiche séparément.
+  const parSens = useMemo(() => {
+    if (direction !== "allerRetour") return null;
+    return ["export", "import"].map((sens) => ({
+      sens,
+      libelle: libelleVoyage(pays, sens),
+      ...totauxVoyage(colisInclus.filter((c) => (c.direction || "export") === sens), [], data.users, data.remisesCaisse),
+    }));
+  }, [direction, colisInclus, pays, data.users, data.remisesCaisse]);
+
+  function ouvrirNouveau() {
+    setOuvert("nouveau");
+    setPays("FR"); setDirection("export"); setDateDepart(""); setTrackings([]); setDepenses([]);
+    setDepLibelle(""); setDepMontant(""); setDepDevise("GNF"); setRecherche("");
+  }
+  function ouvrirVoyage(v) {
+    setOuvert(v.id);
+    setPays(v.pays); setDirection(v.direction); setDateDepart(v.dateDepart || "");
+    setTrackings(v.trackings || []); setDepenses(v.depenses || []); setRecherche("");
+  }
+  function fermer() { setOuvert(null); setConfirmation(null); }
+
+  function basculer(tracking) {
+    if (enLecture) return;
+    setTrackings((l) => (l.includes(tracking) ? l.filter((t) => t !== tracking) : [...l, tracking]));
+  }
+  function toutSelectionner() {
+    const cles = eligibles.map((c) => c.tracking);
+    const tout = cles.every((t) => trackings.includes(t));
+    setTrackings((l) => (tout ? l.filter((t) => !cles.includes(t)) : [...new Set([...l, ...cles])]));
+  }
+  function ajouterDepense() {
+    if (!depLibelle.trim() || !(Number(depMontant) > 0)) { notify?.("Indiquez un libellé et un montant de dépense"); return; }
+    setDepenses((l) => [...l, { id: `dv${Date.now()}`, libelle: depLibelle.trim(), montant: Number(depMontant), devise: depDevise }]);
+    setDepLibelle(""); setDepMontant("");
+  }
+  function retirerDepense(id) { setDepenses((l) => l.filter((d) => d.id !== id)); }
+
+  /** Construit l'objet enregistré à partir de l'écran, sans les totaux (toujours recalculés). */
+  function voyageDepuisEcran(statut) {
+    const base = voyageCourant || {};
+    return {
+      id: base.id || `voy${Date.now()}`,
+      numero: base.numero || genNumeroVoyage(voyages),
+      creeLe: base.creeLe || new Date().toISOString(),
+      creePar: base.creePar || monNom,
+      pays, direction, dateDepart, trackings, depenses, statut,
+      valideeLe: statut === "Validé" ? new Date().toISOString() : null,
+      valideePar: statut === "Validé" ? monNom : null,
+    };
+  }
+
+  function enregistrer(statut) {
+    const voyage = voyageDepuisEcran(statut);
+    const autres = voyages.filter((v) => v.id !== voyage.id);
+    persist({
+      ...data,
+      voyages: [voyage, ...autres],
+      activityLog: pushActivity(data, session,
+        statut === "Validé" ? "Voyage validé" : "Voyage enregistré",
+        `${voyage.numero} — ${libelleVoyage(pays, direction)} · ${totaux.nbColis} colis · résultat ${fmt(totaux.resultat, "EUR")}`),
+    });
+    return voyage;
+  }
+
+  function enregistrerBrouillon() {
+    const v = enregistrer("Brouillon");
+    notify?.(`Voyage ${v.numero} enregistré en brouillon`);
+    setOuvert(v.id);
+  }
+
+  function validerVoyage() {
+    setConfirmation(null);
+    const v = enregistrer("Validé");
+    notify?.(`Voyage ${v.numero} validé — ses colis sortent de la liste`);
+    setOuvert(v.id);
+    imprimerFiche(v);
+  }
+
+  function rouvrir(v) {
+    persist({
+      ...data,
+      voyages: voyages.map((x) => (x.id === v.id ? { ...x, statut: "Brouillon", valideeLe: null, valideePar: null } : x)),
+      activityLog: pushActivity(data, session, "Voyage rouvert", `${v.numero} — ${libelleVoyage(v.pays, v.direction)}`),
+    });
+    notify?.(`Voyage ${v.numero} rouvert — modifiable à nouveau`);
+  }
+
+  function supprimer(v) {
+    persist({
+      ...data,
+      voyages: voyages.filter((x) => x.id !== v.id),
+      activityLog: pushActivity(data, session, "Voyage supprimé", `${v.numero} — ${libelleVoyage(v.pays, v.direction)}`),
+    });
+    notify?.(`Voyage ${v.numero} supprimé — ses colis redeviennent disponibles`);
+    setVoyageASupprimer(null);
+    if (ouvert === v.id) setOuvert(null);
+  }
+
+  async function imprimerFiche(voyage) {
+    try {
+      const jspdf = await loadJsPDF();
+      const doc = preparerDocPdf(new jspdf.jsPDF());
+      const hasAutoTable = await ensureAutoTable();
+      const set = new Set(voyage.trackings || []);
+      dessinerFicheVoyage(doc, voyage, data.colis.filter((c) => set.has(c.tracking)), hasAutoTable, data);
+      openPdf(doc, `fiche-voyage-${voyage.numero}.pdf`);
+    } catch (e) {
+      console.error(e);
+      notify?.("Échec de génération du PDF — réessayez");
+    }
+  }
+
+  const carte = { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14 };
+
+  // ── Liste des voyages ────────────────────────────────────────────────────────
+  if (!ouvert) {
+    return (
+      <div>
+        <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 27, margin: "0 0 5px" }}>Voyages</h1>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: 12, marginBottom: 20 }}>
+          <p style={{ color: "var(--muted)", fontSize: 14.5, margin: 0, maxWidth: 640 }}>
+            Le rendement de chaque rotation : les colis embarqués, ce qu’ils rapportent, les dépenses engagées,
+            et ce qu’il en reste. Une fiche validée retire ses colis des voyages suivants.
+          </p>
+          <button onClick={ouvrirNouveau} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+            <Plus size={16} /> Nouveau voyage
+          </button>
+        </div>
+
+        {voyages.length === 0 ? (
+          <div style={{ ...carte, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>
+            Aucun voyage enregistré. Créez-en un pour mesurer ce que rapporte une rotation.
+          </div>
+        ) : voyages.map((v) => {
+          const set = new Set(v.trackings || []);
+          const t = totauxVoyage(data.colis.filter((c) => set.has(c.tracking)), v.depenses, data.users, data.remisesCaisse);
+          const valide = v.statut === "Validé";
+          return (
+            <div key={v.id} style={{ ...carte, marginBottom: 12, padding: "14px 16px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+                <button onClick={() => ouvrirVoyage(v)} style={{ background: "none", border: "none", padding: 0, textAlign: "start", cursor: "pointer", flex: 1, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)" }}>{v.numero}</span>
+                    <span style={{ fontSize: 13, color: "var(--muted)" }}>{libelleVoyage(v.pays, v.direction)}</span>
+                    <span style={{
+                      background: valide ? "var(--ok-bg-soft)" : "var(--warn-bg)", color: valide ? "var(--ok-fg)" : "var(--warn-fg)",
+                      borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700,
+                    }}>{v.statut}</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 5 }}>
+                    {t.nbColis} colis ({t.nbPayes} payés · {t.nbPartiels} partiels · {t.nbImpayes} impayés) · {t.poids.toFixed(1)} kg
+                    <br />recettes {fmt(t.facture, "EUR")} · dépenses {fmt(t.depensesEUR, "EUR")} · bilan {fmt(t.tresorerie, "EUR")}
+                    {v.dateDepart ? ` · départ ${new Date(`${v.dateDepart}T00:00:00`).toLocaleDateString("fr-FR")}` : ""}
+                  </div>
+                </button>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 16, fontWeight: 700, color: t.resultat >= 0 ? "var(--ok-fg)" : "var(--danger-fg)" }}>
+                    {fmt(t.resultat, "EUR")}
+                  </div>
+                  <button onClick={() => imprimerFiche(v)} style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 11px", color: "var(--text)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                    <Printer size={13} /> Fiche
+                  </button>
+                  <button onClick={() => setVoyageASupprimer(v)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer", padding: 4 }} title="Supprimer ce voyage">
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+
+        {voyageASupprimer && (
+          <ConfirmerAction
+            titre="Supprimer ce voyage ?"
+            message={`${voyageASupprimer.numero} — ${libelleVoyage(voyageASupprimer.pays, voyageASupprimer.direction)}.`}
+            consequence="Ses colis redeviendront disponibles pour un autre voyage, et ses dépenses seront perdues. Les colis eux-mêmes ne sont pas supprimés."
+            onConfirmer={() => supprimer(voyageASupprimer)}
+            onAnnuler={() => setVoyageASupprimer(null)}
+          />
+        )}
+      </div>
+    );
+  }
+
+  // ── Création / consultation d'un voyage ──────────────────────────────────────
+  const titre = voyageCourant ? `${voyageCourant.numero} — ${libelleVoyage(pays, direction)}` : "Nouveau voyage";
+  return (
+    <div>
+      <ConfigPageHeader
+        title={titre}
+        desc={enLecture
+          ? "Voyage validé : la fiche est figée et ses colis n’apparaissent plus dans les autres voyages."
+          : "Choisissez la route, cochez les colis embarqués, ajoutez les dépenses, puis validez la fiche."}
+        onBack={fermer}
+        retour="Voyages"
+      />
+
+      <div style={{ ...carte, padding: 16, marginBottom: 18 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Pays</div>
+            <select value={pays} disabled={enLecture} onChange={(e) => { setPays(e.target.value); setTrackings([]); }} style={inputStyle}>
+              {COUNTRIES.filter((c) => c.code !== "GN").map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code]} {c.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Sens</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {[["export", `Conakry → ${villePays}`], ["import", `${villePays} → Conakry`], ["allerRetour", "Aller-retour"]].map(([sens, label]) => (
+                <button key={sens} disabled={enLecture}
+                  onClick={() => {
+                    // On ne vide la sélection que si le nouveau sens ne couvre plus les colis déjà
+                    // cochés : passer d'un aller simple à l'aller-retour doit les conserver.
+                    setDirection(sens);
+                    setTrackings((l) => l.filter((t) => {
+                      const c = data.colis.find((x) => x.tracking === t);
+                      return c && voyageCouvre(sens, c.direction || "export");
+                    }));
+                  }}
+                  style={{ ...toggleBtn, ...(direction === sens ? toggleActive : {}), opacity: enLecture ? 0.6 : 1, fontSize: 12, flex: "1 1 auto" }}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Date de départ</div>
+            <input type="date" value={dateDepart} disabled={enLecture} onChange={(e) => setDateDepart(e.target.value)} style={inputStyle} />
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12, marginBottom: 18 }}>
+        {[
+          { label: "Colis embarqués", valeur: String(totaux.nbColis), sous: `${totaux.poids.toFixed(1)} kg au total`, icon: Package, tint: "#5B8DEF" },
+          { label: "Recettes (chiffre d’affaires)", valeur: fmt(totaux.facture, "EUR"), sous: `encaissé ${fmt(totaux.encaisse, "EUR")} · reste ${fmt(totaux.resteAEncaisser, "EUR")}`, icon: DollarSign, tint: "#0A2647" },
+          { label: "Dépenses du voyage", valeur: fmt(totaux.depensesEUR, "EUR"), sous: `${depenses.length} ligne${depenses.length > 1 ? "s" : ""}`, icon: Receipt, tint: "#B8801C" },
+          { label: "Résultat du voyage", valeur: fmt(totaux.resultat, "EUR"), sous: fmtGNF(totaux.resultat * (LIVE_RATES.GNF || CURRENCIES.GNF)), icon: Plane, tint: totaux.resultat >= 0 ? "#16A163" : "#E23F52" },
+        ].map((k) => (
+          <div key={k.label} style={{ ...carte, padding: "16px 18px" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+              <div style={{ fontSize: 12.5, color: "var(--muted)", fontWeight: 600 }}>{k.label}</div>
+              <div style={{ width: 32, height: 32, borderRadius: 9, background: k.tint, display: "grid", placeItems: "center", flexShrink: 0 }}><k.icon size={16} color="#fff" /></div>
+            </div>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 20, fontWeight: 700, color: "var(--text)", marginTop: 10, wordBreak: "break-word" }}>{k.valeur}</div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 5 }}>{k.sous}</div>
+          </div>
+        ))}
+      </div>
+
+      {parSens && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 12, marginBottom: 18 }}>
+          {parSens.map((s) => (
+            <div key={s.sens} style={{ ...carte, padding: "14px 16px" }}>
+              <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text)" }}>{s.libelle}</div>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>
+                {s.nbColis} colis · {s.poids.toFixed(1)} kg
+              </div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)", marginTop: 6 }}>{fmt(s.facture, "EUR")}</div>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                encaissé {fmt(s.encaisse, "EUR")} · reste {fmt(s.resteAEncaisser, "EUR")}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ ...carte, marginBottom: 18, padding: "14px 16px" }}>
+        <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)", marginBottom: 10 }}>Bilan des paiements</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 10, marginBottom: 14 }}>
+          {[
+            { label: "Payés", valeur: totaux.nbPayes, coul: "var(--ok-fg)", fond: "var(--ok-bg-soft)" },
+            { label: "Partiels", valeur: totaux.nbPartiels, coul: "var(--warn-fg)", fond: "var(--warn-bg)" },
+            { label: "Impayés", valeur: totaux.nbImpayes, coul: "var(--danger-fg)", fond: "var(--danger-bg)" },
+            { label: "Total colis", valeur: totaux.nbColis, coul: "var(--text)", fond: "var(--surface2)" },
+          ].map((k) => (
+            <div key={k.label} style={{ background: k.fond, borderRadius: 10, padding: "10px 12px" }}>
+              <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 20, fontWeight: 700, color: k.coul }}>{k.valeur}</div>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>{k.label}</div>
+            </div>
+          ))}
+        </div>
+        {totaux.encaissements.parLieu.map((l) => (
+          <div key={l.pays || "?"} style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "8px 0", borderTop: "1px solid var(--surface2)", flexWrap: "wrap" }}>
+            <span style={{ fontSize: 13, color: "var(--muted)" }}>Encaissé à {l.lieu}</span>
+            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{formaterDevises(l.devises)}</span>
+          </div>
+        ))}
+        {totaux.encaissements.nonVentileEUR > 0.005 && (
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "8px 0", borderTop: "1px solid var(--surface2)", flexWrap: "wrap" }}>
+            <span style={{ fontSize: 13, color: "var(--muted)" }}>Sans détail de paiement</span>
+            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--muted)" }}>{fmt(totaux.encaissements.nonVentileEUR, "EUR")}</span>
+          </div>
+        )}
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "8px 0", borderTop: "1px solid var(--surface2)", flexWrap: "wrap" }}>
+          <span style={{ fontSize: 13, color: "var(--muted)" }}>Reste à encaisser</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: totaux.resteAEncaisser > 0 ? "var(--danger-fg)" : "var(--ok-fg)" }}>{fmt(totaux.resteAEncaisser, "EUR")}</span>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "12px 0 0", borderTop: "1.5px solid var(--border)", marginTop: 6, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Bilan final — argent réellement rentré</div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>encaissé {fmt(totaux.encaisse, "EUR")} moins les dépenses {fmt(totaux.depensesEUR, "EUR")}</div>
+          </div>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 18, fontWeight: 700, color: totaux.tresorerie >= 0 ? "var(--ok-fg)" : "var(--danger-fg)" }}>
+            {fmt(totaux.tresorerie, "EUR")}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ ...carte, marginBottom: 18, padding: "14px 16px" }}>
+        <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>Qui a encaissé, et qui doit verser</div>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 10 }}>
+          Chaque agent est rattaché à son lieu d’affectation : ce qu’il encaisse à Paris est dans la caisse de
+          Paris, ce qu’il encaisse en Guinée dans celle de Conakry. Seules les espèces sont à verser — le Mobile
+          Money et les virements arrivent directement sur les comptes de l’entreprise.
+        </div>
+        {totaux.encaissements.lignes.length === 0 ? (
+          <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Aucun encaissement sur les colis de ce voyage.</div>
+        ) : totaux.encaissements.lignes.map((l) => {
+          const doitVerser = Object.values(l.aVerser).some((v) => Math.abs(v) >= 0.005);
+          return (
+            <div key={`${l.agent}@${l.pays || "?"}`} style={{ padding: "10px 0", borderTop: "1px solid var(--surface2)" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>
+                  {l.agent} <span style={{ fontWeight: 600, color: "var(--muted)" }}>· {l.lieu}</span>
+                </div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{formaterDevises(l.devises)}</div>
+              </div>
+              <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                <span style={{
+                  background: doitVerser ? "var(--warn-bg)" : "var(--ok-bg-soft)", color: doitVerser ? "var(--warn-fg)" : "var(--ok-fg)",
+                  borderRadius: 20, padding: "2px 10px", fontSize: 11, fontWeight: 700,
+                }}>
+                  {doitVerser ? `Doit verser ${formaterDevises(l.aVerser)}` : "Rien à verser"}
+                </span>
+                {Object.values(l.verse).some((v) => Math.abs(v) >= 0.005) && (
+                  <span style={{ fontSize: 11, color: "var(--muted)", alignSelf: "center" }}>déjà versé {formaterDevises(l.verse)}</span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+        <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 10 }}>
+          « Versé » signifie repris sur un bon de remise en caisse validé — voir la page Caisse.
+        </div>
+      </div>
+
+      <div style={{ ...carte, marginBottom: 18, overflow: "hidden" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "14px 16px", flexWrap: "wrap" }}>
+          <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>
+            Colis du voyage — {trackings.length} sélectionné{trackings.length > 1 ? "s" : ""}
+            {!enLecture && <span style={{ color: "var(--muted)", fontWeight: 600 }}> / {eligibles.length} disponible{eligibles.length > 1 ? "s" : ""}</span>}
+          </div>
+          {!enLecture && eligibles.length > 0 && (
+            <button onClick={toutSelectionner} style={{ background: "none", border: "none", color: "var(--info-fg)", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
+              Tout sélectionner / désélectionner
+            </button>
+          )}
+        </div>
+        {!enLecture && (
+          <div style={{ padding: "0 16px 12px" }}>
+            <input value={recherche} onChange={(e) => setRecherche(e.target.value)} placeholder="Rechercher un n° de suivi, un client…" style={inputStyle} />
+          </div>
+        )}
+        <div style={{ borderTop: "1px solid var(--border)", maxHeight: 420, overflowY: "auto" }}>
+          {(enLecture ? colisInclus : eligibles).length === 0 ? (
+            <div style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>
+              Aucun colis disponible sur cette route — ils sont peut-être déjà rattachés à un autre voyage.
+            </div>
+          ) : (enLecture ? colisInclus : eligibles).map((c) => (
+            <label key={c.tracking} style={{ display: "flex", alignItems: "center", gap: 12, padding: "11px 16px", borderBottom: "1px solid var(--surface2)", cursor: enLecture ? "default" : "pointer" }}>
+              <input type="checkbox" checked={trackings.includes(c.tracking)} disabled={enLecture} onChange={() => basculer(c.tracking)} style={{ width: 16, height: 16, flexShrink: 0 }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{c.tracking} — {c.destinataire}</div>
+                <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                  {c.status} · {(Number(c.poids) || 0).toFixed(1)} kg · {new Date(c.createdAt).toLocaleDateString("fr-FR")}
+                </div>
+                <div style={{ display: "flex", gap: 6, marginTop: 5, flexWrap: "wrap" }}>
+                  {(() => {
+                    const st = statutPaiementColis(c);
+                    const style = { "Payé": ["var(--ok-bg-soft)", "var(--ok-fg)"], "Partiel": ["var(--warn-bg)", "var(--warn-fg)"], "Impayé": ["var(--danger-bg)", "var(--danger-fg)"] }[st];
+                    return <span style={{ background: style[0], color: style[1], borderRadius: 20, padding: "2px 9px", fontSize: 10.5, fontWeight: 700 }}>{st}</span>;
+                  })()}
+                  {direction === "allerRetour" && (
+                    <span style={{ background: "var(--surface2)", color: "var(--muted)", borderRadius: 20, padding: "2px 9px", fontSize: 10.5, fontWeight: 700 }}>
+                      {(c.direction || "export") === "export" ? "Aller" : "Retour"}
+                    </span>
+                  )}
+                </div>
+              </div>
+              <div style={{ textAlign: "end", flexShrink: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{fmt(c.prix, "EUR")}</div>
+                {(Number(c.reste) || 0) > 0 && <div style={{ fontSize: 11, color: "var(--danger-fg)" }}>reste {fmt(c.reste, "EUR")}</div>}
+              </div>
+            </label>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ ...carte, marginBottom: 18, padding: "14px 16px" }}>
+        <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)", marginBottom: 10 }}>Dépenses du voyage</div>
+        {depenses.length === 0 && <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10 }}>Fret, douane, manutention, transport local… tout ce que la rotation a coûté.</div>}
+        {depenses.map((d) => (
+          <div key={d.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid var(--surface2)" }}>
+            <div style={{ fontSize: 13, color: "var(--text)" }}>{d.libelle}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{fmt(versEUR(d.montant, d.devise), d.devise)}</div>
+              {!enLecture && (
+                <button onClick={() => retirerDepense(d.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer", padding: 2 }} title="Retirer cette dépense">
+                  <Trash2 size={13} />
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
+        {!enLecture && (
+          <div style={{ marginTop: 12 }}>
+            {/* Libellé sur toute la largeur, puis montant / devise / bouton : sur un téléphone,
+                les quatre champs côte à côte réduisaient le montant à une case illisible. */}
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Libellé</div>
+            <input value={depLibelle} onChange={(e) => setDepLibelle(e.target.value)} placeholder="ex: fret aérien" style={{ ...inputStyle, marginBottom: 0 }} />
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 100px auto", gap: 8, marginTop: 8, alignItems: "end" }}>
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Montant</div>
+                <input type="number" min="0" step="0.01" value={depMontant} onChange={(e) => setDepMontant(e.target.value)} placeholder="0" style={{ ...inputStyle, marginBottom: 0 }} />
+              </div>
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Devise</div>
+                <select value={depDevise} onChange={(e) => setDepDevise(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }}>
+                  {Object.keys(CURRENCIES).map((d) => <option key={d} value={d}>{d}</option>)}
+                </select>
+              </div>
+              <button onClick={ajouterDepense} style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "10px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                Ajouter
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 20 }}>
+        {!enLecture ? (
+          <>
+            <button onClick={enregistrerBrouillon} disabled={trackings.length === 0} style={{
+              background: "var(--surface)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 9,
+              padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: trackings.length ? "pointer" : "not-allowed", opacity: trackings.length ? 1 : 0.6,
+            }}>
+              Enregistrer le brouillon
+            </button>
+            <button onClick={() => setConfirmation(true)} disabled={trackings.length === 0} style={{
+              display: "flex", alignItems: "center", gap: 7, background: trackings.length ? "#16A163" : "var(--surface2)",
+              color: trackings.length ? "#fff" : "var(--muted)", border: "none", borderRadius: 9, padding: "11px 18px",
+              fontSize: 13.5, fontWeight: 700, cursor: trackings.length ? "pointer" : "not-allowed",
+            }}>
+              <CheckCircle2 size={16} /> Valider la fiche de voyage
+            </button>
+          </>
+        ) : (
+          <>
+            <button onClick={() => imprimerFiche(voyageCourant)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+              <Printer size={16} /> Rééditer la fiche (PDF)
+            </button>
+            <button onClick={() => rouvrir(voyageCourant)} style={{ background: "var(--surface)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+              Rouvrir pour modifier
+            </button>
+          </>
+        )}
+      </div>
+
+      {confirmation && (
+        <ConfirmerAction
+          titre="Valider cette fiche de voyage ?"
+          message={`${libelleVoyage(pays, direction)} — ${totaux.nbColis} colis (${totaux.nbPayes} payés, ${totaux.nbPartiels} partiels, ${totaux.nbImpayes} impayés), ${totaux.poids.toFixed(1)} kg. Recettes ${fmt(totaux.facture, "EUR")}, dépenses ${fmt(totaux.depensesEUR, "EUR")}, bilan final ${fmt(totaux.tresorerie, "EUR")}.`}
+          consequence="Ces colis n’apparaîtront plus dans la liste des voyages suivants, pour qu’aucun ne soit compté deux fois. La fiche s’ouvrira en PDF, et reste réouvrable si vous devez la corriger."
+          libelleAction="Valider la fiche"
+          onConfirmer={validerVoyage}
+          onAnnuler={() => setConfirmation(null)}
+        />
+      )}
+
+      <div style={{ fontSize: 11.5, color: "var(--muted)" }}>
+        Le résultat est calculé sur le chiffre d’affaires facturé : un colis impayé a voyagé et coûté du fret,
+        sa recette reste acquise. L’encaissement réel est suivi à part, dans Caisse et Comptabilité.
+      </div>
+    </div>
+  );
+}
+VoyagesPage = memo(VoyagesPage);
+
 function ComptabilitePage({ data, persist, session, notify }) {
   const [periode, setPeriode] = useState("mois");
   const [form, setForm] = useState(null);

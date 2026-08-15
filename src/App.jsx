@@ -12311,7 +12311,19 @@ function CaissePage({ data, persist, session, notify }) {
     };
   })), [data.colis, remiseParCle]);
 
-  const agentsConnus = useMemo(() => [...new Set(lignes.map((l) => l.agent))].sort((a, b) => a.localeCompare(b, "fr")), [lignes]);
+  /*
+   * La liste des agents ne se déduit pas seulement des encaissements déjà enregistrés : tant qu'un
+   * agent n'a rien encaissé, il n'apparaissait pas du tout, et on croyait l'application incomplète
+   * alors qu'elle n'avait simplement rien à montrer pour lui. On part donc des comptes existants,
+   * complétés par les noms rencontrés dans les paiements (agents partis, personnes sans compte).
+   */
+  const agentsConnus = useMemo(() => {
+    const noms = new Set(encaisseursPossibles(data.users).map(nomAffiche).filter(Boolean));
+    lignes.forEach((l) => noms.add(l.agent));
+    return [...noms].sort((a, b) => a.localeCompare(b, "fr"));
+  }, [lignes, data.users]);
+  /** Un agent sans encaissement sur la période reste proposé, mais on le signale plutôt que d'afficher un vide muet. */
+  const agentSansEncaissement = agentActif !== "tous" && !lignes.some((l) => l.agent === agentActif);
   const sitesConnus = useMemo(() => [...new Set(lignes.map((l) => l.site))].sort((a, b) => a.localeCompare(b, "fr")), [lignes]);
 
   const filtrees = useMemo(() => {
@@ -12621,7 +12633,9 @@ function CaissePage({ data, persist, session, notify }) {
 
       {parAgent.length === 0 ? (
         <div style={{ ...carte, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>
-          Aucun encaissement sur cette période. Changez de période ou retirez un filtre.
+          {agentSansEncaissement
+            ? `${agentActif} n’a encore encaissé aucun paiement. Les agents apparaissent ici dès leur premier encaissement enregistré à leur nom.`
+            : "Aucun encaissement sur cette période. Changez de période ou retirez un filtre."}
         </div>
       ) : parAgent.map((g) => {
         const cles = g.liste.map((l) => l.cle);

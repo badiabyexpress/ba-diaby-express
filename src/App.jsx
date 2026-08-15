@@ -6156,6 +6156,8 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
    * la comptabilité et les reçus restent exacts colis par colis.
    */
   function encaisserGroupe(trackings, montantEUR, mode, montantSaisi, deviseSaisie, details) {
+    const { percuPar, ...detailsPaiement } = details || {};
+    const receveur = receveurPaiement(session, data.users, percuPar);
     const cibles = data.colis
       .filter((c) => trackings.includes(c.tracking))
       .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
@@ -6186,16 +6188,15 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
         id: `pay${Date.now()}-${c.tracking}`, montant: part,
         montantSaisi: +(part * (LIVE_RATES[deviseSaisie] || CURRENCIES[deviseSaisie] || 1)).toFixed(2),
         deviseSaisie, mode, date: horodatage,
-        par: `${session.prenom} ${session.nom}`.trim() || session.identifiant,
-        // Où l'argent est entré : là où se trouve l'agent qui l'encaisse. Sans cette marque, il
-        // fallait le deviner d'après la devise — un euro reçu à Conakry passait pour un euro reçu
-        // à Paris, et le rendement d'un voyage se retrouvait ventilé du mauvais côté.
-        parPays: session.paysOperation || "GN", parSite: session.agence || "",
-        ...(details || {}), groupe: true,
+        // Qui a reçu l'argent (pas forcément qui saisit) et où il se trouve : sans cette marque, la
+        // caisse réclamait la somme à la mauvaise personne, et le lieu se devinait d'après la devise
+        // — un euro reçu à Conakry passait pour un euro reçu à Paris.
+        ...receveur,
+        ...detailsPaiement, groupe: true,
       };
       return { ...c, paye, reste, paiements: [...(c.paiements || []), paiement] };
     }) };
-    next.activityLog = logActivity("Encaissement groupé", `${nbColis} colis — ${montantSaisi} ${deviseSaisie} (${mode})${details?.reference ? ` réf. ${details.reference}` : ""}`);
+    next.activityLog = logActivity("Encaissement groupé", `${nbColis} colis — ${montantSaisi} ${deviseSaisie} (${mode})${detailsPaiement?.reference ? ` réf. ${detailsPaiement.reference}` : ""}${receveur.saisiPar ? ` — argent reçu par ${receveur.par}` : ""}`);
     persist(next);
     notify(ajuste
       ? `Réparti sur ${nbColis} colis — limité au solde dû, pensez à rendre la monnaie`
@@ -6203,6 +6204,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
   }
 
   function encaisser(tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId) {
+    const receveur = receveurPaiement(session, data.users, details?.percuPar);
     // Un encaissement ne peut jamais être négatif, ni dépasser le montant restant dû : sinon une
     // faute de frappe (un zéro de trop) gonflerait le chiffre d’affaires, car la comptabilité
     // additionne le champ « payé ». Si le client remet davantage, la différence est de la monnaie
@@ -6232,15 +6234,14 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
       const paye = +(c.paye + applique).toFixed(2);
       const reste = Math.max(+(c.prix - paye).toFixed(2), 0);
       const paiement = { id: `pay${Date.now()}`, montant: applique, montantSaisi, deviseSaisie, mode, date: new Date().toISOString(),
-        par: `${session.prenom} ${session.nom}`,
-        parPays: session.paysOperation || "GN", parSite: session.agence || "",
+        ...receveur,
         reference: details?.reference || "", numeroPayeur: details?.numeroPayeur || "", numeroReceveur: details?.numeroReceveur || "" };
       const declarationsPaiement = declarationId
         ? (c.declarationsPaiement || []).map((d) => (d.id === declarationId ? { ...d, statut: "Confirmé" } : d))
         : c.declarationsPaiement;
       return { ...c, paye, reste, paiements: [...(c.paiements || []), paiement], declarationsPaiement };
     }) };
-    next.activityLog = logActivity("Paiement encaissé", `${tracking} — ${montantSaisi} ${deviseSaisie} (${mode})${details?.reference ? ` réf. ${details.reference}` : ""}`);
+    next.activityLog = logActivity("Paiement encaissé", `${tracking} — ${montantSaisi} ${deviseSaisie} (${mode})${details?.reference ? ` réf. ${details.reference}` : ""}${receveur.saisiPar ? ` — argent reçu par ${receveur.par}` : ""}`);
     persist(next);
     notify(ajuste ? `Encaissement limité au solde dû (${fmt(applique, "EUR")}) — pensez à rendre la monnaie` : "Paiement encaissé");
     const colisPaye = next.colis.find((c) => c.tracking === tracking);
@@ -6510,7 +6511,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
           notify?.("Code renvoyé au client");
         }}
         onClose={() => setRemiseEnCours(null)} />}
-      {showEncaisseGroupe && <EncaisserGroupeModal data={data} onEncaisser={encaisserGroupe} onClose={() => setShowEncaisseGroupe(false)} />}
+      {showEncaisseGroupe && <EncaisserGroupeModal data={data} session={session} onEncaisser={encaisserGroupe} onClose={() => setShowEncaisseGroupe(false)} />}
       {showReception && <ReceptionBordereauModal onClose={() => setShowReception(false)} data={data} persist={persist} notify={notify} session={session} />}
       {selected && <ColisDetail colis={selected} onClose={() => setSelected(null)} onAdvance={() => advance(selected.tracking)} onDelete={() => remove(selected.tracking)} onCancel={(motif) => annuler(selected.tracking, motif)} onRefuser={(motif) => refuser(selected.tracking, motif)} onDeclarerLitige={(t, d) => declarerLitige(selected.tracking, t, d)} onResoudreLitige={(r, i) => resoudreLitige(selected.tracking, r, i)} onMajRetour={(statutRetour) => majRetour(selected.tracking, statutRetour)} onUpdate={(patch) => updateColis(selected.tracking, patch)} onEncaisser={(montant, mode, montantSaisi, deviseSaisie, details, declarationId) => encaisser(selected.tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId)} canManage={!isChauffeur} isAdmin={session.role === "Administrateur"} isChauffeur={isChauffeur} data={data} session={session} notify={notify} />}
     </div>
@@ -9767,7 +9768,7 @@ function RemiseColisModal({ colis, session, onConfirmer, onClose, onRenvoyerCode
   );
 }
 
-function EncaisserGroupeModal({ data, onEncaisser, onClose }) {
+function EncaisserGroupeModal({ data, session, onEncaisser, onClose }) {
   const impayes = (data.colis || []).filter((c) => c.reste > 0.005 && !["Annulé", "Refusé"].includes(c.status));
   const parClient = {};
   impayes.forEach((c) => {
@@ -9791,6 +9792,8 @@ function EncaisserGroupeModal({ data, onEncaisser, onClose }) {
   const [reference, setReference] = useState("");
   const [numeroPayeur, setNumeroPayeur] = useState("");
   const [numeroReceveur, setNumeroReceveur] = useState("");
+  const [percuPar, setPercuPar] = useState("");
+  const [percuAutre, setPercuAutre] = useState("");
   const avecReference = mode === "Orange Money" || mode === "MTN Money" || mode === "Virement";
   const cfgPaiement = data.paymentConfig || {};
 
@@ -9870,6 +9873,15 @@ function EncaisserGroupeModal({ data, onEncaisser, onClose }) {
             </Field>
           </div>
 
+          <div style={{ marginTop: 12 }}>
+            <ChampPercuPar
+              users={data.users} session={session}
+              valeur={percuPar} onChange={setPercuPar}
+              autre={percuAutre} onChangeAutre={setPercuAutre}
+              client={client?.nom}
+            />
+          </div>
+
           {avecReference && (
             <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "12px 14px", marginTop: 12 }}>
               <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 700, marginBottom: 8 }}>DÉTAILS DE LA TRANSACTION</div>
@@ -9889,9 +9901,10 @@ function EncaisserGroupeModal({ data, onEncaisser, onClose }) {
 
           <button
             onClick={() => {
-              const details = avecReference
-                ? { reference: reference.trim(), numeroPayeur: numeroPayeur.trim(), numeroReceveur: numeroReceveur.trim() }
-                : null;
+              const details = {
+                ...(avecReference ? { reference: reference.trim(), numeroPayeur: numeroPayeur.trim(), numeroReceveur: numeroReceveur.trim() } : {}),
+                percuPar: percuPar === "__autre" ? percuAutre.trim() : percuPar,
+              };
               onEncaisser(coches.map((c) => c.tracking), montantEUR, mode, Number(montant) || 0, devise, details);
               onClose();
             }}
@@ -10478,6 +10491,10 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
   const [devisePaiement, setDevisePaiement] = useState("EUR");
   const [modePaiement, setModePaiement] = useState("Espèces");
   const [referenceTransaction, setReferenceTransaction] = useState("");
+  // Qui a réellement reçu l'argent. Vide = la personne connectée. Un comptable qui enregistre le
+  // paiement encaissé par un agent au comptoir désigne ici cet agent : la somme sera due par lui.
+  const [percuPar, setPercuPar] = useState("");
+  const [percuAutre, setPercuAutre] = useState("");
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [reponses, setReponses] = useState({});
   const [numeroPayeur, setNumeroPayeur] = useState(colis.telephone || "");
@@ -10556,9 +10573,10 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
     if (isNaN(n) || n <= 0) return;
     // convertit le montant saisi (dans devisePaiement) vers l’équivalent EUR, notre unité de référence interne
     const montantEUR = +(n / (LIVE_RATES[devisePaiement] || CURRENCIES[devisePaiement] || 1)).toFixed(2);
-    onEncaisser(montantEUR, modePaiement, n, devisePaiement, { reference: referenceTransaction, numeroPayeur, numeroReceveur });
+    const recu = percuPar === "__autre" ? percuAutre.trim() : percuPar;
+    onEncaisser(montantEUR, modePaiement, n, devisePaiement, { reference: referenceTransaction, numeroPayeur, numeroReceveur, percuPar: recu });
     setPayerOuvert(false);
-    setMontantPaye(""); setReferenceTransaction("");
+    setMontantPaye(""); setReferenceTransaction(""); setPercuPar(""); setPercuAutre("");
   }
   function validerBonSortie() {
     if (!recupNom.trim() || !recupTel.trim()) return;
@@ -10919,6 +10937,12 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
                   {MODES_PAIEMENT.map((m) => <option key={m} value={m}>{m}</option>)}
                 </select>
               </Field>
+              <ChampPercuPar
+                users={data?.users} session={session}
+                valeur={percuPar} onChange={setPercuPar}
+                autre={percuAutre} onChangeAutre={setPercuAutre}
+                client={colis.destinataire}
+              />
               {(modePaiement === "Orange Money" || modePaiement === "MTN Money" || modePaiement === "Virement") && (
                 <div style={{ background: "var(--surface)", borderRadius: 8, padding: 12, marginTop: 8 }}>
                   <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8 }}>DÉTAILS DE LA TRANSACTION (optionnel mais recommandé)</div>
@@ -10948,7 +10972,10 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
                   <div>{p.deviseSaisie ? fmt(p.montant, p.deviseSaisie) : fmt(p.montant, "EUR")}{p.deviseSaisie && p.deviseSaisie !== "EUR" ? ` (≈ ${fmt(p.montant, "EUR")})` : ""} · {p.mode}</div>
                   {p.reference && <div style={{ fontSize: 10.5, color: "var(--muted)" }}>Réf. {p.reference}{p.numeroPayeur ? ` · payeur ${p.numeroPayeur}` : ""}{p.numeroReceveur ? ` · reçu sur ${p.numeroReceveur}` : ""}</div>}
                   {p.correction && <div style={{ fontSize: 10.5, color: "var(--warn-fg)" }}>Correction{p.motif ? ` : ${p.motif}` : ""}{p.parCorrection ? ` · par ${p.parCorrection}` : ""}</div>}
-                  <div style={{ fontSize: 10.5, color: "var(--muted)" }}>{new Date(p.date).toLocaleDateString("fr-FR")}{p.par ? ` · ${p.par}` : ""}</div>
+                  <div style={{ fontSize: 10.5, color: "var(--muted)" }}>
+                    {new Date(p.date).toLocaleDateString("fr-FR")}{p.par ? ` · reçu par ${p.par}` : ""}
+                    {p.saisiPar ? ` · saisi par ${p.saisiPar}` : ""}
+                  </div>
                 </div>
                 <button onClick={() => handleDownloadRecu(p)} disabled={recuState === p.id} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 6, padding: "4px 8px", color: "var(--muted)", cursor: "pointer", fontSize: 10.5, display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
                   <Download size={11} /> {recuState === p.id ? "…" : "Reçu"}
@@ -12279,6 +12306,7 @@ function CaissePage({ data, persist, session, notify }) {
       agent: agentBrut && agentBrut.trim() ? agentBrut.trim() : "Non renseigné",
       acompte: !!p.acompte || p.par === "Enregistrement initial",
       correction: !!p.correction, motif: p.motif || "", parCorrection: p.parCorrection || "",
+      saisiPar: p.saisiPar || "",
       remise: remiseParCle.get(cle) || null,
     };
   })), [data.colis, remiseParCle]);
@@ -12650,6 +12678,7 @@ function CaissePage({ data, persist, session, notify }) {
                         {l.acompte && " · acompte à l’enregistrement"}
                         {l.reference && ` · réf. ${l.reference}`}
                         {l.correction && ` · correction${l.motif ? ` : ${l.motif}` : ""}${l.parCorrection ? ` (par ${l.parCorrection})` : ""}`}
+                        {l.saisiPar && ` · saisi par ${l.saisiPar}`}
                       </div>
                       {l.remise && (
                         <div style={{ display: "inline-block", marginTop: 5, background: "var(--ok-bg-soft)", color: "var(--ok-fg)", borderRadius: 20, padding: "2px 9px", fontSize: 11, fontWeight: 700 }}>
@@ -12813,6 +12842,83 @@ function voyageCouvre(direction, sensColis) {
 /** Nom d'affichage d'un utilisateur, tel qu'il est estampillé sur les paiements. */
 function nomAffiche(u) {
   return `${u?.prenom || ""} ${u?.nom || ""}`.trim() || u?.identifiant || "";
+}
+
+/**
+ * Champ « Argent reçu par » des formulaires d'encaissement.
+ *
+ * Par défaut la personne connectée. Quand un comptable enregistre un paiement qu'un agent a
+ * encaissé au comptoir sans le saisir, il désigne ici cet agent : la somme est alors portée à la
+ * caisse de l'agent — perçue mais non reversée — et non à celle du comptable, qui n'a jamais eu
+ * l'argent en main. Une personne sans compte (chauffeur, partenaire de passage) peut être saisie
+ * au nom complet.
+ */
+function ChampPercuPar({ users, session, valeur, onChange, autre, onChangeAutre, client }) {
+  const moi = session ? (`${session.prenom} ${session.nom}`.trim() || session.identifiant) : "";
+  const autresPersonnes = encaisseursPossibles(users).filter((u) => nomAffiche(u) !== moi);
+  const delegue = valeur && valeur !== moi;
+  const nomFinal = valeur === "__autre" ? autre.trim() : valeur;
+  return (
+    <>
+      <Field label="Argent reçu par">
+        <select value={valeur} onChange={(e) => onChange(e.target.value)} style={inputStyle}>
+          <option value="">{moi || "Moi"} (moi)</option>
+          {autresPersonnes.map((u) => (
+            <option key={u.id} value={nomAffiche(u)}>
+              {nomAffiche(u)}{u.role ? ` — ${u.role}` : ""}{u.paysOperation ? ` ${FLAGS[u.paysOperation] || ""}` : ""}
+            </option>
+          ))}
+          <option value="__autre">Une autre personne…</option>
+        </select>
+      </Field>
+      {valeur === "__autre" && (
+        <Field label="Nom complet de la personne qui a reçu l’argent">
+          <input value={autre} onChange={(e) => onChangeAutre(e.target.value)} style={inputStyle} placeholder="Prénom et nom" />
+        </Field>
+      )}
+      {delegue && nomFinal && (
+        <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "9px 12px", marginBottom: 14, fontSize: 11.5, color: "var(--warn-fg)" }}>
+          L’argent est chez <strong>{nomFinal}</strong>{client ? `, encaissé pour ${client}` : ""} — il apparaîtra comme perçu et non reversé dans sa caisse, pas dans la vôtre.
+          Votre nom reste inscrit comme celui qui a saisi le paiement.
+        </div>
+      )}
+    </>
+  );
+}
+
+/** Personnes susceptibles d'encaisser de l'argent pour l'agence (les clients n'en font pas partie). */
+function encaisseursPossibles(users) {
+  return (users || [])
+    .filter((u) => ["Administrateur", "Agent", "Comptable", "Chauffeur", "Partenaire"].includes(u.role))
+    .sort((a, b) => nomAffiche(a).localeCompare(nomAffiche(b), "fr"));
+}
+
+/**
+ * Construit les informations « qui a reçu l'argent » d'un encaissement.
+ *
+ * Il arrive qu'un agent encaisse au comptoir sans rien saisir, et que le comptable enregistre le
+ * paiement plus tard, sur sa parole. L'argent est alors chez l'agent, pas chez le comptable : le
+ * paiement doit être porté au compte de celui qui l'a réellement perçu, sinon la caisse réclame la
+ * somme à la mauvaise personne. On garde aussi le nom de qui a saisi, pour que la ligne reste
+ * traçable.
+ *
+ * `percuPar` est le nom complet choisi dans le formulaire ; vide, c'est la personne connectée.
+ */
+function receveurPaiement(session, users, percuPar) {
+  const moi = session ? (`${session.prenom} ${session.nom}`.trim() || session.identifiant) : "";
+  const nom = (percuPar || "").trim();
+  if (!nom || nom === moi) {
+    return { par: moi, parPays: session?.paysOperation || "GN", parSite: session?.agence || "" };
+  }
+  const u = (users || []).find((x) => nomAffiche(x) === nom);
+  return {
+    par: nom,
+    // Si la personne n'a pas de compte (chauffeur occasionnel, partenaire...), on rattache la somme
+    // à la caisse de celui qui enregistre : c'est là que l'argent devra être rapporté.
+    parPays: u?.paysOperation || session?.paysOperation || "GN",
+    parSite: u?.agence || session?.agence || "",
+    saisiPar: moi,
+  };
 }
 
 /**

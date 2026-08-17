@@ -5,9 +5,52 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Ba-Diaby Express — Gestion logistique</title>
     <meta name="description" content="Plateforme de gestion logistique Ba-Diaby Express : colis, tarification, comptabilité, IA." />
+    <meta name="theme-color" content="#0A0F1C" />
+    <!--
+      Les polices étaient chargées par un @import placé dans une balise <style> de l'application,
+      donc APRÈS le téléchargement et l'exécution du JavaScript. Sur une connexion 4G, cela
+      repoussait le texte de plusieurs secondes. Déclarées ici, elles partent en même temps que le
+      reste : le préchargement de connexion (preconnect) économise en plus l'établissement TLS.
+    -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!--
+      Chargée en "preload" puis promue en feuille de style : la demande part immédiatement, mais
+      elle ne retient pas l'affichage. Une simple balise stylesheet est bloquante — si Google Fonts
+      répond mal, ce qui arrive sur une connexion instable, l'écran reste noir tant qu'elle traîne
+      (mesuré à 13 secondes réseau coupé). Ici, la page s'affiche tout de suite avec la police de
+      secours, et la vraie police prend le relais à son arrivée (display=swap).
+    -->
+    <link
+      rel="preload"
+      as="style"
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap"
+      onload="this.onload=null;this.rel='stylesheet'"
+    />
+    <noscript>
+      <link
+        rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap"
+      />
+    </noscript>
+    <style>
+      /* Fond posé tout de suite : sans lui, l'écran restait blanc puis basculait en sombre. */
+      html, body { margin: 0; background: #0A0F1C; color: #F1F4FA; font-family: Inter, system-ui, sans-serif; }
+      /* Marque d'attente, remplacée par l'application dès qu'elle est prête. */
+      #demarrage { position: fixed; inset: 0; display: grid; place-items: center; gap: 14px; align-content: center; }
+      #demarrage p { margin: 0; font-size: 13.5px; color: #8A97B5; letter-spacing: 0.02em; }
+      #demarrage .rond { width: 34px; height: 34px; border-radius: 50%; border: 3px solid #242E47; border-top-color: #C8102E; animation: tourne 0.9s linear infinite; }
+      @keyframes tourne { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) { #demarrage .rond { animation-duration: 3s; } }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="demarrage">
+        <div class="rond"></div>
+        <p>Ba-Diaby Express — chargement…</p>
+      </div>
+    </div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

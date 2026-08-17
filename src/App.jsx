@@ -1837,7 +1837,8 @@ function Shell({ children, rtl, theme }) {
   return (
     <div dir={rtl ? "rtl" : "ltr"} data-theme={theme || "dark"}>
       <style>{`
-        @import url('${FONT_LINK}');
+        /* Les polices sont déclarées dans index.html : chargées ici par @import, elles n'étaient
+           demandées qu'après l'exécution du JavaScript, soit plusieurs secondes de retard en 4G. */
         * { box-sizing: border-box; }
         :root, [data-theme="dark"] {
           --bg: #0A0F1C; --surface: #131A2B; --surface2: #1B2438; --border: #242E47; --text: #F1F4FA; --muted: #8A97B5;

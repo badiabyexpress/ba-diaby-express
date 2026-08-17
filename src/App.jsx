@@ -12271,6 +12271,8 @@ function CaissePage({ data, persist, session, notify }) {
   const [histoOuvert, setHistoOuvert] = useState(false);
   const [confirmationRemise, setConfirmationRemise] = useState(null);
   const [remiseAAnnuler, setRemiseAAnnuler] = useState(null);
+  // Encaissement dont on corrige le destinataire ({ ligne, nom }), et son motif.
+  const [aReattribuer, setAReattribuer] = useState(null);
 
   const agentActif = voitTousLesAgents ? agentFiltre : (monNom || "Non renseigné");
   const remises = data.remisesCaisse || [];
@@ -12307,6 +12309,10 @@ function CaissePage({ data, persist, session, notify }) {
       acompte: !!p.acompte || p.par === "Enregistrement initial",
       correction: !!p.correction, motif: p.motif || "", parCorrection: p.parCorrection || "",
       saisiPar: p.saisiPar || "",
+      // Position dans le tableau des paiements du colis : c'est ce qui permet de retrouver la
+      // ligne exacte à corriger, deux encaissements pouvant se ressembler trait pour trait.
+      index: i,
+      ancienPar: p.ancienPar || "", reattribuePar: p.reattribuePar || "",
       remise: remiseParCle.get(cle) || null,
     };
   })), [data.colis, remiseParCle]);
@@ -12484,6 +12490,37 @@ function CaissePage({ data, persist, session, notify }) {
     notify?.(bons.length > 1 ? `${bons.length} remises enregistrées` : `Remise ${bons[0].numero} enregistrée`);
     setSelection([]);
     imprimerBons(bons);
+  }
+
+  /**
+   * Corrige l'agent auquel un encaissement est rattaché.
+   *
+   * L'argent finit souvent chez quelqu'un d'autre que celui qui apparaît : encaissements d'avant
+   * cette mise à jour retombés sur l'agent de création du colis, ou personne désignée par erreur au
+   * moment de la saisie. Sans correction possible, la caisse réclamait indéfiniment la somme au
+   * mauvais agent. Le lieu suit le nouvel agent, et l'ancien nom reste inscrit sur la ligne.
+   */
+  function reattribuer({ ligne, nom, motif }) {
+    const u = (data.users || []).find((x) => nomAffiche(x) === nom);
+    const maintenant = new Date().toISOString();
+    persist({
+      ...data,
+      colis: data.colis.map((c) => (c.tracking !== ligne.tracking ? c : {
+        ...c,
+        paiements: (c.paiements || []).map((p, i) => (i !== ligne.index ? p : {
+          ...p,
+          par: nom,
+          parPays: u?.paysOperation || p.parPays || "GN",
+          parSite: u?.agence || "",
+          ancienPar: p.ancienPar || ligne.agent,
+          reattribuePar: monNom, reattribueLe: maintenant, motifReattribution: (motif || "").trim(),
+        })),
+      })),
+      activityLog: pushActivity(data, session, "Encaissement réattribué",
+        `${ligne.tracking} — ${formaterDevises({ [ligne.deviseSaisie]: ligne.montantSaisi })} : ${ligne.agent} → ${nom}${motif ? ` (${motif})` : ""}`),
+    });
+    notify?.(`Encaissement réattribué à ${nom}`);
+    setAReattribuer(null);
   }
 
   function annulerRemise(remise) {
@@ -12693,12 +12730,24 @@ function CaissePage({ data, persist, session, notify }) {
                         {l.reference && ` · réf. ${l.reference}`}
                         {l.correction && ` · correction${l.motif ? ` : ${l.motif}` : ""}${l.parCorrection ? ` (par ${l.parCorrection})` : ""}`}
                         {l.saisiPar && ` · saisi par ${l.saisiPar}`}
+                        {l.reattribuePar && ` · réattribué${l.ancienPar ? ` depuis ${l.ancienPar}` : ""} par ${l.reattribuePar}`}
                       </div>
-                      {l.remise && (
-                        <div style={{ display: "inline-block", marginTop: 5, background: "var(--ok-bg-soft)", color: "var(--ok-fg)", borderRadius: 20, padding: "2px 9px", fontSize: 11, fontWeight: 700 }}>
-                          Remis — {l.remise.numero} le {new Date(l.remise.date).toLocaleDateString("fr-FR")}
-                        </div>
-                      )}
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 5, flexWrap: "wrap" }}>
+                        {l.remise && (
+                          <span style={{ background: "var(--ok-bg-soft)", color: "var(--ok-fg)", borderRadius: 20, padding: "2px 9px", fontSize: 11, fontWeight: 700 }}>
+                            Remis — {l.remise.numero} le {new Date(l.remise.date).toLocaleDateString("fr-FR")}
+                          </span>
+                        )}
+                        {voitTousLesAgents && (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.preventDefault(); e.stopPropagation(); setAReattribuer({ ligne: l, nom: l.agent, motif: "" }); }}
+                            style={{ background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "3px 9px", fontSize: 11, fontWeight: 600, color: "var(--muted)", cursor: "pointer" }}
+                          >
+                            Corriger l’agent
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </label>
                 ))}
@@ -12805,6 +12854,67 @@ function CaissePage({ data, persist, session, notify }) {
           onConfirmer={validerRemise}
           onAnnuler={() => setConfirmationRemise(null)}
         />
+      )}
+
+      {aReattribuer && (
+        <Modal onClose={() => setAReattribuer(null)} title="Corriger l’agent de cet encaissement">
+          <div style={{ background: "var(--surface2)", borderRadius: 10, padding: "12px 14px", marginBottom: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>
+              {aReattribuer.ligne.tracking} — {aReattribuer.ligne.client}
+            </div>
+            <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 3 }}>
+              {formaterDevises({ [aReattribuer.ligne.deviseSaisie]: aReattribuer.ligne.montantSaisi })} · {aReattribuer.ligne.mode} ·{" "}
+              {new Date(aReattribuer.ligne.date).toLocaleString("fr-FR")}
+            </div>
+            <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 3 }}>
+              Actuellement au compte de <strong style={{ color: "var(--text)" }}>{aReattribuer.ligne.agent}</strong>
+            </div>
+          </div>
+
+          {aReattribuer.ligne.remise ? (
+            <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "10px 12px", fontSize: 12.5, color: "var(--warn-fg)" }}>
+              Cet encaissement figure sur le bon de remise {aReattribuer.ligne.remise.numero}, déjà validé : quelqu’un a signé
+              l’avoir versé. Annulez d’abord cette remise dans « Remises enregistrées » si elle était erronée.
+            </div>
+          ) : (
+            <>
+              <Field label="L’argent a en réalité été reçu par">
+                <select value={aReattribuer.nom} onChange={(e) => setAReattribuer((s) => ({ ...s, nom: e.target.value }))} style={inputStyle}>
+                  {[...new Set([aReattribuer.ligne.agent, ...encaisseursPossibles(data.users).map(nomAffiche)])].filter(Boolean).map((n) => (
+                    <option key={n} value={n}>{n}</option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Motif (facultatif)">
+                <input
+                  value={aReattribuer.motif}
+                  onChange={(e) => setAReattribuer((s) => ({ ...s, motif: e.target.value }))}
+                  style={inputStyle}
+                  placeholder="ex: encaissé au comptoir par Mariama, saisi à mon nom"
+                />
+              </Field>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 14 }}>
+                La somme quittera la caisse de {aReattribuer.ligne.agent} pour celle de {aReattribuer.nom || "…"}, avec son lieu
+                d’affectation. L’ancien nom et le vôtre restent inscrits sur la ligne.
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+                <button onClick={() => setAReattribuer(null)} style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>Annuler</button>
+                <button
+                  onClick={() => reattribuer(aReattribuer)}
+                  disabled={!aReattribuer.nom || aReattribuer.nom === aReattribuer.ligne.agent}
+                  style={{
+                    background: !aReattribuer.nom || aReattribuer.nom === aReattribuer.ligne.agent ? "var(--surface2)" : "#16A163",
+                    color: !aReattribuer.nom || aReattribuer.nom === aReattribuer.ligne.agent ? "var(--muted)" : "#fff",
+                    border: "none", borderRadius: 8, padding: "10px 18px", fontSize: 13, fontWeight: 700,
+                    cursor: !aReattribuer.nom || aReattribuer.nom === aReattribuer.ligne.agent ? "not-allowed" : "pointer",
+                  }}
+                >
+                  Réattribuer
+                </button>
+              </div>
+            </>
+          )}
+        </Modal>
       )}
 
       {remiseAAnnuler && (

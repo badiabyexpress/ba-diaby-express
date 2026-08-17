@@ -1,0 +1,174 @@
+/**
+ * Fonction serverless Vercel — vérification de la connexion côté serveur.
+ *
+ * POURQUOI CE FICHIER
+ * -------------------
+ * L'application vérifie aujourd'hui les mots de passe dans le navigateur : pour cela, elle doit
+ * d'abord télécharger la liste des comptes — empreintes de mots de passe comprises — avec la clé
+ * publique Supabase. Cette clé étant présente dans le code envoyé à chaque visiteur, l'écran de
+ * connexion ne protège rien : on peut interroger la base sans jamais le voir.
+ *
+ * Cette fonction déplace la vérification côté serveur. Elle lit les comptes avec la CLÉ DE SERVICE
+ * (qui ne quitte jamais le serveur), compare l'empreinte, et renvoie un jeton de session signé.
+ * Le navigateur joint ensuite ce jeton à ses appels Supabase. Une fois les politiques de la base
+ * resserrées sur `auth.role() = 'authenticated'`, la clé publique seule ne donnera plus rien.
+ *
+ * VARIABLES D'ENVIRONNEMENT À CRÉER SUR VERCEL (Supabase → Settings → API)
+ * -----------------------------------------------------------------------
+ *   SUPABASE_URL                 adresse du projet (ex: https://xxxx.supabase.co)
+ *   SUPABASE_SERVICE_ROLE_KEY    clé de service — SECRET, ne jamais exposer au navigateur
+ *   SUPABASE_JWT_SECRET          secret de signature des jetons — SECRET également
+ *
+ * Aucune ne commence par VITE_ : ce préfixe les enverrait au navigateur, ce qui annulerait
+ * l'intérêt de la manœuvre.
+ *
+ * TANT QUE CES VARIABLES N'EXISTENT PAS, la fonction répond 501 et l'application retombe
+ * automatiquement sur son fonctionnement actuel. Elle peut donc être mise en ligne sans risque,
+ * avant même que la configuration soit faite.
+ */
+
+import crypto from "node:crypto";
+
+/** Durée de validité du jeton. Assez longue pour une journée de travail, assez courte pour qu'un
+ *  jeton volé sur un téléphone perdu cesse de servir rapidement. */
+const DUREE_JETON_SECONDES = 12 * 3600;
+
+/** Mêmes paramètres que le navigateur (voir hashPBKDF2 dans src/App.jsx) : toute différence ici
+ *  empêcherait tout le monde de se connecter. */
+const PBKDF2_ITERATIONS = 150000;
+
+function hashPBKDF2(motDePasse, sel, iterations = PBKDF2_ITERATIONS) {
+  return crypto.pbkdf2Sync(motDePasse, sel, iterations, 32, "sha256").toString("hex");
+}
+
+/** Ancien schéma, conservé pour les comptes pas encore migrés : SHA-256 de "sel:motdepasse". */
+function hashSHA256(motDePasse, sel) {
+  return crypto.createHash("sha256").update(`${sel}:${motDePasse}`).digest("hex");
+}
+
+/** Comparaison à durée constante : une comparaison ordinaire laisse deviner l'empreinte
+ *  caractère par caractère en mesurant le temps de réponse. */
+function egalitéSûre(a, b) {
+  const A = Buffer.from(String(a || ""), "utf8");
+  const B = Buffer.from(String(b || ""), "utf8");
+  if (A.length !== B.length) return false;
+  return crypto.timingSafeEqual(A, B);
+}
+
+function base64url(donnees) {
+  return Buffer.from(donnees).toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/**
+ * Fabrique un jeton accepté par Supabase, dans la forme exacte de la clé publique du projet :
+ * { iss: "supabase", ref: <référence du projet>, role, iat, exp }, signé en HS256.
+ * `role: authenticated` est ce que liront les politiques de la base.
+ */
+function signerJeton({ secret, refProjet, userId, identifiant }) {
+  const maintenant = Math.floor(Date.now() / 1000);
+  const entete = { alg: "HS256", typ: "JWT" };
+  const charge = {
+    iss: "supabase",
+    ...(refProjet ? { ref: refProjet } : {}),
+    role: "authenticated",
+    aud: "authenticated",
+    sub: userId,
+    identifiant,
+    iat: maintenant,
+    exp: maintenant + DUREE_JETON_SECONDES,
+  };
+  const corps = `${base64url(JSON.stringify(entete))}.${base64url(JSON.stringify(charge))}`;
+  const signature = crypto.createHmac("sha256", secret).update(corps).digest("base64")
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return { token: `${corps}.${signature}`, expireA: (maintenant + DUREE_JETON_SECONDES) * 1000 };
+}
+
+/** Référence du projet, telle qu'elle figure dans l'adresse : https://<ref>.supabase.co */
+function refDepuisUrl(url) {
+  const m = /^https?:\/\/([^.]+)\./.exec(url || "");
+  return m ? m[1] : null;
+}
+
+/*
+ * Ralentissement des essais répétés. Une fonction serverless peut être recréée à tout moment,
+ * ce compteur n'est donc pas une protection absolue — c'est un ralentisseur, qui suffit à rendre
+ * une attaque par dictionnaire inconfortable, en complément des 150 000 tours de PBKDF2.
+ */
+const essais = new Map();
+function tropDEssais(cle) {
+  const maintenant = Date.now();
+  const e = essais.get(cle);
+  if (!e || maintenant - e.debut > 10 * 60 * 1000) { essais.set(cle, { debut: maintenant, n: 1 }); return false; }
+  e.n += 1;
+  return e.n > 10;
+}
+
+export default async function handler(req, res) {
+  if (req.method !== "POST") return res.status(405).json({ error: "Méthode non autorisée" });
+
+  const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+  const cleService = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const secretJwt = process.env.SUPABASE_JWT_SECRET;
+
+  // Non configuré : on le dit clairement, et l'application reprend son ancien chemin.
+  if (!url || !cleService || !secretJwt) {
+    return res.status(501).json({
+      error: "Connexion serveur non configurée",
+      manquantes: [
+        !url && "SUPABASE_URL",
+        !cleService && "SUPABASE_SERVICE_ROLE_KEY",
+        !secretJwt && "SUPABASE_JWT_SECRET",
+      ].filter(Boolean),
+    });
+  }
+
+  try {
+    const { identifiant, motdepasse } = req.body || {};
+    if (!identifiant || !motdepasse) return res.status(400).json({ error: "Identifiant et mot de passe requis" });
+
+    const cleEssais = `${req.headers["x-forwarded-for"] || "?"}|${String(identifiant).toLowerCase()}`;
+    if (tropDEssais(cleEssais)) {
+      return res.status(429).json({ error: "Trop de tentatives. Réessayez dans quelques minutes." });
+    }
+
+    const reponse = await fetch(`${url}/rest/v1/bde_data?key=eq.bde-data&select=value`, {
+      headers: { apikey: cleService, Authorization: `Bearer ${cleService}` },
+    });
+    if (!reponse.ok) {
+      console.error("Lecture des comptes impossible", reponse.status);
+      return res.status(502).json({ error: "Base de données injoignable" });
+    }
+    const lignes = await reponse.json();
+    const donnees = lignes?.[0]?.value || {};
+    const compte = (donnees.users || []).find((u) => u.identifiant === String(identifiant).trim());
+
+    /*
+     * Même réponse pour un identifiant inconnu et pour un mot de passe faux : sinon, la page de
+     * connexion permet de découvrir qui travaille dans l'entreprise. Le hachage est calculé même
+     * quand le compte n'existe pas, pour que la durée de réponse ne trahisse pas l'information.
+     */
+    const echec = { status: 401, corps: { error: "Identifiant ou mot de passe incorrect." } };
+    const sel = compte?.motdepasseSalt || "sel-inexistant";
+    const attendu = compte?.motdepasseSecure || "";
+    const algo = compte?.motdepasseAlgo === "pbkdf2" || !compte ? "pbkdf2" : "sha256";
+    const calcule = algo === "pbkdf2"
+      ? hashPBKDF2(motdepasse, sel, compte?.motdepasseIter || PBKDF2_ITERATIONS)
+      : hashSHA256(motdepasse, sel);
+
+    if (!compte || !attendu || !egalitéSûre(calcule, attendu)) {
+      return res.status(echec.status).json(echec.corps);
+    }
+
+    const { token, expireA } = signerJeton({
+      secret: secretJwt,
+      refProjet: refDepuisUrl(url),
+      userId: compte.id,
+      identifiant: compte.identifiant,
+    });
+    // Le jeton et l'identité, rien d'autre : ni empreinte, ni liste de comptes.
+    return res.status(200).json({ token, expireA, userId: compte.id });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Erreur serveur lors de la connexion." });
+  }
+}

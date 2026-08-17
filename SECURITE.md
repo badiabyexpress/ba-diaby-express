@@ -82,6 +82,38 @@ create policy "Accès complet via la clé anon" on public.bde_data for all using
 Bénéfice secondaire, important : la liste des comptes et leurs empreintes de mot de passe ne
 partent plus dans le navigateur de qui le demande.
 
+### Où en est le travail
+
+Le code est écrit et vérifié — il ne reste que la configuration et le resserrage.
+
+| | État |
+|---|---|
+| `api/login.js` — vérification serveur et jeton | fait, éprouvé |
+| Jeton porté par les appels Supabase et le temps réel | fait |
+| Repli automatique tant que ce n'est pas configuré | fait, éprouvé |
+| Les deux variables dans Vercel | **à faire — vous** |
+| Resserrage des politiques de la base | à faire — après vérification |
+
+Ce qui a été éprouvé, et comment :
+
+- **Les empreintes de mot de passe calculées par le serveur sont identiques à celles du
+  navigateur** — comparées sur cinq cas, dont un mot de passe accentué, un vide, un très long et
+  un nombre d'itérations différent. C'est le point critique : le moindre écart empêcherait tout le
+  monde de se connecter.
+- **La fonction**, sur treize cas : non configurée (501), bon mot de passe (jeton signé, rôle
+  `authenticated`, expiration à 12 h), mauvais mot de passe et identifiant inconnu (réponse
+  identique au mot près, pour ne pas révéler qui travaille dans l'entreprise), ancien schéma de
+  mot de passe encore accepté, champs vides, onzième tentative bloquée, méthode GET refusée,
+  et aucune empreinte dans la réponse.
+- **L'application**, sur dix cas dans un navigateur : fonction absente ou serveur injoignable →
+  connexion locale comme aujourd'hui et aucun jeton conservé ; serveur disponible → jeton conservé
+  avec son expiration ; déconnexion → jeton effacé ; refus du serveur (401) et trop de tentatives
+  (429) → message affiché, sans repli local qui contournerait le ralentissement.
+
+Ce qui **n'a pas pu être vérifié ici** : que la base accepte réellement le jeton fabriqué. Ce
+conteneur n'a aucun accès réseau sortant. C'est précisément ce que valide l'étape 2 ci-dessous,
+et pourquoi les politiques ne doivent être resserrées qu'après.
+
 ### Ce qu'il faut avant de commencer
 
 Deux variables à créer dans Vercel → Settings → Environment Variables, prises dans Supabase →
@@ -105,8 +137,9 @@ connexion.
 
 ### À traiter en même temps
 
-- **La synchronisation temps réel** (`subscribeToChanges`) passe aussi par la clé anon : elle
-  devra recevoir le jeton, sinon les appareils cesseront de se mettre à jour entre eux.
+- **La synchronisation temps réel** (`subscribeToChanges`) passe aussi par la clé anon : c'est
+  traité — le canal se rouvre après chaque connexion pour repartir avec le jeton, sinon les
+  appareils cesseraient de se mettre à jour entre eux le jour du resserrage.
 - **Le mode hors ligne** conserve une copie locale des données : elle reste lisible sur l'appareil.
   C'est voulu — c'est ce qui permet de travailler sans réseau — mais cela signifie qu'un téléphone
   perdu expose les données qu'il a en cache. La vraie réponse est le verrouillage de l'appareil.

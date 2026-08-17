@@ -1837,7 +1837,8 @@ function Shell({ children, rtl, theme }) {
   return (
     <div dir={rtl ? "rtl" : "ltr"} data-theme={theme || "dark"}>
       <style>{`
-        @import url('${FONT_LINK}');
+        /* Les polices sont déclarées dans index.html : chargées ici par @import, elles n'étaient
+           demandées qu'après l'exécution du JavaScript, soit plusieurs secondes de retard en 4G. */
         * { box-sizing: border-box; }
         :root, [data-theme="dark"] {
           --bg: #0A0F1C; --surface: #131A2B; --surface2: #1B2438; --border: #242E47; --text: #F1F4FA; --muted: #8A97B5;
@@ -3843,6 +3844,41 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome }) 
   );
 }
 
+/**
+ * Ce que chaque agent doit encore verser, tous colis confondus.
+ *
+ * Même règle que la page Caisse : seules les espèces non reprises par un bon de remise validé sont
+ * dues. On retient aussi l'ancienneté du plus vieil encaissement non versé — c'est elle qui dit
+ * s'il faut relancer : mille euros encaissés ce matin n'ont rien d'inquiétant, trois cents qui
+ * dorment depuis dix jours, si.
+ */
+function soldesCaisseParAgent(data) {
+  const remis = new Set((data.remisesCaisse || []).flatMap((r) => r.cles || []));
+  const parAgent = new Map();
+  (data.colis || []).forEach((c) => {
+    (c.paiements || []).forEach((p, i) => {
+      if ((p.mode || MODE_ESPECES) !== MODE_ESPECES) return;
+      if (remis.has(clePaiement(c.tracking, p, i))) return;
+      const agentBrut = (p.par && p.par !== "Enregistrement initial") ? p.par : c.agentCreation;
+      const agent = agentBrut && agentBrut.trim() ? agentBrut.trim() : "Non renseigné";
+      const devise = p.deviseSaisie || "EUR";
+      const montantSaisi = p.montantSaisi != null && p.montantSaisi !== ""
+        ? Number(p.montantSaisi) || 0
+        : (Number(p.montant) || 0) * (LIVE_RATES[devise] || CURRENCIES[devise] || 1);
+      if (!parAgent.has(agent)) parAgent.set(agent, { agent, devises: {}, totalEUR: 0, nb: 0, plusAncien: p.date });
+      const g = parAgent.get(agent);
+      ajouterDevise(g.devises, devise, montantSaisi);
+      g.totalEUR += Number(p.montant) || 0;
+      g.nb += 1;
+      if (p.date && new Date(p.date) < new Date(g.plusAncien)) g.plusAncien = p.date;
+    });
+  });
+  return [...parAgent.values()]
+    .filter((g) => g.totalEUR > 0.005)
+    .map((g) => ({ ...g, jours: Math.floor((Date.now() - new Date(g.plusAncien)) / 86400000) }))
+    .sort((a, b) => b.totalEUR - a.totalEUR);
+}
+
 const StatCard = memo(function StatCard({ label, value, icon: Icon, tint, trend, trendColor, outline }) {
   return (
     <div style={{ background: SURFACE, borderRadius: 16, padding: "20px 22px", flex: 1, minWidth: 190, border: `1.5px solid ${outline || BORDER}`, boxShadow: "0 2px 12px rgba(10,38,71,0.06)" }}>
@@ -3913,9 +3949,19 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
       + (data.demandesRegroupement || []).filter((r) => r.statut === "En attente").length
       + data.colis.reduce((s, c) => s + (c.signalements || []).filter((sig) => sig.statut === "Ouvert").length, 0)
       + data.colis.filter((c) => c.demandeExpress && c.demandeExpress.statut === "En attente").length;
-    return { colis, total, thisMonth, enTransit, aExpedier, ca, encaisse, parPays, recent, parAgence, oublies, parProvenance, parRoute, impayesARelancer, centreClientsEnAttente };
+    /*
+     * Espèces encaissées et pas encore versées. Un agent ne voit que la sienne : ce n'est pas un
+     * tableau de bord de surveillance mutuelle, mais un rappel de ce qu'on doit rapporter.
+     */
+    const voitToutesLesCaisses = session.role === "Administrateur" || session.role === "Comptable"
+      || effectivePermission(session, "compta.consulter");
+    const monNom = `${session.prenom || ""} ${session.nom || ""}`.trim() || session.identifiant || "";
+    const soldesCaisse = soldesCaisseParAgent(data).filter((g) => voitToutesLesCaisses || g.agent === monNom);
+    return { colis, total, thisMonth, enTransit, aExpedier, ca, encaisse, parPays, recent, parAgence, oublies, parProvenance, parRoute, impayesARelancer, centreClientsEnAttente, soldesCaisse, voitToutesLesCaisses };
   }, [data.colis, data.sites, data.clientAccounts, data.preAlertes, data.demandesRegroupement, session.agence]);
-  const { colis, total, thisMonth, enTransit, aExpedier, ca, encaisse, parPays, recent, parAgence, oublies, parProvenance, parRoute, impayesARelancer, centreClientsEnAttente } = stats;
+  const { colis, total, thisMonth, enTransit, aExpedier, ca, encaisse, parPays, recent, parAgence, oublies, parProvenance, parRoute, impayesARelancer, centreClientsEnAttente, soldesCaisse, voitToutesLesCaisses } = stats;
+  // Trois jours sans verser : au-delà, l'argent dort et le rappel a sa place dans « À faire aujourd'hui ».
+  const caisseEnRetard = soldesCaisse.filter((s) => s.jours >= 3);
 
   const quickActions = [
     { label: "Nouveau Colis", desc: "Créer une étiquette pour un client", icon: Plus, tint: "var(--danger-fg)", action: onNouveauColis },
@@ -3938,7 +3984,7 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
         </div>
       </div>
 
-      {(oublies.length > 0 || impayesARelancer > 0 || centreClientsEnAttente > 0) && (
+      {(oublies.length > 0 || impayesARelancer > 0 || centreClientsEnAttente > 0 || caisseEnRetard.length > 0) && (
         <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderInlineStart: "4px solid var(--brand-solid)",
                       borderRadius: 16, padding: "18px 22px", marginBottom: 22, display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap",
                       boxShadow: "0 2px 12px rgba(0,0,0,0.10)" }}>
@@ -3956,6 +4002,13 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
                 <DollarSign size={13} /> {impayesARelancer} impayé{impayesARelancer > 1 ? "s" : ""} à relancer
               </button>
             )}
+            {caisseEnRetard.length > 0 && (
+              <button onClick={() => onNavigate("caisse")} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 20, padding: "8px 15px", color: "var(--warn-fg)", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                <Wallet size={13} /> {voitToutesLesCaisses
+                  ? `${caisseEnRetard.length} caisse${caisseEnRetard.length > 1 ? "s" : ""} à récupérer`
+                  : "Espèces à verser"}
+              </button>
+            )}
             {centreClientsEnAttente > 0 && (
               <button onClick={() => onNavigate("centreclients")} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 20, padding: "8px 15px", color: "var(--info-fg)", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
                 <MessageCircle size={13} /> {centreClientsEnAttente} demande{centreClientsEnAttente > 1 ? "s" : ""} client{centreClientsEnAttente > 1 ? "s" : ""}
@@ -3971,6 +4024,51 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
         <StatCard label="En transit" value={enTransit} icon={Plane} tint="#5B8DEF" trend="Actuellement en cours" trendColor="var(--muted)" />
         <StatCard label="À expédier" value={aExpedier} icon={AlertTriangle} tint="var(--danger-fg)" trend={aExpedier > 0 ? "Nécessite action" : "Rien en attente"} trendColor={aExpedier > 0 ? "var(--danger-fg)" : "var(--muted)"} />
       </div>
+
+      {soldesCaisse.length > 0 && (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: "16px 20px", marginBottom: 20 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginBottom: 4 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <Wallet size={17} color="var(--warn-fg)" />
+              <span style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>
+                {voitToutesLesCaisses ? "Espèces à remettre en caisse" : "Ce que vous devez remettre"}
+              </span>
+            </div>
+            <button onClick={() => onNavigate("caisse")} style={{ background: "none", border: "none", color: "var(--info-fg)", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
+              Ouvrir la Caisse
+            </button>
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 12 }}>
+            Argent encaissé en espèces et pas encore repris sur un bon de remise.
+          </div>
+          {soldesCaisse.map((s) => {
+            const enRetard = s.jours >= 3;
+            const compte = (data.users || []).find((u) => nomAffiche(u) === s.agent);
+            const message = `Bonjour ${s.agent}, merci de passer verser les espèces encaissées : ${formaterDevises(s.devises)} (${s.nb} encaissement${s.nb > 1 ? "s" : ""}, le plus ancien remonte à ${s.jours} jour${s.jours > 1 ? "s" : ""}). Merci !`;
+            return (
+              <div key={s.agent} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "10px 0", borderTop: "1px solid var(--surface2)", flexWrap: "wrap" }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>{s.agent}</div>
+                  <div style={{ fontSize: 11.5, color: enRetard ? "var(--warn-fg)" : "var(--muted)", marginTop: 2 }}>
+                    {s.nb} encaissement{s.nb > 1 ? "s" : ""} · le plus ancien {s.jours === 0 ? "aujourd’hui" : `il y a ${s.jours} jour${s.jours > 1 ? "s" : ""}`}
+                  </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 15, fontWeight: 700, color: enRetard ? "var(--warn-fg)" : "var(--text)" }}>
+                    {formaterDevises(s.devises)}
+                  </span>
+                  {voitToutesLesCaisses && enRetard && compte?.telephone && (
+                    <a href={waLink(compte.telephone, message)} target="_blank" rel="noreferrer"
+                      style={{ display: "flex", alignItems: "center", gap: 5, background: "#3ECB84", color: "#fff", borderRadius: 8, padding: "6px 11px", fontSize: 11.5, fontWeight: 700, textDecoration: "none" }}>
+                      <MessageCircle size={12} /> Relancer
+                    </a>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {oublies.length > 0 && (
         <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 14, padding: "16px 20px", marginBottom: 20 }}>
@@ -12271,6 +12369,8 @@ function CaissePage({ data, persist, session, notify }) {
   const [histoOuvert, setHistoOuvert] = useState(false);
   const [confirmationRemise, setConfirmationRemise] = useState(null);
   const [remiseAAnnuler, setRemiseAAnnuler] = useState(null);
+  // Encaissement dont on corrige le destinataire ({ ligne, nom }), et son motif.
+  const [aReattribuer, setAReattribuer] = useState(null);
 
   const agentActif = voitTousLesAgents ? agentFiltre : (monNom || "Non renseigné");
   const remises = data.remisesCaisse || [];
@@ -12307,6 +12407,10 @@ function CaissePage({ data, persist, session, notify }) {
       acompte: !!p.acompte || p.par === "Enregistrement initial",
       correction: !!p.correction, motif: p.motif || "", parCorrection: p.parCorrection || "",
       saisiPar: p.saisiPar || "",
+      // Position dans le tableau des paiements du colis : c'est ce qui permet de retrouver la
+      // ligne exacte à corriger, deux encaissements pouvant se ressembler trait pour trait.
+      index: i,
+      ancienPar: p.ancienPar || "", reattribuePar: p.reattribuePar || "",
       remise: remiseParCle.get(cle) || null,
     };
   })), [data.colis, remiseParCle]);
@@ -12484,6 +12588,37 @@ function CaissePage({ data, persist, session, notify }) {
     notify?.(bons.length > 1 ? `${bons.length} remises enregistrées` : `Remise ${bons[0].numero} enregistrée`);
     setSelection([]);
     imprimerBons(bons);
+  }
+
+  /**
+   * Corrige l'agent auquel un encaissement est rattaché.
+   *
+   * L'argent finit souvent chez quelqu'un d'autre que celui qui apparaît : encaissements d'avant
+   * cette mise à jour retombés sur l'agent de création du colis, ou personne désignée par erreur au
+   * moment de la saisie. Sans correction possible, la caisse réclamait indéfiniment la somme au
+   * mauvais agent. Le lieu suit le nouvel agent, et l'ancien nom reste inscrit sur la ligne.
+   */
+  function reattribuer({ ligne, nom, motif }) {
+    const u = (data.users || []).find((x) => nomAffiche(x) === nom);
+    const maintenant = new Date().toISOString();
+    persist({
+      ...data,
+      colis: data.colis.map((c) => (c.tracking !== ligne.tracking ? c : {
+        ...c,
+        paiements: (c.paiements || []).map((p, i) => (i !== ligne.index ? p : {
+          ...p,
+          par: nom,
+          parPays: u?.paysOperation || p.parPays || "GN",
+          parSite: u?.agence || "",
+          ancienPar: p.ancienPar || ligne.agent,
+          reattribuePar: monNom, reattribueLe: maintenant, motifReattribution: (motif || "").trim(),
+        })),
+      })),
+      activityLog: pushActivity(data, session, "Encaissement réattribué",
+        `${ligne.tracking} — ${formaterDevises({ [ligne.deviseSaisie]: ligne.montantSaisi })} : ${ligne.agent} → ${nom}${motif ? ` (${motif})` : ""}`),
+    });
+    notify?.(`Encaissement réattribué à ${nom}`);
+    setAReattribuer(null);
   }
 
   function annulerRemise(remise) {
@@ -12693,12 +12828,24 @@ function CaissePage({ data, persist, session, notify }) {
                         {l.reference && ` · réf. ${l.reference}`}
                         {l.correction && ` · correction${l.motif ? ` : ${l.motif}` : ""}${l.parCorrection ? ` (par ${l.parCorrection})` : ""}`}
                         {l.saisiPar && ` · saisi par ${l.saisiPar}`}
+                        {l.reattribuePar && ` · réattribué${l.ancienPar ? ` depuis ${l.ancienPar}` : ""} par ${l.reattribuePar}`}
                       </div>
-                      {l.remise && (
-                        <div style={{ display: "inline-block", marginTop: 5, background: "var(--ok-bg-soft)", color: "var(--ok-fg)", borderRadius: 20, padding: "2px 9px", fontSize: 11, fontWeight: 700 }}>
-                          Remis — {l.remise.numero} le {new Date(l.remise.date).toLocaleDateString("fr-FR")}
-                        </div>
-                      )}
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 5, flexWrap: "wrap" }}>
+                        {l.remise && (
+                          <span style={{ background: "var(--ok-bg-soft)", color: "var(--ok-fg)", borderRadius: 20, padding: "2px 9px", fontSize: 11, fontWeight: 700 }}>
+                            Remis — {l.remise.numero} le {new Date(l.remise.date).toLocaleDateString("fr-FR")}
+                          </span>
+                        )}
+                        {voitTousLesAgents && (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.preventDefault(); e.stopPropagation(); setAReattribuer({ ligne: l, nom: l.agent, motif: "" }); }}
+                            style={{ background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "3px 9px", fontSize: 11, fontWeight: 600, color: "var(--muted)", cursor: "pointer" }}
+                          >
+                            Corriger l’agent
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </label>
                 ))}
@@ -12805,6 +12952,67 @@ function CaissePage({ data, persist, session, notify }) {
           onConfirmer={validerRemise}
           onAnnuler={() => setConfirmationRemise(null)}
         />
+      )}
+
+      {aReattribuer && (
+        <Modal onClose={() => setAReattribuer(null)} title="Corriger l’agent de cet encaissement">
+          <div style={{ background: "var(--surface2)", borderRadius: 10, padding: "12px 14px", marginBottom: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>
+              {aReattribuer.ligne.tracking} — {aReattribuer.ligne.client}
+            </div>
+            <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 3 }}>
+              {formaterDevises({ [aReattribuer.ligne.deviseSaisie]: aReattribuer.ligne.montantSaisi })} · {aReattribuer.ligne.mode} ·{" "}
+              {new Date(aReattribuer.ligne.date).toLocaleString("fr-FR")}
+            </div>
+            <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 3 }}>
+              Actuellement au compte de <strong style={{ color: "var(--text)" }}>{aReattribuer.ligne.agent}</strong>
+            </div>
+          </div>
+
+          {aReattribuer.ligne.remise ? (
+            <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "10px 12px", fontSize: 12.5, color: "var(--warn-fg)" }}>
+              Cet encaissement figure sur le bon de remise {aReattribuer.ligne.remise.numero}, déjà validé : quelqu’un a signé
+              l’avoir versé. Annulez d’abord cette remise dans « Remises enregistrées » si elle était erronée.
+            </div>
+          ) : (
+            <>
+              <Field label="L’argent a en réalité été reçu par">
+                <select value={aReattribuer.nom} onChange={(e) => setAReattribuer((s) => ({ ...s, nom: e.target.value }))} style={inputStyle}>
+                  {[...new Set([aReattribuer.ligne.agent, ...encaisseursPossibles(data.users).map(nomAffiche)])].filter(Boolean).map((n) => (
+                    <option key={n} value={n}>{n}</option>
+                  ))}
+                </select>
+              </Field>
+              <Field label="Motif (facultatif)">
+                <input
+                  value={aReattribuer.motif}
+                  onChange={(e) => setAReattribuer((s) => ({ ...s, motif: e.target.value }))}
+                  style={inputStyle}
+                  placeholder="ex: encaissé au comptoir par Mariama, saisi à mon nom"
+                />
+              </Field>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 14 }}>
+                La somme quittera la caisse de {aReattribuer.ligne.agent} pour celle de {aReattribuer.nom || "…"}, avec son lieu
+                d’affectation. L’ancien nom et le vôtre restent inscrits sur la ligne.
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+                <button onClick={() => setAReattribuer(null)} style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>Annuler</button>
+                <button
+                  onClick={() => reattribuer(aReattribuer)}
+                  disabled={!aReattribuer.nom || aReattribuer.nom === aReattribuer.ligne.agent}
+                  style={{
+                    background: !aReattribuer.nom || aReattribuer.nom === aReattribuer.ligne.agent ? "var(--surface2)" : "#16A163",
+                    color: !aReattribuer.nom || aReattribuer.nom === aReattribuer.ligne.agent ? "var(--muted)" : "#fff",
+                    border: "none", borderRadius: 8, padding: "10px 18px", fontSize: 13, fontWeight: 700,
+                    cursor: !aReattribuer.nom || aReattribuer.nom === aReattribuer.ligne.agent ? "not-allowed" : "pointer",
+                  }}
+                >
+                  Réattribuer
+                </button>
+              </div>
+            </>
+          )}
+        </Modal>
       )}
 
       {remiseAAnnuler && (

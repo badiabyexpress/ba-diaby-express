@@ -3843,6 +3843,41 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome }) 
   );
 }
 
+/**
+ * Ce que chaque agent doit encore verser, tous colis confondus.
+ *
+ * Même règle que la page Caisse : seules les espèces non reprises par un bon de remise validé sont
+ * dues. On retient aussi l'ancienneté du plus vieil encaissement non versé — c'est elle qui dit
+ * s'il faut relancer : mille euros encaissés ce matin n'ont rien d'inquiétant, trois cents qui
+ * dorment depuis dix jours, si.
+ */
+function soldesCaisseParAgent(data) {
+  const remis = new Set((data.remisesCaisse || []).flatMap((r) => r.cles || []));
+  const parAgent = new Map();
+  (data.colis || []).forEach((c) => {
+    (c.paiements || []).forEach((p, i) => {
+      if ((p.mode || MODE_ESPECES) !== MODE_ESPECES) return;
+      if (remis.has(clePaiement(c.tracking, p, i))) return;
+      const agentBrut = (p.par && p.par !== "Enregistrement initial") ? p.par : c.agentCreation;
+      const agent = agentBrut && agentBrut.trim() ? agentBrut.trim() : "Non renseigné";
+      const devise = p.deviseSaisie || "EUR";
+      const montantSaisi = p.montantSaisi != null && p.montantSaisi !== ""
+        ? Number(p.montantSaisi) || 0
+        : (Number(p.montant) || 0) * (LIVE_RATES[devise] || CURRENCIES[devise] || 1);
+      if (!parAgent.has(agent)) parAgent.set(agent, { agent, devises: {}, totalEUR: 0, nb: 0, plusAncien: p.date });
+      const g = parAgent.get(agent);
+      ajouterDevise(g.devises, devise, montantSaisi);
+      g.totalEUR += Number(p.montant) || 0;
+      g.nb += 1;
+      if (p.date && new Date(p.date) < new Date(g.plusAncien)) g.plusAncien = p.date;
+    });
+  });
+  return [...parAgent.values()]
+    .filter((g) => g.totalEUR > 0.005)
+    .map((g) => ({ ...g, jours: Math.floor((Date.now() - new Date(g.plusAncien)) / 86400000) }))
+    .sort((a, b) => b.totalEUR - a.totalEUR);
+}
+
 const StatCard = memo(function StatCard({ label, value, icon: Icon, tint, trend, trendColor, outline }) {
   return (
     <div style={{ background: SURFACE, borderRadius: 16, padding: "20px 22px", flex: 1, minWidth: 190, border: `1.5px solid ${outline || BORDER}`, boxShadow: "0 2px 12px rgba(10,38,71,0.06)" }}>
@@ -3913,9 +3948,19 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
       + (data.demandesRegroupement || []).filter((r) => r.statut === "En attente").length
       + data.colis.reduce((s, c) => s + (c.signalements || []).filter((sig) => sig.statut === "Ouvert").length, 0)
       + data.colis.filter((c) => c.demandeExpress && c.demandeExpress.statut === "En attente").length;
-    return { colis, total, thisMonth, enTransit, aExpedier, ca, encaisse, parPays, recent, parAgence, oublies, parProvenance, parRoute, impayesARelancer, centreClientsEnAttente };
+    /*
+     * Espèces encaissées et pas encore versées. Un agent ne voit que la sienne : ce n'est pas un
+     * tableau de bord de surveillance mutuelle, mais un rappel de ce qu'on doit rapporter.
+     */
+    const voitToutesLesCaisses = session.role === "Administrateur" || session.role === "Comptable"
+      || effectivePermission(session, "compta.consulter");
+    const monNom = `${session.prenom || ""} ${session.nom || ""}`.trim() || session.identifiant || "";
+    const soldesCaisse = soldesCaisseParAgent(data).filter((g) => voitToutesLesCaisses || g.agent === monNom);
+    return { colis, total, thisMonth, enTransit, aExpedier, ca, encaisse, parPays, recent, parAgence, oublies, parProvenance, parRoute, impayesARelancer, centreClientsEnAttente, soldesCaisse, voitToutesLesCaisses };
   }, [data.colis, data.sites, data.clientAccounts, data.preAlertes, data.demandesRegroupement, session.agence]);
-  const { colis, total, thisMonth, enTransit, aExpedier, ca, encaisse, parPays, recent, parAgence, oublies, parProvenance, parRoute, impayesARelancer, centreClientsEnAttente } = stats;
+  const { colis, total, thisMonth, enTransit, aExpedier, ca, encaisse, parPays, recent, parAgence, oublies, parProvenance, parRoute, impayesARelancer, centreClientsEnAttente, soldesCaisse, voitToutesLesCaisses } = stats;
+  // Trois jours sans verser : au-delà, l'argent dort et le rappel a sa place dans « À faire aujourd'hui ».
+  const caisseEnRetard = soldesCaisse.filter((s) => s.jours >= 3);
 
   const quickActions = [
     { label: "Nouveau Colis", desc: "Créer une étiquette pour un client", icon: Plus, tint: "var(--danger-fg)", action: onNouveauColis },
@@ -3938,7 +3983,7 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
         </div>
       </div>
 
-      {(oublies.length > 0 || impayesARelancer > 0 || centreClientsEnAttente > 0) && (
+      {(oublies.length > 0 || impayesARelancer > 0 || centreClientsEnAttente > 0 || caisseEnRetard.length > 0) && (
         <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderInlineStart: "4px solid var(--brand-solid)",
                       borderRadius: 16, padding: "18px 22px", marginBottom: 22, display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap",
                       boxShadow: "0 2px 12px rgba(0,0,0,0.10)" }}>
@@ -3956,6 +4001,13 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
                 <DollarSign size={13} /> {impayesARelancer} impayé{impayesARelancer > 1 ? "s" : ""} à relancer
               </button>
             )}
+            {caisseEnRetard.length > 0 && (
+              <button onClick={() => onNavigate("caisse")} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 20, padding: "8px 15px", color: "var(--warn-fg)", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                <Wallet size={13} /> {voitToutesLesCaisses
+                  ? `${caisseEnRetard.length} caisse${caisseEnRetard.length > 1 ? "s" : ""} à récupérer`
+                  : "Espèces à verser"}
+              </button>
+            )}
             {centreClientsEnAttente > 0 && (
               <button onClick={() => onNavigate("centreclients")} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 20, padding: "8px 15px", color: "var(--info-fg)", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
                 <MessageCircle size={13} /> {centreClientsEnAttente} demande{centreClientsEnAttente > 1 ? "s" : ""} client{centreClientsEnAttente > 1 ? "s" : ""}
@@ -3971,6 +4023,51 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
         <StatCard label="En transit" value={enTransit} icon={Plane} tint="#5B8DEF" trend="Actuellement en cours" trendColor="var(--muted)" />
         <StatCard label="À expédier" value={aExpedier} icon={AlertTriangle} tint="var(--danger-fg)" trend={aExpedier > 0 ? "Nécessite action" : "Rien en attente"} trendColor={aExpedier > 0 ? "var(--danger-fg)" : "var(--muted)"} />
       </div>
+
+      {soldesCaisse.length > 0 && (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: "16px 20px", marginBottom: 20 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginBottom: 4 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <Wallet size={17} color="var(--warn-fg)" />
+              <span style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>
+                {voitToutesLesCaisses ? "Espèces à remettre en caisse" : "Ce que vous devez remettre"}
+              </span>
+            </div>
+            <button onClick={() => onNavigate("caisse")} style={{ background: "none", border: "none", color: "var(--info-fg)", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>
+              Ouvrir la Caisse
+            </button>
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 12 }}>
+            Argent encaissé en espèces et pas encore repris sur un bon de remise.
+          </div>
+          {soldesCaisse.map((s) => {
+            const enRetard = s.jours >= 3;
+            const compte = (data.users || []).find((u) => nomAffiche(u) === s.agent);
+            const message = `Bonjour ${s.agent}, merci de passer verser les espèces encaissées : ${formaterDevises(s.devises)} (${s.nb} encaissement${s.nb > 1 ? "s" : ""}, le plus ancien remonte à ${s.jours} jour${s.jours > 1 ? "s" : ""}). Merci !`;
+            return (
+              <div key={s.agent} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "10px 0", borderTop: "1px solid var(--surface2)", flexWrap: "wrap" }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>{s.agent}</div>
+                  <div style={{ fontSize: 11.5, color: enRetard ? "var(--warn-fg)" : "var(--muted)", marginTop: 2 }}>
+                    {s.nb} encaissement{s.nb > 1 ? "s" : ""} · le plus ancien {s.jours === 0 ? "aujourd’hui" : `il y a ${s.jours} jour${s.jours > 1 ? "s" : ""}`}
+                  </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 15, fontWeight: 700, color: enRetard ? "var(--warn-fg)" : "var(--text)" }}>
+                    {formaterDevises(s.devises)}
+                  </span>
+                  {voitToutesLesCaisses && enRetard && compte?.telephone && (
+                    <a href={waLink(compte.telephone, message)} target="_blank" rel="noreferrer"
+                      style={{ display: "flex", alignItems: "center", gap: 5, background: "#3ECB84", color: "#fff", borderRadius: 8, padding: "6px 11px", fontSize: 11.5, fontWeight: 700, textDecoration: "none" }}>
+                      <MessageCircle size={12} /> Relancer
+                    </a>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {oublies.length > 0 && (
         <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 14, padding: "16px 20px", marginBottom: 20 }}>

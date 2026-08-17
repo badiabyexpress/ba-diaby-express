@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue, memo } from "react";
 import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, ChevronDown, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell, SlidersHorizontal, Copy, MoreHorizontal, Wallet } from "lucide-react";
-import { storage, supabase, subscribeToChanges, flushOutbox, pendingSyncCount } from "./lib/storage.js";
+import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces } from "./lib/storage.js";
 
 /* ---------- design tokens ----------
 Identité : Navy #0A2647 · Rouge de marque #C8102E · Blanc #FFFFFF
@@ -1149,6 +1149,51 @@ const MINUTES_INACTIVITE_AGENT = 360;
 const MINUTES_INACTIVITE_CLIENT = 360;
 const CLE_SESSION_CLIENT = "bde-session-client";
 const CLE_SESSION = "bde-session";
+const CLE_JETON = "bde-jeton";
+
+/**
+ * Connexion vérifiée par le serveur.
+ *
+ * Tant que la fonction api/login.js n'est pas configurée (variables absentes), elle répond 501 :
+ * on retourne alors null et l'application vérifie le mot de passe comme avant. C'est ce qui permet
+ * de mettre ce code en ligne sans rien casser, avant même d'avoir créé les variables.
+ *
+ * Un mot de passe refusé (401) ou trop d'essais (429) ne sont PAS des cas de repli : les renvoyer
+ * à la vérification locale annulerait le ralentissement des attaques.
+ */
+async function connexionServeur(identifiant, motdepasse) {
+  let reponse;
+  try {
+    reponse = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ identifiant, motdepasse }),
+    });
+  } catch (e) {
+    return null; // hors ligne ou fonction injoignable : l'application se débrouille seule
+  }
+  if (reponse.status === 501 || reponse.status === 404 || reponse.status >= 502) return null;
+  const corps = await reponse.json().catch(() => ({}));
+  if (!reponse.ok) return { refus: corps.error || "Identifiant ou mot de passe incorrect." };
+  return corps; // { token, expireA, userId }
+}
+
+function lireJetonEnregistre() {
+  try {
+    const brut = window.localStorage.getItem(CLE_JETON);
+    if (!brut) return null;
+    const { token, expireA } = JSON.parse(brut);
+    if (!token || !expireA || Date.now() > expireA) { window.localStorage.removeItem(CLE_JETON); return null; }
+    return token;
+  } catch (e) { return null; }
+}
+function ecrireJeton(token, expireA) {
+  try {
+    if (token) window.localStorage.setItem(CLE_JETON, JSON.stringify({ token, expireA }));
+    else window.localStorage.removeItem(CLE_JETON);
+  } catch (e) { /* stockage indisponible : le jeton vivra le temps de la page */ }
+  definirJetonAcces(token || null);
+}
 const CLE_DERNIERE_VUE = "bde-derniere-vue";
 
 /*
@@ -1221,6 +1266,16 @@ function App() {
   const [syncing, setSyncing] = useState(false);
   const [showLogin, setShowLogin] = useState(() => typeof window !== "undefined" && new URLSearchParams(window.location.search).has("connexion"));
   const [session, setSession] = useState(null);
+  /*
+   * Change à chaque fois qu'un jeton de session est installé : le canal temps réel se rouvre alors
+   * avec la nouvelle autorisation. Le jeton enregistré est réinstallé dès le premier rendu, pour
+   * qu'un rechargement de page n'oblige pas à se reconnecter tant qu'il est valide.
+   */
+  const [versionAcces, setVersionAcces] = useState(() => {
+    const jeton = lireJetonEnregistre();
+    if (jeton) definirJetonAcces(jeton);
+    return 0;
+  });
   const [sessionRestauree, setSessionRestauree] = useState(false);
 
   // Restauration : on ne conserve QUE l'identifiant du compte, jamais le mot de passe ni son
@@ -1254,6 +1309,9 @@ function App() {
     // Contrôle périodique : au-delà du délai sans action, la session se ferme.
     const minuteur = setInterval(() => {
       if (!lireSessionEnregistree()) {
+        // Le jeton d'accès part avec la session : il ne doit pas survivre à l'expiration.
+        ecrireJeton(null);
+        setVersionAcces((n) => n + 1);
         setSession(null);
         setView("dashboard");
       }
@@ -1290,8 +1348,11 @@ function App() {
     return () => clearTimeout(timeout);
   }, []);
 
-  // Synchronisation en temps réel : si un autre appareil modifie les données,
-  // on les recharge ici automatiquement, sans rafraîchir la page.
+  /*
+   * Le canal temps réel doit repartir après une connexion : il porte l'en-tête d'autorisation du
+   * client au moment où il est ouvert. Sans cela, il resterait ouvert avec la seule clé publique
+   * et cesserait de recevoir les changements le jour où la base ne l'acceptera plus.
+   */
   useEffect(() => {
     const unsubscribe = subscribeToChanges("bde-data", (newValueString) => {
       try {
@@ -1302,7 +1363,7 @@ function App() {
       } catch (e) { console.error("Échec de synchronisation temps réel", e); }
     });
     return unsubscribe;
-  }, []);
+  }, [versionAcces]);
 
   // Mode hors-ligne : dès que la connexion revient, on rejoue automatiquement les modifications
   // faites pendant la coupure. Fonctionne réellement sur le site déployé (Supabase) ; dans
@@ -1444,7 +1505,7 @@ function App() {
       setView("dashboard");
       try { persist({ ...data, users: (data.users || []).map((x) => (x.id === u.id ? normalized : x)) }); }
       catch (ex) { console.error("Migration du compte impossible :", ex); }
-    }} offline={offline} theme={theme} onToggleTheme={toggleTheme} onBackToHome={() => { setShowLogin(false); const url = new URL(window.location.href); url.searchParams.delete("connexion"); window.history.replaceState({}, "", url); }} /></Shell>;
+    }} offline={offline} theme={theme} onToggleTheme={toggleTheme} onJeton={() => setVersionAcces((n) => n + 1)} onBackToHome={() => { setShowLogin(false); const url = new URL(window.location.href); url.searchParams.delete("connexion"); window.history.replaceState({}, "", url); }} /></Shell>;
   }
 
   const canAdmin = session.role === "Administrateur";
@@ -1557,7 +1618,7 @@ function App() {
                 <div style={{ fontSize: 11.5, color: "var(--nav-muted)", marginBottom: 10 }}>{session.role}</div>
               </>
             )}
-            <button onClick={() => { ecrireSessionEnregistree(null); setSession(null); setView("dashboard"); setShowLogin(false); const url = new URL(window.location.href); url.searchParams.delete("connexion"); window.history.replaceState({}, "", url); }} title={(collapsed && !isMobile) ? t.logout : undefined} style={{ display: "flex", alignItems: "center", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", gap: 8, width: "100%", fontSize: 13, color: "var(--brand-on-dark)", background: "none", border: "none", cursor: "pointer" }}>
+            <button onClick={() => { ecrireSessionEnregistree(null); ecrireJeton(null); setVersionAcces((n) => n + 1); setSession(null); setView("dashboard"); setShowLogin(false); const url = new URL(window.location.href); url.searchParams.delete("connexion"); window.history.replaceState({}, "", url); }} title={(collapsed && !isMobile) ? t.logout : undefined} style={{ display: "flex", alignItems: "center", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", gap: 8, width: "100%", fontSize: 13, color: "var(--brand-on-dark)", background: "none", border: "none", cursor: "pointer" }}>
               <LogOut size={15} /> {!(collapsed && !isMobile) && t.logout}
             </button>
           </div>
@@ -3751,7 +3812,7 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
 }
 
 
-function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome }) {
+function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, onJeton }) {
   const [id, setId] = useState("");
   const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
@@ -3765,10 +3826,28 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome }) 
     setErr("");
     try {
       const list = users || [];
-      const u = list.find((x) => x.identifiant === id.trim());
+      /*
+       * Vérification par le serveur quand elle est disponible : le mot de passe y est comparé avec
+       * une clé qui ne quitte jamais le serveur, et la réponse contient un jeton de session. Sinon
+       * (fonction non configurée, hors ligne), on retombe sur la vérification locale d'origine.
+       */
+      const serveur = await connexionServeur(id.trim(), pw);
+      if (serveur?.refus) { setErr(serveur.refus); return; }
+
+      const u = serveur?.userId
+        ? list.find((x) => x.id === serveur.userId)
+        : list.find((x) => x.identifiant === id.trim());
       if (!u) { setErr("Identifiant ou mot de passe incorrect."); return; }
-      const { ok, migratedUser } = await verifyPassword(pw, u);
-      if (!ok) { setErr("Identifiant ou mot de passe incorrect."); return; }
+
+      let migratedUser = null;
+      if (serveur?.token) {
+        ecrireJeton(serveur.token, serveur.expireA);
+        onJeton?.();
+      } else {
+        const local = await verifyPassword(pw, u);
+        if (!local.ok) { setErr("Identifiant ou mot de passe incorrect."); return; }
+        migratedUser = local.migratedUser;
+      }
       const finalUser = migratedUser || u;
       if (finalUser.twoFA) { const code = genOtp(); setOtp(code); setPending(finalUser); }
       else onLogin(finalUser);
@@ -8691,11 +8770,11 @@ async function genererUrlEtiquette(colis) {
   const doc = await construireEtiquetteDoc(colis);
   const blob = doc.output("blob");
   const chemin = `etiquettes/${colis.tracking}.pdf`;
-  const { error: erreurUpload } = await supabase.storage
+  const { error: erreurUpload } = await clientSupabase().storage
     .from("colis-documents")
     .upload(chemin, blob, { contentType: "application/pdf", upsert: true });
   if (erreurUpload) throw erreurUpload;
-  const { data: { publicUrl } } = supabase.storage.from("colis-documents").getPublicUrl(chemin);
+  const { data: { publicUrl } } = clientSupabase().storage.from("colis-documents").getPublicUrl(chemin);
   return publicUrl;
 }
 

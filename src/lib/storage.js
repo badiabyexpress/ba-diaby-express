@@ -35,7 +35,42 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
   console.error("VITE_SUPABASE_URL et VITE_SUPABASE_ANON_KEY doivent être configurées (voir .env.example).");
 }
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+/*
+ * Jeton de session délivré par api/login.js après vérification du mot de passe côté serveur.
+ *
+ * Sans jeton, le client fonctionne comme avant, avec la seule clé publique — c'est le cas tant que
+ * la fonction serveur n'est pas configurée. Avec jeton, chaque appel part signé « authenticated »,
+ * ce qui permettra aux politiques de la base de n'accorder l'accès qu'aux personnes réellement
+ * connectées, au lieu de l'accorder à quiconque détient la clé publiée dans le navigateur.
+ */
+let jetonAcces = null;
+
+function creerClient() {
+  return createClient(SUPABASE_URL, SUPABASE_KEY,
+    jetonAcces ? { global: { headers: { Authorization: `Bearer ${jetonAcces}` } } } : undefined);
+}
+
+let client = creerClient();
+
+/** Le client courant. Passer par cette fonction : la référence change quand le jeton change. */
+export function clientSupabase() {
+  return client;
+}
+
+/**
+ * Installe (ou retire, avec null) le jeton de session. Le client est recréé pour que l'en-tête
+ * accompagne aussi bien les lectures et écritures que le canal temps réel.
+ */
+export function definirJetonAcces(jeton) {
+  if (jeton === jetonAcces) return;
+  jetonAcces = jeton || null;
+  try { client.removeAllChannels?.(); } catch (e) { /* aucun canal ouvert */ }
+  client = creerClient();
+}
+
+export function jetonEnPlace() {
+  return !!jetonAcces;
+}
 
 const TABLE = "bde_data";
 const CACHE_PREFIX = "bde-cache:";
@@ -51,7 +86,7 @@ function setQueue(q) {
 export const storage = {
   async get(key, shared) {
     try {
-      const { data, error } = await supabase.from(TABLE).select("value").eq("key", key).maybeSingle();
+      const { data, error } = await client.from(TABLE).select("value").eq("key", key).maybeSingle();
       if (error) throw error;
       if (!data) throw new Error(`Clé "${key}" introuvable`);
       try { localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(data.value)); } catch (e) { /* pas grave */ }
@@ -68,7 +103,7 @@ export const storage = {
     const parsed = typeof value === "string" ? JSON.parse(value) : value;
     try { localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(parsed)); } catch (e) { /* pas grave */ }
     try {
-      const { error } = await supabase.from(TABLE).upsert({ key, value: parsed, updated_at: new Date().toISOString() });
+      const { error } = await client.from(TABLE).upsert({ key, value: parsed, updated_at: new Date().toISOString() });
       if (error) throw error;
       return { key, value, shared: !!shared };
     } catch (e) {
@@ -90,13 +125,13 @@ export const storage = {
 
   async delete(key, shared) {
     try { localStorage.removeItem(CACHE_PREFIX + key); } catch (e) { /* pas grave */ }
-    const { error } = await supabase.from(TABLE).delete().eq("key", key);
+    const { error } = await client.from(TABLE).delete().eq("key", key);
     if (error) throw error;
     return { key, deleted: true, shared: !!shared };
   },
 
   async list(prefix, shared) {
-    let query = supabase.from(TABLE).select("key");
+    let query = client.from(TABLE).select("key");
     if (prefix) query = query.like("key", `${prefix}%`);
     const { data, error } = await query;
     if (error) throw error;
@@ -111,7 +146,7 @@ export const storage = {
  * Retourne une fonction "unsubscribe" à appeler au démontage du composant.
  */
 export function subscribeToChanges(key, callback) {
-  const channel = supabase
+  const channel = client
     .channel(`bde_data_changes_${key}`)
     .on(
       "postgres_changes",
@@ -124,7 +159,7 @@ export function subscribeToChanges(key, callback) {
     )
     .subscribe();
 
-  return () => { supabase.removeChannel(channel); };
+  return () => { client.removeChannel(channel); };
 }
 
 /**
@@ -142,7 +177,7 @@ export async function flushOutbox() {
   for (const key of Object.keys(latestByKey)) {
     const item = latestByKey[key];
     try {
-      const { error } = await supabase.from(TABLE).upsert({ key: item.key, value: item.value, updated_at: new Date().toISOString() });
+      const { error } = await client.from(TABLE).upsert({ key: item.key, value: item.value, updated_at: new Date().toISOString() });
       if (error) throw error;
       flushed++;
     } catch (e) {

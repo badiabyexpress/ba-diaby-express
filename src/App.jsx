@@ -4468,14 +4468,19 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
  *
  * `retour` nomme l'écran vers lequel on revient : il valait toujours « Configuration », y compris
  * depuis la création d'un bordereau ou une fiche de voyage, où ce n'est pas là qu'on retourne.
+ *
+ * `minWidth: 0` et `flexWrap` ne sont pas cosmétiques : plusieurs pages placent cet en-tête dans
+ * une rangée avec un bouton d'action (« Ajouter un site », « Créer un compte »). Sans eux, l'en-tête
+ * refusait de se réduire sur un écran de téléphone et poussait le bouton hors de l'écran — la page
+ * ne défilant pas horizontalement, le bouton devenait à moitié invisible et inutilisable.
  */
 function ConfigPageHeader({ title, desc, onBack, retour = "Configuration" }) {
   return (
-    <div style={{ display: "flex", alignItems: "flex-start", gap: 16, marginBottom: 24 }}>
+    <div style={{ display: "flex", alignItems: "flex-start", gap: 16, marginBottom: 24, flexWrap: "wrap", minWidth: 0, flex: "1 1 240px" }}>
       <button onClick={onBack} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 14px", color: "var(--text)", fontSize: 13.5, fontWeight: 600, cursor: "pointer", flexShrink: 0, marginTop: 2 }}>
         <ChevronLeft size={15} /> {retour}
       </button>
-      <div>
+      <div style={{ minWidth: 0, flex: "1 1 200px" }}>
         <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: 0 }}>{title}</h1>
         <p style={{ color: "var(--muted)", fontSize: 14, margin: "5px 0 0" }}>{desc}</p>
       </div>
@@ -5079,7 +5084,7 @@ function CategoriesProduitsPage({ data, persist, session, notify, onBack }) {
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
         <ConfigPageHeader title="Gestion des Catégories de Produits" desc="Configurez les catégories et leurs tarifs pour votre entreprise." onBack={onBack} />
         {isAdmin && !form && <button onClick={openNew} style={{ display: "flex", alignItems: "center", gap: 6, background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}><Plus size={16} /> Nouvelle Catégorie</button>}
       </div>
@@ -15458,30 +15463,64 @@ function SitesOperationPage({ data, persist, notify, onBack }) {
    */
   const sitesGN = sitesLocaux(sites);
   const [form, setForm] = useState(null);
+  const [erreurForm, setErreurForm] = useState("");
+
+  /*
+   * L'agence de retrait réellement utilisable.
+   *
+   * La référence enregistrée peut désigner un site supprimé, passé à l'étranger, ou ne pas exister
+   * du tout (données créées avant l'ajout de ce réglage). Le menu affichait alors une agence que la
+   * référence ne désignait pas. On calcule donc toujours la valeur effective à partir des sites
+   * présents, pour que ce qui est affiché soit ce qui est réellement enregistré.
+   */
+  function agenceRetraitValide(listeSites, reference) {
+    const locaux = sitesLocaux(listeSites);
+    return locaux.some((s) => s.id === reference) ? reference : (locaux[0]?.id || "");
+  }
+  const agenceRetraitEffective = agenceRetraitValide(sites, data.agenceRetraitClient);
+
+  function ouvrirFormulaire(valeurs) { setErreurForm(""); setForm(valeurs); }
+  function fermerFormulaire() { setErreurForm(""); setForm(null); }
 
   function saveSite() {
-    if (!form.nom) return;
-    const exists = sites.some((s) => s.id === form.id);
-    const next = exists ? sites.map((s) => (s.id === form.id ? form : s)) : [...sites, { ...form, id: form.id || `s${Date.now()}` }];
     /*
-     * Si le site édité est l'agence de retrait de l'Espace Client et qu'on lui retire son
-     * rattachement Guinée, cette référence deviendrait obsolète (un site étranger ne sert que de
-     * point de retrait sur le ticket, jamais d'agence Espace Client). On la fait suivre vers un
-     * autre site local plutôt que de laisser une agence de retrait qui n'existe plus vraiment.
+     * Un nom vide ne faisait rien du tout : le bouton « Enregistrer » restait sans effet et sans
+     * explication, ce qui donne l'impression que l'application est bloquée. On le dit maintenant.
      */
-    let agenceRetraitClient = data.agenceRetraitClient;
-    if (exists && form.id === agenceRetraitClient && form.pays && form.pays !== "GN") {
-      agenceRetraitClient = sitesLocaux(next.filter((s) => s.id !== form.id))[0]?.id || "";
+    const nom = (form.nom || "").trim();
+    if (!nom) { setErreurForm("Donnez un nom à l’agence : c’est lui qui l’identifie dans toute l’application."); return; }
+    const exists = sites.some((s) => s.id === form.id);
+    /*
+     * Le nom — et non l'identifiant — est ce qui rattache un colis (colis.site) et un agent
+     * (utilisateur.agence) à son agence. Deux agences homonymes rendraient donc les statistiques
+     * par agence et le filtrage des colis par agent impossibles à démêler.
+     */
+    if (sites.some((s) => s.id !== form.id && (s.nom || "").trim().toLowerCase() === nom.toLowerCase())) {
+      setErreurForm(`Une agence nommée « ${nom} » existe déjà. Choisissez un autre nom : c’est le nom qui rattache les colis et les agents à leur agence.`);
+      return;
     }
-    persist({ ...data, sites: next, agenceRetraitClient });
+    const site = { ...form, nom };
+    const next = exists ? sites.map((s) => (s.id === site.id ? site : s)) : [...sites, { ...site, id: site.id || `s${Date.now()}` }];
+    /*
+     * L'agence de retrait de l'Espace Client doit toujours désigner un site existant, en Guinée
+     * (un site à l'étranger ne sert que de point de retrait sur le ticket). Si la référence ne
+     * pointe plus vers rien — site passé à l'étranger, ou réglage jamais enregistré — on la fait
+     * suivre vers le premier site local, celui-là même que le menu affiche déjà.
+     */
+    persist({ ...data, sites: next, agenceRetraitClient: agenceRetraitValide(next, data.agenceRetraitClient) });
     notify?.(exists ? "Site mis à jour" : "Site ajouté");
-    setForm(null);
+    fermerFormulaire();
   }
-  function removeSite(id) { persist({ ...data, sites: sites.filter((s) => s.id !== id) }); }
+  function removeSite(id) {
+    const next = sites.filter((s) => s.id !== id);
+    // Supprimer l'agence de retrait laissait une référence dans le vide : l'Espace Client
+    // annonçait alors une adresse de retrait qui n'existe plus.
+    persist({ ...data, sites: next, agenceRetraitClient: agenceRetraitValide(next, data.agenceRetraitClient) });
+  }
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
       {siteASupprimer && (
         <ConfirmerAction
           titre="Supprimer ce site ?"
@@ -15492,16 +15531,17 @@ function SitesOperationPage({ data, persist, notify, onBack }) {
         />
       )}
         <ConfigPageHeader title="Sites d’opération" desc="Gérez vos points d’enregistrement et de retrait, et les informations affichées sur le ticket d’envoi." onBack={onBack} />
-        <button onClick={() => setForm({ nom: "", pays: "GN", adresse: "", telephone: "", horaires: "", paiements: "", stockage: "" })} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}><Plus size={16} /> Ajouter un site</button>
+        <button onClick={() => ouvrirFormulaire({ nom: "", pays: "GN", adresse: "", telephone: "", horaires: "", paiements: "", stockage: "" })} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}><Plus size={16} /> Ajouter un site</button>
       </div>
       <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "14px 16px", marginBottom: 16 }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>Agence de retrait de l’Espace Client</div>
         <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 10 }}>
           Adresse communiquée aux clients de l’Espace Client dès que leur colis est disponible. Une seule agence, pour éviter toute confusion.
         </div>
-        <select value={data.agenceRetraitClient || "site-bambeto"}
+        <select value={agenceRetraitEffective}
           onChange={(e) => { persist({ ...data, agenceRetraitClient: e.target.value }); notify?.("Agence de retrait mise à jour"); }}
           style={{ ...inputStyle, maxWidth: 320, marginBottom: 0 }}>
+          {sitesGN.length === 0 && <option value="">Aucune agence en Guinée — ajoutez-en une ci-dessous</option>}
           {sitesGN.map((s) => <option key={s.id} value={s.id}>{s.nom} — {s.adresse}</option>)}
         </select>
       </div>
@@ -15519,7 +15559,7 @@ function SitesOperationPage({ data, persist, notify, onBack }) {
                 )}
               </div>
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => setForm({ pays: "GN", ...s })} style={{ background: "none", border: "none", color: "var(--info-fg)", cursor: "pointer" }}><Settings size={14} /></button>
+                <button onClick={() => ouvrirFormulaire({ pays: "GN", ...s })} style={{ background: "none", border: "none", color: "var(--info-fg)", cursor: "pointer" }}><Settings size={14} /></button>
                 <button onClick={() => setSiteASupprimer(s)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={14} /></button>
               </div>
             </div>
@@ -15533,8 +15573,8 @@ function SitesOperationPage({ data, persist, notify, onBack }) {
         {sites.length === 0 && <div style={{ color: "var(--muted)", fontSize: 13 }}>Aucun site enregistré — ajoutez Bambeto, Madina, etc.</div>}
       </div>
       {form && (
-        <Modal onClose={() => setForm(null)} title={form.id ? "Modifier le site" : "Nouveau site"}>
-          <Field label="Nom"><input value={form.nom} onChange={(e) => setForm({ ...form, nom: e.target.value })} style={inputStyle} placeholder="ex: Bambeto" /></Field>
+        <Modal onClose={fermerFormulaire} title={form.id ? "Modifier le site" : "Nouveau site"} saisieEnCours={!!(form.nom || form.adresse || form.telephone)}>
+          <Field label="Nom"><input value={form.nom} onChange={(e) => { setErreurForm(""); setForm({ ...form, nom: e.target.value }); }} style={inputStyle} placeholder="ex: Bambeto" /></Field>
           <Field label="Pays">
             <select value={form.pays || "GN"} onChange={(e) => setForm({ ...form, pays: e.target.value })} style={inputStyle}>
               {COUNTRIES.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code] || ""} {c.name}</option>)}
@@ -15550,8 +15590,13 @@ function SitesOperationPage({ data, persist, notify, onBack }) {
           <Field label="Horaires"><input value={form.horaires} onChange={(e) => setForm({ ...form, horaires: e.target.value })} style={inputStyle} placeholder="Lun-Sam 8h-18h" /></Field>
           <Field label="Moyens de paiement acceptés"><input value={form.paiements} onChange={(e) => setForm({ ...form, paiements: e.target.value })} style={inputStyle} placeholder="Espèces, Orange Money" /></Field>
           <Field label="Infos stockage"><input value={form.stockage} onChange={(e) => setForm({ ...form, stockage: e.target.value })} style={inputStyle} placeholder="Retrait sous 7 jours" /></Field>
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 8 }}>
-            <button onClick={() => setForm(null)} style={{ padding: "9px 16px", borderRadius: 8, border: "1.5px solid var(--border)", background: "var(--surface2)", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>Annuler</button>
+          {erreurForm && (
+            <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "10px 12px", fontSize: 12.5, color: "var(--danger-fg)", marginBottom: 12, lineHeight: 1.5 }}>
+              {erreurForm}
+            </div>
+          )}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 8, flexWrap: "wrap" }}>
+            <button onClick={fermerFormulaire} style={{ padding: "9px 16px", borderRadius: 8, border: "1.5px solid var(--border)", background: "var(--surface2)", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>Annuler</button>
             <button onClick={saveSite} style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
           </div>
         </Modal>
@@ -16046,7 +16091,7 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
 
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 18, gap: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 18, gap: 12, flexWrap: "wrap" }}>
         <ConfigPageHeader title="Gestion Utilisateurs" desc="Accès, rôles et permissions de l’équipe." onBack={onBack} />
         {effectivePermission(session, "users.gerer") && <button onClick={() => setShowForm(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}><Plus size={16} /> Créer un compte</button>}
       </div>

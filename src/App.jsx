@@ -4608,6 +4608,25 @@ function PartnerDashboard({ data, session, persist, notify }) {
     notify?.("Vos informations ont été enregistrées");
   }
 
+  /*
+   * Le seul « payé » de tout le circuit partenaire.
+   *
+   * L'entreprise n'encaisse rien sur ces colis : nulle part elle ne peut donc dire qu'ils sont
+   * payés. Le partenaire, lui, sait quand son client l'a réglé à l'arrivée — c'est son suivi à
+   * lui, qu'il tient d'un geste depuis sa liste. Personne d'autre ne peut poser ni retirer cette
+   * marque, et elle ne touche à rien d'autre : ni la facture que l'entreprise lui adresse, ni
+   * aucune caisse.
+   */
+  function marquerPaye(tracking, paye) {
+    persist({
+      ...data,
+      colis: (data.colis || []).map((c) => (c.tracking === tracking
+        ? { ...c, paiementPartenaire: paye ? { paye: true, le: new Date().toISOString(), par: `${session.prenom} ${session.nom}`.trim() || session.identifiant } : null }
+        : c)),
+    });
+    notify?.(paye ? `${tracking} marqué payé` : `${tracking} : marque de paiement retirée`);
+  }
+
   async function enregistrerColis(colis) {
     const resultat = await persist({
       ...data,
@@ -4681,13 +4700,16 @@ function PartnerDashboard({ data, session, persist, notify }) {
       <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", marginBottom: 20 }}>
         <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", minWidth: 760, borderCollapse: "collapse" }}>
-          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Expéditeur", "Destinataire", "Poids", "Coût", "Vérification", "Acheminement"].map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
+          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Expéditeur", "Destinataire", "Poids", "Coût", "Vérification", "Acheminement", "Réglé par votre client"].map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
           <tbody>
-            {colisPartenaire.length === 0 && <tr><td colSpan={7} style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucun colis enregistré pour l’instant — utilisez « Enregistrer un colis ».</td></tr>}
+            {colisPartenaire.length === 0 && <tr><td colSpan={8} style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucun colis enregistré pour l’instant — utilisez « Enregistrer un colis ».</td></tr>}
             {colisPartenaire.map((c) => {
               const st = STATUS_STYLE[c.status];
               const valide = statutValidationPartenaire(c) === "Validé";
               const facture = mesFactures.find((f) => f.id === c.facturePartenaireId);
+              const paye = !!c.paiementPartenaire?.paye;
+              // Un colis se marque payé quand il est arrivé : c'est là que le client règle.
+              const arrive = ["Arrivé", "Disponible au retrait", "Livré"].includes(c.status);
               return (
                 <tr key={c.tracking} style={{ borderTop: "1px solid var(--border)" }}>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.tracking}</td>
@@ -4702,6 +4724,20 @@ function PartnerDashboard({ data, session, persist, notify }) {
                     {facture && <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 3 }}>{facture.numero}</div>}
                   </td>
                   <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}><span style={{ background: st?.bg, color: st?.fg, padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>{c.status}</span></td>
+                  <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}>
+                    {paye ? (
+                      <div>
+                        <span style={{ background: "var(--ok-bg-soft)", color: "var(--ok-fg)", padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>Payé</span>
+                        <button onClick={() => marquerPaye(c.tracking, false)} style={{ display: "block", background: "none", border: "none", color: "var(--muted)", fontSize: 10.5, cursor: "pointer", padding: "3px 0 0" }}>Annuler</button>
+                      </div>
+                    ) : arrive ? (
+                      <button onClick={() => marquerPaye(c.tracking, true)} style={{ background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "6px 11px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>
+                        Marquer payé
+                      </button>
+                    ) : (
+                      <span style={{ fontSize: 11.5, color: "var(--muted)" }}>—</span>
+                    )}
+                  </td>
                 </tr>
               );
             })}
@@ -9289,7 +9325,7 @@ async function downloadClientManifest(compte, colisListe, devise = "GNF") {
     { titre: "Trajet", largeur: 42, cle: (c) => routeLabel(c.pays, c.direction) },
     { titre: "Où en est-il", largeur: 40, cle: (c) => clientStatusLabel(c.status) },
     { titre: "Poids", largeur: 18, cle: (c) => `${c.poids} kg`, droite: true },
-    { titre: "À régler", largeur: 18, cle: (c) => (c.reste > 0 ? fmt(c.reste, devise) : "Payé"), droite: true },
+    { titre: "À régler", largeur: 18, cle: (c) => (estColisPartenaire(c) ? "Partenaire" : (c.reste > 0 ? fmt(c.reste, devise) : "Payé")), droite: true },
   ];
   const largeurTotale = COLONNES.reduce((s, c) => s + c.largeur, 0);
 
@@ -11903,6 +11939,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
   const devisesAffichees = [...new Set(["GNF", expCurrency, destCliCurrency])];
   // Un colis partenaire n'est pas facturé par l'entreprise : il n'est ni payé ni impayé.
   const colisPartenaire = estColisPartenaire(colis);
+  const partenaireColis = partenaireDuColis(data, colis);
   const statutPaiement = colisPartenaire ? "Partenaire — non facturé"
     : colis.reste <= 0 ? "Payé" : colis.paye > 0 ? "Partiellement payé" : "Non payé";
   // Deux teintes distinctes : une pastille pleine (texte blanc dessus) et une couleur de
@@ -12002,19 +12039,29 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
                       {etiquetteWaErreur && <span style={{ ...menuItemHint, color: "var(--warn-fg)" }}>{etiquetteWaErreur}</span>}
                     </button>
                   )}
-                  <div style={{ height: 1, background: "var(--border)", margin: "4px 2px" }} />
-                  <button onClick={handleDownloadInvoice} disabled={invoiceState === "loading"} style={menuItemStyle}>
-                    {invoiceState === "loading" ? "Génération…" : "Télécharger la facture"}
-                    {invoiceState === "error" && <span style={menuItemHint}>Échec — réessayez</span>}
-                  </button>
-                  {(colis.destinataireEmail || colis.email) && (
-                    <button onClick={handleEnvoyerFacture} disabled={emailState === "loading"} style={menuItemStyle}>
-                      {emailState === "loading" ? "Envoi…" : emailState === "envoye" ? "Facture envoyée" : emailState === "brouillon" ? "Brouillon e-mail ouvert" : "Renvoyer la facture par e-mail"}
-                    </button>
+                  {/*
+                    Ni facture ni ticket de caisse sur un colis partenaire : ces documents portent
+                    des montants encaissés par l'entreprise et une mention de règlement. Ici il n'y
+                    a rien à encaisser — le partenaire facture son client lui-même, et c'est lui
+                    seul qui recevra notre facture, sur son espace.
+                  */}
+                  {!colisPartenaire && (
+                    <>
+                      <div style={{ height: 1, background: "var(--border)", margin: "4px 2px" }} />
+                      <button onClick={handleDownloadInvoice} disabled={invoiceState === "loading"} style={menuItemStyle}>
+                        {invoiceState === "loading" ? "Génération…" : "Télécharger la facture"}
+                        {invoiceState === "error" && <span style={menuItemHint}>Échec — réessayez</span>}
+                      </button>
+                      {(colis.destinataireEmail || colis.email) && (
+                        <button onClick={handleEnvoyerFacture} disabled={emailState === "loading"} style={menuItemStyle}>
+                          {emailState === "loading" ? "Envoi…" : emailState === "envoye" ? "Facture envoyée" : emailState === "brouillon" ? "Brouillon e-mail ouvert" : "Renvoyer la facture par e-mail"}
+                        </button>
+                      )}
+                      <button onClick={handleDownloadTicketThermal} disabled={ticketThermalState === "loading"} style={menuItemStyle}>
+                        {ticketThermalState === "loading" ? "Génération…" : "Ticket thermique 80 mm"}
+                      </button>
+                    </>
                   )}
-                  <button onClick={handleDownloadTicketThermal} disabled={ticketThermalState === "loading"} style={menuItemStyle}>
-                    {ticketThermalState === "loading" ? "Génération…" : "Ticket thermique 80 mm"}
-                  </button>
                 </div>
               </>
             )}
@@ -12165,6 +12212,29 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
         </div>
       )}
 
+      {/*
+       * Colis partenaire : aucun encaissement de l'entreprise, donc aucun mot sur un paiement.
+       * Écrire « Payé : 0,00 EUR sur 0,00 EUR » laissait croire à un règlement soldé alors que
+       * rien n'a jamais été demandé au client. Seul le partenaire peut dire, à l'arrivée, que
+       * son client l'a payé — et c'est le seul « payé » qui s'affiche ici.
+       */}
+      {colisPartenaire ? (
+        <div style={{ background: "var(--surface)", border: "1.5px solid var(--info-fg)", borderRadius: 12, padding: 16, marginBottom: 18 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Colis partenaire</div>
+            {colis.paiementPartenaire?.paye
+              ? <span style={{ background: "#0F7A45", color: "#fff", padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>Payé au partenaire</span>
+              : <span style={{ background: "#3D63FF", color: "#fff", padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>Non facturé par l’entreprise</span>}
+          </div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8, lineHeight: 1.55 }}>
+            {partenaireColis ? `Déposé par ${reglagesPartenaire(partenaireColis).nomCommercial || `${partenaireColis.prenom} ${partenaireColis.nom}`.trim()}. ` : ""}
+            L’entreprise n’encaisse rien sur ce colis : le partenaire facture son client lui-même.
+            {colis.paiementPartenaire?.paye
+              ? ` Marqué payé par le partenaire le ${new Date(colis.paiementPartenaire.le).toLocaleDateString("fr-FR")}.`
+              : ""}
+          </div>
+        </div>
+      ) : (
       <div style={{ background: "var(--surface)", border: `1.5px solid ${statutFg}`, borderRadius: 12, padding: 16, marginBottom: 18 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Paiements</div>
@@ -12257,6 +12327,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
           </div>
         )}
       </div>
+      )}
 
       <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 18 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: (colis.remise || colis.bonSortie) ? 10 : 0 }}>
@@ -13224,7 +13295,14 @@ function Clients({ data }) {
 Clients = memo(Clients);
 function PaiementsPage({ data, notify }) {
   const [filter, setFilter] = useState("tous");
-  const colis = data.colis;
+  /*
+   * Les colis partenaires sortent de cette page.
+   *
+   * L'entreprise ne leur facture rien à ce titre — c'est le partenaire qui règle, sur sa propre
+   * facture (Configuration → Partenaires). Sans prix, ils apparaissaient ici comme « soldés »,
+   * annonçant des règlements que personne n'avait faits et noyant les vrais impayés.
+   */
+  const colis = useMemo(() => (data.colis || []).filter((c) => !estColisPartenaire(c)), [data.colis]);
   const { withStatus, totalCA, totalEncaisse, totalReste } = useMemo(() => ({
     withStatus: colis.map((c) => ({ ...c, payStatus: c.reste <= 0 ? "solde" : c.paye > 0 ? "partiel" : "impaye" })),
     totalCA: colis.reduce((s, c) => s + c.prix, 0),
@@ -14485,8 +14563,11 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data) {
     c.tracking, c.destinataire || "—",
     (c.direction || "export") === "export" ? "Aller" : "Retour",
     `${(Number(c.poids) || 0).toFixed(1)} kg`,
-    fmt(c.prix, "EUR"), fmt(c.paye, "EUR"),
-    (Number(c.reste) || 0) > 0 ? fmt(c.reste, "EUR") : "Payé",
+    // Un colis partenaire n'a ni prix ni règlement chez nous : la fiche le dit, plutôt que
+    // d'afficher des zéros qui se liraient comme un colis soldé.
+    estColisPartenaire(c) ? "—" : fmt(c.prix, "EUR"),
+    estColisPartenaire(c) ? "—" : fmt(c.paye, "EUR"),
+    estColisPartenaire(c) ? "Partenaire" : ((Number(c.reste) || 0) > 0 ? fmt(c.reste, "EUR") : "Payé"),
   ]);
   if (hasAutoTable && doc.autoTable && body.length > 0) {
     doc.autoTable({

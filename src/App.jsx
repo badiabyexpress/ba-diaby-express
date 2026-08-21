@@ -724,6 +724,24 @@ function voitLesMontants(session) {
   return !session?.partenaireParent || session?.voitLesMontants === true;
 }
 
+/*
+ * Le message de suivi qu'un partenaire envoie à son propre client.
+ *
+ * Il est écrit à la première personne du partenaire et signé de son nom commercial : c'est lui
+ * qui a vendu l'envoi, c'est son client, et voir surgir le nom de son transporteur dans une
+ * conversation qu'il n'a pas engagée lui coûterait ce client. Ba-Diaby n'apparaît nulle part —
+ * ni dans le texte, ni sur la page qui s'ouvre au bout du lien.
+ *
+ * Rien d'autre que le numéro de suivi ne circule : ni prix, ni poids, ni contenu. Le lien mène à
+ * la page publique, qui n'a jamais rien montré de sensible.
+ */
+function messageSuiviPartenaire(colis, nomCommercial) {
+  const destinataire = (colis?.destinataire || "").trim().split(" ")[0];
+  const salutation = destinataire ? `Bonjour ${destinataire},` : "Bonjour,";
+  const signature = nomCommercial ? `\n\n${nomCommercial}` : "";
+  return `${salutation}\n\nVotre colis ${colis?.tracking || ""} est en route. Vous pouvez suivre son acheminement à tout moment ici :\n${trackingUrlFor(colis?.tracking || "")}${signature}`;
+}
+
 /**
  * Modes d'acheminement final d'un colis partenaire, une fois arrivé dans le pays de destination.
  *
@@ -2645,6 +2663,15 @@ function PublicTrackingPage({ data, loading }) {
   const [searched, setSearched] = useState(!!params?.get("code"));
   const colis = data && searched ? data.colis.find((c) => c.tracking.toUpperCase() === code.trim().toUpperCase()) : null;
   const notFound = searched && !loading && data && !colis;
+  /*
+   * Un colis partenaire se suit sous la marque du partenaire, jamais sous la nôtre.
+   *
+   * C'est son client : il a acheté un envoi à sa boutique, pas à Ba-Diaby. Lui montrer le nom de
+   * son transporteur sur la page de suivi, c'est lui donner le moyen de nous appeler directement
+   * la fois suivante — autrement dit prendre son client à un partenaire qui vient de nous le
+   * confier. Tant qu'aucun colis n'est trouvé, la page reste celle de l'entreprise.
+   */
+  const marqueColis = colis ? marquePartenaire(data, colis) : null;
 
   function rechercher(e) {
     e?.preventDefault();
@@ -2686,9 +2713,17 @@ function PublicTrackingPage({ data, loading }) {
       <div style={{ width: "100%", maxWidth: 560, display: "flex", justifyContent: "flex-end", marginBottom: 20 }}>
         <ClientLangSwitch lang={lang} onChange={setLang} />
       </div>
-      <img src={data?.branding?.logo || DEFAULT_LOGO} alt="logo" style={{ width: 54, height: 54, borderRadius: 13, objectFit: "cover", marginBottom: 14, boxShadow: "0 10px 26px rgba(0,0,0,0.3)" }} />
+      {marqueColis && !marqueColis.logo ? (
+        <div style={{ width: 54, height: 54, borderRadius: 13, marginBottom: 14, background: "rgba(255,255,255,0.14)", color: "#fff", display: "grid", placeItems: "center", fontSize: 26, fontWeight: 700, boxShadow: "0 10px 26px rgba(0,0,0,0.3)" }}>
+          {(marqueColis.nomCommercial || "?").trim().charAt(0).toUpperCase()}
+        </div>
+      ) : (
+        <img src={(marqueColis && marqueColis.logo) || data?.branding?.logo || DEFAULT_LOGO} alt="" style={{ width: 54, height: 54, borderRadius: 13, objectFit: "cover", marginBottom: 14, boxShadow: "0 10px 26px rgba(0,0,0,0.3)" }} />
+      )}
       <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 25, color: "#fff", marginBottom: 4, textAlign: "center" }}>
-        BA-DIABY <span style={{ color: "#FF8A9B" }}>EXPRESS</span>
+        {marqueColis
+          ? marqueColis.nomCommercial
+          : <>BA-DIABY <span style={{ color: "#FF8A9B" }}>EXPRESS</span></>}
       </div>
       <div style={{ fontSize: 13.5, color: "rgba(255,255,255,0.78)", marginBottom: 28 }}>{T("Suivi de colis")}</div>
 
@@ -2759,7 +2794,13 @@ function PublicTrackingPage({ data, loading }) {
             remettra à l'agence — avec l'équivalent dans la devise de l'expéditeur et/ou du
             destinataire quand elle diffère du GNF. Page publique : on annonce ce qui reste à
             régler, jamais l'historique des versements ni le détail des prix.
+
+            Rien de tout cela sur un colis partenaire : l'entreprise n'encaisse rien auprès de son
+            client final, et son prix est à zéro. Le bloc affichait donc « Non payé » à quelqu'un
+            qui avait peut-être déjà réglé son partenaire — sur la page même que le partenaire lui
+            envoie. C'est le dernier endroit où la mention subsistait.
           */}
+          {!estColisPartenaire(colis) && (
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap",
                         background: colis.reste <= 0.005 ? "var(--ok-bg)" : colis.paye > 0 ? "var(--warn-bg)" : "var(--danger-bg)",
                         border: "1px solid " + (colis.reste <= 0.005 ? "var(--ok-border)" : colis.paye > 0 ? "var(--warn-border)" : "var(--danger-border)"),
@@ -2779,6 +2820,7 @@ function PublicTrackingPage({ data, loading }) {
               </span>
             )}
           </div>
+          )}
 
           <div style={{ borderTop: "1px solid var(--border)", paddingTop: 14 }}>
             <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8 }}>{T("HISTORIQUE")}</div>
@@ -2793,7 +2835,11 @@ function PublicTrackingPage({ data, loading }) {
         </div>
       )}
 
-      <div style={{ fontSize: 11, color: "rgba(255,255,255,0.65)", marginTop: 32 }}>{T("Ba-Diaby Express — Transport de colis Conakry - Monde")}</div>
+      <div style={{ fontSize: 11, color: "rgba(255,255,255,0.65)", marginTop: 32, textAlign: "center" }}>
+        {marqueColis
+          ? [marqueColis.telephone, marqueColis.siteWeb].filter(Boolean).join(" · ") || marqueColis.nomCommercial
+          : T("Ba-Diaby Express — Transport de colis Conakry - Monde")}
+      </div>
     </div>
   );
 }
@@ -4878,6 +4924,8 @@ function PartnerDashboard({ data, session, persist, notify }) {
         </button>
       </div>
 
+      {!estEmploye && <PromesseConfidentialite />}
+
       {/*
         Trois chiffres, pas six.
         
@@ -4946,9 +4994,9 @@ function PartnerDashboard({ data, session, persist, notify }) {
       <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", marginBottom: 20 }}>
         <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", minWidth: 760, borderCollapse: "collapse" }}>
-          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Expéditeur", "Destinataire", "Poids", ...(montantsVisibles ? ["Coût"] : []), "Vérification", "Acheminement", "Réglé par votre client"].map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
+          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Expéditeur", "Destinataire", "Poids", ...(montantsVisibles ? ["Coût"] : []), "Vérification", "Acheminement", "Réglé par votre client", "Suivi"].map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
           <tbody>
-            {colisPartenaire.length === 0 && <tr><td colSpan={montantsVisibles ? 8 : 7} style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucun colis enregistré pour l’instant — utilisez « Enregistrer un colis ».</td></tr>}
+            {colisPartenaire.length === 0 && <tr><td colSpan={montantsVisibles ? 9 : 8} style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucun colis enregistré pour l’instant — utilisez « Enregistrer un colis ».</td></tr>}
             {colisPartenaire.map((c) => {
               const st = STATUS_STYLE[c.status];
               const valide = statutValidationPartenaire(c) === "Validé";
@@ -4983,6 +5031,20 @@ function PartnerDashboard({ data, session, persist, notify }) {
                     ) : (
                       <span style={{ fontSize: 11.5, color: "var(--muted)" }}>—</span>
                     )}
+                  </td>
+                  {/*
+                    Le partenaire envoie le suivi à son client sans quitter l'application et sans
+                    rien retaper : le numéro du destinataire est déjà là, le message aussi. C'est
+                    ce geste qui fait revenir un partenaire dans son espace — il n'y vient plus
+                    pour consulter, il y vient pour travailler devant son client.
+                  */}
+                  <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}>
+                    <a href={waLink(c.telephone, messageSuiviPartenaire(c, reglages.nomCommercial))}
+                      target="_blank" rel="noreferrer"
+                      title={c.telephone ? `Envoyer le suivi à ${c.destinataire}` : "Choisir le contact dans WhatsApp"}
+                      style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "#3ECB84", color: "#fff", borderRadius: 8, padding: "6px 11px", fontSize: 11.5, fontWeight: 700, textDecoration: "none" }}>
+                      <MessageCircle size={13} /> Envoyer
+                    </a>
                   </td>
                 </tr>
               );
@@ -5541,6 +5603,69 @@ function AccesEmployes({ employes, onCreer, onSupprimer, onBasculerMontants, onR
           onConfirmer={() => { const u = aSupprimer; setASupprimer(null); onSupprimer(u); }}
           onAnnuler={() => setASupprimer(null)}
         />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Ce que l'entreprise voit du partenaire, et ce qu'elle n'en voit pas.
+ *
+ * Un partenaire confie son activité à un outil qui appartient à son transporteur : c'est une
+ * réticence légitime, et lui répondre en petits caractères sous la grille tarifaire ne suffit
+ * pas. La promesse est donc dite en clair, à l'endroit où il travaille.
+ *
+ * Elle n'a de valeur que si elle est exacte. Le marquage « réglé par votre client » enregistre
+ * bien quelque chose — le fait qu'un colis a été payé, jamais le montant. C'est écrit tel quel :
+ * une promesse arrangeante qu'un partenaire prendrait en défaut une seule fois vaut moins que
+ * pas de promesse du tout.
+ */
+function PromesseConfidentialite() {
+  const [deplie, setDeplie] = useState(false);
+  const puce = (texte) => (
+    <li style={{ marginBottom: 5, lineHeight: 1.5 }}>{texte}</li>
+  );
+
+  return (
+    <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 16px", marginBottom: 18 }}>
+      <button onClick={() => setDeplie((v) => !v)}
+        style={{ display: "flex", alignItems: "center", gap: 9, background: "none", border: "none", padding: 0, cursor: "pointer", width: "100%", textAlign: "start" }}>
+        <Lock size={15} color="var(--info-fg)" style={{ flexShrink: 0 }} />
+        <span style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600, flex: 1, lineHeight: 1.45 }}>
+          Les prix que vous demandez à vos clients ne sont pas enregistrés ici.
+        </span>
+        <span style={{ fontSize: 11.5, color: "var(--info-fg)", fontWeight: 700, whiteSpace: "nowrap" }}>
+          {deplie ? "Masquer" : "En détail"}
+        </span>
+      </button>
+
+      {deplie && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))", gap: 18, marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--info-border)" }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", marginBottom: 7, letterSpacing: 0.3 }}>CE QUE NOUS VOYONS</div>
+            <ul style={{ margin: 0, paddingInlineStart: 18, fontSize: 12.5, color: "var(--text)" }}>
+              {puce("Les colis que vous déposez : numéro de suivi, destinataire, poids, contenu déclaré.")}
+              {puce("Ce que nous vous facturons, au tarif de votre contrat.")}
+              {puce("Les versements que vous nous faites sur vos factures.")}
+              {puce("Qu’un colis a été réglé par votre client, si vous le marquez vous-même — le fait, jamais le montant.")}
+            </ul>
+          </div>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", marginBottom: 7, letterSpacing: 0.3 }}>CE QUE NOUS NE VOYONS PAS</div>
+            <ul style={{ margin: 0, paddingInlineStart: 18, fontSize: 12.5, color: "var(--text)" }}>
+              {puce("Le prix que vous demandez à vos clients.")}
+              {puce("Votre marge — nous connaissons notre tarif, pas le vôtre.")}
+              {puce("Le montant que vos clients vous versent.")}
+              {puce("Vos échanges avec eux, et votre carnet d’adresses hors de cet espace.")}
+            </ul>
+          </div>
+          <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "var(--muted)", lineHeight: 1.55 }}>
+            Aucun écran ne vous demande vos prix de vente, et aucun champ ne les attend. Vos colis
+            voyagent sous votre nom commercial, et le lien de suivi que vous envoyez à vos clients
+            porte votre marque, pas la nôtre. Les accès que vous ouvrez à vos employés sont muets
+            sur nos montants tant que vous ne l’autorisez pas.
+          </div>
+        </div>
       )}
     </div>
   );

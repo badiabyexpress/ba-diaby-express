@@ -682,8 +682,79 @@ function reglagesPartenaire(user) {
     // Devise unique pour tout le partenaire : une facture regroupe plusieurs destinations, elle ne
     // peut pas mélanger des euros et des francs guinéens sur un même total.
     tarif: { parKg: Number(t.parKg) || 0, parUnite: Number(t.parUnite) || 0, devise: t.devise || "EUR" },
+    /*
+     * Sous combien de jours une facture doit être réglée. C'est un terme du contrat, négocié
+     * partenaire par partenaire : celui qui dépose tous les jours ne règle pas au même rythme que
+     * celui qui vient une fois par mois. Quinze jours par défaut, faute de mieux — et zéro
+     * signifie « pas de délai convenu », auquel cas rien n'est jamais compté en retard.
+     */
+    delaiReglementJours: p.delaiReglementJours == null ? 15 : Math.max(0, Number(p.delaiReglementJours) || 0),
     destinations: (Array.isArray(p.destinations) ? p.destinations : []).map(normaliserDestinationPartenaire),
   };
+}
+
+/*
+ * Une facture en retard, et de combien.
+ *
+ * Le retard se compte depuis l'émission, pas depuis le dernier versement : un partenaire qui
+ * verse dix euros par semaine sur une facture de mille repousserait indéfiniment l'échéance.
+ * Une facture soldée n'est jamais en retard, quel que soit le temps qu'elle a mis.
+ */
+function joursDepuis(dateIso) {
+  if (!dateIso) return 0;
+  return Math.floor((Date.now() - new Date(dateIso).getTime()) / 86400000);
+}
+function retardFacture(facture, delaiJours) {
+  if (!delaiJours || resteDuFacture(facture) <= 0.005) return 0;
+  return Math.max(0, joursDepuis(facture?.creeeLe) - delaiJours);
+}
+/*
+ * Le message de relance envoyé au partenaire.
+ *
+ * Celui-là porte notre nom, à l'inverse du suivi que le partenaire envoie à ses clients : c'est
+ * notre facture, c'est nous qui réclamons. Il donne les trois choses qu'on cherche quand on reçoit
+ * une relance — de quelle facture il s'agit, combien reste dû, depuis quand — et rien d'autre. Un
+ * partenaire qui a déjà versé un acompte lit le reste dû, pas le total : lui réclamer une somme
+ * qu'il a en partie réglée est le meilleur moyen de faire durer la discussion.
+ */
+function messageRelanceFacture(facture, partenaire, retardJours) {
+  const r = reglagesPartenaire(partenaire);
+  const nom = r.nomCommercial || `${partenaire?.prenom || ""} ${partenaire?.nom || ""}`.trim();
+  const salutation = nom ? `Bonjour ${nom},` : "Bonjour,";
+  const emise = facture?.creeeLe ? new Date(facture.creeeLe).toLocaleDateString("fr-FR") : "";
+  const reste = resteDuFacture(facture);
+  const regle = totalRegleFacture(facture);
+  const detail = regle > 0.005
+    ? `Sur un total de ${fmt(Number(facture.total) || 0, facture.devise)}, nous avons bien reçu ${fmt(regle, facture.devise)}. Il reste ${fmt(reste, facture.devise)}.`
+    : `Elle s'élève à ${fmt(reste, facture.devise)}.`;
+  return `${salutation}\n\nVotre facture ${facture?.numero || ""} du ${emise} n'est pas encore soldée — son échéance est dépassée de ${retardJours} jour${retardJours > 1 ? "s" : ""}.\n\n${detail}\n\nMerci de nous dire quand vous pourrez la régler.\n\nBa-Diaby Express`;
+}
+
+/*
+ * Les factures en retard, tous partenaires confondus.
+ *
+ * Chaque partenaire a son propre délai : on ne peut pas compter les retards sans repasser par son
+ * contrat. C'est aussi pourquoi ce décompte ne s'additionne pas en argent — les devises diffèrent
+ * d'un partenaire à l'autre.
+ */
+function toutesFacturesEnRetard(data) {
+  const users = data?.users || [];
+  return (data?.facturesPartenaire || []).filter((f) => {
+    const p = users.find((u) => u.id === f.partenaireId);
+    return p ? retardFacture(f, reglagesPartenaire(p).delaiReglementJours) > 0 : false;
+  });
+}
+
+/** Les factures d'un partenaire dont l'échéance est dépassée, les plus anciennes d'abord. */
+function facturesEnRetard(factures, delaiJours) {
+  return (factures || [])
+    .filter((f) => retardFacture(f, delaiJours) > 0)
+    .sort((a, b) => new Date(a.creeeLe) - new Date(b.creeeLe));
+}
+/** Date à laquelle une relance a été envoyée pour la dernière fois, s'il y en a eu une. */
+function derniereRelance(facture) {
+  const relances = Array.isArray(facture?.relances) ? facture.relances : [];
+  return relances.length ? relances[relances.length - 1] : null;
 }
 
 /*
@@ -6188,9 +6259,10 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
            * additionner ne voudrait rien dire.
            */
           const impayees = (data.facturesPartenaire || []).filter((f) => statutFacturePartenaire(f) !== "Réglée").length;
+          const retards = toutesFacturesEnRetard(data).length;
           const signaux = [
             aVerifier > 0 ? `${aVerifier} colis à vérifier` : "",
-            impayees > 0 ? `${impayees} facture${impayees > 1 ? "s" : ""} à encaisser` : "",
+            impayees > 0 ? `${impayees} facture${impayees > 1 ? "s" : ""} à encaisser${retards > 0 ? `, dont ${retards} en retard` : ""}` : "",
           ].filter(Boolean).join(" · ");
           return <Card icon={Truck} tint="#0EA5E9" title="Partenaires"
             desc={`Tarif de chaque partenaire, identité de ses étiquettes, vérification de ses colis et facturation.${signaux ? ` — ${signaux}` : ""}`}
@@ -18136,6 +18208,131 @@ async function construireFacturePartenaireDoc(facture, partenaire, colisFactures
 }
 
 /**
+ * Relevé mensuel d'un partenaire.
+ *
+ * La facture répond à « combien pour ces colis-là ». Le relevé répond à une autre question, que
+ * personne ne pouvait poser jusqu'ici : « qu'est-ce qui s'est passé entre nous ce mois-ci ». Il
+ * réunit ce qui a été facturé, ce qui a été reçu, et ce qui reste dû à la fin — le document qu'un
+ * partenaire donne à son comptable, et celui qu'on ressort quand un solde est contesté.
+ *
+ * Il porte notre identité : c'est l'entreprise qui rend ses comptes au partenaire.
+ */
+async function construireRelevePartenaireDoc(partenaire, mois, factures, colis) {
+  const jspdf = await loadJsPDF();
+  const doc = preparerDocPdf(new jspdf.jsPDF());
+  const W = 210, M = 16;
+  const NAVY = [10, 38, 71], RED = [214, 39, 63], INK = [17, 20, 26], MUTED = [122, 130, 142], LINE = [225, 228, 234];
+  const r = reglagesPartenaire(partenaire);
+  const devise = r.tarif.devise;
+  const debut = new Date(mois.annee, mois.mois, 1);
+  const fin = new Date(mois.annee, mois.mois + 1, 0, 23, 59, 59);
+  const dansLeMois = (d) => { const x = new Date(d); return x >= debut && x <= fin; };
+  const libelleMois = debut.toLocaleDateString("fr-FR", { month: "long", year: "numeric" });
+
+  doc.addImage(DEFAULT_LOGO, "PNG", M, 14, 18, 18);
+  doc.setFont(undefined, "bold"); doc.setFontSize(15); doc.setTextColor(...NAVY);
+  doc.text("BA-DIABY", M + 22, 22);
+  doc.setTextColor(...RED); doc.text("EXPRESS", M + 22, 29);
+  doc.setFont(undefined, "bold"); doc.setFontSize(19); doc.setTextColor(...INK);
+  doc.text("RELEVÉ DE COMPTE", W - M, 22, { align: "right" });
+  doc.setFont(undefined, "normal"); doc.setFontSize(10); doc.setTextColor(...MUTED);
+  doc.text(libelleMois, W - M, 29, { align: "right" });
+  doc.setDrawColor(...LINE); doc.setLineWidth(0.4); doc.line(M, 38, W - M, 38);
+
+  doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...MUTED);
+  doc.text("COMPTE DE", M, 47);
+  doc.setFont(undefined, "bold"); doc.setFontSize(12); doc.setTextColor(...INK);
+  doc.text(r.nomCommercial || `${partenaire?.prenom || ""} ${partenaire?.nom || ""}`.trim() || "Partenaire", M, 54);
+  doc.setFont(undefined, "normal"); doc.setFontSize(9.5); doc.setTextColor(...MUTED);
+  let y = 60;
+  [r.adresse, r.telephone, r.email].filter(Boolean).forEach((ligne) => { doc.text(String(ligne), M, y); y += 5; });
+
+  /*
+   * L'activité du mois se compte sur les colis déposés dans le mois, pas sur ceux facturés :
+   * un colis déposé le 30 et facturé le 2 du mois suivant appartient au mois où il a été remis,
+   * c'est ainsi que le partenaire s'en souvient.
+   */
+  const colisDuMois = (colis || []).filter((c) => dansLeMois(c.createdAt) && c.status !== "Annulé");
+  const poids = colisDuMois.reduce((s, c) => s + (Number(c.poids) || 0), 0);
+  const facturesDuMois = (factures || []).filter((f) => dansLeMois(f.creeeLe));
+  const versementsDuMois = (factures || []).flatMap((f) => reglementsFacture(f)
+    .filter((v) => dansLeMois(v.date))
+    .map((v) => ({ ...v, facture: f.numero })));
+  const totalFacture = facturesDuMois.reduce((s, f) => s + (Number(f.total) || 0), 0);
+  const totalRecu = versementsDuMois.reduce((s, v) => s + (Number(v.montant) || 0), 0);
+
+  y = Math.max(y + 6, 74);
+  const ligneChiffre = (libelle, valeur, gras) => {
+    if (y > 264) { doc.addPage(); y = 24; }
+    doc.setFont(undefined, gras ? "bold" : "normal"); doc.setFontSize(gras ? 11 : 10);
+    doc.setTextColor(...(gras ? INK : MUTED));
+    doc.text(libelle, M, y);
+    doc.setTextColor(...INK);
+    doc.text(valeur, W - M, y, { align: "right" });
+    y += gras ? 8 : 6.5;
+  };
+  const titre = (texte) => {
+    if (y > 258) { doc.addPage(); y = 24; }
+    y += 4;
+    doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...MUTED);
+    doc.text(texte, M, y);
+    y += 3;
+    doc.setDrawColor(...LINE); doc.line(M, y, W - M, y);
+    y += 7;
+  };
+
+  titre("ACTIVITÉ DU MOIS");
+  ligneChiffre("Colis déposés", String(colisDuMois.length));
+  ligneChiffre("Poids total", `${poids.toFixed(1)} kg`);
+
+  titre("FACTURES ÉMISES DANS LE MOIS");
+  if (facturesDuMois.length === 0) {
+    ligneChiffre("Aucune facture émise sur la période", "—");
+  } else {
+    facturesDuMois.forEach((f) => ligneChiffre(
+      `${f.numero} — ${new Date(f.creeeLe).toLocaleDateString("fr-FR")} · ${(f.trackings || []).length} colis`,
+      fmt(Number(f.total) || 0, f.devise || devise)));
+    ligneChiffre("Total facturé", fmt(totalFacture, devise), true);
+  }
+
+  titre("VERSEMENTS REÇUS DANS LE MOIS");
+  if (versementsDuMois.length === 0) {
+    ligneChiffre("Aucun versement reçu sur la période", "—");
+  } else {
+    versementsDuMois.forEach((v) => ligneChiffre(
+      `${new Date(v.date).toLocaleDateString("fr-FR")} — ${v.mode || MODE_ESPECES}${v.reference ? ` (réf. ${v.reference})` : ""} · ${v.facture}`,
+      fmt(Number(v.montant) || 0, devise)));
+    ligneChiffre("Total reçu", fmt(totalRecu, devise), true);
+  }
+
+  /*
+   * Le solde est celui du jour de l'édition, toutes factures confondues — y compris celles des
+   * mois précédents. Un solde limité au mois écoulé donnerait à un partenaire en retard depuis
+   * trois mois un relevé rassurant, ce qui est exactement l'inverse de ce qu'un relevé sert à
+   * faire. La date d'édition est donc imprimée juste à côté.
+   */
+  const soldeGlobal = (factures || []).reduce((s, f) => s + resteDuFacture(f), 0);
+  titre("SOLDE");
+  if (y > 258) { doc.addPage(); y = 24; }
+  doc.setFont(undefined, "bold"); doc.setFontSize(12); doc.setTextColor(...INK);
+  doc.text("RESTE DÛ À CE JOUR", M, y);
+  doc.setFontSize(15); doc.setTextColor(...(soldeGlobal > 0.005 ? RED : [22, 161, 99]));
+  doc.text(fmt(soldeGlobal, devise), W - M, y, { align: "right" });
+  y += 7;
+  doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
+  doc.text(`Toutes factures confondues, arrêté au ${new Date().toLocaleDateString("fr-FR")}.`, M, y);
+
+  y += 12;
+  if (y > 268) { doc.addPage(); y = 24; }
+  doc.setFontSize(8.5); doc.setTextColor(...MUTED);
+  doc.text(doc.splitTextToSize(
+    "Relevé établi au tarif convenu avec le partenaire, sur des colis vérifiés et pesés par nos agents. "
+    + "Les prix que le partenaire applique à ses propres clients n'y figurent pas.", W - 2 * M), M, y);
+
+  return doc;
+}
+
+/**
  * Portail partenaires de l'administrateur.
  *
  * Tout ce qui concerne un partenaire est décidé ici, et nulle part ailleurs : le tarif qu'il paie,
@@ -18320,6 +18517,44 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
     notify?.(`Versement de ${fmt(Number(r.montant) || 0, facture.devise)} annulé sur ${facture.numero}`);
   }
 
+  /*
+   * Relance d'une facture en retard.
+   *
+   * L'envoi n'est pas automatique, et ce n'est pas une facilité : l'application tourne dans le
+   * navigateur de l'agent, il n'y a personne pour envoyer un message la nuit. Ce qu'elle fait, et
+   * qui manquait, c'est repérer ce qui traîne et préparer le message — l'agent n'a plus qu'à
+   * l'envoyer. Une relance de plus par mois vaut mieux qu'un automatisme qu'on n'a pas.
+   *
+   * La date est conservée sur la facture. Sans elle, on relance deux fois le même jour un
+   * partenaire qui a déjà répondu, ou on ne relance pas du tout de peur d'insister.
+   */
+  function marquerRelance(factureId) {
+    const facture = facturesPartenaire.find((f) => f.id === factureId);
+    if (!facture) return;
+    const relance = { le: new Date().toISOString(), par: monNom };
+    persist({
+      ...data,
+      facturesPartenaire: facturesPartenaire.map((f) => (f.id === factureId
+        ? { ...f, relances: [...(Array.isArray(f.relances) ? f.relances : []), relance] }
+        : f)),
+      activityLog: pushActivity(data, session, "Facture partenaire relancée",
+        `${facture.numero} — ${fmt(resteDuFacture(facture), facture.devise)} dus par ${partenaire?.prenom} ${partenaire?.nom}`),
+    });
+    notify?.(`Relance de ${facture.numero} notée`);
+  }
+
+  async function imprimerReleve(mois) {
+    const sesColis = (data.colis || []).filter((c) => c.partenaireId === partenaire.id);
+    try {
+      const doc = await construireRelevePartenaireDoc(partenaire, mois, sesFactures, sesColis);
+      const etiquette = `${String(mois.mois + 1).padStart(2, "0")}-${mois.annee}`;
+      openPdf(doc, `releve-${(reglagesPartenaire(partenaire).nomCommercial || partenaire.nom || "partenaire").replace(/\s+/g, "-").toLowerCase()}-${etiquette}.pdf`);
+    } catch (e) {
+      console.error(e);
+      notify?.("Impossible de générer le relevé — vérifiez votre connexion.");
+    }
+  }
+
   async function imprimerFacture(facture) {
     const inclus = (data.colis || []).filter((c) => (facture.trackings || []).includes(c.tracking));
     try {
@@ -18401,6 +18636,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
           colis={data.colis || []} onCreerFacture={creerFacture} onImprimer={imprimerFacture}
           onCorriger={corrigerMontant} onRouvrir={rouvrirFacture}
           onEncaisser={encaisserFacture} onAnnulerReglement={annulerReglement}
+          onRelancer={marquerRelance} onReleve={imprimerReleve}
         />
       )}
     </div>
@@ -18418,6 +18654,7 @@ function ContratPartenaire({ partenaire, autres, onSave }) {
   const [siteWeb, setSiteWeb] = useState(r.siteWeb);
   const [prefixe, setPrefixe] = useState(r.prefixeTracking);
   const [devise, setDevise] = useState(r.tarif.devise);
+  const [delaiReglement, setDelaiReglement] = useState(String(r.delaiReglementJours));
   /*
    * Destinations ouvertes à ce partenaire. Un partenaire peut n'être autorisé que pour la France ;
    * l'administrateur lui ouvre d'autres pays au fur et à mesure, chacun à son propre tarif.
@@ -18510,6 +18747,7 @@ function ContratPartenaire({ partenaire, autres, onSave }) {
       // Le tarif global reste écrit : il sert de repli pour un colis déjà enregistré vers une
       // destination qu'on refermerait plus tard, et porte la devise commune du partenaire.
       tarif: { parKg: propres[0]?.parKg || 0, parUnite: propres[0]?.parUnite || 0, devise },
+      delaiReglementJours: Math.max(0, nombre(delaiReglement) || 0),
       destinations: propres,
     });
   }
@@ -18523,6 +18761,15 @@ function ContratPartenaire({ partenaire, autres, onSave }) {
           un colis pour Bruxelles ne coûte pas la même chose qu’un colis pour Paris. Sans rapport
           avec les prix qu’il applique, lui, à ses propres clients.
         </div>
+        <Field label="Délai de règlement (jours)">
+          <input value={delaiReglement} onChange={(e) => setDelaiReglement(e.target.value)} inputMode="numeric"
+            style={{ ...inputStyle, maxWidth: 160 }} placeholder="15" />
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 5, lineHeight: 1.5 }}>
+            Sous combien de jours ses factures doivent être réglées. Passé ce délai, elles
+            apparaissent en retard et peuvent être relancées d’un geste. <strong>0</strong> = aucun
+            délai convenu, rien n’est jamais compté en retard.
+          </div>
+        </Field>
         <Field label="Devise du contrat">
           <select value={devise} onChange={(e) => setDevise(e.target.value)} style={{ ...inputStyle, maxWidth: 160 }}>
             {["EUR", "GNF", "USD", "XOF", "MAD", "CAD"].map((d) => <option key={d} value={d}>{d}</option>)}
@@ -18768,8 +19015,11 @@ function VerificationColisPartenaire({ partenaire, colis, onValider }) {
 }
 
 /** Regroupement des colis vérifiés en une facture unique, et historique des factures émises. */
-function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreerFacture, onImprimer, onCorriger, onRouvrir, onEncaisser, onAnnulerReglement }) {
-  const devise = reglagesPartenaire(partenaire).tarif.devise;
+function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreerFacture, onImprimer, onCorriger, onRouvrir, onEncaisser, onAnnulerReglement, onRelancer, onReleve }) {
+  const reglagesDuPartenaire = reglagesPartenaire(partenaire);
+  const devise = reglagesDuPartenaire.tarif.devise;
+  const delaiReglement = reglagesDuPartenaire.delaiReglementJours;
+  const enRetard = facturesEnRetard(factures, delaiReglement);
   const total = aFacturer.reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0);
   const [confirmation, setConfirmation] = useState(false);
   const [aRouvrir, setARouvrir] = useState(null);
@@ -18777,6 +19027,22 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
   const [montant, setMontant] = useState("");
   const [aEncaisser, setAEncaisser] = useState(null);
   const [reglementAAnnuler, setReglementAAnnuler] = useState(null);
+  /*
+   * Le mois du relevé. Le mois écoulé par défaut, et non le mois courant : un relevé s'édite en
+   * début de mois pour le mois qui vient de se terminer, jamais pour celui qu'on est en train de
+   * vivre. Douze mois en arrière suffisent — au-delà, la question ne se pose plus.
+   */
+  const [moisReleve, setMoisReleve] = useState(() => {
+    const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() - 1);
+    return `${d.getFullYear()}-${d.getMonth()}`;
+  });
+  const moisDisponibles = useMemo(() => {
+    const d = new Date(); d.setDate(1);
+    return Array.from({ length: 12 }, (_, i) => {
+      const m = new Date(d.getFullYear(), d.getMonth() - i, 1);
+      return { cle: `${m.getFullYear()}-${m.getMonth()}`, libelle: m.toLocaleDateString("fr-FR", { month: "long", year: "numeric" }) };
+    });
+  }, []);
   // Ce que le partenaire doit encore, toutes factures confondues : le chiffre qu'on vient chercher.
   const soldeDu = factures.reduce((s, f) => s + resteDuFacture(f), 0);
   const impayees = factures.filter((f) => statutFacturePartenaire(f) !== "Réglée").length;
@@ -18854,7 +19120,9 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
         {factures.length > 0 && (
           <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
             {soldeDu > 0.005 ? (
-              <>Reste dû : <strong style={{ color: "var(--danger-fg)", fontSize: 15 }}>{fmt(soldeDu, devise)}</strong> sur {impayees} facture{impayees > 1 ? "s" : ""}</>
+              <>Reste dû : <strong style={{ color: "var(--danger-fg)", fontSize: 15 }}>{fmt(soldeDu, devise)}</strong> sur {impayees} facture{impayees > 1 ? "s" : ""}
+                {enRetard.length > 0 && <>, dont <strong style={{ color: "var(--danger-fg)" }}>{enRetard.length} en retard</strong></>}
+              </>
             ) : (
               <span style={{ color: "var(--ok-fg)", fontWeight: 700 }}>Toutes les factures sont réglées</span>
             )}
@@ -18873,6 +19141,8 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
             const regle = totalRegleFacture(f);
             const reste = resteDuFacture(f);
             const versements = reglementsFacture(f);
+            const retard = retardFacture(f, delaiReglement);
+            const relance = derniereRelance(f);
             return (
             <div key={f.id} style={{ background: "var(--surface)", borderRadius: 12, border: "1px solid var(--border)", padding: "14px 16px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
@@ -18880,9 +19150,15 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
                   <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                     <span style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{f.numero}</span>
                     <span style={{ background: st.bg, color: st.fg, padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>{statut}</span>
+                    {retard > 0 && (
+                      <span style={{ background: "var(--danger-bg)", color: "var(--danger-fg)", padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>
+                        En retard de {retard} jour{retard > 1 ? "s" : ""}
+                      </span>
+                    )}
                   </div>
                   <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
                     {new Date(f.creeeLe).toLocaleDateString("fr-FR")} · {(f.trackings || []).length} colis{f.creePar ? ` · par ${f.creePar}` : ""}
+                    {relance && ` · relancé le ${new Date(relance.le).toLocaleDateString("fr-FR")}${relance.par ? ` par ${relance.par}` : ""}`}
                   </div>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
@@ -18898,6 +19174,19 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
                     <button onClick={() => setAEncaisser(f)} style={{ display: "flex", alignItems: "center", gap: 6, background: "#16A163", border: "none", color: "#fff", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
                       <DollarSign size={14} /> Encaisser
                     </button>
+                  )}
+                  {/*
+                    Le message part sur le WhatsApp du partenaire, prêt à envoyer. C'est notre
+                    facture à nous : elle porte donc notre nom, contrairement au suivi que le
+                    partenaire envoie à ses propres clients.
+                  */}
+                  {retard > 0 && (
+                    <a href={waLink(reglagesDuPartenaire.telephone, messageRelanceFacture(f, partenaire, retard))}
+                      target="_blank" rel="noreferrer"
+                      onClick={() => onRelancer(f.id)}
+                      style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "#3ECB84", color: "#fff", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, textDecoration: "none" }}>
+                      <MessageCircle size={14} /> Relancer
+                    </a>
                   )}
                   <button onClick={() => onImprimer(f)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
                     <Printer size={14} /> PDF
@@ -18929,6 +19218,31 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
           })}
         </div>
       )}
+
+      {/*
+        Le relevé répond à une autre question que la facture : non pas « combien pour ces colis-là »
+        mais « qu'est-ce qui s'est passé entre nous ce mois-ci ». C'est le document qu'un partenaire
+        donne à son comptable, et celui qu'on ressort quand un solde est contesté.
+      */}
+      <div style={{ background: "var(--surface)", borderRadius: 12, border: "1px solid var(--border)", padding: "14px 16px", marginTop: 16, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>Relevé de compte</div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 }}>
+            Colis déposés, factures émises, versements reçus et solde restant — sur un mois.
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <select value={moisReleve} onChange={(e) => setMoisReleve(e.target.value)} style={{ ...inputStyle, marginBottom: 0, width: "auto", minWidth: 160 }}>
+            {moisDisponibles.map((m) => <option key={m.cle} value={m.cle}>{m.libelle}</option>)}
+          </select>
+          <button onClick={() => {
+            const [annee, mois] = moisReleve.split("-").map(Number);
+            onReleve({ annee, mois });
+          }} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "9px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+            <Printer size={14} /> Éditer le relevé
+          </button>
+        </div>
+      </div>
 
       {confirmation && (
         <ConfirmerAction

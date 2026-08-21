@@ -710,7 +710,29 @@ function normaliserDestinationPartenaire(d) {
     acheminement: ACHEMINEMENTS_PARTENAIRE.some((a) => a.cle === d?.acheminement) ? d.acheminement : "direct",
     correspondant: { nom: c.nom || "", telephone: c.telephone || "", adresse: c.adresse || "" },
     fraisPoste: Number(d?.fraisPoste) || 0,
+    /*
+     * Catégories tarifaires propres à ce partenaire, sur cette destination.
+     *
+     * « À l'unité » ne veut pas dire un seul prix : un téléphone, un passeport et un carton
+     * partent tous à l'unité et ne se facturent pas pareil. Chaque catégorie porte donc son
+     * propre montant. Sans catégorie choisie, l'article retombe sur le tarif général du pays.
+     */
+    categories: (Array.isArray(d?.categories) ? d.categories : []).map((cat, i) => ({
+      id: cat?.id || `cp${i}${Math.random().toString(36).slice(2, 6)}`,
+      nom: cat?.nom || "",
+      type: cat?.type === "kg" ? "kg" : "unite",
+      montant: Number(cat?.montant) || 0,
+    })),
   };
+}
+
+/** Prix d'un article : celui de sa catégorie si elle est choisie, sinon le tarif général du pays. */
+function prixArticlePartenaire(article, tarif) {
+  const quantite = Number(article?.quantite) || 1;
+  const poids = Number(article?.poids) || 0;
+  const cat = (tarif?.categories || []).find((c) => c.id === article?.categoriePartenaire);
+  if (cat) return cat.type === "unite" ? cat.montant * quantite : cat.montant * poids;
+  return article?.tarification === "unite" ? (tarif?.parUnite || 0) * quantite : (tarif?.parKg || 0) * poids;
 }
 
 /**
@@ -761,9 +783,7 @@ function detailPrixPartenaire(colis, user) {
   const articles = colis?.produits || [];
   const transport = articles.length === 0
     ? (Number(colis?.poids) || 0) * tarif.parKg
-    : articles.reduce((s, a) => (a.tarification === "unite"
-      ? s + tarif.parUnite * (Number(a.quantite) || 1)
-      : s + tarif.parKg * (Number(a.poids) || 0)), 0);
+    : articles.reduce((s, a) => s + prixArticlePartenaire(a, tarif), 0);
   /*
    * Les frais de poste ne sont pas une marge : c'est un timbre que l'entreprise achète pour le
    * compte du partenaire quand personne ne vient récupérer le colis sur place. Ils sont donc
@@ -4518,7 +4538,7 @@ Dashboard = memo(Dashboard);
 function PartnerDashboard({ data, session, persist, notify }) {
   const [periode, setPeriode] = useState("mois");
   const [showForm, setShowForm] = useState(false);
-  const [onglet, setOnglet] = useState("colis");
+  const [onglet, setOnglet] = useState("accueil");
   const colisPartenaire = data.colis.filter((c) => c.partenaireId === session.id);
   const moi = (data.users || []).find((u) => u.id === session.id) || session;
   const reglages = reglagesPartenaire(moi);
@@ -4568,6 +4588,25 @@ function PartnerDashboard({ data, session, persist, notify }) {
   const prets = colisPartenaire.filter(estColisExpediable);
   const bloques = colisPartenaire.filter((c) => statutValidationPartenaire(c) === "En attente"
     && c.status === "Enregistré");
+
+  /*
+   * Le partenaire tient lui-même ses coordonnées à jour.
+   *
+   * Il ne touche ni aux tarifs, ni aux destinations, ni à son préfixe de suivi : ce sont des
+   * termes du contrat, et le préfixe a déjà été imprimé sur des étiquettes en circulation. Tout
+   * le reste — son nom commercial, son logo, ses coordonnées — lui appartient, et l'obliger à
+   * appeler l'entreprise pour corriger un numéro de téléphone n'aurait aucun sens.
+   */
+  function enregistrerIdentite(patch) {
+    persist({
+      ...data,
+      users: (data.users || []).map((u) => (u.id === session.id
+        ? { ...u, partenaire: { ...(u.partenaire || {}), ...patch } }
+        : u)),
+      activityLog: pushActivity(data, session, "Informations partenaire mises à jour", reglages.nomCommercial || `${session.prenom} ${session.nom}`.trim()),
+    });
+    notify?.("Vos informations ont été enregistrées");
+  }
 
   async function enregistrerColis(colis) {
     const resultat = await persist({
@@ -4620,8 +4659,13 @@ function PartnerDashboard({ data, session, persist, notify }) {
         <StatCard label="Vérifié, à facturer" value={fmt(enAttenteDeFacture, devise)} icon={Clock} tint="#D6A22E" />
       </div>
 
+      {/*
+        Quatre onglets seulement. « Accueil » réunit ce qu'on consulte sans agir — les
+        informations du partenaire et ses factures — et laisse aux trois autres ce sur quoi il
+        travaille. À cinq onglets, la barre se repliait sur deux lignes sur un téléphone.
+      */}
       <div style={{ display: "flex", gap: 22, borderBottom: "1px solid var(--border)", marginBottom: 18, flexWrap: "wrap" }}>
-        {[["colis", "Mes colis", colisPartenaire.length], ["expedier", "À expédier", prets.length], ["clients", "Mes clients", mesClients.length], ["factures", "Mes factures", mesFactures.length], ["infos", "Mes informations", 0]].map(([cle, libelle, compte]) => (
+        {[["accueil", "Accueil", 0], ["colis", "Mes colis", colisPartenaire.length], ["expedier", "À expédier", prets.length], ["clients", "Mes clients", mesClients.length]].map(([cle, libelle, compte]) => (
           <button key={cle} onClick={() => setOnglet(cle)} style={{
             background: "none", border: "none", padding: "0 0 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 7,
             color: onglet === cle ? "var(--info-fg)" : "var(--muted)",
@@ -4807,7 +4851,10 @@ function PartnerDashboard({ data, session, persist, notify }) {
         </div>
       )}
 
-      {onglet === "factures" && (mesFactures.length === 0 ? (
+      {onglet === "accueil" && (
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 10 }}>Vos factures</div>
+      )}
+      {onglet === "accueil" && (mesFactures.length === 0 ? (
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 13, marginBottom: 20 }}>
           Aucune facture pour l’instant. Vos colis vérifiés y seront regroupés.
         </div>
@@ -4844,27 +4891,9 @@ function PartnerDashboard({ data, session, persist, notify }) {
         </div>
       ))}
 
-      {onglet === "infos" && (
+      {onglet === "accueil" && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(300px,1fr))", gap: 16, marginBottom: 20, alignItems: "start" }}>
-          <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, border: "1px solid var(--border)" }}>
-            <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 14 }}>Votre identité</div>
-            <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 16 }}>
-              {reglages.logo
-                ? <img src={reglages.logo} alt="" style={{ width: 56, height: 56, borderRadius: 10, objectFit: "cover", background: "#fff" }} />
-                : <div style={{ width: 56, height: 56, borderRadius: 10, background: "var(--brand-solid)", color: "#fff", display: "grid", placeItems: "center", fontSize: 24, fontWeight: 700 }}>{(reglages.nomCommercial || session.prenom || "?").charAt(0).toUpperCase()}</div>}
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{reglages.nomCommercial || `${session.prenom} ${session.nom}`.trim()}</div>
-                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>@{session.identifiant}</div>
-              </div>
-            </div>
-            {[["Adresse", reglages.adresse], ["Téléphone", reglages.telephone], ["E-mail", reglages.email], ["Site web", reglages.siteWeb],
-              ["Préfixe de vos numéros de suivi", reglages.prefixeTracking || "BDE (identité de l’entreprise)"]].map(([libelle, valeur]) => (
-              <div key={libelle} style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "8px 0", borderTop: "1px solid var(--border)", fontSize: 12.5 }}>
-                <span style={{ color: "var(--muted)" }}>{libelle}</span>
-                <span style={{ color: "var(--text)", fontWeight: 600, textAlign: "end", wordBreak: "break-word" }}>{valeur || "—"}</span>
-              </div>
-            ))}
-          </div>
+          <IdentitePartenaire key={moi.id} partenaire={moi} session={session} onSave={enregistrerIdentite} />
           <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, border: "1px solid var(--border)" }}>
             <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Vos destinations et tarifs</div>
             <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>
@@ -4885,6 +4914,13 @@ function PartnerDashboard({ data, session, persist, notify }) {
                   <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
                     {fmt(d.parKg, devise)} / kg · {fmt(d.parUnite, devise)} / unité
                   </div>
+                  {d.categories.length > 0 && (
+                    <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6, lineHeight: 1.6 }}>
+                      {d.categories.map((cat) => (
+                        <div key={cat.id}>{cat.nom} : <strong style={{ color: "var(--text)" }}>{fmt(cat.montant, devise)}</strong> / {cat.type === "unite" ? "unité" : "kg"}</div>
+                      ))}
+                    </div>
+                  )}
                   <div style={{ fontSize: 11.5, marginTop: 6, color: d.acheminement === "poste" ? "var(--warn-fg)" : "var(--muted)", lineHeight: 1.5 }}>
                     {mode?.label || "Livraison par l’entreprise"}
                     {d.acheminement === "correspondant" && (
@@ -4925,6 +4961,118 @@ function nombreArticles(colis) {
 }
 
 /**
+ * Identité du partenaire, modifiable par lui-même.
+ *
+ * Ce qui est à lui, il le corrige seul : son nom commercial, son logo, ses coordonnées. Ce qui
+ * relève du contrat — tarifs, destinations — reste à l'entreprise. Le préfixe de suivi aussi :
+ * il figure déjà sur des étiquettes en circulation, le changer casserait la correspondance entre
+ * un colis et son numéro.
+ */
+function IdentitePartenaire({ partenaire, session, onSave }) {
+  const r = reglagesPartenaire(partenaire);
+  const [edition, setEdition] = useState(false);
+  const [nomCommercial, setNomCommercial] = useState(r.nomCommercial);
+  const [logo, setLogo] = useState(r.logo);
+  const [adresse, setAdresse] = useState(r.adresse);
+  const [telephone, setTelephone] = useState(r.telephone);
+  const [email, setEmail] = useState(r.email);
+  const [siteWeb, setSiteWeb] = useState(r.siteWeb);
+  const [err, setErr] = useState("");
+
+  function annuler() {
+    setNomCommercial(r.nomCommercial); setLogo(r.logo); setAdresse(r.adresse);
+    setTelephone(r.telephone); setEmail(r.email); setSiteWeb(r.siteWeb);
+    setErr(""); setEdition(false);
+  }
+  async function choisirLogo(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try { setLogo(await redimensionnerLogo(file)); setErr(""); }
+    catch (ex) { setErr("Ce fichier n’a pas pu être lu comme une image."); }
+  }
+  function enregistrer() {
+    if (email.trim() && !/^\S+@\S+\.\S+$/.test(email.trim())) { setErr("Adresse e-mail invalide."); return; }
+    setErr("");
+    onSave({
+      nomCommercial: nomCommercial.trim(), logo, adresse: adresse.trim(),
+      telephone: telephone.trim(), email: email.trim(), siteWeb: siteWeb.trim(),
+    });
+    setEdition(false);
+  }
+
+  return (
+    <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, border: "1px solid var(--border)" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14 }}>Votre identité</div>
+        {!edition && (
+          <button onClick={() => setEdition(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "7px 13px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+            <PenTool size={13} /> Modifier
+          </button>
+        )}
+      </div>
+
+      {edition ? (
+        <>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.55 }}>
+            Ce sont vos informations : elles s’affichent sur vos étiquettes et sur vos documents.
+            Vos tarifs et vos destinations relèvent du contrat et restent à l’entreprise.
+          </div>
+          <Field label="Logo">
+            <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+              <div style={{ width: 56, height: 56, borderRadius: 10, background: "#fff", border: "1px solid var(--border)", display: "grid", placeItems: "center", overflow: "hidden", flexShrink: 0 }}>
+                {logo ? <img src={logo} alt="" style={{ maxWidth: "100%", maxHeight: "100%" }} /> : <span style={{ fontSize: 10, color: "#999" }}>aucun</span>}
+              </div>
+              <label style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                <Upload size={14} /> Choisir une image
+                <input type="file" accept="image/*" onChange={choisirLogo} style={{ display: "none" }} />
+              </label>
+              {logo && <button type="button" onClick={() => setLogo(null)} style={{ background: "none", border: "none", color: "var(--danger-fg)", fontSize: 12.5, cursor: "pointer" }}>Retirer</button>}
+            </div>
+          </Field>
+          <Field label="Nom commercial"><input value={nomCommercial} onChange={(e) => setNomCommercial(e.target.value)} style={inputStyle} placeholder="ex : Tombolia Cargo" /></Field>
+          <Field label="Adresse"><input value={adresse} onChange={(e) => setAdresse(e.target.value)} style={inputStyle} /></Field>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 12 }}>
+            <Field label="Téléphone"><input value={telephone} onChange={(e) => setTelephone(e.target.value)} style={inputStyle} /></Field>
+            <Field label="E-mail"><input value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} /></Field>
+          </div>
+          <Field label="Site web"><input value={siteWeb} onChange={(e) => setSiteWeb(e.target.value)} style={inputStyle} placeholder="www.exemple.com" /></Field>
+          {err && (
+            <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, color: "var(--danger-fg)", marginBottom: 12 }}>{err}</div>
+          )}
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <button onClick={enregistrer} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
+            <button onClick={annuler} style={{ background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "10px 18px", fontSize: 13, cursor: "pointer" }}>Annuler</button>
+          </div>
+        </>
+      ) : (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 16 }}>
+            {r.logo
+              ? <img src={r.logo} alt="" style={{ width: 56, height: 56, borderRadius: 10, objectFit: "cover", background: "#fff" }} />
+              : <div style={{ width: 56, height: 56, borderRadius: 10, background: "var(--brand-solid)", color: "#fff", display: "grid", placeItems: "center", fontSize: 24, fontWeight: 700 }}>{(r.nomCommercial || session.prenom || "?").charAt(0).toUpperCase()}</div>}
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{r.nomCommercial || `${session.prenom} ${session.nom}`.trim()}</div>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>@{session.identifiant}</div>
+            </div>
+          </div>
+          {[["Adresse", r.adresse], ["Téléphone", r.telephone], ["E-mail", r.email], ["Site web", r.siteWeb],
+            ["Préfixe de vos numéros de suivi", r.prefixeTracking || "BDE (identité de l’entreprise)"]].map(([libelle, valeur]) => (
+            <div key={libelle} style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "8px 0", borderTop: "1px solid var(--border)", fontSize: 12.5 }}>
+              <span style={{ color: "var(--muted)" }}>{libelle}</span>
+              <span style={{ color: "var(--text)", fontWeight: 600, textAlign: "end", wordBreak: "break-word" }}>{valeur || "—"}</span>
+            </div>
+          ))}
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 12, lineHeight: 1.5 }}>
+            Le préfixe de vos numéros de suivi figure déjà sur des étiquettes en circulation : seule
+            l’entreprise peut le changer.
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
  * Enregistrement d'un colis pour le compte d'un partenaire.
  *
  * Volontairement bien plus court que le formulaire de colis ordinaire : ni catégorie, ni tarif,
@@ -4945,7 +5093,7 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
   const [clientTelephone, setClientTelephone] = useState("");
   const [destPays, setDestPays] = useState("FR");
   const [mode, setMode] = useState("air");
-  const [articles, setArticles] = useState(() => [{ ...emptyProduit(), tarification: "kg" }]);
+  const [articles, setArticles] = useState(() => [{ ...emptyProduit(), tarification: "kg", categoriePartenaire: "" }]);
   const [err, setErr] = useState("");
 
   const partenaire = (partenaires || []).find((p) => p.id === partenaireId);
@@ -4978,7 +5126,7 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
   const saisieEnCours = !!expNom || !!clientNom || articles.some((a) => a.nom);
 
   function majArticle(id, patch) { setErr(""); setArticles((l) => l.map((a) => (a.id === id ? { ...a, ...patch } : a))); }
-  function ajouterArticle() { setArticles((l) => [...l, { ...emptyProduit(), tarification: "kg" }]); }
+  function ajouterArticle() { setArticles((l) => [...l, { ...emptyProduit(), tarification: "kg", categoriePartenaire: "" }]); }
   function retirerArticle(id) { setArticles((l) => (l.length > 1 ? l.filter((a) => a.id !== id) : l)); }
 
   function submit(e) {
@@ -4990,7 +5138,16 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
     if (articles.some((a) => !(Number(a.poids) > 0))) { setErr("Indiquez le poids de chaque article, en kilogrammes."); return; }
     if (articles.some((a) => a.tarification === "unite" && !(Number(a.quantite) >= 1))) { setErr("Un article facturé à l’unité doit avoir une quantité d’au moins 1."); return; }
     if (!paysDisponibles.some((c) => c.code === destPays)) { setErr("Cette destination n’est pas ouverte à ce partenaire."); return; }
-    const produits = articles.map((a) => ({ ...a, nom: a.nom.trim(), categorie: "", personnalise: true, montant: "0", typePrix: "unitaire" }));
+    const produits = articles.map((a) => {
+      // Le nom de la catégorie est recopié sur l'article : si le contrat change plus tard, la
+      // fiche du colis doit continuer de dire à quel titre il a été facturé.
+      const cat = contrat.categories.find((c) => c.id === a.categoriePartenaire);
+      return {
+        ...a, nom: a.nom.trim(), categorie: "", personnalise: true, montant: "0", typePrix: "unitaire",
+        categorieNomPartenaire: cat ? cat.nom : "",
+        tarification: cat ? cat.type : (a.tarification || "kg"),
+      };
+    });
     const detail = detailPrixPartenaire({ produits, poids: poidsTotal, pays: paysRoute }, partenaire);
     onSave({
       // Colis expédié sous la marque du partenaire : son numéro de suivi porte son préfixe, pas
@@ -5084,7 +5241,9 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
         <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>Destination</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
           <Field label="Pays de destination *">
-            <select value={destPays} onChange={(e) => setDestPays(e.target.value)} style={inputStyle}>
+            {/* Changer de destination remet les catégories à zéro : celles de la France n'existent
+                pas pour la Belgique, et garder l'ancienne donnerait un prix pris ailleurs. */}
+            <select value={destPays} onChange={(e) => { setDestPays(e.target.value); setArticles((l) => l.map((a) => ({ ...a, categoriePartenaire: "" }))); }} style={inputStyle}>
               {paysDisponibles.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code] || ""} {c.name}</option>)}
             </select>
           </Field>
@@ -5141,29 +5300,47 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
               )}
             </div>
             <Field label="Désignation *"><input value={a.nom} onChange={(e) => majArticle(a.id, { nom: e.target.value })} style={inputStyle} placeholder="ex : cartons de vêtements" /></Field>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 10 }}>
-              <Field label="Facturé">
-                <select value={a.tarification || "kg"} onChange={(e) => majArticle(a.id, { tarification: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }}>
-                  <option value="kg">Au kilo</option>
-                  <option value="unite">À l’unité</option>
+            {/* Catégorie du contrat : quand elle est choisie, c'est elle qui décide du prix ET de
+                l'unité de facturation — inutile de demander deux fois la même chose. */}
+            {contrat.categories.length > 0 && (
+              <Field label="Catégorie">
+                <select value={a.categoriePartenaire || ""} onChange={(e) => majArticle(a.id, { categoriePartenaire: e.target.value })} style={inputStyle}>
+                  <option value="">Tarif général</option>
+                  {contrat.categories.map((cat) => (
+                    <option key={cat.id} value={cat.id}>{cat.nom} — {fmt(cat.montant, contrat.devise)}/{cat.type === "unite" ? "unité" : "kg"}</option>
+                  ))}
                 </select>
               </Field>
-              <Field label="Quantité"><input type="number" min="1" value={a.quantite} onChange={(e) => majArticle(a.id, { quantite: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
-              <Field label="Poids (kg) *"><input type="number" step="0.01" min="0" value={a.poids} onChange={(e) => majArticle(a.id, { poids: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="0" /></Field>
-            </div>
-            {tarifDefini && (
-              <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8 }}>
-                {a.tarification === "unite"
-                  ? `${Number(a.quantite) || 1} × ${fmt(contrat.parUnite, contrat.devise)}`
-                  : `${Number(a.poids) || 0} kg × ${fmt(contrat.parKg, contrat.devise)}`}
-                {" = "}
-                <strong style={{ color: "var(--text)" }}>
-                  {fmt(a.tarification === "unite"
-                    ? contrat.parUnite * (Number(a.quantite) || 1)
-                    : contrat.parKg * (Number(a.poids) || 0), contrat.devise)}
-                </strong>
-              </div>
             )}
+            {(() => {
+              const cat = contrat.categories.find((c) => c.id === a.categoriePartenaire);
+              return (
+                <>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 10 }}>
+                    {!cat && (
+                      <Field label="Facturé">
+                        <select value={a.tarification || "kg"} onChange={(e) => majArticle(a.id, { tarification: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }}>
+                          <option value="kg">Au kilo</option>
+                          <option value="unite">À l’unité</option>
+                        </select>
+                      </Field>
+                    )}
+                    <Field label="Quantité"><input type="number" min="1" value={a.quantite} onChange={(e) => majArticle(a.id, { quantite: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
+                    <Field label="Poids (kg) *"><input type="number" step="0.01" min="0" value={a.poids} onChange={(e) => majArticle(a.id, { poids: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="0" /></Field>
+                  </div>
+                  {tarifDefini && (
+                    <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8 }}>
+                      {(cat ? cat.type : a.tarification) === "unite"
+                        ? `${Number(a.quantite) || 1} × ${fmt(cat ? cat.montant : contrat.parUnite, contrat.devise)}`
+                        : `${Number(a.poids) || 0} kg × ${fmt(cat ? cat.montant : contrat.parKg, contrat.devise)}`}
+                      {cat ? ` (${cat.nom})` : ""}
+                      {" = "}
+                      <strong style={{ color: "var(--text)" }}>{fmt(prixArticlePartenaire(a, contrat), contrat.devise)}</strong>
+                    </div>
+                  )}
+                </>
+              );
+            })()}
           </div>
         ))}
         <button type="button" onClick={ajouterArticle} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", marginBottom: 14 }}>
@@ -17409,6 +17586,21 @@ function ContratPartenaire({ partenaire, autres, onSave }) {
   function retirerDestination(pays) {
     setDestinations((l) => l.filter((d) => d.pays !== pays));
   }
+  function ajouterCategorie(pays) {
+    setErr("");
+    setDestinations((l) => l.map((d) => (d.pays === pays
+      ? { ...d, categories: [...d.categories, { id: `cp${Date.now()}${Math.random().toString(36).slice(2, 5)}`, nom: "", type: "unite", montant: 0 }] }
+      : d)));
+  }
+  function majCategorie(pays, id, patch) {
+    setErr("");
+    setDestinations((l) => l.map((d) => (d.pays === pays
+      ? { ...d, categories: d.categories.map((c) => (c.id === id ? { ...c, ...patch } : c)) }
+      : d)));
+  }
+  function retirerCategorie(pays, id) {
+    setDestinations((l) => l.map((d) => (d.pays === pays ? { ...d, categories: d.categories.filter((c) => c.id !== id) } : d)));
+  }
 
   async function choisirLogo(e) {
     const file = e.target.files?.[0];
@@ -17439,11 +17631,17 @@ function ContratPartenaire({ partenaire, autres, onSave }) {
       if (d.acheminement === "correspondant" && !d.correspondant.nom.trim() && !d.correspondant.telephone.trim()) {
         setErr(`Indiquez au moins le nom ou le téléphone du correspondant pour « ${nom} ».`); return;
       }
+      // Une catégorie sans nom serait impossible à choisir dans le formulaire de colis.
+      if (d.categories.some((c) => !String(c.nom).trim())) { setErr(`Donnez un nom à chaque catégorie de « ${nom} ».`); return; }
+      if (d.categories.some((c) => isNaN(nombre(c.montant)) || nombre(c.montant) < 0)) {
+        setErr(`Les montants des catégories de « ${nom} » doivent être positifs.`); return;
+      }
     }
     setErr("");
     const propres = destinations.map((d) => normaliserDestinationPartenaire({
       ...d, parKg: nombre(d.parKg), parUnite: nombre(d.parUnite), fraisPoste: nombre(d.fraisPoste),
       correspondant: { nom: d.correspondant.nom.trim(), telephone: d.correspondant.telephone.trim(), adresse: d.correspondant.adresse.trim() },
+      categories: d.categories.map((c) => ({ ...c, nom: String(c.nom).trim(), montant: nombre(c.montant) })),
     }));
     onSave({
       nomCommercial: nomCommercial.trim(), logo, adresse: adresse.trim(), telephone: telephone.trim(),
@@ -17514,8 +17712,34 @@ function ContratPartenaire({ partenaire, autres, onSave }) {
                   </Field>
                 </div>
               )}
+              {/*
+                Catégories de ce partenaire pour cette destination : « à l'unité » n'est pas un
+                prix unique — un téléphone, un passeport et un carton partent tous à l'unité et ne
+                se facturent pas pareil.
+              */}
+              <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "var(--text)" }}>Catégories tarifaires</div>
+                <div style={{ fontSize: 11.5, color: "var(--muted)", margin: "3px 0 10px", lineHeight: 1.5 }}>
+                  Facultatif. Un article sans catégorie est facturé au tarif général ci-dessus.
+                </div>
+                {d.categories.map((cat) => (
+                  <div key={cat.id} style={{ display: "grid", gridTemplateColumns: "minmax(90px,1.4fr) minmax(80px,1fr) minmax(70px,0.9fr) auto", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                    <input value={cat.nom} onChange={(e) => majCategorie(d.pays, cat.id, { nom: e.target.value })} placeholder="ex : téléphone" style={{ ...inputStyle, marginBottom: 0 }} />
+                    <select value={cat.type} onChange={(e) => majCategorie(d.pays, cat.id, { type: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }}>
+                      <option value="unite">À l’unité</option>
+                      <option value="kg">Au kilo</option>
+                    </select>
+                    <input value={cat.montant} onChange={(e) => majCategorie(d.pays, cat.id, { montant: e.target.value })} placeholder="0" style={{ ...inputStyle, marginBottom: 0 }} />
+                    <button type="button" onClick={() => retirerCategorie(d.pays, cat.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer", display: "flex", alignItems: "center" }}><Trash2 size={13} /></button>
+                  </div>
+                ))}
+                <button type="button" onClick={() => ajouterCategorie(d.pays)} style={{ display: "flex", alignItems: "center", gap: 5, background: "var(--surface)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "6px 11px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>
+                  <Plus size={13} /> Ajouter une catégorie
+                </button>
+              </div>
+
               <div style={{ background: "var(--surface)", borderRadius: 8, padding: "8px 11px", fontSize: 11.5, color: "var(--muted)", marginTop: 10 }}>
-                Un colis de 10 kg au kilo : <strong style={{ color: "var(--text)" }}>
+                Un colis de 10 kg au tarif général : <strong style={{ color: "var(--text)" }}>
                   {fmt((Number(String(d.parKg).replace(",", ".")) || 0) * 10 + (d.acheminement === "poste" ? (Number(String(d.fraisPoste).replace(",", ".")) || 0) : 0), devise)}
                 </strong>
                 {d.acheminement === "poste" ? " (frais de poste compris)" : ""}
@@ -17635,7 +17859,9 @@ function VerificationColisPartenaire({ partenaire, colis, onValider }) {
                 {(c.produits || []).length === 0 ? "Contenu non détaillé" : (c.produits || []).map((p, i) => (
                   <div key={p.id || i}>
                     ×{p.quantite || 1} {p.nom || "article sans nom"} — {p.poids || 0} kg
-                    <span style={{ marginInlineStart: 6, fontSize: 11 }}>({p.tarification === "unite" ? "à l’unité" : "au kilo"})</span>
+                    <span style={{ marginInlineStart: 6, fontSize: 11 }}>
+                      ({p.categorieNomPartenaire ? `${p.categorieNomPartenaire}, ` : ""}{p.tarification === "unite" ? "à l’unité" : "au kilo"})
+                    </span>
                   </div>
                 ))}
                 {/*

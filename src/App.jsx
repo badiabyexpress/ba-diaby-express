@@ -8608,10 +8608,19 @@ async function construireEtiquetteDoc(colis) {
     codeBarres: 105,     // code-barres (11 mm) puis numéro
     sepCode: 120.5,
     expediteur: 120.5,   // zone expéditeur
-    sepExp: 132.5,
-    stats: 135.5,        // poids / articles / date
-    bandeau: 141.5,      // bandeau bleu final (7,5 mm)
+    sepExp: 131,
+    stats: 133.6,        // poids / articles / date
+    /*
+     * Bandeau final, remonté et raccourci (6,8 mm au lieu de 7,5).
+     *
+     * Sa dernière ligne se trouvait à 1,67 mm du bord du papier, c'est-à-dire dans la marge que
+     * la plupart des imprimantes d'étiquettes n'impriment pas : elle sortait rognée, illisible.
+     * Le bas de l'étiquette a donc été resserré de 1,1 mm (zone expéditeur et statistiques) pour
+     * dégager 3,2 mm sous la dernière ligne — au-delà de la marge morte de toutes les imprimantes.
+     */
+    bandeau: 140.4,
   };
+  const HAUTEUR_BANDEAU = 6.8;
 
   const hr = (y) => { doc.setDrawColor(...LINE); doc.setLineWidth(0.25); doc.line(M, y, W - M, y); };
   const eyebrow = (text, x, y) => { doc.setFont(undefined, "bold"); doc.setFontSize(6.4); doc.setTextColor(...MUTED); doc.text(text.toUpperCase(), x, y); };
@@ -8722,14 +8731,14 @@ async function construireEtiquetteDoc(colis) {
   hr(Z.sepCode);
 
   // ── Expéditeur ────────────────────────────────────────────────────────────
-  eyebrow("Expéditeur / From", M, Z.expediteur + 4);
+  eyebrow("Expéditeur / From", M, Z.expediteur + 3.5);
   doc.setTextColor(...INK); doc.setFont(undefined, "bold"); doc.setFontSize(9);
-  doc.text(ajuster(colis.expediteur, W - 2 * M - 26, 1), M, Z.expediteur + 8);
+  doc.text(ajuster(colis.expediteur, W - 2 * M - 26, 1), M, Z.expediteur + 7.3);
   doc.setFont(undefined, "normal"); doc.setFontSize(7.6);
-  doc.text(colis.expediteurTelephone || "", W - M, Z.expediteur + 8, { align: "right" });
+  doc.text(colis.expediteurTelephone || "", W - M, Z.expediteur + 7.3, { align: "right" });
   if (colis.expediteurAdresse) {
     doc.setFontSize(6.9); doc.setTextColor(...MUTED);
-    doc.text(ajuster(colis.expediteurAdresse, W - 2 * M, 1), M, Z.expediteur + 11.2);
+    doc.text(ajuster(colis.expediteurAdresse, W - 2 * M, 1), M, Z.expediteur + 9.8);
   }
   hr(Z.sepExp);
 
@@ -8742,19 +8751,27 @@ async function construireEtiquetteDoc(colis) {
     doc.setFont(undefined, "bold"); doc.setFontSize(6.2); doc.setTextColor(...MUTED);
     doc.text(label, cx, Z.stats, { align: "center" });
     doc.setFontSize(9.4); doc.setTextColor(...INK);
-    doc.text(value, cx, Z.stats + 4.5, { align: "center" });
-    if (i > 0) { doc.setDrawColor(...LINE); doc.line(M + colW * i, Z.stats - 3, M + colW * i, Z.stats + 5.5); }
+    doc.text(value, cx, Z.stats + 4.4, { align: "center" });
+    if (i > 0) { doc.setDrawColor(...LINE); doc.line(M + colW * i, Z.stats - 2.6, M + colW * i, Z.stats + 5.5); }
   });
 
   // ── Bandeau final : route + site (deux informations en un seul bloc) ───────
   // Filet rouge au-dessus, comme sous l'en-tête : les deux bandes de couleur encadrent
   // l'étiquette du haut en bas, pour une identité reconnaissable même à distance.
   doc.setFillColor(...RED); doc.rect(0.6, Z.bandeau - 0.9, W - 1.2, 0.9, "F");
-  doc.setFillColor(...NAVY); doc.rect(0.6, Z.bandeau, W - 1.2, 7.5, "F");
-  doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold"); doc.setFontSize(7.8);
-  doc.text(routeLabel(colis.pays, colis.direction).toUpperCase(), W / 2, Z.bandeau + 3.6, { align: "center" });
-  doc.setFontSize(5.8); doc.setTextColor(178, 196, 222);
-  doc.text("WWW.BA-DIABY-EXPRESS.COM · TRANSPORT SOUMIS AUX CGV BA-DIABY EXPRESS", W / 2, Z.bandeau + 6.4, { align: "center" });
+  doc.setFillColor(...NAVY); doc.rect(0.6, Z.bandeau, W - 1.2, HAUTEUR_BANDEAU, "F");
+  doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold"); doc.setFontSize(8);
+  doc.text(routeLabel(colis.pays, colis.direction).toUpperCase(), W / 2, Z.bandeau + 3, { align: "center" });
+  /*
+   * Seconde ligne du bandeau : blanc pur, et non plus un bleu-gris clair.
+   *
+   * Sur un aplat sombre, des lettres de cette taille imprimées en couleur claire se remplissent
+   * d'encre — le texte devient une bavure grise. Le blanc pur est la seule couleur qui tienne à
+   * cette taille. Le texte est par ailleurs raccourci (68 caractères le condamnaient à 5,8 pt,
+   * soit 1,47 mm de haut) : la mention des CGV renvoie désormais au site, comme il est d'usage.
+   */
+  doc.setFontSize(6.8); doc.setTextColor(255, 255, 255);
+  doc.text("WWW.BA-DIABY-EXPRESS.COM · CGV SUR NOTRE SITE", W / 2, Z.bandeau + 5.9, { align: "center" });
 
   return doc;
 }
@@ -8965,18 +8982,18 @@ async function renderLabelCanvas(colis, largeurDots) {
 
   // ── Expéditeur ────────────────────────────────────────────────────────
   ctx.font = `bold ${6.4 * s}px Arial`;
-  ctx.fillText("EXPÉDITEUR / FROM", M, 124.5 * s);
+  ctx.fillText("EXPÉDITEUR / FROM", M, 124 * s);
   ctx.font = `bold ${9 * s}px Arial`;
-  ctx.fillText(colis.expediteur || "—", M, 128.5 * s);
+  ctx.fillText(colis.expediteur || "—", M, 127.8 * s);
   ctx.textAlign = "right";
   ctx.font = `${7.6 * s}px Arial`;
-  ctx.fillText(colis.expediteurTelephone || "", W - M, 128.5 * s);
+  ctx.fillText(colis.expediteurTelephone || "", W - M, 127.8 * s);
   ctx.textAlign = "left";
   if (colis.expediteurAdresse) {
     ctx.font = `${6.9 * s}px Arial`;
-    ctx.fillText(envelopperTexteCanvas(ctx, colis.expediteurAdresse, W - 2 * M, 1)[0] || "", M, 131.7 * s);
+    ctx.fillText(envelopperTexteCanvas(ctx, colis.expediteurAdresse, W - 2 * M, 1)[0] || "", M, 130.3 * s);
   }
-  hr(132.5 * s);
+  hr(131 * s);
 
   // ── Poids / articles / date ───────────────────────────────────────────
   const articles = (colis.produits || []).reduce((sum, p) => sum + (Number(p.quantite) || 1), 0) || 1;
@@ -8986,19 +9003,21 @@ async function renderLabelCanvas(colis, largeurDots) {
   stats.forEach(([label, value], i) => {
     const cx = M + colW * i + colW / 2;
     ctx.font = `bold ${6.2 * s}px Arial`;
-    ctx.fillText(label, cx, 137.5 * s);
+    ctx.fillText(label, cx, 135.6 * s);
     ctx.font = `${9.4 * s}px Arial`;
-    ctx.fillText(value, cx, 142 * s);
+    ctx.fillText(value, cx, 140 * s);
   });
   ctx.textAlign = "left";
 
   // ── Bandeau final : route ─────────────────────────────────────────────
-  ctx.fillRect(0.6 * s, 141.5 * s, W - 1.2 * s, 7.5 * s);
+  // Comme sur la version PDF : bandeau remonté et raccourci, pour que la dernière ligne ne tombe
+  // plus dans la marge non imprimable du bas (elle en sortait rognée, donc illisible).
+  ctx.fillRect(0.6 * s, 140.4 * s, W - 1.2 * s, 6.8 * s);
   ctx.save(); ctx.fillStyle = "#fff"; ctx.textAlign = "center";
   ctx.font = `bold ${7.4 * s}px Arial`;
-  ctx.fillText(routeLabel(colis.pays, colis.direction).toUpperCase(), W / 2, 145.4 * s);
-  ctx.font = `${5.8 * s}px Arial`;
-  ctx.fillText("WWW.BA-DIABY-EXPRESS.COM", W / 2, 148.2 * s);
+  ctx.fillText(routeLabel(colis.pays, colis.direction).toUpperCase(), W / 2, 143.4 * s);
+  ctx.font = `bold ${5.4 * s}px Arial`;
+  ctx.fillText("WWW.BA-DIABY-EXPRESS.COM", W / 2, 146.3 * s);
   ctx.restore();
 
   return canvas;

@@ -905,6 +905,45 @@ function marquePartenaire(data, colis) {
   return r.nomCommercial ? r : null;
 }
 
+/*
+ * Le nom sous lequel l'entreprise écrit au destinataire d'un colis.
+ *
+ * Celui du partenaire quand le colis est le sien : son client a commandé chez lui, ne nous
+ * connaît pas, et recevoir un message signé d'un transporteur dont il n'a jamais entendu parler
+ * l'inquiète autant qu'il donne à ce transporteur le moyen de le démarcher.
+ *
+ * Le principe était écrit dans le code depuis l'origine, mais appliqué à l'enregistrement
+ * seulement : les huit autres messages — mise en transit, arrivée, mise à disposition, remise,
+ * relance de retrait — partaient signés Ba-Diaby Express. Ce point d'entrée unique évite que le
+ * prochain message ajouté retombe dans le même oubli.
+ */
+/*
+ * Ce qu'on écrit au partenaire quand un de ses colis avance.
+ *
+ * Pas le message du client : celui-là s'adresse au destinataire, le tutoie presque, et ne dit pas
+ * ce que le partenaire veut savoir. Lui suit une expédition, pas un cadeau — il lui faut le
+ * numéro, le nom de son client, et l'étape, en une ligne qu'il peut lire d'un coup d'œil entre
+ * deux dépôts. Le message vient de nous : c'est nous qui transportons pour lui.
+ */
+function messageEtapePartenaire(evenement, colis) {
+  const qui = colis?.destinataire ? ` pour ${colis.destinataire}` : "";
+  const etapes = {
+    verification: "a été vérifié par nos agents : il partira au prochain départ",
+    expedie: "vient de quitter notre entrepôt",
+    arrivee: "est arrivé à destination",
+    retrait: "est disponible au retrait",
+    livre: "a été remis à son destinataire",
+  };
+  const etape = etapes[evenement];
+  if (!etape) return null;
+  return `Votre colis ${colis?.tracking || ""}${qui} ${etape}.\n\nBa-Diaby Express`;
+}
+
+function nomExpediteurPourClient(data, colis) {
+  const marque = marquePartenaire(data, colis);
+  return marque ? marque.nomCommercial : "Ba-Diaby Express";
+}
+
 /**
  * Prix facturé par l'entreprise AU partenaire, dans la devise de son tarif.
  *
@@ -1082,12 +1121,19 @@ function waLink(phone, msg) { return `https://wa.me/${(phone || "").replace(/[^\
  * Catalogue des événements pouvant déclencher une notification WhatsApp.
  * Sert à la fois à construire l'écran de réglages et à retrouver le libellé d'un événement.
  */
+/*
+ * `partenaire: true` marque les étapes dont un partenaire peut être prévenu pour ses propres
+ * colis. Les autres ne le concernent pas : l'enregistrement, c'est lui qui l'a fait ; le
+ * paiement, l'entreprise n'en encaisse aucun sur ses colis. Leur interrupteur reste donc absent
+ * plutôt que désactivé — une case grise qu'on ne peut pas cocher n'apprend rien.
+ */
 const EVENEMENTS_WHATSAPP = [
+  { cle: "verification",   label: "Quand un colis partenaire est vérifié", partenaire: true, partenaireSeul: true },
   { cle: "enregistrement", label: "À l’enregistrement du colis" },
-  { cle: "expedie",        label: "Quand le colis est expédié" },
-  { cle: "arrivee",        label: "À l’arrivée en Guinée" },
+  { cle: "expedie",        label: "Quand le colis est expédié", partenaire: true },
+  { cle: "arrivee",        label: "À l’arrivée en Guinée", partenaire: true },
   { cle: "retrait",        label: "Quand le colis est disponible au retrait" },
-  { cle: "livre",          label: "Quand le colis est remis au client" },
+  { cle: "livre",          label: "Quand le colis est remis au client", partenaire: true },
   { cle: "paiement",       label: "À la réception d’un paiement" },
   { cle: "modification",   label: "Après modification du colis" },
   { cle: "relanceRetrait", label: "Rappel d’un colis non retiré" },
@@ -1122,6 +1168,27 @@ async function notifierEvenement(data, evenement, colis, message) {
       const { envoye } = await envoyerWhatsApp(tel, message, mediaUrl);
       if (envoye) envoyes++;
     } catch (e) { /* une notification ne doit jamais bloquer l'action en cours */ }
+  }
+
+  /*
+   * Le partenaire est prévenu de ce qui arrive à ses colis, dans son propre message.
+   *
+   * C'est le remplaçant de l'appel téléphonique : « mon colis est-il parti ? », « est-il
+   * arrivé ? ». Il ne reçoit pas la version destinée au client — elle porte sa marque à lui et
+   * s'adresse à son client — mais une ligne factuelle signée de nous, son transporteur.
+   *
+   * L'étiquette PDF ne le suit pas : il l'a déjà imprimée en déposant le colis.
+   */
+  if (prefs.partenaire && estColisPartenaire(colis)) {
+    const messagePartenaire = messageEtapePartenaire(evenement, colis);
+    const p = partenaireDuColis(data, colis);
+    const tel = p ? reglagesPartenaire(p).telephone : "";
+    if (messagePartenaire && tel) {
+      try {
+        const { envoye } = await envoyerWhatsApp(tel, messagePartenaire);
+        if (envoye) envoyes++;
+      } catch (e) { /* une notification ne doit jamais bloquer l'action en cours */ }
+    }
   }
 
   /*
@@ -1364,11 +1431,18 @@ function defaultSeed() {
      * remise, paiement) — pour ne pas le noyer sous les messages.
      */
     notifWhatsApp: {
+      /*
+       * La colonne « partenaire » ne concerne que les colis déposés par un partenaire. Il est
+       * prévenu de ce qui change l'état de son expédition — vérification, départ, arrivée,
+       * remise — et de rien d'autre : ni de l'enregistrement, qu'il a fait lui-même, ni des
+       * paiements, dont l'entreprise n'encaisse aucun sur ses colis.
+       */
+      verification:    { expediteur: false, destinataire: false, partenaire: true },
       enregistrement:  { expediteur: true,  destinataire: true },
-      expedie:         { expediteur: false, destinataire: true },
-      arrivee:         { expediteur: false, destinataire: true },
+      expedie:         { expediteur: false, destinataire: true,  partenaire: true },
+      arrivee:         { expediteur: false, destinataire: true,  partenaire: true },
       retrait:         { expediteur: false, destinataire: true },
-      livre:           { expediteur: true,  destinataire: true },
+      livre:           { expediteur: true,  destinataire: true,  partenaire: true },
       paiement:        { expediteur: true,  destinataire: true },
       modification:    { expediteur: false, destinataire: false },
       relanceRetrait:  { expediteur: false, destinataire: true },
@@ -4884,6 +4958,51 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
    * total : il n'y a pas une version pour nous et une pour lui. Il en a besoin pour sa propre
    * comptabilité, et devoir la réclamer par téléphone à chaque fin de mois n'a aucun sens.
    */
+  /*
+   * Le partenaire emporte ses colis dans un tableur.
+   *
+   * Il tient sa propre comptabilité, souvent dans un classeur qu'il a construit lui-même. Sans
+   * export, il recopie à la main ce que l'application affiche déjà — et se trompe. La colonne du
+   * coût ne sort que s'il a le droit de la voir : un employé aux montants masqués ne doit pas
+   * pouvoir contourner la règle en exportant.
+   */
+  const [exportEnCours, setExportEnCours] = useState(false);
+  async function exporterMesColis() {
+    setExportEnCours(true);
+    try {
+      const XLSX = await loadXLSXLib();
+      const entetes = ["N° de suivi", "Enregistré le", "Expéditeur", "Destinataire", "Téléphone",
+        "Destination", "Poids (kg)", ...(montantsVisibles ? [`Coût (${devise})`] : []),
+        "Vérification", "Acheminement", "Facture", "Réglé par votre client"];
+      const lignes = colisPartenaire.map((c) => [
+        c.tracking,
+        c.createdAt ? new Date(c.createdAt).toLocaleDateString("fr-FR") : "",
+        c.expediteur || "",
+        c.destinataire || "",
+        c.telephone || "",
+        COUNTRIES.find((x) => x.code === (c.destinatairePays || c.pays))?.name || c.pays || "",
+        Number(c.poids) || 0,
+        ...(montantsVisibles ? [Number(c.prixPartenaire) || 0] : []),
+        statutValidationPartenaire(c),
+        c.status || "",
+        montantsVisibles ? (mesFactures.find((f) => f.id === c.facturePartenaireId)?.numero || "") : "",
+        c.paiementPartenaire?.paye ? "Oui" : "Non",
+      ]);
+      const wb = XLSX.utils.book_new();
+      const titre = `${reglages.nomCommercial || "Partenaire"} — mes colis`;
+      const ws = XLSX.utils.aoa_to_sheet([[titre], [`Export généré le ${new Date().toLocaleDateString("fr-FR")}`], [], entetes, ...lignes]);
+      ws["!cols"] = entetes.map(() => ({ wch: 20 }));
+      ws["!merges"] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: entetes.length - 1 } }];
+      XLSX.utils.book_append_sheet(wb, ws, "Mes colis");
+      XLSX.writeFile(wb, `mes-colis-${new Date().toISOString().slice(0, 10)}.xlsx`);
+    } catch (e) {
+      console.error(e);
+      notify?.("Impossible de préparer le fichier — vérifiez votre connexion.");
+    } finally {
+      setExportEnCours(false);
+    }
+  }
+
   async function imprimerMaFacture(facture) {
     const inclus = (data.colis || []).filter((c) => (facture.trackings || []).includes(c.tracking));
     setPdfEnCours(facture.id);
@@ -5063,9 +5182,18 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
             <button key={k} onClick={() => setPeriode(k)} style={{ padding: "7px 14px", borderRadius: 20, border: "1.5px solid " + (periode === k ? "var(--brand-solid)" : "var(--border)"), background: periode === k ? "var(--brand-solid)" : "var(--surface)", color: periode === k ? "#fff" : "var(--muted)", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>{label}</button>
           ))}
         </div>
-        <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
-          <strong style={{ color: "var(--text)" }}>{scoped.length}</strong> colis · <strong style={{ color: "var(--text)" }}>{poidsTotal.toFixed(1)} kg</strong>
-          {montantsVisibles && <> · <strong style={{ color: "var(--text)" }}>{fmt(coutPeriode, devise)}</strong></>}
+        <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+          <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
+            <strong style={{ color: "var(--text)" }}>{scoped.length}</strong> colis · <strong style={{ color: "var(--text)" }}>{poidsTotal.toFixed(1)} kg</strong>
+            {montantsVisibles && <> · <strong style={{ color: "var(--text)" }}>{fmt(coutPeriode, devise)}</strong></>}
+          </div>
+          {colisPartenaire.length > 0 && (
+            <button onClick={exporterMesColis} disabled={exportEnCours}
+              title="Tous vos colis, dans un fichier Excel"
+              style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: exportEnCours ? "wait" : "pointer", opacity: exportEnCours ? 0.6 : 1 }}>
+              <Download size={14} /> {exportEnCours ? "Préparation…" : "Exporter en Excel"}
+            </button>
+          )}
         </div>
       </div>
       <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", marginBottom: 20 }}>
@@ -7863,7 +7991,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
       const c = aRelancer[i];
       const ag = siteRetraitPourColis(c, data);
       const du = c.reste > 0 ? ` Reste à régler : ${fmtGNF(c.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}.` : "";
-      const message = `Bonjour ${c.destinataire}, votre colis Ba-Diaby Express ${c.tracking} vous attend depuis ${c.joursAttente} jours`
+      const message = `Bonjour ${c.destinataire}, votre colis ${nomExpediteurPourClient(data, c)} ${c.tracking} vous attend depuis ${c.joursAttente} jours`
         + (ag ? ` à notre agence ${ag.nom} — ${ag.adresse}${ag.horaires ? ` (${ag.horaires})` : ""}.` : ".")
         + du + " Merci de venir le récupérer.";
       if (!c.telephone && !c.expediteurTelephone) echecs.push({ tracking: c.tracking, raison: "pas de numéro" });
@@ -7920,9 +8048,8 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     // Notification automatique selon les préférences (Configuration → Notifications WhatsApp).
     // Sous la marque d'un partenaire, le client ne doit pas recevoir un message signé
     // Ba-Diaby Express : il a commandé chez le partenaire et ne nous connaît pas.
-    const marque = marquePartenaire(data, colis);
     notifierEvenement(data, "enregistrement", colis,
-      `Bonjour ${colis.destinataire}, votre colis ${marque ? marque.nomCommercial : "Ba-Diaby Express"} ${colis.tracking} a bien été enregistré`
+      `Bonjour ${colis.destinataire}, votre colis ${nomExpediteurPourClient(data, colis)} ${colis.tracking} a bien été enregistré`
       + `${colis.poids ? ` (${colis.poids} kg)` : ""}. Suivez-le à tout moment sur notre plateforme.`);
     setShowForm(false);
   }
@@ -7947,7 +8074,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
         prixChange ? `montant : ${fmtGNF((apres.prix || 0) * (LIVE_RATES.GNF || CURRENCIES.GNF))}` : null,
       ].filter(Boolean).join(", ");
       notifierEvenement(next, "modification", apres,
-        `Bonjour ${apres.destinataire}, les informations de votre colis Ba-Diaby Express ${tracking} ont été mises à jour — ${details}.`);
+        `Bonjour ${apres.destinataire}, les informations de votre colis ${nomExpediteurPourClient(data, apres)} ${tracking} ont été mises à jour — ${details}.`);
     }
   }
   const [remiseEnCours, setRemiseEnCours] = useState(null);
@@ -7983,7 +8110,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     const colisMaj = next.colis.find((c) => c.tracking === tracking);
     if (colisMaj) {
       notifierEvenement(next, "livre", colisMaj,
-        `Bonjour ${colisMaj.destinataire}, votre colis Ba-Diaby Express ${tracking} a bien été remis à ${preuve.nom}. Merci de votre confiance !`);
+        `Bonjour ${colisMaj.destinataire}, votre colis ${nomExpediteurPourClient(data, colisMaj)} ${tracking} a bien été remis à ${preuve.nom}. Merci de votre confiance !`);
     }
   }
 
@@ -8015,18 +8142,18 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     if (evt && colisMaj) {
       const ag = siteRetraitPourColis(colisMaj, data);
       const messages = {
-        expedie: `Bonjour ${colisMaj.destinataire}, votre colis Ba-Diaby Express ${tracking} vient de quitter notre entrepôt.`,
-        arrivee: `Bonjour ${colisMaj.destinataire}, votre colis Ba-Diaby Express ${tracking} est arrivé en Guinée.`,
-        retrait: `Bonjour ${colisMaj.destinataire}, votre colis Ba-Diaby Express ${tracking} est disponible au retrait.`
+        expedie: `Bonjour ${colisMaj.destinataire}, votre colis ${nomExpediteurPourClient(data, colisMaj)} ${tracking} vient de quitter notre entrepôt.`,
+        arrivee: `Bonjour ${colisMaj.destinataire}, votre colis ${nomExpediteurPourClient(data, colisMaj)} ${tracking} est arrivé en Guinée.`,
+        retrait: `Bonjour ${colisMaj.destinataire}, votre colis ${nomExpediteurPourClient(data, colisMaj)} ${tracking} est disponible au retrait.`
           + (ag ? ` Retrait à notre agence ${ag.nom} — ${ag.adresse}${ag.horaires ? ` (${ag.horaires})` : ""}.` : "")
           + (colisMaj.reste > 0 ? ` Reste à régler : ${fmtGNF(colisMaj.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}.` : "")
           + (colisMaj.codeRetrait ? ` Votre code de retrait : ${colisMaj.codeRetrait} — présentez-le à l’agence.` : ""),
-        livre: `Bonjour ${colisMaj.destinataire}, votre colis Ba-Diaby Express ${tracking} vous a bien été remis. Merci de votre confiance !`,
+        livre: `Bonjour ${colisMaj.destinataire}, votre colis ${nomExpediteurPourClient(data, colisMaj)} ${tracking} vous a bien été remis. Merci de votre confiance !`,
       };
       notifierEvenement(next, evt, colisMaj, messages[evt]);
     }
     if (data.notificationSettings?.ouvertureAutoWhatsApp && current.telephone) {
-      const msg = `Bonjour ${current.destinataire}, votre colis Ba-Diaby Express (${tracking}) est maintenant : ${nextStatus}. Merci de votre confiance.`;
+      const msg = `Bonjour ${current.destinataire}, votre colis ${nomExpediteurPourClient(data, current)} (${tracking}) est maintenant : ${nextStatus}. Merci de votre confiance.`;
       window.open(waLink(current.telephone, msg), "_blank");
       notify("Statut mis à jour — WhatsApp ouvert, il ne reste qu’à envoyer");
     } else {
@@ -8802,7 +8929,7 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
    * ligne où en est son colis, et savoir quoi faire s'il peut venir le chercher.
    */
   function messagePourEtape(colis, etape) {
-    const base = `Bonjour ${colis.destinataire}, votre colis Ba-Diaby Express ${colis.tracking}`;
+    const base = `Bonjour ${colis.destinataire}, votre colis ${nomExpediteurPourClient(data, colis)} ${colis.tracking}`;
     if (etape.cle === "En transit") return `${base} vient de quitter notre entrepôt. Nous vous préviendrons dès son arrivée en Guinée.`;
     if (etape.cle === "Arrivé") return `${base} est arrivé en Guinée. Il sera bientôt disponible au retrait.`;
     const ag = siteRetraitPourColis(colis, data);
@@ -10615,7 +10742,7 @@ async function envoyerEtiquetteWhatsApp(colis, data) {
   // Sous la marque d'un partenaire, le message ne doit pas nommer Ba-Diaby Express : son client
   // ne nous connaît pas.
   const marque = marquePartenaire(data, colis);
-  const message = `Bonjour ${colis.destinataire}, voici l’étiquette de votre colis ${marque ? marque.nomCommercial : "Ba-Diaby Express"} (${colis.tracking}).`;
+  const message = `Bonjour ${colis.destinataire}, voici l’étiquette de votre colis ${nomExpediteurPourClient(data, colis)} (${colis.tracking}).`;
   const resultat = await envoyerWhatsApp(colis.telephone, message, publicUrl);
   // Contrairement à notifierWhatsApp() (message texte), il n'existe pas de brouillon WhatsApp de
   // secours pour une pièce jointe — wa.me ne sait pré-remplir que du texte. Sans Twilio configuré,
@@ -12478,7 +12605,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
    * comme avant. L'agent n'est jamais bloqué : dans le pire des cas il appuie sur Envoyer.
    */
   async function notifierWhatsApp() {
-    const message = `Bonjour ${colis.destinataire}, votre colis Ba-Diaby Express (${colis.tracking}) est actuellement : ${clientStatusLabel(colis.status)}. Suivez-le à tout moment sur notre plateforme.`;
+    const message = `Bonjour ${colis.destinataire}, votre colis ${nomExpediteurPourClient(data, colis)} (${colis.tracking}) est actuellement : ${clientStatusLabel(colis.status)}. Suivez-le à tout moment sur notre plateforme.`;
     setWaErreur(""); setWaState("envoi");
     const { envoye, raison } = await envoyerWhatsApp(colis.telephone, message);
     if (envoye) { setWaState("envoye"); return; }
@@ -14087,7 +14214,7 @@ function PaiementsPage({ data, notify }) {
             <div style={{ padding: "0 20px 16px" }}>
               {impayesARelancer.map((c) => {
                 const jours = Math.floor((new Date() - new Date(c.createdAt)) / 86400000);
-                const msg = `Bonjour ${c.destinataire}, votre colis Ba-Diaby Express (${c.tracking}) a un solde restant de ${fmt(c.reste, "EUR")}. Merci de régulariser dès que possible. Pour toute question, contactez-nous.`;
+                const msg = `Bonjour ${c.destinataire}, votre colis ${nomExpediteurPourClient(data, c)} (${c.tracking}) a un solde restant de ${fmt(c.reste, "EUR")}. Merci de régulariser dès que possible. Pour toute question, contactez-nous.`;
                 return (
                   <div key={c.tracking} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderTop: "1px solid var(--surface2)", flexWrap: "wrap", gap: 8 }}>
                     <div>
@@ -17064,6 +17191,10 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
           l’enregistrement à la livraison, même sans WhatsApp.
           Si l’envoi automatique n’est pas disponible, l’action se déroule normalement et le message
           peut être envoyé à la main depuis la fiche du colis.
+          <br /><br />
+          La colonne <strong>Partenaire</strong> ne concerne que les colis déposés par un partenaire :
+          il reçoit alors son propre message, signé Ba-Diaby Express — tandis que son client, lui,
+          reçoit un message signé de la marque du partenaire.
         </div>
       </div>
 
@@ -17075,6 +17206,7 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
               <th style={{ padding: "12px 16px", fontSize: 11, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.5, whiteSpace: "nowrap" }}>ÉVÉNEMENT</th>
               <th style={{ padding: "12px 16px", fontSize: 11, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.5, textAlign: "center", width: 120, whiteSpace: "nowrap" }}>EXPÉDITEUR</th>
               <th style={{ padding: "12px 16px", fontSize: 11, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.5, textAlign: "center", width: 120, whiteSpace: "nowrap" }}>DESTINATAIRE</th>
+              <th style={{ padding: "12px 16px", fontSize: 11, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.5, textAlign: "center", width: 120, whiteSpace: "nowrap" }}>PARTENAIRE</th>
             </tr>
           </thead>
           <tbody>
@@ -17087,9 +17219,22 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
                   </div>
                 </td>
                 <td style={{ padding: "12px 16px", textAlign: "center" }}>
-                  <div style={{ display: "flex", justifyContent: "center" }}>
-                    <Interrupteur actif={!!(brouillon[e.cle] || {}).destinataire} onClick={() => basculer(e.cle, "destinataire")} />
-                  </div>
+                  {e.partenaireSeul ? (
+                    <span style={{ fontSize: 12, color: "var(--muted)" }}>—</span>
+                  ) : (
+                    <div style={{ display: "flex", justifyContent: "center" }}>
+                      <Interrupteur actif={!!(brouillon[e.cle] || {}).destinataire} onClick={() => basculer(e.cle, "destinataire")} />
+                    </div>
+                  )}
+                </td>
+                <td style={{ padding: "12px 16px", textAlign: "center" }}>
+                  {e.partenaire ? (
+                    <div style={{ display: "flex", justifyContent: "center" }}>
+                      <Interrupteur actif={!!(brouillon[e.cle] || {}).partenaire} onClick={() => basculer(e.cle, "partenaire")} />
+                    </div>
+                  ) : (
+                    <span style={{ fontSize: 12, color: "var(--muted)" }}>—</span>
+                  )}
                 </td>
               </tr>
             ))}
@@ -18374,13 +18519,25 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
   }
 
   function validerColis(tracking, montant) {
+    const colisMaj = (data.colis || []).map((c) => (c.tracking === tracking
+      ? { ...c, prixPartenaire: +(Number(montant) || 0).toFixed(2), validationPartenaire: { statut: "Validé", par: monNom, le: new Date().toISOString() } }
+      : c));
     persist({
       ...data,
-      colis: (data.colis || []).map((c) => (c.tracking === tracking
-        ? { ...c, prixPartenaire: +(Number(montant) || 0).toFixed(2), validationPartenaire: { statut: "Validé", par: monNom, le: new Date().toISOString() } }
-        : c)),
+      colis: colisMaj,
       activityLog: pushActivity(data, session, "Colis partenaire vérifié", `${tracking} — ${fmt(Number(montant) || 0, reglagesPartenaire(partenaire).tarif.devise)}`),
     });
+    /*
+     * La vérification est l'étape que le partenaire attend : avant elle, son colis ne monte pas
+     * dans l'avion. C'est aussi celle qu'il ne peut pas deviner — elle se passe chez nous, sans
+     * lui. Elle vaut donc un message, alors que l'enregistrement, qu'il a fait lui-même, n'en
+     * vaut aucun. La notification ne doit jamais faire échouer la vérification elle-même.
+     */
+    const verifie = colisMaj.find((c) => c.tracking === tracking);
+    if (verifie) {
+      notifierEvenement({ ...data, colis: colisMaj }, "verification", verifie, "")
+        .catch(() => { /* un colis reste vérifié même si le message ne part pas */ });
+    }
     notify?.(`Colis ${tracking} vérifié`);
   }
 

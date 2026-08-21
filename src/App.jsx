@@ -821,6 +821,41 @@ function colisPartenaireAFacturer(colis, partenaireId) {
     && !c.facturePartenaireId
     && c.status !== "Annulé");
 }
+/*
+ * Ce que le partenaire a déjà réglé sur une facture.
+ *
+ * Une facture partenaire n'est pas toujours soldée d'un coup : un partenaire qui dépose chaque
+ * semaine règle souvent en plusieurs fois, au comptoir ou par virement. Chaque versement est donc
+ * conservé à part — son montant, son mode, sa date et l'agent qui l'a reçu — et le solde s'en
+ * déduit. Un seul champ « payé oui/non » aurait obligé l'agent à attendre le règlement complet
+ * pour enregistrer quoi que ce soit, et l'argent déjà reçu n'aurait figuré nulle part.
+ */
+function reglementsFacture(facture) {
+  return Array.isArray(facture?.reglements) ? facture.reglements : [];
+}
+function totalRegleFacture(facture) {
+  return +reglementsFacture(facture).reduce((s, r) => s + (Number(r.montant) || 0), 0).toFixed(2);
+}
+/** Ce qui reste dû sur une facture. Jamais négatif : un trop-perçu ne devient pas une dette. */
+function resteDuFacture(facture) {
+  return +Math.max(0, (Number(facture?.total) || 0) - totalRegleFacture(facture)).toFixed(2);
+}
+/*
+ * L'état d'une facture se déduit de ses versements, il n'est jamais stocké : deux champs qui
+ * disent la même chose finissent toujours par se contredire — une facture « réglée » sans
+ * versement, ou l'inverse. Le centime de tolérance évite qu'un arrondi laisse une facture
+ * éternellement « partielle » pour 0,004 EUR.
+ */
+function statutFacturePartenaire(facture) {
+  const regle = totalRegleFacture(facture);
+  if (regle <= 0.005) return "Impayée";
+  return regle >= (Number(facture?.total) || 0) - 0.005 ? "Réglée" : "Partielle";
+}
+const STATUT_FACTURE_STYLE = {
+  "Impayée": { bg: "var(--danger-bg)", fg: "var(--danger-fg)" },
+  "Partielle": { bg: "var(--warn-bg)", fg: "var(--warn-fg)" },
+  "Réglée": { bg: "var(--ok-bg-soft)", fg: "var(--ok-fg)" },
+};
 /** Numéro de facture partenaire, continu sur l'année : FP-2026-0001. */
 function genNumeroFacturePartenaire(factures) {
   const annee = new Date().getFullYear();
@@ -4546,6 +4581,12 @@ function PartnerDashboard({ data, session, persist, notify }) {
   const mesFactures = (data.facturesPartenaire || []).filter((f) => f.partenaireId === session.id)
     .sort((a, b) => new Date(b.creeeLe) - new Date(a.creeeLe));
   /*
+   * Ce que le partenaire doit encore à l'entreprise. Il le voit d'où il travaille : jusqu'ici,
+   * ses factures affichaient un total sans jamais dire si elles avaient été payées, et il devait
+   * appeler pour savoir où il en était.
+   */
+  const resteARegler = mesFactures.reduce((s, f) => s + resteDuFacture(f), 0);
+  /*
    * Le répertoire des clients du partenaire, reconstitué depuis ses colis : chaque destinataire
    * rencontré, avec ce qu'il a reçu et quand. Le partenaire n'a rien à ressaisir — il retrouve
    * simplement à qui il a déjà expédié.
@@ -4676,6 +4717,10 @@ function PartnerDashboard({ data, session, persist, notify }) {
         <StatCard label="Prêts à expédier" value={prets.length} icon={Plane} tint="#16A163" />
         <StatCard label="Coût sur la période" value={fmt(coutPeriode, devise)} icon={Receipt} tint="#0EA5E9" />
         <StatCard label="Vérifié, à facturer" value={fmt(enAttenteDeFacture, devise)} icon={Clock} tint="#D6A22E" />
+        <StatCard label="Reste à régler" value={fmt(resteARegler, devise)} icon={Wallet}
+          tint={resteARegler > 0.005 ? "#D6453F" : "#16A163"}
+          trend={resteARegler > 0.005 ? "sur vos factures" : "vous êtes à jour"}
+          trendColor={resteARegler > 0.005 ? "var(--warn-fg)" : "var(--ok-fg)"} />
       </div>
 
       {/*
@@ -4896,11 +4941,19 @@ function PartnerDashboard({ data, session, persist, notify }) {
         </div>
       ) : (
         <div style={{ display: "grid", gap: 10, marginBottom: 20 }}>
-          {mesFactures.map((f) => (
+          {mesFactures.map((f) => {
+            const statut = statutFacturePartenaire(f);
+            const st = STATUT_FACTURE_STYLE[statut];
+            const versements = reglementsFacture(f);
+            const reste = resteDuFacture(f);
+            return (
             <div key={f.id} style={{ background: "var(--surface)", borderRadius: 12, border: "1px solid var(--border)", padding: "14px 16px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{f.numero}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{f.numero}</span>
+                    <span style={{ background: st.bg, color: st.fg, padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>{statut}</span>
+                  </div>
                   <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
                     {new Date(f.creeeLe).toLocaleDateString("fr-FR")} · {(f.trackings || []).length} colis
                     {/* La facture n'existe que parce qu'un agent a vérifié chaque colis : le dire
@@ -4909,8 +4962,30 @@ function PartnerDashboard({ data, session, persist, notify }) {
                     {f.modifieeLe ? ` · corrigée le ${new Date(f.modifieeLe).toLocaleDateString("fr-FR")}` : ""}
                   </div>
                 </div>
-                <strong style={{ fontSize: 17, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif" }}>{fmt(Number(f.total) || 0, f.devise)}</strong>
+                <div style={{ textAlign: "right" }}>
+                  <strong style={{ fontSize: 17, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif" }}>{fmt(Number(f.total) || 0, f.devise)}</strong>
+                  {statut !== "Impayée" && (
+                    <div style={{ fontSize: 11.5, fontWeight: 700, marginTop: 2, color: reste > 0.005 ? "var(--warn-fg)" : "var(--ok-fg)" }}>
+                      {reste > 0.005 ? `reste ${fmt(reste, f.devise)}` : "réglée"}
+                    </div>
+                  )}
+                </div>
               </div>
+              {/*
+                Le partenaire retrouve ici chaque versement tel que l'entreprise l'a enregistré :
+                le montant, le mode, la date, et l'agent qui l'a reçu. C'est ce qui lui permet de
+                rapprocher ses propres écritures sans avoir à téléphoner.
+              */}
+              {versements.length > 0 && (
+                <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)", display: "grid", gap: 5 }}>
+                  {versements.map((r) => (
+                    <div key={r.id} style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12, color: "var(--muted)" }}>
+                      <span>Versé le {new Date(r.date).toLocaleDateString("fr-FR")} · {r.mode || MODE_ESPECES}{r.reference ? ` · réf. ${r.reference}` : ""}{r.par ? ` · reçu par ${r.par}` : ""}</span>
+                      <span style={{ color: "var(--ok-fg)", fontWeight: 700, whiteSpace: "nowrap" }}>− {fmt(Number(r.montant) || 0, f.devise)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
               <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)", fontSize: 12, color: "var(--muted)", lineHeight: 1.7 }}>
                 {(f.trackings || []).map((t) => {
                   const c = colisPartenaire.find((x) => x.tracking === t);
@@ -4923,7 +4998,8 @@ function PartnerDashboard({ data, session, persist, notify }) {
                 })}
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
       ))}
 
@@ -5510,8 +5586,19 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
           // endroit d'où l'on peut les vérifier, et rien d'autre ne signale qu'il y en a.
           const aVerifier = (data.colis || []).filter((c) => estColisPartenaire(c)
             && statutValidationPartenaire(c) === "En attente" && c.status !== "Annulé").length;
+          /*
+           * Les factures partenaires encore dues sont signalées ici pour la même raison que les
+           * colis à vérifier : rien d'autre dans l'application ne dit qu'un partenaire doit de
+           * l'argent. Le compte, et non la somme — chaque partenaire a sa propre devise, et les
+           * additionner ne voudrait rien dire.
+           */
+          const impayees = (data.facturesPartenaire || []).filter((f) => statutFacturePartenaire(f) !== "Réglée").length;
+          const signaux = [
+            aVerifier > 0 ? `${aVerifier} colis à vérifier` : "",
+            impayees > 0 ? `${impayees} facture${impayees > 1 ? "s" : ""} à encaisser` : "",
+          ].filter(Boolean).join(" · ");
           return <Card icon={Truck} tint="#0EA5E9" title="Partenaires"
-            desc={`Tarif de chaque partenaire, identité de ses étiquettes, vérification de ses colis et facturation.${aVerifier > 0 ? ` — ${aVerifier} colis à vérifier` : ""}`}
+            desc={`Tarif de chaque partenaire, identité de ses étiquettes, vérification de ses colis et facturation.${signaux ? ` — ${signaux}` : ""}`}
             onClick={() => setSub("partenaires")} />;
         })()}
         <Card icon={LayoutDashboard} tint="#3D63FF" title="Performance des agents" desc="Colis enregistrés, chiffre d’affaires et paiements encaissés, par agent." onClick={() => setSub("performance")} />
@@ -17414,12 +17501,81 @@ async function construireFacturePartenaireDoc(facture, partenaire, colisFactures
   y += 4;
   doc.setDrawColor(...LINE); doc.line(W / 2, y, W - M, y);
   y += 8;
-  doc.setFont(undefined, "bold"); doc.setFontSize(12); doc.setTextColor(...INK);
-  doc.text("TOTAL À RÉGLER", W / 2, y);
-  doc.setFontSize(15); doc.setTextColor(...RED);
-  doc.text(fmt(Number(facture.total) || 0, facture.devise), W - M, y, { align: "right" });
+  /*
+   * Le pied de facture dit toujours deux choses distinctes : ce qui a été facturé, et ce qui
+   * reste dû. Tant qu'aucun versement n'est enregistré, les deux se confondent et une seule
+   * ligne suffit. Dès qu'un partenaire a versé quelque chose, la facture réimprimée doit le
+   * porter — sans cela, le même document réclamerait une somme déjà payée.
+   */
+  const versementsPdf = reglementsFacture(facture);
+  const totalFacture = Number(facture.total) || 0;
+  if (versementsPdf.length === 0) {
+    doc.setFont(undefined, "bold"); doc.setFontSize(12); doc.setTextColor(...INK);
+    doc.text("TOTAL À RÉGLER", W / 2, y);
+    doc.setFontSize(15); doc.setTextColor(...RED);
+    doc.text(fmt(totalFacture, facture.devise), W - M, y, { align: "right" });
+  } else {
+    const reste = resteDuFacture(facture);
+    doc.setFont(undefined, "bold"); doc.setFontSize(10.5); doc.setTextColor(...INK);
+    doc.text("TOTAL FACTURÉ", W / 2, y);
+    doc.setTextColor(...INK);
+    doc.text(fmt(totalFacture, facture.devise), W - M, y, { align: "right" });
+
+    doc.setFont(undefined, "normal"); doc.setFontSize(9);
+    versementsPdf.forEach((r) => {
+      y += 6;
+      if (y > 268) { doc.addPage(); y = 24; }
+      doc.setTextColor(...MUTED);
+      /*
+       * Le libellé s'arrête là où commence le montant — dont on mesure la largeur réelle plutôt
+       * que de réserver une marge au jugé, qui gaspillait la place utile à la référence.
+       */
+      const montantTexte = `- ${fmt(Number(r.montant) || 0, facture.devise)}`;
+      const largeurLibelle = (W - M) - (W / 2) - doc.getTextWidth(montantTexte) - 6;
+      const debut = `Versé le ${new Date(r.date).toLocaleDateString("fr-FR")} — ${r.mode || MODE_ESPECES}`;
+      /*
+       * La référence est la seule partie de longueur imprévisible — un numéro de virement peut
+       * être très long. Elle est raccourcie jusqu'à tenir, et abandonnée si même quelques
+       * caractères ne rentrent pas : mieux vaut pas de référence du tout qu'une référence coupée
+       * en deux, qui ne permet de retrouver aucun versement.
+       */
+      let libelle = debut;
+      const ref = String(r.reference || "");
+      if (ref) {
+        // On mesure exactement la chaîne qui sera imprimée, points de suite compris : mesurer une
+        // variante plus courte laissait passer un libellé qui débordait ensuite.
+        const avecRef = (t) => `${debut} (réf. ${t})`;
+        if (doc.getTextWidth(avecRef(ref)) <= largeurLibelle) {
+          libelle = avecRef(ref);
+        } else {
+          let court = ref;
+          while (court.length > 4 && doc.getTextWidth(avecRef(`${court}…`)) > largeurLibelle) court = court.slice(0, -1);
+          if (court.length > 4 && doc.getTextWidth(avecRef(`${court}…`)) <= largeurLibelle) libelle = avecRef(`${court}…`);
+        }
+      }
+      doc.text(doc.splitTextToSize(libelle, largeurLibelle)[0], W / 2, y);
+      doc.text(montantTexte, W - M, y, { align: "right" });
+    });
+
+    y += 4;
+    doc.setDrawColor(...LINE); doc.line(W / 2, y, W - M, y);
+    y += 8;
+    doc.setFont(undefined, "bold"); doc.setFontSize(12);
+    if (reste <= 0.005) {
+      doc.setTextColor(22, 161, 99);
+      doc.text("FACTURE RÉGLÉE", W / 2, y);
+      doc.setFontSize(15);
+      doc.text(fmt(0, facture.devise), W - M, y, { align: "right" });
+    } else {
+      doc.setTextColor(...INK);
+      doc.text("RESTE À RÉGLER", W / 2, y);
+      doc.setFontSize(15); doc.setTextColor(...RED);
+      doc.text(fmt(reste, facture.devise), W - M, y, { align: "right" });
+    }
+  }
 
   y += 14;
+  if (y > 268) { doc.addPage(); y = 24; }
   doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
   doc.text(doc.splitTextToSize(
     "Montants calculés au tarif convenu avec le partenaire, sur des colis vérifiés et pesés par nos agents. "
@@ -17531,6 +17687,15 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
    * la suivante en prendra un nouveau, pour qu'aucune facture ne circule en deux versions.
    */
   function rouvrirFacture(facture) {
+    /*
+     * Une facture déjà réglée, même en partie, ne se rouvre pas : la rouvrir la supprime, et
+     * l'argent reçu disparaîtrait avec elle sans laisser de trace. L'agent doit d'abord annuler
+     * les versements — un geste explicite, tracé au journal — avant de pouvoir toucher au reste.
+     */
+    if (reglementsFacture(facture).length > 0) {
+      notify?.(`Facture ${facture.numero} déjà réglée en partie — annulez d’abord ses versements`);
+      return;
+    }
     const inclus = new Set(facture.trackings || []);
     persist({
       ...data,
@@ -17539,6 +17704,69 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
       activityLog: pushActivity(data, session, "Facture partenaire rouverte", `${facture.numero} — ${inclus.size} colis rendus à la facturation`),
     });
     notify?.(`Facture ${facture.numero} rouverte — ses colis reviennent à facturer`);
+  }
+
+  /*
+   * Versement d'un partenaire sur l'une de ses factures.
+   *
+   * C'est le seul endroit de l'application où l'entreprise constate de l'argent reçu d'un
+   * partenaire : ses colis, eux, ne portent aucun encaissement — elle ne facture pas le client
+   * final. Le versement est plafonné au reste dû, pour la même raison qu'au comptoir : un montant
+   * saisi de travers ne doit pas créer une facture réglée à 150 %, qu'aucun écran ne saurait plus
+   * expliquer. Il ne touche ni aux recettes des colis, ni à la caisse des agents : ces deux
+   * comptes ne suivent que ce qui est encaissé auprès des clients de l'entreprise.
+   *
+   * La facture est relue ici par son identifiant, dans les données à jour, et non reprise de la
+   * fenêtre ouverte par l'agent — même protection qu'au comptoir : si quelqu'un d'autre vient de
+   * l'encaisser, le reste dû relu vaut zéro et l'opération est refusée au lieu d'enregistrer un
+   * versement déjà reçu.
+   */
+  function encaisserFacture(factureId, montant, mode, reference) {
+    const facture = facturesPartenaire.find((f) => f.id === factureId);
+    if (!facture) return;
+    const reste = resteDuFacture(facture);
+    const demande = Number(String(montant).replace(",", ".")) || 0;
+    if (demande <= 0) { notify?.("Montant invalide — indiquez ce que le partenaire a versé"); return; }
+    if (reste <= 0.005) { notify?.(`Facture ${facture.numero} déjà soldée`); return; }
+    const applique = +Math.min(demande, reste).toFixed(2);
+    const reglement = {
+      id: `rp${Date.now()}`,
+      montant: applique,
+      mode: mode || MODE_ESPECES,
+      reference: (reference || "").trim(),
+      date: new Date().toISOString(),
+      par: monNom,
+    };
+    const majFacture = { ...facture, reglements: [...reglementsFacture(facture), reglement] };
+    persist({
+      ...data,
+      facturesPartenaire: facturesPartenaire.map((f) => (f.id === factureId ? majFacture : f)),
+      activityLog: pushActivity(data, session, "Règlement partenaire encaissé",
+        `${facture.numero} — ${fmt(applique, facture.devise)} (${reglement.mode})${reglement.reference ? ` réf. ${reglement.reference}` : ""} — reste ${fmt(resteDuFacture(majFacture), facture.devise)}`),
+    });
+    notify?.(applique < demande
+      ? `Versement ramené au reste dû (${fmt(applique, facture.devise)}) — pensez à rendre la monnaie`
+      : `${fmt(applique, facture.devise)} encaissés sur ${facture.numero}`);
+  }
+
+  /*
+   * Annulation d'un versement — une erreur de saisie, un chèque revenu impayé. Le versement est
+   * retiré, jamais modifié sur place : le journal doit pouvoir montrer ce qui a été enregistré,
+   * puis repris, et par qui.
+   */
+  function annulerReglement(factureId, reglementId) {
+    const facture = facturesPartenaire.find((f) => f.id === factureId);
+    if (!facture) return;
+    const r = reglementsFacture(facture).find((x) => x.id === reglementId);
+    if (!r) return;
+    const majFacture = { ...facture, reglements: reglementsFacture(facture).filter((x) => x.id !== reglementId) };
+    persist({
+      ...data,
+      facturesPartenaire: facturesPartenaire.map((f) => (f.id === factureId ? majFacture : f)),
+      activityLog: pushActivity(data, session, "Règlement partenaire annulé",
+        `${facture.numero} — ${fmt(Number(r.montant) || 0, facture.devise)} (${r.mode || MODE_ESPECES}) enregistrés par ${r.par || "?"} — reste ${fmt(resteDuFacture(majFacture), facture.devise)}`),
+    });
+    notify?.(`Versement de ${fmt(Number(r.montant) || 0, facture.devise)} annulé sur ${facture.numero}`);
   }
 
   async function imprimerFacture(facture) {
@@ -17621,6 +17849,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
           partenaire={partenaire} aFacturer={aFacturer} factures={sesFactures}
           colis={data.colis || []} onCreerFacture={creerFacture} onImprimer={imprimerFacture}
           onCorriger={corrigerMontant} onRouvrir={rouvrirFacture}
+          onEncaisser={encaisserFacture} onAnnulerReglement={annulerReglement}
         />
       )}
     </div>
@@ -17988,13 +18217,18 @@ function VerificationColisPartenaire({ partenaire, colis, onValider }) {
 }
 
 /** Regroupement des colis vérifiés en une facture unique, et historique des factures émises. */
-function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreerFacture, onImprimer, onCorriger, onRouvrir }) {
+function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreerFacture, onImprimer, onCorriger, onRouvrir, onEncaisser, onAnnulerReglement }) {
   const devise = reglagesPartenaire(partenaire).tarif.devise;
   const total = aFacturer.reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0);
   const [confirmation, setConfirmation] = useState(false);
   const [aRouvrir, setARouvrir] = useState(null);
   const [enCorrection, setEnCorrection] = useState(null);
   const [montant, setMontant] = useState("");
+  const [aEncaisser, setAEncaisser] = useState(null);
+  const [reglementAAnnuler, setReglementAAnnuler] = useState(null);
+  // Ce que le partenaire doit encore, toutes factures confondues : le chiffre qu'on vient chercher.
+  const soldeDu = factures.reduce((s, f) => s + resteDuFacture(f), 0);
+  const impayees = factures.filter((f) => statutFacturePartenaire(f) !== "Réglée").length;
 
   return (
     <div>
@@ -18059,32 +18293,89 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
         )}
       </div>
 
-      <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 10 }}>Factures émises</div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14 }}>Factures émises</div>
+        {/*
+          Le solde du partenaire est porté en tête de la liste : c'est la question qu'on se pose
+          en ouvrant cet onglet — combien nous doit-il encore — et la parcourir facture par
+          facture pour l'additionner de tête était la seule façon d'y répondre.
+        */}
+        {factures.length > 0 && (
+          <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
+            {soldeDu > 0.005 ? (
+              <>Reste dû : <strong style={{ color: "var(--danger-fg)", fontSize: 15 }}>{fmt(soldeDu, devise)}</strong> sur {impayees} facture{impayees > 1 ? "s" : ""}</>
+            ) : (
+              <span style={{ color: "var(--ok-fg)", fontWeight: 700 }}>Toutes les factures sont réglées</span>
+            )}
+          </div>
+        )}
+      </div>
       {factures.length === 0 ? (
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
           Aucune facture émise pour ce partenaire.
         </div>
       ) : (
         <div style={{ display: "grid", gap: 10 }}>
-          {factures.map((f) => (
-            <div key={f.id} style={{ background: "var(--surface)", borderRadius: 12, border: "1px solid var(--border)", padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{f.numero}</div>
-                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
-                  {new Date(f.creeeLe).toLocaleDateString("fr-FR")} · {(f.trackings || []).length} colis{f.creePar ? ` · par ${f.creePar}` : ""}
+          {factures.map((f) => {
+            const statut = statutFacturePartenaire(f);
+            const st = STATUT_FACTURE_STYLE[statut];
+            const regle = totalRegleFacture(f);
+            const reste = resteDuFacture(f);
+            const versements = reglementsFacture(f);
+            return (
+            <div key={f.id} style={{ background: "var(--surface)", borderRadius: 12, border: "1px solid var(--border)", padding: "14px 16px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{f.numero}</span>
+                    <span style={{ background: st.bg, color: st.fg, padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>{statut}</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
+                    {new Date(f.creeeLe).toLocaleDateString("fr-FR")} · {(f.trackings || []).length} colis{f.creePar ? ` · par ${f.creePar}` : ""}
+                  </div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+                  <div style={{ textAlign: "right" }}>
+                    <strong style={{ fontSize: 16, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif" }}>{fmt(Number(f.total) || 0, f.devise)}</strong>
+                    {statut !== "Impayée" && (
+                      <div style={{ fontSize: 11.5, color: reste > 0.005 ? "var(--warn-fg)" : "var(--ok-fg)", fontWeight: 700, marginTop: 2 }}>
+                        {reste > 0.005 ? `${fmt(regle, f.devise)} reçus · reste ${fmt(reste, f.devise)}` : "Soldée"}
+                      </div>
+                    )}
+                  </div>
+                  {reste > 0.005 && (
+                    <button onClick={() => setAEncaisser(f)} style={{ display: "flex", alignItems: "center", gap: 6, background: "#16A163", border: "none", color: "#fff", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                      <DollarSign size={14} /> Encaisser
+                    </button>
+                  )}
+                  <button onClick={() => onImprimer(f)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                    <Printer size={14} /> PDF
+                  </button>
+                  <button onClick={() => setARouvrir(f)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "1.5px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                    <RefreshCw size={14} /> Rouvrir
+                  </button>
                 </div>
               </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
-                <strong style={{ fontSize: 16, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif" }}>{fmt(Number(f.total) || 0, f.devise)}</strong>
-                <button onClick={() => onImprimer(f)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
-                  <Printer size={14} /> PDF
-                </button>
-                <button onClick={() => setARouvrir(f)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "1.5px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
-                  <RefreshCw size={14} /> Rouvrir
-                </button>
-              </div>
+              {versements.length > 0 && (
+                <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)", display: "grid", gap: 6 }}>
+                  {versements.map((r) => (
+                    <div key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 12, color: "var(--muted)" }}>
+                      <span>
+                        <strong style={{ color: "var(--text)" }}>{fmt(Number(r.montant) || 0, f.devise)}</strong>
+                        {" — "}{r.mode || MODE_ESPECES}{r.reference ? ` · réf. ${r.reference}` : ""}
+                        {" · "}{new Date(r.date).toLocaleDateString("fr-FR")}{r.par ? ` · reçu par ${r.par}` : ""}
+                      </span>
+                      <button onClick={() => setReglementAAnnuler({ facture: f, reglement: r })}
+                        style={{ background: "none", border: "none", color: "var(--danger-fg)", fontSize: 11.5, fontWeight: 600, cursor: "pointer", padding: 0 }}>
+                        Annuler
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
@@ -18099,7 +18390,20 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
         />
       )}
 
-      {aRouvrir && (
+      {/*
+        Une facture déjà réglée, même partiellement, ne se rouvre pas : on le dit ici plutôt que
+        de laisser l'agent confirmer une action qui sera ensuite refusée.
+      */}
+      {aRouvrir && (reglementsFacture(aRouvrir).length > 0 ? (
+        <ConfirmerAction
+          titre="Facture déjà réglée"
+          message={`${aRouvrir.numero} porte ${reglementsFacture(aRouvrir).length} versement${reglementsFacture(aRouvrir).length > 1 ? "s" : ""}, pour ${fmt(totalRegleFacture(aRouvrir), aRouvrir.devise)}.`}
+          consequence="Rouvrir une facture la supprime : l’argent déjà reçu ne serait plus rattaché à rien. Annulez d’abord ses versements, un par un, puis rouvrez-la."
+          libelleAction="J’ai compris"
+          onConfirmer={() => setARouvrir(null)}
+          onAnnuler={() => setARouvrir(null)}
+        />
+      ) : (
         <ConfirmerAction
           titre="Rouvrir cette facture ?"
           message={`${aRouvrir.numero} — ${(aRouvrir.trackings || []).length} colis, ${fmt(Number(aRouvrir.total) || 0, aRouvrir.devise)}.`}
@@ -18108,8 +18412,94 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
           onConfirmer={() => { const f = aRouvrir; setARouvrir(null); onRouvrir(f); }}
           onAnnuler={() => setARouvrir(null)}
         />
+      ))}
+
+      {aEncaisser && (
+        <EncaisserFacturePartenaireModal
+          facture={aEncaisser}
+          partenaire={partenaire}
+          onEncaisser={(m, mode, ref) => { onEncaisser(aEncaisser.id, m, mode, ref); setAEncaisser(null); }}
+          onClose={() => setAEncaisser(null)}
+        />
+      )}
+
+      {reglementAAnnuler && (
+        <ConfirmerAction
+          titre="Annuler ce versement ?"
+          message={`${fmt(Number(reglementAAnnuler.reglement.montant) || 0, reglementAAnnuler.facture.devise)} enregistrés le ${new Date(reglementAAnnuler.reglement.date).toLocaleDateString("fr-FR")}${reglementAAnnuler.reglement.par ? ` par ${reglementAAnnuler.reglement.par}` : ""}.`}
+          consequence="Le versement est retiré de la facture, qui redevient due d’autant. L’opération est inscrite au journal d’activité. Si l’argent a bien été reçu, ne l’annulez pas."
+          libelleAction="Annuler le versement"
+          onConfirmer={() => { const x = reglementAAnnuler; setReglementAAnnuler(null); onAnnulerReglement(x.facture.id, x.reglement.id); }}
+          onAnnuler={() => setReglementAAnnuler(null)}
+        />
       )}
     </div>
+  );
+}
+
+/**
+ * Encaissement d'un versement de partenaire sur une facture.
+ *
+ * Le montant est pré-rempli avec le reste dû — le cas courant est le règlement complet — mais
+ * reste modifiable : un partenaire qui verse un acompte doit pouvoir le faire enregistrer le jour
+ * où il l'apporte, et non le jour où il solde. Le mode et la référence sont conservés parce que
+ * c'est ce qu'on cherche quand un versement est contesté trois semaines plus tard.
+ */
+function EncaisserFacturePartenaireModal({ facture, partenaire, onEncaisser, onClose }) {
+  const reste = resteDuFacture(facture);
+  const [montant, setMontant] = useState(String(reste));
+  const [mode, setMode] = useState(MODE_ESPECES);
+  const [reference, setReference] = useState("");
+  const saisi = Number(String(montant).replace(",", ".")) || 0;
+  const applique = Math.min(Math.max(saisi, 0), reste);
+  const nomPartenaire = reglagesPartenaire(partenaire).nomCommercial
+    || `${partenaire?.prenom || ""} ${partenaire?.nom || ""}`.trim();
+
+  return (
+    <Modal title="Encaisser un versement" onClose={onClose} niveau={1} saisieEnCours={saisi > 0}>
+      <div style={{ background: "var(--surface2)", borderRadius: 10, padding: "12px 14px", marginBottom: 16 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{facture.numero}</div>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3, lineHeight: 1.55 }}>
+          {nomPartenaire || "Partenaire"} · total {fmt(Number(facture.total) || 0, facture.devise)}
+          {totalRegleFacture(facture) > 0.005 && <> · déjà reçu {fmt(totalRegleFacture(facture), facture.devise)}</>}
+          <br />
+          Reste dû <strong style={{ color: "var(--text)" }}>{fmt(reste, facture.devise)}</strong>
+        </div>
+      </div>
+
+      <Field label={`Montant versé (${facture.devise})`}>
+        <input value={montant} onChange={(e) => setMontant(e.target.value)} autoFocus inputMode="decimal" style={inputStyle} />
+      </Field>
+      {saisi > reste + 0.005 && (
+        <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "10px 12px", marginBottom: 14, fontSize: 12.5, color: "var(--text)", lineHeight: 1.5 }}>
+          Le versement sera ramené à {fmt(reste, facture.devise)} — une facture ne peut pas être réglée
+          au-delà de ce qu’elle porte. Pensez à rendre la différence.
+        </div>
+      )}
+
+      <Field label="Mode de règlement">
+        <select value={mode} onChange={(e) => setMode(e.target.value)} style={inputStyle}>
+          {MODES_PAIEMENT.map((m) => <option key={m} value={m}>{m}</option>)}
+        </select>
+      </Field>
+
+      <Field label="Référence (facultatif)">
+        <input value={reference} onChange={(e) => setReference(e.target.value)} style={inputStyle}
+          placeholder="N° de transaction, de virement, de chèque…" />
+      </Field>
+
+      <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+        <button
+          disabled={applique <= 0}
+          onClick={() => onEncaisser(montant, mode, reference)}
+          style={{ flex: 1, background: applique > 0 ? "#16A163" : "var(--surface2)", color: applique > 0 ? "#fff" : "var(--muted)", border: "none", borderRadius: 8, padding: "12px 0", fontSize: 13.5, fontWeight: 700, cursor: applique > 0 ? "pointer" : "not-allowed" }}>
+          Encaisser {applique > 0 ? fmt(applique, facture.devise) : ""}
+        </button>
+        <button onClick={onClose} style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "12px 20px", fontSize: 13, cursor: "pointer" }}>
+          Annuler
+        </button>
+      </div>
+    </Modal>
   );
 }
 

@@ -637,8 +637,26 @@ function libelleCategoriePrix(c, ...devises) {
   const unite = c.type === "kg" ? "kg" : "unité";
   return `${c.emoji} ${c.nom} (${fmtGNF(gnf)}${equiv ? ` ~ ${equiv}` : ""}/${unite})`;
 }
+/**
+ * Colis déposé par un partenaire.
+ *
+ * Un partenaire n'est pas un agent : il a ses propres clients, fixe lui-même ses prix et les
+ * facture directement. L'application ne connaît donc ni catégorie, ni tarif, ni commission sur
+ * ces colis — elle sert uniquement à tracer qui expédie quoi, et à vérifier le contenu avant
+ * le départ de chaque voyage. Le rattachement à un partenaire suffit à le désigner comme tel.
+ */
+function estColisPartenaire(colis) {
+  return !!colis?.partenaireId;
+}
+
 /** Calcule la commission d’agence gagnée sur un colis, en EUR, selon les taux (globaux ou par catégorie). */
 function calcCommission(colis, commissionConfig, categories) {
+  /*
+   * Aucune commission sur un colis partenaire. Sans cette sortie, un colis sans prix produisait
+   * malgré tout une commission calculée sur son poids (2 €/kg par défaut) : de l'argent inventé,
+   * qui gonflait les statistiques d'agence et la comptabilité.
+   */
+  if (estColisPartenaire(colis)) return 0;
   const cfg = commissionConfig || { parKg: 2, parUnite: 5 };
   if (!colis.produits || colis.produits.length === 0) {
     return (Number(colis.poids) || 0) * cfg.parKg;
@@ -1638,7 +1656,7 @@ function App() {
             </div>
           )}
           <main style={{ flex: 1, padding: isMobile ? "16px 14px" : "28px 32px", overflowY: "auto", minWidth: 0 }}>
-            {view === "dashboard" && (session.role === "Partenaire" ? <PartnerDashboard data={data} session={session} /> : <Dashboard data={data} session={session} onNavigate={setView} onNouveauColis={() => { setView("colis"); setOuvrirFormulaireColis((n) => n + 1); }} />)}
+            {view === "dashboard" && (session.role === "Partenaire" ? <PartnerDashboard data={data} session={session} persist={persist} notify={notify} /> : <Dashboard data={data} session={session} onNavigate={setView} onNouveauColis={() => { setView("colis"); setOuvrirFormulaireColis((n) => n + 1); }} />)}
             {view === "colis" && <ColisView data={data} persist={persist} session={session} notify={notify} t={t} initialQuery={colisInitialQuery} ouvrirFormulaire={ouvrirFormulaireColis} />}
             {view === "centreclients" && (effectivePermission(session, "espaceclient.gerer")
               ? <CentreClientsPage data={data} persist={persist} notify={notify} session={session} />
@@ -4299,8 +4317,17 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
 
 
 Dashboard = memo(Dashboard);
-function PartnerDashboard({ data, session }) {
+/**
+ * Espace Partenaire.
+ *
+ * Un partenaire fixe ses prix et facture ses clients lui-même : l'application ne connaît ni son
+ * tarif, ni sa marge. Cet écran ne montre donc aucun montant — seulement ce qu'il a confié à
+ * l'entreprise (client, articles, poids) et où en est chaque envoi. Il lui sert aussi à
+ * enregistrer ses colis lui-même, sans passer par le comptoir.
+ */
+function PartnerDashboard({ data, session, persist, notify }) {
   const [periode, setPeriode] = useState("mois");
+  const [showForm, setShowForm] = useState(false);
   const colisPartenaire = data.colis.filter((c) => c.partenaireId === session.id);
   const now = new Date();
   const inPeriod = (dateStr) => {
@@ -4310,43 +4337,69 @@ function PartnerDashboard({ data, session }) {
     return true;
   };
   const scoped = colisPartenaire.filter((c) => c.status !== "Annulé" && inPeriod(c.createdAt));
-  const poidsTotal = scoped.reduce((s, c) => s + c.poids, 0);
-  const commissionTotale = scoped.reduce((s, c) => s + calcCommission(c, data.commissionConfig, data.categories), 0);
-  const recus = colisPartenaire.filter((c) => c.paye > 0 && inPeriod(c.createdAt));
+  const poidsTotal = scoped.reduce((s, c) => s + (Number(c.poids) || 0), 0);
+  const articlesTotal = scoped.reduce((s, c) => s + nombreArticles(c), 0);
+
+  async function enregistrerColis(colis) {
+    const resultat = await persist({
+      ...data,
+      colis: [colis, ...data.colis],
+      activityLog: pushActivity(data, session, "Colis partenaire créé", `${colis.tracking} — ${colis.destinataire}`),
+    });
+    notify?.(resultat?.queued
+      ? `Colis ${colis.tracking} en attente de synchronisation — ne fermez pas cette page avant confirmation`
+      : `Colis ${colis.tracking} enregistré`);
+    setShowForm(false);
+  }
 
   return (
     <div>
-      <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: "0 0 4px" }}>Espace Partenaire</h1>
-      <p style={{ color: "var(--muted)", fontSize: 13.5, marginTop: 0, marginBottom: 18 }}>Bienvenue {session.prenom} {session.nom} — suivi de vos colis et de vos commissions.</p>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap", marginBottom: 18 }}>
+        <div style={{ minWidth: 0, flex: "1 1 240px" }}>
+          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: "0 0 4px" }}>Espace Partenaire</h1>
+          <p style={{ color: "var(--muted)", fontSize: 13.5, margin: 0 }}>Bienvenue {session.prenom} {session.nom} — enregistrez vos colis et suivez leur acheminement.</p>
+        </div>
+        <button onClick={() => setShowForm(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>
+          <Plus size={17} /> Enregistrer un colis
+        </button>
+      </div>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+      <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 16px", marginBottom: 18 }}>
+        <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
+          Vos prix et vos factures restent les vôtres : l’application ne les connaît pas. L’enregistrement sert
+          à tracer le client, les articles et le poids, et à vérifier le contenu avant le départ de chaque voyage.
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
         {[["semaine", "Cette semaine"], ["mois", "Ce mois"], ["tout", "Tout"]].map(([k, label]) => (
           <button key={k} onClick={() => setPeriode(k)} style={{ padding: "7px 14px", borderRadius: 20, border: "1.5px solid " + (periode === k ? "var(--brand-solid)" : "var(--border)"), background: periode === k ? "var(--brand-solid)" : "var(--surface)", color: periode === k ? "#fff" : "var(--muted)", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>{label}</button>
         ))}
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 14, marginBottom: 24 }}>
-        <StatCard label="Colis suivis" value={scoped.length} icon={Package} tint="#3D63FF" />
+        <StatCard label="Colis enregistrés" value={scoped.length} icon={Package} tint="#3D63FF" />
         <StatCard label="Poids total" value={`${poidsTotal.toFixed(1)} kg`} icon={Truck} tint="#8B5CF6" />
-        <StatCard label="Commission gagnée" value={fmt(commissionTotale, "EUR")} icon={DollarSign} tint="#16A163" />
+        <StatCard label="Articles" value={articlesTotal} icon={FileStack} tint="#16A163" />
       </div>
 
       <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 10 }}>Vos colis</div>
       <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", marginBottom: 20 }}>
         <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", minWidth: 560, borderCollapse: "collapse" }}>
-          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Destinataire", "Statut", "Poids", "Commission"].map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
+        <table style={{ width: "100%", minWidth: 620, borderCollapse: "collapse" }}>
+          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Client", "Destination", "Articles", "Poids", "Statut"].map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
           <tbody>
-            {colisPartenaire.length === 0 && <tr><td colSpan={5} style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucun colis ne vous est encore rattaché.</td></tr>}
+            {colisPartenaire.length === 0 && <tr><td colSpan={6} style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucun colis enregistré pour l’instant — utilisez « Enregistrer un colis ».</td></tr>}
             {colisPartenaire.map((c) => {
               const st = STATUS_STYLE[c.status];
               return (
                 <tr key={c.tracking} style={{ borderTop: "1px solid var(--border)" }}>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.tracking}</td>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{c.destinataire}</td>
-                  <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}><span style={{ background: st?.bg, color: st?.fg, padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>{c.status}</span></td>
+                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{routeLabel(c.pays, c.direction) || "—"}</td>
+                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{nombreArticles(c)}</td>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.poids} kg</td>
-                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--ok-fg)", fontWeight: 600, whiteSpace: "nowrap" }}>{fmt(calcCommission(c, data.commissionConfig, data.categories), "EUR")}</td>
+                  <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}><span style={{ background: st?.bg, color: st?.fg, padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>{c.status}</span></td>
                 </tr>
               );
             })}
@@ -4355,18 +4408,170 @@ function PartnerDashboard({ data, session }) {
         </div>
       </div>
 
-      <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 10 }}>Historique des paiements reçus par vos colis</div>
-      <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", padding: 16 }}>
-        {recus.length === 0 ? (
-          <div style={{ color: "var(--muted)", fontSize: 13 }}>Aucun paiement enregistré sur cette période.</div>
-        ) : recus.flatMap((c) => (c.paiements || []).map((p) => (
-          <div key={p.id} style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: "var(--text)", padding: "6px 0", borderTop: "1px solid var(--border)" }}>
-            <span>{c.tracking} — {p.deviseSaisie ? fmt(p.montant, p.deviseSaisie) : fmt(p.montant, "EUR")}</span>
-            <span style={{ color: "var(--muted)" }}>{new Date(p.date).toLocaleDateString("fr-FR")}</span>
-          </div>
-        )))}
-      </div>
+      {showForm && (
+        <ColisPartenaireForm
+          onClose={() => setShowForm(false)}
+          onSave={enregistrerColis}
+          existingColis={data.colis}
+          session={session}
+          partenaires={(data.users || []).filter((u) => u.role === "Partenaire")}
+          partenaireImpose={session.id}
+        />
+      )}
     </div>
+  );
+}
+
+/** Nombre d'articles d'un colis (somme des quantités), au moins 1 pour un colis sans détail. */
+function nombreArticles(colis) {
+  return (colis.produits || []).reduce((s, p) => s + (Number(p.quantite) || 1), 0) || 1;
+}
+
+/**
+ * Enregistrement d'un colis pour le compte d'un partenaire.
+ *
+ * Volontairement bien plus court que le formulaire de colis ordinaire : ni catégorie, ni tarif,
+ * ni acompte, ni remise — un partenaire facture son client lui-même et l'entreprise n'a pas à
+ * connaître ces montants. Ne restent que les informations nécessaires au transport et au
+ * contrôle avant départ : qui est le client, ce qu'il envoie, et combien ça pèse.
+ *
+ * Le même formulaire sert au partenaire (son compte est alors imposé) et à l'agent du comptoir
+ * qui enregistre à sa place (il choisit le partenaire dans la liste).
+ */
+function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenaires, partenaireImpose }) {
+  const [partenaireId, setPartenaireId] = useState(partenaireImpose || "");
+  const [clientPrenom, setClientPrenom] = useState("");
+  const [clientNom, setClientNom] = useState("");
+  const [clientTelephone, setClientTelephone] = useState("");
+  const [destPays, setDestPays] = useState("FR");
+  const [mode, setMode] = useState("air");
+  const [articles, setArticles] = useState(() => [emptyProduit()]);
+  const [err, setErr] = useState("");
+
+  const paysDisponibles = allowedCountries(session);
+  const direction = destPays === "GN" ? "import" : "export";
+  const paysRoute = destPays === "GN" ? "GN" : destPays;
+  const poidsTotal = articles.reduce((s, a) => s + (Number(a.poids) || 0), 0);
+  const partenaire = (partenaires || []).find((p) => p.id === partenaireId);
+  const saisieEnCours = !!clientPrenom || !!clientNom || articles.some((a) => a.nom);
+
+  function majArticle(id, patch) { setErr(""); setArticles((l) => l.map((a) => (a.id === id ? { ...a, ...patch } : a))); }
+  function ajouterArticle() { setArticles((l) => [...l, emptyProduit()]); }
+  function retirerArticle(id) { setArticles((l) => (l.length > 1 ? l.filter((a) => a.id !== id) : l)); }
+
+  function submit(e) {
+    e.preventDefault();
+    if (!partenaireId) { setErr("Choisissez le partenaire pour le compte duquel ce colis est enregistré."); return; }
+    if (!clientNom.trim()) { setErr("Indiquez le nom du client — c’est lui qui identifie le colis à l’arrivée."); return; }
+    if (articles.some((a) => !a.nom.trim())) { setErr("Donnez une désignation à chaque article."); return; }
+    if (articles.some((a) => !(Number(a.poids) > 0))) { setErr("Indiquez le poids de chaque article, en kilogrammes."); return; }
+    const client = `${clientPrenom} ${clientNom}`.trim();
+    onSave({
+      tracking: genTracking((existingColis || []).map((c) => c.tracking)),
+      /*
+       * Le partenaire est l'expéditeur vis-à-vis de l'entreprise : c'est lui qui dépose la
+       * marchandise et à qui l'on rend des comptes. Son client est le destinataire.
+       */
+      expediteur: partenaire ? `${partenaire.prenom} ${partenaire.nom}`.trim() : "Partenaire",
+      expediteurTelephone: partenaire?.telephone || "", expediteurEmail: "", expediteurAdresse: "",
+      expediteurPays: partenaire?.paysOperation || "GN",
+      destinataire: client, telephone: clientTelephone, destinataireEmail: "", destinataireAdresse: "",
+      destinataireVille: "", destinataireCodePostal: "", destinatairePays: destPays,
+      pays: paysRoute, direction, mode,
+      produits: articles.map((a) => ({ ...a, nom: a.nom.trim(), categorie: "", personnalise: true, montant: "0", typePrix: "unitaire" })),
+      poids: +poidsTotal.toFixed(2), volume: 0,
+      /*
+       * Aucun montant : ni valeur déclarée, ni prix, ni acompte. Ces champs restent à zéro pour
+       * que le colis traverse sans dommage tout ce qui additionne des recettes — la recette de ce
+       * colis appartient au partenaire, elle n'a jamais été encaissée par l'entreprise.
+       */
+      valeurDeclaree: 0, prixBrut: 0, discountLoyalty: 0, rabaisMontant: 0, rabaisDevise: "GNF", rabaisEUR: 0,
+      prix: 0, paye: 0, reste: 0, paiements: [], photos: [],
+      site: session?.agence || "", partenaireId, clientAccountId: null, provenance: null,
+      agentCreation: session ? `${session.prenom} ${session.nom}`.trim() || session.identifiant : "",
+      notesInternes: "",
+      status: "Enregistré", historique: [{ status: "Enregistré", date: new Date().toISOString() }],
+      createdAt: new Date().toISOString(), pod: null, signature: null, driverLoc: null,
+    });
+  }
+
+  return (
+    <Modal onClose={onClose} title="Colis partenaire" wide saisieEnCours={saisieEnCours}>
+      <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 16, lineHeight: 1.55 }}>
+        Ni catégorie ni tarif : le partenaire facture son client lui-même. Seuls le client, les articles
+        et le poids sont enregistrés, pour le suivi et la vérification avant départ.
+      </div>
+      <form onSubmit={submit}>
+        {!partenaireImpose && (
+          <Field label="Partenaire *">
+            <select value={partenaireId} onChange={(e) => { setErr(""); setPartenaireId(e.target.value); }} style={inputStyle}>
+              <option value="">Choisir un partenaire…</option>
+              {(partenaires || []).map((p) => <option key={p.id} value={p.id}>{p.prenom} {p.nom}</option>)}
+            </select>
+            {(partenaires || []).length === 0 && (
+              <div style={{ fontSize: 11.5, color: "var(--warn-fg)", marginTop: -8, marginBottom: 10 }}>
+                Aucun compte partenaire n’existe encore — créez-le dans Configuration → Gestion Utilisateurs, rôle « Partenaire ».
+              </div>
+            )}
+          </Field>
+        )}
+
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "4px 0 10px" }}>Client du partenaire</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
+          <Field label="Prénom"><input value={clientPrenom} onChange={(e) => setClientPrenom(e.target.value)} style={inputStyle} /></Field>
+          <Field label="Nom *"><input value={clientNom} onChange={(e) => { setErr(""); setClientNom(e.target.value); }} style={inputStyle} /></Field>
+        </div>
+        <Field label="Téléphone (facultatif)"><PhoneInput value={clientTelephone} onChange={setClientTelephone} /></Field>
+
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>Destination</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
+          <Field label="Pays de destination *">
+            <select value={destPays} onChange={(e) => setDestPays(e.target.value)} style={inputStyle}>
+              {paysDisponibles.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code] || ""} {c.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Mode de transport">
+            <select value={mode} onChange={(e) => setMode(e.target.value)} style={inputStyle}>
+              <option value="air">Aérien</option>
+              <option value="sea">Maritime</option>
+            </select>
+          </Field>
+        </div>
+
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>Articles</div>
+        {articles.map((a, i) => (
+          <div key={a.id} style={{ background: "var(--surface2)", borderRadius: 10, padding: 12, marginBottom: 10 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)" }}>Article {i + 1}</div>
+              {articles.length > 1 && (
+                <button type="button" onClick={() => retirerArticle(a.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer", display: "flex", alignItems: "center" }}><Trash2 size={14} /></button>
+              )}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 10 }}>
+              <Field label="Désignation *"><input value={a.nom} onChange={(e) => majArticle(a.id, { nom: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="ex : cartons de vêtements" /></Field>
+              <Field label="Quantité"><input type="number" min="1" value={a.quantite} onChange={(e) => majArticle(a.id, { quantite: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
+              <Field label="Poids (kg) *"><input type="number" step="0.01" min="0" value={a.poids} onChange={(e) => majArticle(a.id, { poids: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="0" /></Field>
+            </div>
+          </div>
+        ))}
+        <button type="button" onClick={ajouterArticle} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", marginBottom: 14 }}>
+          <Plus size={14} /> Ajouter un article
+        </button>
+
+        <div style={{ background: "var(--surface2)", borderRadius: 10, padding: "12px 14px", marginBottom: 14, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 12.5, color: "var(--muted)" }}>Poids total du colis</span>
+          <strong style={{ fontSize: 16, color: "var(--text)" }}>{poidsTotal.toFixed(2)} kg</strong>
+        </div>
+
+        {err && (
+          <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "10px 12px", fontSize: 12.5, color: "var(--danger-fg)", marginBottom: 12, lineHeight: 1.5 }}>{err}</div>
+        )}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, flexWrap: "wrap" }}>
+          <button type="button" onClick={onClose} style={{ padding: "10px 18px", borderRadius: 8, border: "1.5px solid var(--border)", background: "var(--surface)", color: "var(--muted)", fontSize: 13.5, cursor: "pointer" }}>Annuler</button>
+          <button type="submit" style={{ padding: "10px 18px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>Enregistrer le colis</button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 
@@ -5992,6 +6197,7 @@ const ColisStatCard = memo(function ColisStatCard({ label, value, icon: Icon, ti
 
 function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirFormulaire }) {
   const [showForm, setShowForm] = useState(false);
+  const [showFormPartenaire, setShowFormPartenaire] = useState(false);
   const [showAi, setShowAi] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [showReception, setShowReception] = useState(false);
@@ -6485,6 +6691,9 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
           {effectivePermission(session, "colis.bordereau_reception") && <button onClick={() => setShowReception(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={17} color="var(--ok-fg)" /> Bordereau de réception</button>}
           {effectivePermission(session, "colis.reglement_groupe") && <button onClick={() => setShowEncaisseGroupe(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><DollarSign size={17} color="var(--ok-fg)" /> Règlement groupé</button>}
           {peutCreer && <button onClick={() => setShowAi(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><Sparkles size={17} color="#8B5CF6" /> Créer par IA</button>}
+          {/* Colis déposé par un partenaire : formulaire court, sans catégorie ni tarif — le partenaire
+              facture son client lui-même. Proposé seulement si un compte partenaire existe. */}
+          {peutCreer && (data.users || []).some((u) => u.role === "Partenaire") && <button onClick={() => setShowFormPartenaire(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><Users size={17} color="#16A163" /> Colis partenaire</button>}
           {peutCreer && <button onClick={() => setShowForm(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}><Plus size={17} /> {t.newColis}</button>}
         </div>
       </div>
@@ -6683,6 +6892,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
         </div>
       )}
       {showForm && <ColisForm remiseVolumeConfig={data.remiseVolume} repertoire={data.repertoire} paymentConfig={data.paymentConfig} onClose={() => setShowForm(false)} onSave={addColis} existingColis={data.colis} categories={data.categories || []} session={session} sites={data.sites} partenaires={(data.users || []).filter((u) => u.role === "Partenaire")} clientAccounts={data.clientAccounts || []} preAlertes={data.preAlertes || []} notify={notify} />}
+      {showFormPartenaire && <ColisPartenaireForm onClose={() => setShowFormPartenaire(false)} onSave={async (c) => { await addColis(c); setShowFormPartenaire(false); }} existingColis={data.colis} session={session} partenaires={(data.users || []).filter((u) => u.role === "Partenaire")} />}
       {showAi && <AiColisModal onClose={() => setShowAi(false)} onCreate={addColis} data={data} session={session} />}
       {showImport && <ImportExcelModal onClose={() => setShowImport(false)} onImportMany={importerColisMany} data={data} session={session} />}
       {remiseEnCours && <RemiseColisModal colis={remiseEnCours} session={session}
@@ -8654,11 +8864,18 @@ async function construireEtiquetteDoc(colis) {
   doc.setFillColor(...NAVY); doc.rect(0.6, Z.filetHaut - 1.6, W - 1.2, 1.6, "F");
   doc.setFillColor(...RED); doc.rect(0.6, Z.filetHaut, W - 1.2, 0.9, "F");
 
-  // ── Statut de paiement (pastille pleine, jamais de montant) + route ────────
-  const pastille = paye ? "PAYÉ" : "NON PAYÉ";
+  /*
+   * Statut de paiement (pastille pleine, jamais de montant) + route.
+   *
+   * Un colis partenaire n'est pas facturé par l'entreprise : son reste à payer vaut zéro, ce qui
+   * l'affichait « PAYÉ » sur l'étiquette remise au client — un règlement annoncé qui n'a jamais eu
+   * lieu. La pastille dit désormais ce qu'il en est réellement.
+   */
+  const estPartenaire = estColisPartenaire(colis);
+  const pastille = estPartenaire ? "PARTENAIRE" : (paye ? "PAYÉ" : "NON PAYÉ");
   doc.setFont(undefined, "bold"); doc.setFontSize(7.6);
   const pW = doc.getTextWidth(pastille) + 8;
-  doc.setFillColor(...(paye ? [22, 120, 70] : [190, 30, 45]));
+  doc.setFillColor(...(estPartenaire ? [61, 99, 255] : paye ? [22, 120, 70] : [190, 30, 45]));
   doc.roundedRect(M, Z.statut - 4.2, pW, 6, 3, 3, "F");
   doc.setTextColor(255, 255, 255);
   doc.text(pastille, M + pW / 2, Z.statut, { align: "center" });
@@ -8911,8 +9128,10 @@ async function renderLabelCanvas(colis, largeurDots) {
   ctx.fillRect(0.6 * s, 21.5 * s, W - 1.2 * s, 0.9 * s);
 
   // ── Statut de paiement + route ────────────────────────────────────────
+  // Voir la version PDF : un colis partenaire n'est pas facturé par l'entreprise, l'annoncer
+  // « PAYÉ » sur l'étiquette ferait état d'un règlement qui n'a jamais eu lieu.
   const paye = colis.reste <= 0;
-  const pastille = paye ? "PAYÉ" : "NON PAYÉ";
+  const pastille = estColisPartenaire(colis) ? "PARTENAIRE" : (paye ? "PAYÉ" : "NON PAYÉ");
   ctx.font = `bold ${7.6 * s}px Arial`;
   const pW = ctx.measureText(pastille).width + 8 * s;
   ctx.fillRect(M, 23.3 * s, pW, 6 * s);
@@ -10833,11 +11052,14 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
   const expCurrency = COUNTRIES.find((c) => c.code === (colis.expediteurPays || "GN"))?.currency || "GNF";
   const destCliCurrency = COUNTRIES.find((c) => c.code === (colis.destinatairePays || colis.pays))?.currency || destCurrency;
   const devisesAffichees = [...new Set(["GNF", expCurrency, destCliCurrency])];
-  const statutPaiement = colis.reste <= 0 ? "Payé" : colis.paye > 0 ? "Partiellement payé" : "Non payé";
+  // Un colis partenaire n'est pas facturé par l'entreprise : il n'est ni payé ni impayé.
+  const colisPartenaire = estColisPartenaire(colis);
+  const statutPaiement = colisPartenaire ? "Partenaire — non facturé"
+    : colis.reste <= 0 ? "Payé" : colis.paye > 0 ? "Partiellement payé" : "Non payé";
   // Deux teintes distinctes : une pastille pleine (texte blanc dessus) et une couleur de
   // texte adaptée au thème — la même valeur ne peut pas servir aux deux sans perdre en lisibilité.
-  const statutBg = colis.reste <= 0 ? "#0F7A45" : colis.paye > 0 ? "#8A6008" : "var(--brand-solid)";
-  const statutFg = colis.reste <= 0 ? "var(--ok-fg)" : colis.paye > 0 ? "var(--warn-fg)" : "var(--danger-fg)";
+  const statutBg = colisPartenaire ? "#3D63FF" : colis.reste <= 0 ? "#0F7A45" : colis.paye > 0 ? "#8A6008" : "var(--brand-solid)";
+  const statutFg = colisPartenaire ? "var(--info-fg)" : colis.reste <= 0 ? "var(--ok-fg)" : colis.paye > 0 ? "var(--warn-fg)" : "var(--danger-fg)";
 
   return (
     <Modal onClose={onClose} title="Détail du colis" wide>
@@ -13332,16 +13554,26 @@ function totauxVoyage(colisInclus, depenses, users, remises) {
   const facture = colisInclus.reduce((s, c) => s + (Number(c.prix) || 0), 0);
   const encaisse = colisInclus.reduce((s, c) => s + (Number(c.paye) || 0), 0);
   const depensesEUR = (depenses || []).reduce((s, d) => s + versEUR(d.montant, d.devise), 0);
-  const payes = colisInclus.filter((c) => (Number(c.reste) || 0) <= 0.005);
-  const impayes = colisInclus.filter((c) => (Number(c.reste) || 0) > 0.005 && (Number(c.paye) || 0) <= 0.005);
+  /*
+   * Les colis partenaires sortent du bilan des règlements.
+   *
+   * Sans prix, leur reste à payer vaut zéro : ils étaient donc comptés « payés », et la fiche de
+   * voyage annonçait des règlements que personne n'avait faits. Ils ne sont ni payés ni impayés —
+   * ils ne sont simplement pas facturés par l'entreprise, le partenaire s'en charge.
+   */
+  const facturables = colisInclus.filter((c) => !estColisPartenaire(c));
+  const nbPartenaires = colisInclus.length - facturables.length;
+  const payes = facturables.filter((c) => (Number(c.reste) || 0) <= 0.005);
+  const impayes = facturables.filter((c) => (Number(c.reste) || 0) > 0.005 && (Number(c.paye) || 0) <= 0.005);
   return {
     nbColis: colisInclus.length,
     poids: colisInclus.reduce((s, c) => s + (Number(c.poids) || 0), 0),
     facture, encaisse,
     resteAEncaisser: Math.max(+(facture - encaisse).toFixed(2), 0),
+    nbPartenaires,
     nbPayes: payes.length,
     nbImpayes: impayes.length,
-    nbPartiels: colisInclus.length - payes.length - impayes.length,
+    nbPartiels: facturables.length - payes.length - impayes.length,
     encaissements: encaissementsParAgent(colisInclus, users, remises),
     depensesEUR,
     resultat: +(facture - depensesEUR).toFixed(2),
@@ -13353,6 +13585,9 @@ function totauxVoyage(colisInclus, depenses, users, remises) {
 
 /** Étiquette de règlement d'un colis, telle qu'elle apparaît sur la liste et sur la fiche. */
 function statutPaiementColis(c) {
+  // Un colis partenaire n'est pas facturé par l'entreprise : l'annoncer « payé » ferait croire
+  // à un encaissement qui n'a jamais eu lieu.
+  if (estColisPartenaire(c)) return "Partenaire";
   if ((Number(c.reste) || 0) <= 0.005) return "Payé";
   return (Number(c.paye) || 0) > 0.005 ? "Partiel" : "Impayé";
 }
@@ -13386,7 +13621,7 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data) {
   const infos = [
     ["Route", libelleVoyage(voyage.pays, voyage.direction)],
     ["Départ", voyage.dateDepart ? new Date(`${voyage.dateDepart}T00:00:00`).toLocaleDateString("fr-FR") : "—"],
-    ["Colis embarqués", `${t.nbColis} · ${t.poids.toFixed(1)} kg · ${t.nbPayes} payés, ${t.nbPartiels} partiels, ${t.nbImpayes} impayés`],
+    ["Colis embarqués", `${t.nbColis} · ${t.poids.toFixed(1)} kg · ${t.nbPayes} payés, ${t.nbPartiels} partiels, ${t.nbImpayes} impayés${t.nbPartenaires > 0 ? `, ${t.nbPartenaires} partenaire${t.nbPartenaires > 1 ? "s" : ""}` : ""}`],
   ];
   doc.setFontSize(10);
   infos.forEach(([label, valeur]) => {
@@ -13548,6 +13783,14 @@ function VoyagesPage({ data, persist, session, notify }) {
   const [recherche, setRecherche] = useState("");
   const [confirmation, setConfirmation] = useState(null);
   const [voyageASupprimer, setVoyageASupprimer] = useState(null);
+  /*
+   * Contrôle des colis partenaires avant le départ.
+   *
+   * Un colis partenaire n'a ni tarif ni facture : le seul moment où l'entreprise vérifie ce
+   * qu'elle emporte, c'est avant de sceller le voyage. On récapitule donc client, articles et
+   * poids, et la validation du voyage reste bloquée tant que ce récapitulatif n'est pas confirmé.
+   */
+  const [partenairesVerifies, setPartenairesVerifies] = useState(false);
 
   const voyageCourant = ouvert && ouvert !== "nouveau" ? voyages.find((v) => v.id === ouvert) : null;
   const enLecture = !!voyageCourant && voyageCourant.statut === "Validé";
@@ -13578,6 +13821,9 @@ function VoyagesPage({ data, persist, session, notify }) {
     return data.colis.filter((c) => set.has(c.tracking));
   }, [data.colis, trackings]);
   const totaux = useMemo(() => totauxVoyage(colisInclus, depenses, data.users, data.remisesCaisse), [colisInclus, depenses, data.users, data.remisesCaisse]);
+  const colisPartenaires = useMemo(() => colisInclus.filter(estColisPartenaire), [colisInclus]);
+  /** Le récapitulatif partenaires bloque la validation tant qu'il n'a pas été confirmé. */
+  const controlePartenairesRequis = colisPartenaires.length > 0 && !partenairesVerifies;
   // Sur un aller-retour, chaque sens a son propre rendement : c'est souvent l'aller qui paie le
   // billet et le retour qui fait la marge, ou l'inverse. On les affiche séparément.
   const parSens = useMemo(() => {
@@ -13592,22 +13838,30 @@ function VoyagesPage({ data, persist, session, notify }) {
   function ouvrirNouveau() {
     setOuvert("nouveau");
     setPays("FR"); setDirection("export"); setDateDepart(""); setTrackings([]); setDepenses([]);
-    setDepLibelle(""); setDepMontant(""); setDepDevise("GNF"); setRecherche("");
+    setDepLibelle(""); setDepMontant(""); setDepDevise("GNF"); setRecherche(""); setPartenairesVerifies(false);
   }
   function ouvrirVoyage(v) {
     setOuvert(v.id);
     setPays(v.pays); setDirection(v.direction); setDateDepart(v.dateDepart || "");
     setTrackings(v.trackings || []); setDepenses(v.depenses || []); setRecherche("");
+    setPartenairesVerifies(!!v.controlePartenaires);
   }
   function fermer() { setOuvert(null); setConfirmation(null); }
 
+  /*
+   * Toute modification de la liste des colis annule le contrôle partenaires déjà donné : sans
+   * cela, on pourrait confirmer le récapitulatif puis ajouter un colis qui partirait sans avoir
+   * jamais été vérifié.
+   */
   function basculer(tracking) {
     if (enLecture) return;
+    setPartenairesVerifies(false);
     setTrackings((l) => (l.includes(tracking) ? l.filter((t) => t !== tracking) : [...l, tracking]));
   }
   function toutSelectionner() {
     const cles = eligibles.map((c) => c.tracking);
     const tout = cles.every((t) => trackings.includes(t));
+    setPartenairesVerifies(false);
     setTrackings((l) => (tout ? l.filter((t) => !cles.includes(t)) : [...new Set([...l, ...cles])]));
   }
   function ajouterDepense() {
@@ -13626,6 +13880,11 @@ function VoyagesPage({ data, persist, session, notify }) {
       creeLe: base.creeLe || new Date().toISOString(),
       creePar: base.creePar || monNom,
       pays, direction, dateDepart, trackings, depenses, statut,
+      // Trace du contrôle des colis partenaires : qui l'a fait et quand, pour qu'un écart
+      // constaté à l'arrivée puisse être rapporté à la personne qui a vu partir la marchandise.
+      controlePartenaires: partenairesVerifies
+        ? (base.controlePartenaires || { faitLe: new Date().toISOString(), faitPar: monNom })
+        : null,
       valideeLe: statut === "Validé" ? new Date().toISOString() : null,
       valideePar: statut === "Validé" ? monNom : null,
     };
@@ -13730,7 +13989,7 @@ function VoyagesPage({ data, persist, session, notify }) {
                     }}>{v.statut}</span>
                   </div>
                   <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 5 }}>
-                    {t.nbColis} colis ({t.nbPayes} payés · {t.nbPartiels} partiels · {t.nbImpayes} impayés) · {t.poids.toFixed(1)} kg
+                    {t.nbColis} colis ({t.nbPayes} payés · {t.nbPartiels} partiels · {t.nbImpayes} impayés{t.nbPartenaires > 0 ? ` · ${t.nbPartenaires} partenaire${t.nbPartenaires > 1 ? "s" : ""}` : ""}) · {t.poids.toFixed(1)} kg
                     <br />recettes {fmt(t.facture, "EUR")} · dépenses {fmt(t.depensesEUR, "EUR")} · bilan {fmt(t.tresorerie, "EUR")}
                     {v.dateDepart ? ` · départ ${new Date(`${v.dateDepart}T00:00:00`).toLocaleDateString("fr-FR")}` : ""}
                   </div>
@@ -13854,6 +14113,9 @@ function VoyagesPage({ data, persist, session, notify }) {
             { label: "Payés", valeur: totaux.nbPayes, coul: "var(--ok-fg)", fond: "var(--ok-bg-soft)" },
             { label: "Partiels", valeur: totaux.nbPartiels, coul: "var(--warn-fg)", fond: "var(--warn-bg)" },
             { label: "Impayés", valeur: totaux.nbImpayes, coul: "var(--danger-fg)", fond: "var(--danger-bg)" },
+            // Affichée seulement s'il y en a : ces colis ne sont pas facturés par l'entreprise et
+            // n'ont donc leur place dans aucune des trois colonnes précédentes.
+            ...(totaux.nbPartenaires > 0 ? [{ label: "Partenaires", valeur: totaux.nbPartenaires, coul: "var(--info-fg)", fond: "var(--info-bg)" }] : []),
             { label: "Total colis", valeur: totaux.nbColis, coul: "var(--text)", fond: "var(--surface2)" },
           ].map((k) => (
             <div key={k.label} style={{ background: k.fond, borderRadius: 10, padding: "10px 12px" }}>
@@ -13960,8 +14222,14 @@ function VoyagesPage({ data, persist, session, notify }) {
                 <div style={{ display: "flex", gap: 6, marginTop: 5, flexWrap: "wrap" }}>
                   {(() => {
                     const st = statutPaiementColis(c);
-                    const style = { "Payé": ["var(--ok-bg-soft)", "var(--ok-fg)"], "Partiel": ["var(--warn-bg)", "var(--warn-fg)"], "Impayé": ["var(--danger-bg)", "var(--danger-fg)"] }[st];
-                    return <span style={{ background: style[0], color: style[1], borderRadius: 20, padding: "2px 9px", fontSize: 10.5, fontWeight: 700 }}>{st}</span>;
+                    const styles = {
+                      "Payé": ["var(--ok-bg-soft)", "var(--ok-fg)"],
+                      "Partiel": ["var(--warn-bg)", "var(--warn-fg)"],
+                      "Impayé": ["var(--danger-bg)", "var(--danger-fg)"],
+                      "Partenaire": ["var(--info-bg)", "var(--info-fg)"],
+                    };
+                    const [fond, coul] = styles[st] || ["var(--surface2)", "var(--muted)"];
+                    return <span style={{ background: fond, color: coul, borderRadius: 20, padding: "2px 9px", fontSize: 10.5, fontWeight: 700 }}>{st}</span>;
                   })()}
                   {direction === "allerRetour" && (
                     <span style={{ background: "var(--surface2)", color: "var(--muted)", borderRadius: 20, padding: "2px 9px", fontSize: 10.5, fontWeight: 700 }}>
@@ -14020,6 +14288,58 @@ function VoyagesPage({ data, persist, session, notify }) {
         )}
       </div>
 
+      {colisPartenaires.length > 0 && (
+        <div style={{ background: "var(--surface)", borderRadius: 14, border: `1px solid ${partenairesVerifies ? "var(--ok-fg)" : "var(--warn-border)"}`, overflow: "hidden", marginBottom: 20 }}>
+          <div style={{ padding: "14px 16px", background: partenairesVerifies ? "var(--ok-bg)" : "var(--warn-bg)" }}>
+            <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>
+              Contrôle avant départ — {colisPartenaires.length} colis partenaire{colisPartenaires.length > 1 ? "s" : ""}
+            </div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 }}>
+              Ces colis n’ont ni tarif ni facture chez nous : ce récapitulatif est le seul contrôle de ce
+              qu’ils contiennent. Vérifiez client, articles et poids avant de sceller le voyage.
+            </div>
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", minWidth: 600, borderCollapse: "collapse" }}>
+              <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Partenaire", "Client", "Articles", "Poids"].map((h) => <th key={h} style={{ padding: "9px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
+              <tbody>
+                {colisPartenaires.map((c) => {
+                  const p = (data.users || []).find((u) => u.id === c.partenaireId);
+                  return (
+                    <tr key={c.tracking} style={{ borderTop: "1px solid var(--border)", verticalAlign: "top" }}>
+                      <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.tracking}</td>
+                      <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{p ? `${p.prenom} ${p.nom}`.trim() : "—"}</td>
+                      <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{c.destinataire || "—"}</td>
+                      <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
+                        {(c.produits || []).length === 0 ? "—" : (c.produits || []).map((a, i) => (
+                          <div key={a.id || i}>×{a.quantite || 1} {a.nom || "article sans nom"}{a.poids ? ` — ${a.poids} kg` : ""}</div>
+                        ))}
+                      </td>
+                      <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.poids} kg</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ padding: "12px 16px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
+              Total partenaires : <strong style={{ color: "var(--text)" }}>{colisPartenaires.reduce((s, c) => s + nombreArticles(c), 0)} articles</strong> · <strong style={{ color: "var(--text)" }}>{colisPartenaires.reduce((s, c) => s + (Number(c.poids) || 0), 0).toFixed(1)} kg</strong>
+            </div>
+            {enLecture ? (
+              <div style={{ fontSize: 12.5, color: "var(--ok-fg)", fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
+                <CheckCircle2 size={15} /> Contrôlé{voyageCourant?.controlePartenaires?.faitPar ? ` par ${voyageCourant.controlePartenaires.faitPar}` : ""}
+              </div>
+            ) : (
+              <label style={{ display: "flex", alignItems: "center", gap: 9, fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>
+                <input type="checkbox" checked={partenairesVerifies} onChange={(e) => setPartenairesVerifies(e.target.checked)} style={{ width: 17, height: 17, flexShrink: 0 }} />
+                Je confirme avoir vérifié ces {colisPartenaires.length} colis
+              </label>
+            )}
+          </div>
+        </div>
+      )}
+
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 20 }}>
         {!enLecture ? (
           <>
@@ -14029,13 +14349,21 @@ function VoyagesPage({ data, persist, session, notify }) {
             }}>
               Enregistrer le brouillon
             </button>
-            <button onClick={() => setConfirmation(true)} disabled={trackings.length === 0} style={{
-              display: "flex", alignItems: "center", gap: 7, background: trackings.length ? "#16A163" : "var(--surface2)",
-              color: trackings.length ? "#fff" : "var(--muted)", border: "none", borderRadius: 9, padding: "11px 18px",
-              fontSize: 13.5, fontWeight: 700, cursor: trackings.length ? "pointer" : "not-allowed",
-            }}>
+            <button onClick={() => setConfirmation(true)} disabled={trackings.length === 0 || controlePartenairesRequis}
+              title={controlePartenairesRequis ? "Confirmez d’abord le contrôle des colis partenaires ci-dessus" : undefined}
+              style={{
+                display: "flex", alignItems: "center", gap: 7,
+                background: trackings.length && !controlePartenairesRequis ? "#16A163" : "var(--surface2)",
+                color: trackings.length && !controlePartenairesRequis ? "#fff" : "var(--muted)", border: "none", borderRadius: 9, padding: "11px 18px",
+                fontSize: 13.5, fontWeight: 700, cursor: trackings.length && !controlePartenairesRequis ? "pointer" : "not-allowed",
+              }}>
               <CheckCircle2 size={16} /> Valider la fiche de voyage
             </button>
+            {controlePartenairesRequis && (
+              <div style={{ alignSelf: "center", fontSize: 12, color: "var(--warn-fg)" }}>
+                Confirmez le contrôle des colis partenaires pour pouvoir valider.
+              </div>
+            )}
           </>
         ) : (
           <>
@@ -14052,7 +14380,7 @@ function VoyagesPage({ data, persist, session, notify }) {
       {confirmation && (
         <ConfirmerAction
           titre="Valider cette fiche de voyage ?"
-          message={`${libelleVoyage(pays, direction)} — ${totaux.nbColis} colis (${totaux.nbPayes} payés, ${totaux.nbPartiels} partiels, ${totaux.nbImpayes} impayés), ${totaux.poids.toFixed(1)} kg. Recettes ${fmt(totaux.facture, "EUR")}, dépenses ${fmt(totaux.depensesEUR, "EUR")}, bilan final ${fmt(totaux.tresorerie, "EUR")}.`}
+          message={`${libelleVoyage(pays, direction)} — ${totaux.nbColis} colis (${totaux.nbPayes} payés, ${totaux.nbPartiels} partiels, ${totaux.nbImpayes} impayés), ${totaux.poids.toFixed(1)} kg. Recettes ${fmt(totaux.facture, "EUR")}, dépenses ${fmt(totaux.depensesEUR, "EUR")}, bilan final ${fmt(totaux.tresorerie, "EUR")}.${colisPartenaires.length > 0 ? ` Dont ${colisPartenaires.length} colis partenaire${colisPartenaires.length > 1 ? "s" : ""}, contrôlé${colisPartenaires.length > 1 ? "s" : ""} et sans recette pour l’entreprise.` : ""}`}
           consequence="Ces colis n’apparaîtront plus dans la liste des voyages suivants, pour qu’aucun ne soit compté deux fois. La fiche s’ouvrira en PDF, et reste réouvrable si vous devez la corriger."
           libelleAction="Valider la fiche"
           onConfirmer={validerVoyage}
@@ -14076,7 +14404,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
 
   const {
     colisPeriode, recettes, facture, depensesPeriode, totalDepenses, totalSalaires, commissionsManuelles,
-    commissionsAuto, gnfRate, totalCommissions, commissionsParAgence, partenaires, commissionsParPartenaire,
+    commissionsAuto, gnfRate, totalCommissions, commissionsParAgence,
     benefice, resteAEncaisser, totalIndemnites, litigesOuverts, parMode, joursTries, paiementsPeriode,
   } = useMemo(() => {
     const now = new Date();
@@ -14102,11 +14430,12 @@ function ComptabilitePage({ data, persist, session, notify }) {
       nom: s.nom,
       montant: colisPeriode.filter((c) => (c.site || "Bambeto") === s.nom).reduce((sum, c) => sum + calcCommission(c, data.commissionConfig, data.categories), 0),
     }));
-    const partenaires = (data.users || []).filter((u) => u.role === "Partenaire");
-    const commissionsParPartenaire = partenaires.map((p) => ({
-      nom: `${p.prenom} ${p.nom}`,
-      montant: colisPeriode.filter((c) => c.partenaireId === p.id).reduce((sum, c) => sum + calcCommission(c, data.commissionConfig, data.categories), 0),
-    }));
+    /*
+     * Pas de commission par partenaire : un partenaire facture ses clients lui-même, l'entreprise
+     * ne prélève rien sur ses colis et n'a donc aucune commission à lui verser. Le tableau qui
+     * figurait ici affichait des montants calculés au poids, sans contrepartie réelle. Les
+     * commissions restent en place pour les agences et les agents, à qui elles sont bien dues.
+     */
     // Résultat calculé sur une base COHÉRENTE : le chiffre d’affaires facturé de la période
     // est comparé aux charges de cette même période. Auparavant on soustrayait les commissions
     // dues sur TOUS les colis créés au seul argent déjà encaissé — ce qui affichait une perte
@@ -14130,7 +14459,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
 
     return {
       colisPeriode, recettes, facture, depensesPeriode, totalDepenses, totalSalaires, commissionsManuelles,
-      commissionsAuto, gnfRate, totalCommissions, commissionsParAgence, partenaires, commissionsParPartenaire,
+      commissionsAuto, gnfRate, totalCommissions, commissionsParAgence,
       benefice, resteAEncaisser, totalIndemnites, litigesOuverts, parMode, joursTries, paiementsPeriode,
     };
   }, [data.colis, depenses, data.sites, data.users, data.commissionConfig, data.categories, periode]);
@@ -14347,21 +14676,6 @@ function ComptabilitePage({ data, persist, session, notify }) {
               <div key={a.nom} style={{ background: "var(--surface2)", borderRadius: 12, padding: 14 }}>
                 <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{a.nom}</div>
                 <div style={{ fontSize: 18, fontWeight: 700, color: "var(--ok-fg)", fontFamily: "'Space Grotesk',sans-serif", marginTop: 4 }}>{fmt(a.montant, "EUR")}</div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {commissionsParPartenaire.length > 0 && (
-        <div style={{ background: "var(--surface)", borderRadius: 14, padding: 20, border: "1px solid var(--border)", marginBottom: 20 }}>
-          <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Commissions par partenaire</div>
-          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14 }}>Basées sur les colis rattachés à chaque partenaire lors de leur enregistrement.</div>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12 }}>
-            {commissionsParPartenaire.map((p) => (
-              <div key={p.nom} style={{ background: "var(--surface2)", borderRadius: 12, padding: 14 }}>
-                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{p.nom}</div>
-                <div style={{ fontSize: 18, fontWeight: 700, color: "#8B5CF6", fontFamily: "'Space Grotesk',sans-serif", marginTop: 4 }}>{fmt(p.montant, "EUR")}</div>
               </div>
             ))}
           </div>

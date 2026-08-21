@@ -686,6 +686,62 @@ function reglagesPartenaire(user) {
   };
 }
 
+/*
+ * Comptes d'un partenaire : le titulaire du contrat, et les accès qu'il ouvre à ses employés.
+ *
+ * Un partenaire ne travaille pas seul : quelqu'un tient son dépôt, quelqu'un enregistre les colis
+ * pendant qu'il est en déplacement. Ces personnes ont besoin d'entrer dans l'espace, pas d'un
+ * contrat : leur compte dépend du sien par `partenaireParent`, et tout ce qu'elles enregistrent
+ * est porté au crédit du partenaire, jamais au leur.
+ *
+ * La distinction compte partout où l'entreprise dit « un partenaire » : dans la liste de
+ * Configuration, dans le choix du partenaire à l'enregistrement d'un colis. Un employé n'y a pas
+ * sa place — il n'a ni tarif, ni facture, ni destinations propres.
+ */
+const MAX_EMPLOYES_PARTENAIRE = 5;
+function estPartenairePrincipal(u) {
+  return u?.role === "Partenaire" && !u.partenaireParent;
+}
+function partenairesPrincipaux(users) {
+  return (users || []).filter(estPartenairePrincipal);
+}
+/** Le partenaire dont relève une session : lui-même s'il est titulaire, sinon son employeur. */
+function partenaireDeLaSession(session) {
+  return session?.partenaireParent || session?.id;
+}
+function employesDuPartenaire(users, partenaireId) {
+  return (users || []).filter((u) => u.role === "Partenaire" && u.partenaireParent === partenaireId);
+}
+/*
+ * Ce qu'un employé voit des montants.
+ *
+ * Le prix que l'entreprise facture au partenaire est son prix de revient : c'est sur lui qu'il
+ * bâtit sa marge. Un employé qui le connaît connaît la marge de son patron — ce n'est pas à nous
+ * d'en décider, mais c'est à nous de ne pas l'imposer. Un accès est donc muet sur les montants
+ * par défaut, et le partenaire l'ouvre s'il le souhaite.
+ */
+function voitLesMontants(session) {
+  return !session?.partenaireParent || session?.voitLesMontants === true;
+}
+
+/*
+ * Le message de suivi qu'un partenaire envoie à son propre client.
+ *
+ * Il est écrit à la première personne du partenaire et signé de son nom commercial : c'est lui
+ * qui a vendu l'envoi, c'est son client, et voir surgir le nom de son transporteur dans une
+ * conversation qu'il n'a pas engagée lui coûterait ce client. Ba-Diaby n'apparaît nulle part —
+ * ni dans le texte, ni sur la page qui s'ouvre au bout du lien.
+ *
+ * Rien d'autre que le numéro de suivi ne circule : ni prix, ni poids, ni contenu. Le lien mène à
+ * la page publique, qui n'a jamais rien montré de sensible.
+ */
+function messageSuiviPartenaire(colis, nomCommercial) {
+  const destinataire = (colis?.destinataire || "").trim().split(" ")[0];
+  const salutation = destinataire ? `Bonjour ${destinataire},` : "Bonjour,";
+  const signature = nomCommercial ? `\n\n${nomCommercial}` : "";
+  return `${salutation}\n\nVotre colis ${colis?.tracking || ""} est en route. Vous pouvez suivre son acheminement à tout moment ici :\n${trackingUrlFor(colis?.tracking || "")}${signature}`;
+}
+
 /**
  * Modes d'acheminement final d'un colis partenaire, une fois arrivé dans le pays de destination.
  *
@@ -750,9 +806,16 @@ function tarifPartenairePourPays(user, pays) {
   const r = reglagesPartenaire(user);
   const dest = r.destinations.find((d) => d.pays === pays);
   if (dest) return { ...dest, devise: r.tarif.devise };
+  /*
+   * Le repli doit avoir exactement la même forme qu'une destination déclarée, `categories`
+   * comprise. Sans ce tableau vide, le formulaire de colis partenaire plantait dès son ouverture :
+   * tant qu'aucun partenaire n'est choisi, il n'y a aucune destination, et l'écran lisait
+   * `contrat.categories.length` sur un champ absent.
+   */
   return {
     pays, parKg: r.tarif.parKg, parUnite: r.tarif.parUnite, devise: r.tarif.devise,
     acheminement: "direct", correspondant: { nom: "", telephone: "", adresse: "" }, fraisPoste: 0,
+    categories: [],
   };
 }
 
@@ -1564,6 +1627,15 @@ function App() {
   const [adminResetKey, setAdminResetKey] = useState(0);
   const isMobile = useIsMobile();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  /*
+   * La section ouverte dans l'espace partenaire.
+   *
+   * Elle vit ici, et non dans l'écran lui-même, parce que c'est le menu latéral qui la commande.
+   * Un partenaire n'a qu'une seule entrée de menu — « Tableau de bord » — et une colonne vide en
+   * dessous, pendant que ses cinq sections mangeaient une barre d'onglets en pleine page. Les
+   * sections sont donc passées dans le menu, là où il y avait la place.
+   */
+  const [ongletPartenaire, setOngletPartenaire] = useState("accueil");
   const [showGlobalSearch, setShowGlobalSearch] = useState(false);
   const [colisInitialQuery, setColisInitialQuery] = useState("");
   // Permet au tableau de bord de demander l'ouverture directe du formulaire de création :
@@ -1756,7 +1828,7 @@ function App() {
    * c'est à l'administrateur de la lui donner dans Configuration → Partenaires.
    */
   const marqueSession = session.role === "Partenaire"
-    ? marquePartenaire(data, { partenaireId: session.id })
+    ? marquePartenaire(data, { partenaireId: partenaireDeLaSession(session) })
     : null;
   const identite = marqueSession
     ? {
@@ -1785,7 +1857,28 @@ function App() {
     + (data.demandesRegroupement || []).filter((r) => r.statut === "En attente").length
     + signalementsOuvertsCount
     + expressEnAttenteCount;
-  const nav = [
+  /*
+   * Le menu d'un partenaire, ce sont ses sections — pas les écrans de l'entreprise, auxquels il
+   * n'a pas accès. Les pastilles sont réservées à ce qui appelle un geste : ce qui est prêt à
+   * partir, et les factures encore dues. Le nombre de ses clients n'appelle rien.
+   */
+  const partenaireIdSession = partenaireDeLaSession(session);
+  const colisDuPartenaire = session.role === "Partenaire"
+    ? data.colis.filter((c) => c.partenaireId === partenaireIdSession)
+    : [];
+  const navPartenaire = [
+    { key: "accueil", label: "Accueil", icon: LayoutDashboard, badge: colisDuPartenaire.filter(estColisExpediable).length },
+    { key: "colis", label: "Colis", icon: Package },
+    ...(voitLesMontants(session) ? [{
+      key: "factures", label: "Factures", icon: Receipt,
+      badge: (data.facturesPartenaire || []).filter((f) => f.partenaireId === partenaireIdSession
+        && statutFacturePartenaire(f) !== "Réglée").length,
+    }] : []),
+    { key: "clients", label: "Clients", icon: Users },
+    { key: "compte", label: "Compte", icon: User },
+  ].map((n) => ({ ...n, show: true, actif: ongletPartenaire === n.key, onSelect: () => setOngletPartenaire(n.key) }));
+
+  const nav = session.role === "Partenaire" ? navPartenaire : [
     { key: "dashboard", label: t.dashboard, icon: LayoutDashboard, show: true },
     { key: "colis", label: t.colis, icon: Package, show: perm("colis.voir_propres") || perm("colis.voir_tous") },
     { key: "centreclients", label: "Centre clients", icon: MessageCircle, show: perm("espaceclient.gerer"), badge: centreClientsEnAttente },
@@ -1847,9 +1940,13 @@ function App() {
           </div>
           <nav style={{ padding: 12, display: "flex", flexDirection: "column", gap: 3, flex: 1, overflowY: "auto" }}>
             {nav.map((n) => (
-              <button key={n.key} onClick={() => { setView(n.key); if (n.key === "admin") setAdminResetKey((k) => k + 1); setMobileNavOpen(false); }} title={(collapsed && !isMobile) ? n.label : undefined} style={{
+              <button key={n.key} onClick={() => {
+                if (n.onSelect) n.onSelect();
+                else { setView(n.key); if (n.key === "admin") setAdminResetKey((k) => k + 1); }
+                setMobileNavOpen(false);
+              }} title={(collapsed && !isMobile) ? n.label : undefined} style={{
                 display: "flex", alignItems: "center", gap: 10, padding: (collapsed && !isMobile) ? "10px 0" : "10px 12px", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start",
-                borderRadius: 8, background: view === n.key ? "var(--brand-solid)" : "transparent", color: "#fff", border: "none", cursor: "pointer", fontSize: 14, fontWeight: 600, textAlign: "start", position: "relative",
+                borderRadius: 8, background: (n.actif ?? (view === n.key)) ? "var(--brand-solid)" : "transparent", color: "#fff", border: "none", cursor: "pointer", fontSize: 14, fontWeight: 600, textAlign: "start", position: "relative",
               }}>
                 <n.icon size={17} /> {!(collapsed && !isMobile) && n.label}
                 {!!n.badge && (
@@ -1893,7 +1990,7 @@ function App() {
                 <Menu size={18} />
               </button>
               <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 15, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1 }}>
-                {nav.find((n) => n.key === view)?.label || identite.nom || "BA-DIABY EXPRESS"}
+                {nav.find((n) => n.actif ?? (n.key === view))?.label || identite.nom || "BA-DIABY EXPRESS"}
               </div>
               <button onClick={() => setShowGlobalSearch(true)} style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 8, width: 34, height: 34, display: "grid", placeItems: "center", color: "#fff", cursor: "pointer", flexShrink: 0 }}>
                 <Search size={16} />
@@ -1901,7 +1998,7 @@ function App() {
             </div>
           )}
           <main style={{ flex: 1, padding: isMobile ? "16px 14px" : "28px 32px", overflowY: "auto", minWidth: 0 }}>
-            {view === "dashboard" && (session.role === "Partenaire" ? <PartnerDashboard data={data} session={session} persist={persist} notify={notify} /> : <Dashboard data={data} session={session} onNavigate={setView} onNouveauColis={() => { setView("colis"); setOuvrirFormulaireColis((n) => n + 1); }} />)}
+            {view === "dashboard" && (session.role === "Partenaire" ? <PartnerDashboard data={data} session={session} persist={persist} notify={notify} onglet={ongletPartenaire} /> : <Dashboard data={data} session={session} onNavigate={setView} onNouveauColis={() => { setView("colis"); setOuvrirFormulaireColis((n) => n + 1); }} />)}
             {view === "colis" && <ColisView data={data} persist={persist} session={session} notify={notify} t={t} initialQuery={colisInitialQuery} ouvrirFormulaire={ouvrirFormulaireColis} />}
             {view === "centreclients" && (effectivePermission(session, "espaceclient.gerer")
               ? <CentreClientsPage data={data} persist={persist} notify={notify} session={session} />
@@ -2600,6 +2697,15 @@ function PublicTrackingPage({ data, loading }) {
   const [searched, setSearched] = useState(!!params?.get("code"));
   const colis = data && searched ? data.colis.find((c) => c.tracking.toUpperCase() === code.trim().toUpperCase()) : null;
   const notFound = searched && !loading && data && !colis;
+  /*
+   * Un colis partenaire se suit sous la marque du partenaire, jamais sous la nôtre.
+   *
+   * C'est son client : il a acheté un envoi à sa boutique, pas à Ba-Diaby. Lui montrer le nom de
+   * son transporteur sur la page de suivi, c'est lui donner le moyen de nous appeler directement
+   * la fois suivante — autrement dit prendre son client à un partenaire qui vient de nous le
+   * confier. Tant qu'aucun colis n'est trouvé, la page reste celle de l'entreprise.
+   */
+  const marqueColis = colis ? marquePartenaire(data, colis) : null;
 
   function rechercher(e) {
     e?.preventDefault();
@@ -2641,9 +2747,17 @@ function PublicTrackingPage({ data, loading }) {
       <div style={{ width: "100%", maxWidth: 560, display: "flex", justifyContent: "flex-end", marginBottom: 20 }}>
         <ClientLangSwitch lang={lang} onChange={setLang} />
       </div>
-      <img src={data?.branding?.logo || DEFAULT_LOGO} alt="logo" style={{ width: 54, height: 54, borderRadius: 13, objectFit: "cover", marginBottom: 14, boxShadow: "0 10px 26px rgba(0,0,0,0.3)" }} />
+      {marqueColis && !marqueColis.logo ? (
+        <div style={{ width: 54, height: 54, borderRadius: 13, marginBottom: 14, background: "rgba(255,255,255,0.14)", color: "#fff", display: "grid", placeItems: "center", fontSize: 26, fontWeight: 700, boxShadow: "0 10px 26px rgba(0,0,0,0.3)" }}>
+          {(marqueColis.nomCommercial || "?").trim().charAt(0).toUpperCase()}
+        </div>
+      ) : (
+        <img src={(marqueColis && marqueColis.logo) || data?.branding?.logo || DEFAULT_LOGO} alt="" style={{ width: 54, height: 54, borderRadius: 13, objectFit: "cover", marginBottom: 14, boxShadow: "0 10px 26px rgba(0,0,0,0.3)" }} />
+      )}
       <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 25, color: "#fff", marginBottom: 4, textAlign: "center" }}>
-        BA-DIABY <span style={{ color: "#FF8A9B" }}>EXPRESS</span>
+        {marqueColis
+          ? marqueColis.nomCommercial
+          : <>BA-DIABY <span style={{ color: "#FF8A9B" }}>EXPRESS</span></>}
       </div>
       <div style={{ fontSize: 13.5, color: "rgba(255,255,255,0.78)", marginBottom: 28 }}>{T("Suivi de colis")}</div>
 
@@ -2714,7 +2828,13 @@ function PublicTrackingPage({ data, loading }) {
             remettra à l'agence — avec l'équivalent dans la devise de l'expéditeur et/ou du
             destinataire quand elle diffère du GNF. Page publique : on annonce ce qui reste à
             régler, jamais l'historique des versements ni le détail des prix.
+
+            Rien de tout cela sur un colis partenaire : l'entreprise n'encaisse rien auprès de son
+            client final, et son prix est à zéro. Le bloc affichait donc « Non payé » à quelqu'un
+            qui avait peut-être déjà réglé son partenaire — sur la page même que le partenaire lui
+            envoie. C'est le dernier endroit où la mention subsistait.
           */}
+          {!estColisPartenaire(colis) && (
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap",
                         background: colis.reste <= 0.005 ? "var(--ok-bg)" : colis.paye > 0 ? "var(--warn-bg)" : "var(--danger-bg)",
                         border: "1px solid " + (colis.reste <= 0.005 ? "var(--ok-border)" : colis.paye > 0 ? "var(--warn-border)" : "var(--danger-border)"),
@@ -2734,6 +2854,7 @@ function PublicTrackingPage({ data, loading }) {
               </span>
             )}
           </div>
+          )}
 
           <div style={{ borderTop: "1px solid var(--border)", paddingTop: 14 }}>
             <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8 }}>{T("HISTORIQUE")}</div>
@@ -2748,7 +2869,11 @@ function PublicTrackingPage({ data, loading }) {
         </div>
       )}
 
-      <div style={{ fontSize: 11, color: "rgba(255,255,255,0.65)", marginTop: 32 }}>{T("Ba-Diaby Express — Transport de colis Conakry - Monde")}</div>
+      <div style={{ fontSize: 11, color: "rgba(255,255,255,0.65)", marginTop: 32, textAlign: "center" }}>
+        {marqueColis
+          ? [marqueColis.telephone, marqueColis.siteWeb].filter(Boolean).join(" · ") || marqueColis.nomCommercial
+          : T("Ba-Diaby Express — Transport de colis Conakry - Monde")}
+      </div>
     </div>
   );
 }
@@ -4570,19 +4695,29 @@ Dashboard = memo(Dashboard);
  * au tarif de son contrat, fixé par l'administrateur — colis par colis, puis regroupé sur ses
  * factures. Il dépose ses colis depuis cet écran ; un agent les vérifie ensuite un à un.
  */
-function PartnerDashboard({ data, session, persist, notify }) {
+function PartnerDashboard({ data, session, persist, notify, onglet }) {
   const [periode, setPeriode] = useState("mois");
   const [showForm, setShowForm] = useState(false);
-  const [onglet, setOnglet] = useState("accueil");
   // La facture dont le PDF est en cours de fabrication : le jsPDF se charge depuis Internet, et sur
   // un téléphone cela prend parfois quelques secondes pendant lesquelles rien ne doit sembler mort.
   const [pdfEnCours, setPdfEnCours] = useState(null);
-  const colisPartenaire = data.colis.filter((c) => c.partenaireId === session.id);
-  const moi = (data.users || []).find((u) => u.id === session.id) || session;
+  /*
+   * Un employé travaille dans l'espace de son employeur, pas dans le sien : tout ce qui suit est
+   * lu sous l'identifiant du partenaire titulaire, jamais sous celui de la session.
+   */
+  const partenaireId = partenaireDeLaSession(session);
+  const estEmploye = !!session.partenaireParent;
+  const montantsVisibles = voitLesMontants(session);
+  const colisPartenaire = data.colis.filter((c) => c.partenaireId === partenaireId);
+  const moi = (data.users || []).find((u) => u.id === partenaireId) || session;
+  const monCompte = (data.users || []).find((u) => u.id === session.id) || session;
+  const mesEmployes = useMemo(() => employesDuPartenaire(data.users, partenaireId), [data.users, partenaireId]);
   const reglages = reglagesPartenaire(moi);
   const devise = reglages.tarif.devise;
-  const mesFactures = (data.facturesPartenaire || []).filter((f) => f.partenaireId === session.id)
-    .sort((a, b) => new Date(b.creeeLe) - new Date(a.creeeLe));
+  const mesFactures = montantsVisibles
+    ? (data.facturesPartenaire || []).filter((f) => f.partenaireId === partenaireId)
+      .sort((a, b) => new Date(b.creeeLe) - new Date(a.creeeLe))
+    : [];
   /*
    * Ce que le partenaire doit encore à l'entreprise. Il le voit d'où il travaille : jusqu'ici,
    * ses factures affichaient un total sans jamais dire si elles avaient été payées, et il devait
@@ -4620,7 +4755,7 @@ function PartnerDashboard({ data, session, persist, notify }) {
   const poidsTotal = scoped.reduce((s, c) => s + (Number(c.poids) || 0), 0);
   const coutPeriode = scoped.reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0);
   // Ce qui est vérifié mais pas encore porté sur une facture : le partenaire sait ce qui va tomber.
-  const enAttenteDeFacture = colisPartenaireAFacturer(data.colis, session.id)
+  const enAttenteDeFacture = colisPartenaireAFacturer(data.colis, partenaireId)
     .reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0);
   /*
    * Ce qui part au prochain départ, et ce qui le retient.
@@ -4644,7 +4779,7 @@ function PartnerDashboard({ data, session, persist, notify }) {
   function enregistrerIdentite(patch) {
     persist({
       ...data,
-      users: (data.users || []).map((u) => (u.id === session.id
+      users: (data.users || []).map((u) => (u.id === partenaireId
         ? { ...u, partenaire: { ...(u.partenaire || {}), ...patch } }
         : u)),
       activityLog: pushActivity(data, session, "Informations partenaire mises à jour", reglages.nomCommercial || `${session.prenom} ${session.nom}`.trim()),
@@ -4692,6 +4827,106 @@ function PartnerDashboard({ data, session, persist, notify }) {
     }
   }
 
+  /*
+   * Le partenaire change son propre mot de passe.
+   *
+   * Jusqu'ici il fallait appeler l'entreprise, qui en fabriquait un nouveau : autant dire que
+   * personne ne le changeait jamais. L'ancien mot de passe est exigé — sans lui, un téléphone
+   * laissé déverrouillé une minute suffirait à verrouiller le compte de son propriétaire.
+   */
+  async function changerMonMotDePasse(ancien, nouveau) {
+    const verif = await verifyPassword(ancien, monCompte);
+    if (!verif.ok) return { erreur: "Mot de passe actuel incorrect." };
+    if (!nouveau || nouveau.length < 8) return { erreur: "Choisissez un mot de passe d’au moins 8 caractères." };
+    const identifiants = await creerIdentifiantsMotDePasse(nouveau);
+    await persist({
+      ...data,
+      users: (data.users || []).map((u) => (u.id === session.id ? { ...u, ...identifiants } : u)),
+      activityLog: pushActivity(data, session, "Mot de passe changé", `${session.prenom} ${session.nom}`.trim() || session.identifiant),
+    });
+    return { ok: true };
+  }
+
+  /*
+   * Les accès que le partenaire ouvre à ses employés.
+   *
+   * Il ne travaille pas seul : quelqu'un tient le dépôt, quelqu'un enregistre les colis pendant
+   * qu'il est en déplacement. Faire passer chacun par l'entreprise pour obtenir un compte, c'est
+   * une demande de plus à traiter chez nous et une journée perdue chez lui — il ouvre donc les
+   * accès lui-même.
+   *
+   * Cinq au maximum : un accès nominatif reste nominatif. Au-delà, c'est un compte partagé qui
+   * circule, et plus personne ne sait qui a enregistré quoi.
+   */
+  async function creerAcces({ prenom, nom, identifiant, motdepasse, voitLesMontants: voit }) {
+    const propre = String(identifiant || "").trim();
+    if (!prenom.trim() || !nom.trim() || !propre) return { erreur: "Renseignez le prénom, le nom et l’identifiant." };
+    if (!motdepasse || motdepasse.length < 8) return { erreur: "Choisissez un mot de passe d’au moins 8 caractères." };
+    if (mesEmployes.length >= MAX_EMPLOYES_PARTENAIRE) {
+      return { erreur: `Vous avez déjà ${MAX_EMPLOYES_PARTENAIRE} accès — supprimez-en un pour en créer un autre.` };
+    }
+    /*
+     * L'identifiant doit être unique dans toute l'application, pas seulement chez ce partenaire :
+     * la connexion cherche un compte par identifiant, et deux comptes homonymes rendraient
+     * imprévisible celui qui s'ouvre.
+     */
+    if ((data.users || []).some((u) => (u.identifiant || "").toLowerCase() === propre.toLowerCase())) {
+      return { erreur: "Cet identifiant est déjà pris — choisissez-en un autre." };
+    }
+    const identifiants = await creerIdentifiantsMotDePasse(motdepasse);
+    const employe = {
+      id: `pe${Date.now()}`,
+      prenom: prenom.trim(), nom: nom.trim(), identifiant: propre,
+      role: "Partenaire", partenaireParent: partenaireId, voitLesMontants: !!voit,
+      email: "", telephone: "", twoFA: false, ...identifiants,
+    };
+    await persist({
+      ...data,
+      users: [...(data.users || []), employe],
+      activityLog: pushActivity(data, session, "Accès employé créé", `${employe.prenom} ${employe.nom} (${propre}) — ${reglages.nomCommercial || "partenaire"}`),
+    });
+    notify?.(`Accès créé pour ${employe.prenom} ${employe.nom}`);
+    return { ok: true };
+  }
+
+  function supprimerAcces(employe) {
+    persist({
+      ...data,
+      users: (data.users || []).filter((u) => u.id !== employe.id),
+      activityLog: pushActivity(data, session, "Accès employé supprimé", `${employe.prenom} ${employe.nom} (${employe.identifiant})`),
+    });
+    notify?.(`Accès de ${employe.prenom} ${employe.nom} supprimé`);
+  }
+
+  function basculerMontantsEmploye(employe) {
+    const voit = !employe.voitLesMontants;
+    persist({
+      ...data,
+      users: (data.users || []).map((u) => (u.id === employe.id ? { ...u, voitLesMontants: voit } : u)),
+      activityLog: pushActivity(data, session, "Accès employé modifié",
+        `${employe.prenom} ${employe.nom} — montants ${voit ? "visibles" : "masqués"}`),
+    });
+    notify?.(voit
+      ? `${employe.prenom} voit désormais les montants`
+      : `${employe.prenom} ne voit plus les montants`);
+  }
+
+  /*
+   * Remise à zéro du mot de passe d'un employé, par le partenaire lui-même : c'est lui qui a la
+   * personne en face, c'est donc lui qui peut vérifier son identité. Le nouveau mot de passe est
+   * affiché une seule fois, puis n'est plus lisible nulle part — il n'est conservé que haché.
+   */
+  async function reinitialiserAcces(employe) {
+    const provisoire = `${(employe.prenom || "acces").toLowerCase().replace(/[^a-z]/g, "").slice(0, 6) || "acces"}${Math.floor(1000 + Math.random() * 9000)}`;
+    const identifiants = await creerIdentifiantsMotDePasse(provisoire);
+    await persist({
+      ...data,
+      users: (data.users || []).map((u) => (u.id === employe.id ? { ...u, ...identifiants } : u)),
+      activityLog: pushActivity(data, session, "Mot de passe employé réinitialisé", `${employe.prenom} ${employe.nom} (${employe.identifiant})`),
+    });
+    return provisoire;
+  }
+
   async function enregistrerColis(colis) {
     const resultat = await persist({
       ...data,
@@ -4711,67 +4946,63 @@ function PartnerDashboard({ data, session, persist, notify }) {
           <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: "0 0 4px" }}>
             {reglages.nomCommercial || "Espace Partenaire"}
           </h1>
-          <p style={{ color: "var(--muted)", fontSize: 13.5, margin: 0 }}>Bienvenue {session.prenom} {session.nom} — enregistrez vos colis et suivez leur acheminement.</p>
+          <p style={{ color: "var(--muted)", fontSize: 13.5, margin: 0 }}>
+            Bienvenue {session.prenom} {session.nom} — {estEmploye
+              ? <>vous travaillez dans l’espace de {reglages.nomCommercial || `${moi.prenom} ${moi.nom}`.trim()} ; les colis que vous enregistrez portent votre nom.</>
+              : "enregistrez vos colis et suivez leur acheminement."}
+          </p>
         </div>
         <button onClick={() => setShowForm(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>
           <Plus size={17} /> Enregistrer un colis
         </button>
       </div>
 
-      <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 16px", marginBottom: 18 }}>
-        <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
-          Les montants ci-dessous sont ce que <strong>l’entreprise vous facture</strong>, au tarif convenu
-          {reglages.tarif.parKg > 0 || reglages.tarif.parUnite > 0
-            ? ` (${fmt(reglages.tarif.parKg, devise)}/kg · ${fmt(reglages.tarif.parUnite, devise)}/unité)`
-            : ""}.
-          Ce que vous facturez, vous, à vos clients ne figure nulle part ici. Chaque colis est vérifié
-          par un agent avant d’entrer sur une facture.
-        </div>
-      </div>
-
-      <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
-        {[["semaine", "Cette semaine"], ["mois", "Ce mois"], ["tout", "Tout"]].map(([k, label]) => (
-          <button key={k} onClick={() => setPeriode(k)} style={{ padding: "7px 14px", borderRadius: 20, border: "1.5px solid " + (periode === k ? "var(--brand-solid)" : "var(--border)"), background: periode === k ? "var(--brand-solid)" : "var(--surface)", color: periode === k ? "#fff" : "var(--muted)", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>{label}</button>
-        ))}
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 14, marginBottom: 24 }}>
-        <StatCard label="Colis enregistrés" value={scoped.length} icon={Package} tint="#3D63FF" />
-        <StatCard label="Poids total" value={`${poidsTotal.toFixed(1)} kg`} icon={Truck} tint="#8B5CF6" />
-        <StatCard label="Prêts à expédier" value={prets.length} icon={Plane} tint="#16A163" />
-        <StatCard label="Coût sur la période" value={fmt(coutPeriode, devise)} icon={Receipt} tint="#0EA5E9" />
-        <StatCard label="Vérifié, à facturer" value={fmt(enAttenteDeFacture, devise)} icon={Clock} tint="#D6A22E" />
-        <StatCard label="Reste à régler" value={fmt(resteARegler, devise)} icon={Wallet}
-          tint={resteARegler > 0.005 ? "#D6453F" : "#16A163"}
-          trend={resteARegler > 0.005 ? "sur vos factures" : "vous êtes à jour"}
-          trendColor={resteARegler > 0.005 ? "var(--warn-fg)" : "var(--ok-fg)"} />
-      </div>
+      {!estEmploye && <PromesseConfidentialite />}
 
       {/*
-        Quatre onglets seulement. « Accueil » réunit ce qu'on consulte sans agir — les
-        informations du partenaire et ses factures — et laisse aux trois autres ce sur quoi il
-        travaille. À cinq onglets, la barre se repliait sur deux lignes sur un téléphone.
+        Trois chiffres, pas six.
+        
+        L'en-tête portait six tuiles : sur un téléphone, il fallait faire défiler tout l'écran
+        avant d'atteindre la moindre action. Ne restent ici que les trois questions qu'on se pose
+        en ouvrant l'espace — combien de colis, combien partent, combien je dois. Le poids et le
+        coût de la période ont rejoint « Colis », où se trouve le filtre qui les commande.
       */}
-      <div style={{ display: "flex", gap: 22, borderBottom: "1px solid var(--border)", marginBottom: 18, flexWrap: "wrap" }}>
-        {[["accueil", "Accueil", 0], ["colis", "Mes colis", colisPartenaire.length], ["expedier", "À expédier", prets.length], ["clients", "Mes clients", mesClients.length]].map(([cle, libelle, compte]) => (
-          <button key={cle} onClick={() => setOnglet(cle)} style={{
-            background: "none", border: "none", padding: "0 0 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 7,
-            color: onglet === cle ? "var(--info-fg)" : "var(--muted)",
-            borderBottom: onglet === cle ? "2px solid #5B8DEF" : "2px solid transparent", fontSize: 13.5, fontWeight: 600,
-          }}>
-            {libelle}
-            {compte > 0 && <span style={{ background: "var(--surface2)", color: "var(--muted)", borderRadius: 10, padding: "1px 7px", fontSize: 11, fontWeight: 700 }}>{compte}</span>}
-          </button>
-        ))}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 14, marginBottom: 22 }}>
+        <StatCard label="Colis enregistrés" value={colisPartenaire.length} icon={Package} tint="#3D63FF" />
+        <StatCard label="Prêts à expédier" value={prets.length} icon={Plane} tint="#16A163"
+          trend={bloques.length > 0 ? `${bloques.length} en attente de vérification` : undefined}
+          trendColor="var(--warn-fg)" />
+        {montantsVisibles && (
+          <StatCard label="Reste à régler" value={fmt(resteARegler, devise)} icon={Wallet}
+            tint={resteARegler > 0.005 ? "#D6453F" : "#16A163"}
+            trend={resteARegler > 0.005 ? "sur vos factures" : "vous êtes à jour"}
+            trendColor={resteARegler > 0.005 ? "var(--warn-fg)" : "var(--ok-fg)"} />
+        )}
       </div>
 
       <div style={{ display: onglet === "colis" ? "block" : "none" }}>
+      {/*
+        Le filtre de période est ici, contre le résumé qu'il commande. En tête de page, il
+        laissait croire qu'il agissait sur toutes les tuiles, alors que la moitié d'entre elles
+        l'ignoraient.
+      */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {[["semaine", "Cette semaine"], ["mois", "Ce mois"], ["tout", "Tout"]].map(([k, label]) => (
+            <button key={k} onClick={() => setPeriode(k)} style={{ padding: "7px 14px", borderRadius: 20, border: "1.5px solid " + (periode === k ? "var(--brand-solid)" : "var(--border)"), background: periode === k ? "var(--brand-solid)" : "var(--surface)", color: periode === k ? "#fff" : "var(--muted)", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>{label}</button>
+          ))}
+        </div>
+        <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
+          <strong style={{ color: "var(--text)" }}>{scoped.length}</strong> colis · <strong style={{ color: "var(--text)" }}>{poidsTotal.toFixed(1)} kg</strong>
+          {montantsVisibles && <> · <strong style={{ color: "var(--text)" }}>{fmt(coutPeriode, devise)}</strong></>}
+        </div>
+      </div>
       <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", marginBottom: 20 }}>
         <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", minWidth: 760, borderCollapse: "collapse" }}>
-          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Expéditeur", "Destinataire", "Poids", "Coût", "Vérification", "Acheminement", "Réglé par votre client"].map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
+          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Expéditeur", "Destinataire", "Poids", ...(montantsVisibles ? ["Coût"] : []), "Vérification", "Acheminement", "Réglé par votre client", "Suivi"].map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
           <tbody>
-            {colisPartenaire.length === 0 && <tr><td colSpan={8} style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucun colis enregistré pour l’instant — utilisez « Enregistrer un colis ».</td></tr>}
+            {colisPartenaire.length === 0 && <tr><td colSpan={montantsVisibles ? 9 : 8} style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucun colis enregistré pour l’instant — utilisez « Enregistrer un colis ».</td></tr>}
             {colisPartenaire.map((c) => {
               const st = STATUS_STYLE[c.status];
               const valide = statutValidationPartenaire(c) === "Validé";
@@ -4785,12 +5016,12 @@ function PartnerDashboard({ data, session, persist, notify }) {
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.expediteur || "—"}</td>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{c.destinataire}</td>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.poids} kg</td>
-                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 700, whiteSpace: "nowrap" }}>{fmt(Number(c.prixPartenaire) || 0, c.devisePartenaire || devise)}</td>
+                  {montantsVisibles && <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 700, whiteSpace: "nowrap" }}>{fmt(Number(c.prixPartenaire) || 0, c.devisePartenaire || devise)}</td>}
                   <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}>
                     <span style={{ background: valide ? "var(--ok-bg-soft)" : "var(--warn-bg)", color: valide ? "var(--ok-fg)" : "var(--warn-fg)", padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>
                       {valide ? "Vérifié" : "En attente"}
                     </span>
-                    {facture && <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 3 }}>{facture.numero}</div>}
+                    {montantsVisibles && facture && <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 3 }}>{facture.numero}</div>}
                   </td>
                   <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}><span style={{ background: st?.bg, color: st?.fg, padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>{c.status}</span></td>
                   <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}>
@@ -4807,6 +5038,20 @@ function PartnerDashboard({ data, session, persist, notify }) {
                       <span style={{ fontSize: 11.5, color: "var(--muted)" }}>—</span>
                     )}
                   </td>
+                  {/*
+                    Le partenaire envoie le suivi à son client sans quitter l'application et sans
+                    rien retaper : le numéro du destinataire est déjà là, le message aussi. C'est
+                    ce geste qui fait revenir un partenaire dans son espace — il n'y vient plus
+                    pour consulter, il y vient pour travailler devant son client.
+                  */}
+                  <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}>
+                    <a href={waLink(c.telephone, messageSuiviPartenaire(c, reglages.nomCommercial))}
+                      target="_blank" rel="noreferrer"
+                      title={c.telephone ? `Envoyer le suivi à ${c.destinataire}` : "Choisir le contact dans WhatsApp"}
+                      style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "#3ECB84", color: "#fff", borderRadius: 8, padding: "6px 11px", fontSize: 11.5, fontWeight: 700, textDecoration: "none" }}>
+                      <MessageCircle size={13} /> Envoyer
+                    </a>
+                  </td>
                 </tr>
               );
             })}
@@ -4816,7 +5061,12 @@ function PartnerDashboard({ data, session, persist, notify }) {
       </div>
       </div>
 
-      {onglet === "expedier" && (
+      {/*
+        L'accueil montre ce qui part au prochain départ : c'est la seule chose qu'un partenaire
+        vient vérifier plusieurs fois par jour. Le reste — factures, identité — se consulte, et
+        se consulte depuis son propre onglet.
+      */}
+      {onglet === "accueil" && (
         <div style={{ marginBottom: 20 }}>
           {prets.length === 0 && bloques.length === 0 ? (
             <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
@@ -4956,10 +5206,23 @@ function PartnerDashboard({ data, session, persist, notify }) {
         </div>
       )}
 
-      {onglet === "accueil" && (
-        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 10 }}>Vos factures</div>
+      {/*
+        Tout l'argent au même endroit : ce qui est vérifié et va tomber sur la prochaine facture,
+        puis les factures elles-mêmes avec ce qui reste dû. Auparavant, le montant à venir était
+        une tuile en haut de page et les factures une liste en bas — deux moitiés de la même
+        question, séparées par tout l'écran.
+      */}
+      {onglet === "factures" && montantsVisibles && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+          <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14 }}>Vos factures</div>
+          <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
+            {enAttenteDeFacture > 0.005
+              ? <>Vérifié, pas encore facturé : <strong style={{ color: "var(--text)" }}>{fmt(enAttenteDeFacture, devise)}</strong></>
+              : "Aucun colis vérifié en attente de facturation"}
+          </div>
+        </div>
       )}
-      {onglet === "accueil" && (mesFactures.length === 0 ? (
+      {onglet === "factures" && montantsVisibles && (mesFactures.length === 0 ? (
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 13, marginBottom: 20 }}>
           Aucune facture pour l’instant. Vos colis vérifiés y seront regroupés.
         </div>
@@ -5032,9 +5295,17 @@ function PartnerDashboard({ data, session, persist, notify }) {
         </div>
       ))}
 
-      {onglet === "accueil" && (
+      {onglet === "compte" && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(300px,1fr))", gap: 16, marginBottom: 20, alignItems: "start" }}>
-          <IdentitePartenaire key={moi.id} partenaire={moi} session={session} onSave={enregistrerIdentite} />
+          {!estEmploye && <IdentitePartenaire key={moi.id} partenaire={moi} session={session} onSave={enregistrerIdentite} />}
+          <MonMotDePasse compte={monCompte} onChanger={changerMonMotDePasse} />
+          {!estEmploye && (
+            <AccesEmployes
+              employes={mesEmployes} onCreer={creerAcces} onSupprimer={supprimerAcces}
+              onBasculerMontants={basculerMontantsEmploye} onReinitialiser={reinitialiserAcces}
+            />
+          )}
+          {montantsVisibles && (
           <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, border: "1px solid var(--border)" }}>
             <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Vos destinations et tarifs</div>
             <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>
@@ -5079,6 +5350,7 @@ function PartnerDashboard({ data, session, persist, notify }) {
               contactez votre interlocuteur habituel.
             </div>
           </div>
+          )}
         </div>
       )}
 
@@ -5088,8 +5360,8 @@ function PartnerDashboard({ data, session, persist, notify }) {
           onSave={enregistrerColis}
           existingColis={data.colis}
           session={session}
-          partenaires={(data.users || []).filter((u) => u.role === "Partenaire")}
-          partenaireImpose={session.id}
+          partenaires={partenairesPrincipaux(data.users)}
+          partenaireImpose={partenaireId}
         />
       )}
     </div>
@@ -5109,6 +5381,302 @@ function nombreArticles(colis) {
  * il figure déjà sur des étiquettes en circulation, le changer casserait la correspondance entre
  * un colis et son numéro.
  */
+/**
+ * Changement de mot de passe par son propriétaire.
+ *
+ * L'ancien mot de passe est exigé : le compte reste ouvert sur le téléphone toute la journée, et
+ * sans cette exigence il suffirait de l'attraper posé sur un comptoir pour en verrouiller
+ * l'accès. Le nouveau n'est jamais conservé en clair — seule son empreinte l'est.
+ */
+function MonMotDePasse({ compte, onChanger }) {
+  const [ouvert, setOuvert] = useState(false);
+  const [ancien, setAncien] = useState("");
+  const [nouveau, setNouveau] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [err, setErr] = useState("");
+  const [occupe, setOccupe] = useState(false);
+  const [fait, setFait] = useState(false);
+
+  function fermer() {
+    setOuvert(false); setAncien(""); setNouveau(""); setConfirmation(""); setErr(""); setFait(false);
+  }
+
+  async function valider(e) {
+    e.preventDefault();
+    setErr("");
+    if (nouveau !== confirmation) { setErr("Les deux mots de passe ne correspondent pas."); return; }
+    setOccupe(true);
+    const r = await onChanger(ancien, nouveau);
+    setOccupe(false);
+    if (r?.erreur) { setErr(r.erreur); return; }
+    setFait(true);
+    setTimeout(fermer, 1600);
+  }
+
+  return (
+    <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, border: "1px solid var(--border)" }}>
+      <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Votre mot de passe</div>
+      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>
+        Vous vous connectez avec l’identifiant <strong style={{ color: "var(--text)" }}>{compte.identifiant}</strong>.
+        Changez votre mot de passe quand vous le souhaitez — sans passer par l’entreprise, qui ne peut
+        de toute façon pas le lire.
+      </div>
+
+      {!ouvert ? (
+        <button onClick={() => setOuvert(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 9, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+          <Key size={15} /> Changer mon mot de passe
+        </button>
+      ) : fait ? (
+        <div style={{ background: "var(--ok-bg-soft)", borderRadius: 10, padding: "12px 14px", fontSize: 13, color: "var(--ok-fg)", fontWeight: 700 }}>
+          Mot de passe changé. Il servira à votre prochaine connexion.
+        </div>
+      ) : (
+        <form onSubmit={valider}>
+          <Field label="Mot de passe actuel">
+            <input type="password" value={ancien} onChange={(e) => setAncien(e.target.value)} autoFocus style={inputStyle} />
+          </Field>
+          <Field label="Nouveau mot de passe">
+            <input type="password" value={nouveau} onChange={(e) => setNouveau(e.target.value)} style={inputStyle} placeholder="8 caractères au minimum" />
+          </Field>
+          <Field label="Répétez le nouveau mot de passe">
+            <input type="password" value={confirmation} onChange={(e) => setConfirmation(e.target.value)} style={inputStyle} />
+          </Field>
+          {err && <div style={{ color: "var(--warn-fg)", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="submit" disabled={occupe || !ancien || !nouveau}
+              style={{ flex: 1, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: occupe ? "wait" : "pointer", opacity: occupe || !ancien || !nouveau ? 0.6 : 1 }}>
+              {occupe ? "Enregistrement…" : "Enregistrer"}
+            </button>
+            <button type="button" onClick={fermer} style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "11px 18px", fontSize: 13, cursor: "pointer" }}>
+              Annuler
+            </button>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Les accès que le partenaire ouvre à ses employés — cinq au maximum.
+ *
+ * Chaque accès est nominatif : le nom de celui qui a enregistré un colis figure ensuite sur le
+ * colis, et c'est tout l'intérêt. Un compte partagé entre quatre personnes ne dit rien à
+ * personne le jour où il faut retrouver qui a pesé de travers.
+ *
+ * Par défaut un employé ne voit aucun montant : le tarif que l'entreprise applique au partenaire
+ * est son prix de revient, donc sa marge. Le partenaire peut l'ouvrir accès par accès — à un
+ * gérant de dépôt, oui ; à un manutentionnaire, sans doute pas.
+ */
+function AccesEmployes({ employes, onCreer, onSupprimer, onBasculerMontants, onReinitialiser }) {
+  const [ouvert, setOuvert] = useState(false);
+  const [prenom, setPrenom] = useState("");
+  const [nom, setNom] = useState("");
+  const [identifiant, setIdentifiant] = useState("");
+  const [motdepasse, setMotdepasse] = useState("");
+  const [voit, setVoit] = useState(false);
+  const [err, setErr] = useState("");
+  const [occupe, setOccupe] = useState(false);
+  const [aSupprimer, setASupprimer] = useState(null);
+  const [motDePasseAffiche, setMotDePasseAffiche] = useState(null);
+
+  const restants = MAX_EMPLOYES_PARTENAIRE - employes.length;
+
+  function fermer() {
+    setOuvert(false); setPrenom(""); setNom(""); setIdentifiant(""); setMotdepasse(""); setVoit(false); setErr("");
+  }
+
+  async function valider(e) {
+    e.preventDefault();
+    setErr("");
+    setOccupe(true);
+    const r = await onCreer({ prenom, nom, identifiant, motdepasse, voitLesMontants: voit });
+    setOccupe(false);
+    if (r?.erreur) { setErr(r.erreur); return; }
+    setMotDePasseAffiche({ identifiant: identifiant.trim(), motdepasse });
+    fermer();
+  }
+
+  return (
+    <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, border: "1px solid var(--border)" }}>
+      <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Accès de vos employés</div>
+      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>
+        Ouvrez un accès à qui travaille avec vous : chacun enregistre les colis sous son nom, dans
+        votre espace. {restants > 0
+          ? `Il vous reste ${restants} accès sur ${MAX_EMPLOYES_PARTENAIRE}.`
+          : `Vous avez atteint les ${MAX_EMPLOYES_PARTENAIRE} accès.`}
+      </div>
+
+      {employes.length > 0 && (
+        <div style={{ display: "grid", gap: 8, marginBottom: 14 }}>
+          {employes.map((u) => (
+            <div key={u.id} style={{ background: "var(--surface2)", borderRadius: 12, padding: "12px 14px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{u.prenom} {u.nom}</div>
+                  <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>@{u.identifiant}</div>
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <button onClick={() => onBasculerMontants(u)}
+                    title={u.voitLesMontants ? "Masquer les montants à cette personne" : "Montrer les montants à cette personne"}
+                    style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "1.5px solid var(--border)", borderRadius: 20, padding: "5px 11px", fontSize: 11.5, fontWeight: 700, cursor: "pointer", color: u.voitLesMontants ? "var(--ok-fg)" : "var(--muted)" }}>
+                    {u.voitLesMontants ? <Eye size={13} /> : <EyeOff size={13} />}
+                    {u.voitLesMontants ? "Voit les montants" : "Montants masqués"}
+                  </button>
+                  <button onClick={async () => setMotDePasseAffiche({ identifiant: u.identifiant, motdepasse: await onReinitialiser(u) })}
+                    style={{ background: "none", border: "none", color: "var(--info-fg)", fontSize: 11.5, fontWeight: 600, cursor: "pointer", padding: 0 }}>
+                    Nouveau mot de passe
+                  </button>
+                  <button onClick={() => setASupprimer(u)}
+                    style={{ background: "none", border: "none", color: "var(--danger-fg)", fontSize: 11.5, fontWeight: 600, cursor: "pointer", padding: 0 }}>
+                    Retirer
+                  </button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {!ouvert ? (
+        <button onClick={() => setOuvert(true)} disabled={restants <= 0}
+          style={{ display: "flex", alignItems: "center", gap: 7, background: restants > 0 ? "var(--surface2)" : "transparent", border: "1.5px solid var(--border)", color: restants > 0 ? "var(--text)" : "var(--muted)", borderRadius: 9, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: restants > 0 ? "pointer" : "not-allowed" }}>
+          <Plus size={15} /> Ouvrir un accès
+        </button>
+      ) : (
+        <form onSubmit={valider}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <Field label="Prénom"><input value={prenom} onChange={(e) => setPrenom(e.target.value)} autoFocus style={inputStyle} /></Field>
+            <Field label="Nom"><input value={nom} onChange={(e) => setNom(e.target.value)} style={inputStyle} /></Field>
+          </div>
+          <Field label="Identifiant de connexion">
+            <input value={identifiant} onChange={(e) => setIdentifiant(e.target.value)} style={inputStyle} placeholder="ex : fatou.depot" />
+          </Field>
+          <Field label="Mot de passe">
+            <input value={motdepasse} onChange={(e) => setMotdepasse(e.target.value)} style={inputStyle} placeholder="8 caractères au minimum" />
+          </Field>
+          <button type="button" onClick={() => setVoit((v) => !v)}
+            style={{ display: "flex", alignItems: "center", gap: 8, background: "none", border: "none", padding: 0, marginBottom: 14, cursor: "pointer", textAlign: "left" }}>
+            <span style={{ width: 18, height: 18, borderRadius: 5, border: "1.5px solid var(--border)", background: voit ? "var(--brand-solid)" : "transparent", display: "grid", placeItems: "center", flexShrink: 0 }}>
+              {voit && <Check size={12} color="#fff" />}
+            </span>
+            <span style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.45 }}>
+              Cette personne peut voir les montants — ce que l’entreprise vous facture, et vos factures.
+            </span>
+          </button>
+          {err && <div style={{ color: "var(--warn-fg)", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="submit" disabled={occupe}
+              style={{ flex: 1, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: occupe ? "wait" : "pointer", opacity: occupe ? 0.6 : 1 }}>
+              {occupe ? "Création…" : "Créer l’accès"}
+            </button>
+            <button type="button" onClick={fermer} style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "11px 18px", fontSize: 13, cursor: "pointer" }}>
+              Annuler
+            </button>
+          </div>
+        </form>
+      )}
+
+      {/*
+        Le mot de passe n'est montré qu'ici, une seule fois : ensuite il n'est plus conservé qu'en
+        empreinte, et personne — pas même l'entreprise — ne peut le relire.
+      */}
+      {motDePasseAffiche && (
+        <Modal title="Notez ces identifiants" onClose={() => setMotDePasseAffiche(null)} niveau={1}>
+          <div style={{ fontSize: 13, color: "var(--text)", marginBottom: 14, lineHeight: 1.55 }}>
+            Transmettez-les à la personne concernée. Ce mot de passe ne sera plus affiché : il n’est
+            conservé que sous forme chiffrée, illisible même pour nous.
+          </div>
+          <div style={{ background: "var(--surface2)", borderRadius: 10, padding: "14px 16px", marginBottom: 16 }}>
+            <div style={{ fontSize: 12, color: "var(--muted)" }}>Identifiant</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "var(--text)", marginBottom: 10, wordBreak: "break-all" }}>{motDePasseAffiche.identifiant}</div>
+            <div style={{ fontSize: 12, color: "var(--muted)" }}>Mot de passe</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif", wordBreak: "break-all" }}>{motDePasseAffiche.motdepasse}</div>
+          </div>
+          <button onClick={() => setMotDePasseAffiche(null)}
+            style={{ width: "100%", background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+            J’ai noté
+          </button>
+        </Modal>
+      )}
+
+      {aSupprimer && (
+        <ConfirmerAction
+          titre="Retirer cet accès ?"
+          message={`${aSupprimer.prenom} ${aSupprimer.nom} (@${aSupprimer.identifiant}) ne pourra plus se connecter.`}
+          consequence="Les colis qu’il a enregistrés restent les vôtres et ne bougent pas — seul son accès disparaît. Vous pourrez lui en ouvrir un nouveau à tout moment."
+          libelleAction="Retirer l’accès"
+          onConfirmer={() => { const u = aSupprimer; setASupprimer(null); onSupprimer(u); }}
+          onAnnuler={() => setASupprimer(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Ce que l'entreprise voit du partenaire, et ce qu'elle n'en voit pas.
+ *
+ * Un partenaire confie son activité à un outil qui appartient à son transporteur : c'est une
+ * réticence légitime, et lui répondre en petits caractères sous la grille tarifaire ne suffit
+ * pas. La promesse est donc dite en clair, à l'endroit où il travaille.
+ *
+ * Elle n'a de valeur que si elle est exacte. Le marquage « réglé par votre client » enregistre
+ * bien quelque chose — le fait qu'un colis a été payé, jamais le montant. C'est écrit tel quel :
+ * une promesse arrangeante qu'un partenaire prendrait en défaut une seule fois vaut moins que
+ * pas de promesse du tout.
+ */
+function PromesseConfidentialite() {
+  const [deplie, setDeplie] = useState(false);
+  const puce = (texte) => (
+    <li style={{ marginBottom: 5, lineHeight: 1.5 }}>{texte}</li>
+  );
+
+  return (
+    <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 16px", marginBottom: 18 }}>
+      <button onClick={() => setDeplie((v) => !v)}
+        style={{ display: "flex", alignItems: "center", gap: 9, background: "none", border: "none", padding: 0, cursor: "pointer", width: "100%", textAlign: "start" }}>
+        <Lock size={15} color="var(--info-fg)" style={{ flexShrink: 0 }} />
+        <span style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600, flex: 1, lineHeight: 1.45 }}>
+          Les prix que vous demandez à vos clients ne sont pas enregistrés ici.
+        </span>
+        <span style={{ fontSize: 11.5, color: "var(--info-fg)", fontWeight: 700, whiteSpace: "nowrap" }}>
+          {deplie ? "Masquer" : "En détail"}
+        </span>
+      </button>
+
+      {deplie && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(240px,1fr))", gap: 18, marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--info-border)" }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", marginBottom: 7, letterSpacing: 0.3 }}>CE QUE NOUS VOYONS</div>
+            <ul style={{ margin: 0, paddingInlineStart: 18, fontSize: 12.5, color: "var(--text)" }}>
+              {puce("Les colis que vous déposez : numéro de suivi, destinataire, poids, contenu déclaré.")}
+              {puce("Ce que nous vous facturons, au tarif de votre contrat.")}
+              {puce("Les versements que vous nous faites sur vos factures.")}
+              {puce("Qu’un colis a été réglé par votre client, si vous le marquez vous-même — le fait, jamais le montant.")}
+            </ul>
+          </div>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", marginBottom: 7, letterSpacing: 0.3 }}>CE QUE NOUS NE VOYONS PAS</div>
+            <ul style={{ margin: 0, paddingInlineStart: 18, fontSize: 12.5, color: "var(--text)" }}>
+              {puce("Le prix que vous demandez à vos clients.")}
+              {puce("Votre marge — nous connaissons notre tarif, pas le vôtre.")}
+              {puce("Le montant que vos clients vous versent.")}
+              {puce("Vos échanges avec eux, et votre carnet d’adresses hors de cet espace.")}
+            </ul>
+          </div>
+          <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "var(--muted)", lineHeight: 1.55 }}>
+            Aucun écran ne vous demande vos prix de vente, et aucun champ ne les attend. Vos colis
+            voyagent sous votre nom commercial, et le lien de suivi que vous envoyez à vos clients
+            porte votre marque, pas la nôtre. Les accès que vous ouvrez à vos employés sont muets
+            sur nos montants tant que vous ne l’autorisez pas.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function IdentitePartenaire({ partenaire, session, onSave }) {
   const r = reglagesPartenaire(partenaire);
   const [edition, setEdition] = useState(false);
@@ -5538,7 +6106,6 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
   const back = () => setSub(null);
 
   if (sub === "site") return <SiteVitrinePage data={data} persist={persist} notify={notify} onBack={back} />;
-  if (sub === "routes") return <RoutesTarifsPage data={data} persist={persist} session={session} notify={notify} onBack={back} />;
   if (sub === "devises") return <GestionDevisesPage data={data} persist={persist} session={session} notify={notify} onBack={back} />;
   if (sub === "commissions") return <CommissionsPage data={data} persist={persist} session={session} notify={notify} onBack={back} />;
   if (sub === "reception") return <ReceptionTarifsPage data={data} persist={persist} notify={notify} onBack={back} />;
@@ -5592,7 +6159,6 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
 
       <SectionLabel>COMMERCIAL &amp; LOGISTIQUE</SectionLabel>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14 }}>
-        <Card icon={DollarSign} tint="#8B5CF6" title="Routes &amp; Tarifs" desc="Gérer les taux de change, prix par kg et destinations." onClick={() => setSub("routes")} />
         <Card icon={RefreshCw} tint="#0EA5E9" title="Gestion des devises" desc="Un taux par devise, partagé automatiquement par tous les pays concernés." onClick={() => setSub("devises")} />
         <Card icon={Users} tint="#16A163" title="Commissions par Agence" desc="Définissez combien chaque agence gagne par kg et par unité vendue." onClick={() => setSub("commissions")} />
         <Card icon={Package} tint="var(--danger-fg)" title="Tarifs de réception client" desc="Le tarif au kg appliqué sur les bordereaux de réception, selon le poids du lot." onClick={() => setSub("reception")} />
@@ -5659,50 +6225,6 @@ function ConfigPageHeader({ title, desc, onBack, retour = "Configuration" }) {
       <div style={{ minWidth: 0, flex: "1 1 200px" }}>
         <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: 0 }}>{title}</h1>
         <p style={{ color: "var(--muted)", fontSize: 14, margin: "5px 0 0" }}>{desc}</p>
-      </div>
-    </div>
-  );
-}
-
-function RoutesTarifsPage({ data, persist, session, notify, onBack }) {
-  const [pays, setPays] = useState("FR");
-  const [poids, setPoids] = useState("5");
-  const [mode, setMode] = useState("air");
-  const [cur, setCur] = useState("EUR");
-  const prix = calcPrice(pays, poids, "", mode);
-  const dest = COUNTRIES.find((c) => c.code === pays);
-
-  return (
-    <div>
-      <ConfigPageHeader title="Routes & Tarifs" desc="Simulateur de tarif d’expédition par destination et mode de transport." onBack={onBack} />
-
-      <div style={{ background: "linear-gradient(135deg, #131A6B, #0A1740)", borderRadius: 14, padding: "20px 22px", marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
-        <div>
-          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 18, fontWeight: 700, color: "#fff" }}>Routes & Tarifs</div>
-          <div style={{ fontSize: 12.5, color: "var(--neutral-fg)", marginTop: 4 }}>Les taux de change sont désormais gérés par devise, pas par route — voir "Gestion des devises".</div>
-        </div>
-        <div style={{ background: "rgba(255,255,255,0.1)", borderRadius: 8, padding: "8px 14px", fontSize: 12, color: "#fff" }}>
-          Module Maritime : <strong style={{ color: "#FF8A9B" }}>DÉSACTIVÉ</strong>
-        </div>
-      </div>
-
-      <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
-        <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, width: "min(92vw, 340px)", border: "1px solid var(--border)" }}>
-          <Field label="Pays de destination"><select value={pays} onChange={(e) => setPays(e.target.value)} style={inputStyle}>{COUNTRIES.filter(c => c.code !== "GN").map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code]} {c.name} — {c.city}</option>)}</select></Field>
-          <Field label="Poids (kg)"><input value={poids} onChange={(e) => setPoids(e.target.value)} style={inputStyle} /></Field>
-          <Field label="Mode de transport">
-            <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => setMode("air")} style={{ ...toggleBtn, ...(mode === "air" ? toggleActive : {}) }}><Plane size={14} /> Aérien</button>
-              <button disabled title="Voie maritime temporairement indisponible" style={{ ...toggleBtn, opacity: 0.4, cursor: "not-allowed" }}><Ship size={14} /> Maritime</button>
-            </div>
-          </Field>
-          <Field label="Devise d’affichage"><select value={cur} onChange={(e) => setCur(e.target.value)} style={inputStyle}>{Object.keys(data?.exchangeRates || CURRENCIES).map((c) => <option key={c} value={c}>{c}</option>)}</select></Field>
-        </div>
-        <div style={{ background: "#0A2647", borderRadius: 14, padding: 26, width: 260, color: "#fff", display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center" }}>
-          <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Tarif estimé</div>
-          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 30, fontWeight: 700, marginTop: 6, color: "#fff" }}>{fmt(prix, cur)}</div>
-          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8, textAlign: "center" }}>Conakry → {dest?.city} · {mode === "air" ? "Aérien" : "Maritime"} · devise {dest?.currency}</div>
-        </div>
       </div>
     </div>
   );
@@ -7667,7 +8189,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
           {peutCreer && <button onClick={() => setShowAi(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><Sparkles size={17} color="#8B5CF6" /> Créer par IA</button>}
           {/* Colis déposé par un partenaire : formulaire court, sans catégorie ni tarif — le partenaire
               facture son client lui-même. Proposé seulement si un compte partenaire existe. */}
-          {peutCreer && (data.users || []).some((u) => u.role === "Partenaire") && <button onClick={() => setShowFormPartenaire(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><Users size={17} color="#16A163" /> Colis partenaire</button>}
+          {peutCreer && partenairesPrincipaux(data.users).length > 0 && <button onClick={() => setShowFormPartenaire(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><Users size={17} color="#16A163" /> Colis partenaire</button>}
           {peutCreer && <button onClick={() => setShowForm(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}><Plus size={17} /> {t.newColis}</button>}
         </div>
       </div>
@@ -7865,8 +8387,8 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
           <button onClick={() => imprimerLot("facture")} disabled={impressionLot} style={{ background: "var(--surface2)", color: "#fff", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>{impressionLot ? "Génération…" : "Factures A4"}</button>
         </div>
       )}
-      {showForm && <ColisForm remiseVolumeConfig={data.remiseVolume} repertoire={data.repertoire} paymentConfig={data.paymentConfig} onClose={() => setShowForm(false)} onSave={addColis} existingColis={data.colis} categories={data.categories || []} session={session} sites={data.sites} partenaires={(data.users || []).filter((u) => u.role === "Partenaire")} clientAccounts={data.clientAccounts || []} preAlertes={data.preAlertes || []} notify={notify} />}
-      {showFormPartenaire && <ColisPartenaireForm onClose={() => setShowFormPartenaire(false)} onSave={async (c) => { await addColis(c); setShowFormPartenaire(false); }} existingColis={data.colis} session={session} partenaires={(data.users || []).filter((u) => u.role === "Partenaire")} />}
+      {showForm && <ColisForm remiseVolumeConfig={data.remiseVolume} repertoire={data.repertoire} paymentConfig={data.paymentConfig} onClose={() => setShowForm(false)} onSave={addColis} existingColis={data.colis} categories={data.categories || []} session={session} sites={data.sites} partenaires={partenairesPrincipaux(data.users)} clientAccounts={data.clientAccounts || []} preAlertes={data.preAlertes || []} notify={notify} />}
+      {showFormPartenaire && <ColisPartenaireForm onClose={() => setShowFormPartenaire(false)} onSave={async (c) => { await addColis(c); setShowFormPartenaire(false); }} existingColis={data.colis} session={session} partenaires={partenairesPrincipaux(data.users)} />}
       {showAi && <AiColisModal onClose={() => setShowAi(false)} onCreate={addColis} data={data} session={session} />}
       {showImport && <ImportExcelModal onClose={() => setShowImport(false)} onImportMany={importerColisMany} data={data} session={session} />}
       {remiseEnCours && <RemiseColisModal colis={remiseEnCours} session={session}
@@ -17622,7 +18144,7 @@ async function construireFacturePartenaireDoc(facture, partenaire, colisFactures
  * dépôt — il ne fixe rien.
  */
 function PartenairesPage({ data, persist, notify, onBack, session }) {
-  const partenaires = useMemo(() => (data.users || []).filter((u) => u.role === "Partenaire"), [data.users]);
+  const partenaires = useMemo(() => partenairesPrincipaux(data.users), [data.users]);
   const [selection, setSelection] = useState(() => partenaires[0]?.id || "");
   const [onglet, setOnglet] = useState("contrat");
   const partenaire = partenaires.find((p) => p.id === selection) || null;

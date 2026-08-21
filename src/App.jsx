@@ -1627,6 +1627,15 @@ function App() {
   const [adminResetKey, setAdminResetKey] = useState(0);
   const isMobile = useIsMobile();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  /*
+   * La section ouverte dans l'espace partenaire.
+   *
+   * Elle vit ici, et non dans l'écran lui-même, parce que c'est le menu latéral qui la commande.
+   * Un partenaire n'a qu'une seule entrée de menu — « Tableau de bord » — et une colonne vide en
+   * dessous, pendant que ses cinq sections mangeaient une barre d'onglets en pleine page. Les
+   * sections sont donc passées dans le menu, là où il y avait la place.
+   */
+  const [ongletPartenaire, setOngletPartenaire] = useState("accueil");
   const [showGlobalSearch, setShowGlobalSearch] = useState(false);
   const [colisInitialQuery, setColisInitialQuery] = useState("");
   // Permet au tableau de bord de demander l'ouverture directe du formulaire de création :
@@ -1848,7 +1857,28 @@ function App() {
     + (data.demandesRegroupement || []).filter((r) => r.statut === "En attente").length
     + signalementsOuvertsCount
     + expressEnAttenteCount;
-  const nav = [
+  /*
+   * Le menu d'un partenaire, ce sont ses sections — pas les écrans de l'entreprise, auxquels il
+   * n'a pas accès. Les pastilles sont réservées à ce qui appelle un geste : ce qui est prêt à
+   * partir, et les factures encore dues. Le nombre de ses clients n'appelle rien.
+   */
+  const partenaireIdSession = partenaireDeLaSession(session);
+  const colisDuPartenaire = session.role === "Partenaire"
+    ? data.colis.filter((c) => c.partenaireId === partenaireIdSession)
+    : [];
+  const navPartenaire = [
+    { key: "accueil", label: "Accueil", icon: LayoutDashboard, badge: colisDuPartenaire.filter(estColisExpediable).length },
+    { key: "colis", label: "Colis", icon: Package },
+    ...(voitLesMontants(session) ? [{
+      key: "factures", label: "Factures", icon: Receipt,
+      badge: (data.facturesPartenaire || []).filter((f) => f.partenaireId === partenaireIdSession
+        && statutFacturePartenaire(f) !== "Réglée").length,
+    }] : []),
+    { key: "clients", label: "Clients", icon: Users },
+    { key: "compte", label: "Compte", icon: User },
+  ].map((n) => ({ ...n, show: true, actif: ongletPartenaire === n.key, onSelect: () => setOngletPartenaire(n.key) }));
+
+  const nav = session.role === "Partenaire" ? navPartenaire : [
     { key: "dashboard", label: t.dashboard, icon: LayoutDashboard, show: true },
     { key: "colis", label: t.colis, icon: Package, show: perm("colis.voir_propres") || perm("colis.voir_tous") },
     { key: "centreclients", label: "Centre clients", icon: MessageCircle, show: perm("espaceclient.gerer"), badge: centreClientsEnAttente },
@@ -1910,9 +1940,13 @@ function App() {
           </div>
           <nav style={{ padding: 12, display: "flex", flexDirection: "column", gap: 3, flex: 1, overflowY: "auto" }}>
             {nav.map((n) => (
-              <button key={n.key} onClick={() => { setView(n.key); if (n.key === "admin") setAdminResetKey((k) => k + 1); setMobileNavOpen(false); }} title={(collapsed && !isMobile) ? n.label : undefined} style={{
+              <button key={n.key} onClick={() => {
+                if (n.onSelect) n.onSelect();
+                else { setView(n.key); if (n.key === "admin") setAdminResetKey((k) => k + 1); }
+                setMobileNavOpen(false);
+              }} title={(collapsed && !isMobile) ? n.label : undefined} style={{
                 display: "flex", alignItems: "center", gap: 10, padding: (collapsed && !isMobile) ? "10px 0" : "10px 12px", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start",
-                borderRadius: 8, background: view === n.key ? "var(--brand-solid)" : "transparent", color: "#fff", border: "none", cursor: "pointer", fontSize: 14, fontWeight: 600, textAlign: "start", position: "relative",
+                borderRadius: 8, background: (n.actif ?? (view === n.key)) ? "var(--brand-solid)" : "transparent", color: "#fff", border: "none", cursor: "pointer", fontSize: 14, fontWeight: 600, textAlign: "start", position: "relative",
               }}>
                 <n.icon size={17} /> {!(collapsed && !isMobile) && n.label}
                 {!!n.badge && (
@@ -1956,7 +1990,7 @@ function App() {
                 <Menu size={18} />
               </button>
               <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 15, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1 }}>
-                {nav.find((n) => n.key === view)?.label || identite.nom || "BA-DIABY EXPRESS"}
+                {nav.find((n) => n.actif ?? (n.key === view))?.label || identite.nom || "BA-DIABY EXPRESS"}
               </div>
               <button onClick={() => setShowGlobalSearch(true)} style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 8, width: 34, height: 34, display: "grid", placeItems: "center", color: "#fff", cursor: "pointer", flexShrink: 0 }}>
                 <Search size={16} />
@@ -1964,7 +1998,7 @@ function App() {
             </div>
           )}
           <main style={{ flex: 1, padding: isMobile ? "16px 14px" : "28px 32px", overflowY: "auto", minWidth: 0 }}>
-            {view === "dashboard" && (session.role === "Partenaire" ? <PartnerDashboard data={data} session={session} persist={persist} notify={notify} /> : <Dashboard data={data} session={session} onNavigate={setView} onNouveauColis={() => { setView("colis"); setOuvrirFormulaireColis((n) => n + 1); }} />)}
+            {view === "dashboard" && (session.role === "Partenaire" ? <PartnerDashboard data={data} session={session} persist={persist} notify={notify} onglet={ongletPartenaire} /> : <Dashboard data={data} session={session} onNavigate={setView} onNouveauColis={() => { setView("colis"); setOuvrirFormulaireColis((n) => n + 1); }} />)}
             {view === "colis" && <ColisView data={data} persist={persist} session={session} notify={notify} t={t} initialQuery={colisInitialQuery} ouvrirFormulaire={ouvrirFormulaireColis} />}
             {view === "centreclients" && (effectivePermission(session, "espaceclient.gerer")
               ? <CentreClientsPage data={data} persist={persist} notify={notify} session={session} />
@@ -4661,10 +4695,9 @@ Dashboard = memo(Dashboard);
  * au tarif de son contrat, fixé par l'administrateur — colis par colis, puis regroupé sur ses
  * factures. Il dépose ses colis depuis cet écran ; un agent les vérifie ensuite un à un.
  */
-function PartnerDashboard({ data, session, persist, notify }) {
+function PartnerDashboard({ data, session, persist, notify, onglet }) {
   const [periode, setPeriode] = useState("mois");
   const [showForm, setShowForm] = useState(false);
-  const [onglet, setOnglet] = useState("accueil");
   // La facture dont le PDF est en cours de fabrication : le jsPDF se charge depuis Internet, et sur
   // un téléphone cela prend parfois quelques secondes pendant lesquelles rien ne doit sembler mort.
   const [pdfEnCours, setPdfEnCours] = useState(null);
@@ -4945,33 +4978,6 @@ function PartnerDashboard({ data, session, persist, notify }) {
             trend={resteARegler > 0.005 ? "sur vos factures" : "vous êtes à jour"}
             trendColor={resteARegler > 0.005 ? "var(--warn-fg)" : "var(--ok-fg)"} />
         )}
-      </div>
-
-      {/*
-        Cinq onglets aux libellés courts — « Colis » et non « Mes colis ».
-        
-        Chaque sujet a désormais sa place : ce qui part, les colis, l'argent, les clients, le
-        compte. « Accueil » ne sert plus de fourre-tout où les factures et l'identité se
-        disputaient la même page. Le « Mes » répété cinq fois faisait replier la barre sur deux
-        lignes sur un téléphone, pour aucune information supplémentaire.
-      */}
-      <div style={{ display: "flex", gap: 18, borderBottom: "1px solid var(--border)", marginBottom: 18, flexWrap: "wrap" }}>
-        {[
-          ["accueil", "Accueil", prets.length],
-          ["colis", "Colis", colisPartenaire.length],
-          ...(montantsVisibles ? [["factures", "Factures", mesFactures.filter((f) => statutFacturePartenaire(f) !== "Réglée").length]] : []),
-          ["clients", "Clients", mesClients.length],
-          ["compte", "Compte", 0],
-        ].map(([cle, libelle, compte]) => (
-          <button key={cle} onClick={() => setOnglet(cle)} style={{
-            background: "none", border: "none", padding: "0 0 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 6,
-            color: onglet === cle ? "var(--info-fg)" : "var(--muted)",
-            borderBottom: onglet === cle ? "2px solid #5B8DEF" : "2px solid transparent", fontSize: 13.5, fontWeight: 600,
-          }}>
-            {libelle}
-            {compte > 0 && <span style={{ background: "var(--surface2)", color: "var(--muted)", borderRadius: 10, padding: "1px 7px", fontSize: 11, fontWeight: 700 }}>{compte}</span>}
-          </button>
-        ))}
       </div>
 
       <div style={{ display: onglet === "colis" ? "block" : "none" }}>

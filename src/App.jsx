@@ -1608,6 +1608,36 @@ function App() {
   const canFinance = session.role === "Administrateur" || session.role === "Comptable";
   const perm = (key) => effectivePermission(session, key);
 
+  /*
+   * Identité affichée dans l'interface.
+   *
+   * Un partenaire travaille avec ses propres clients, sous son propre nom : son espace ne doit
+   * porter que SA marque. Voir le nom de l'entreprise dans son menu n'aurait aucun sens pour lui,
+   * et le lui ferait montrer par-dessus l'épaule à des clients qui ne nous connaissent pas.
+   * Tant qu'aucun nom commercial ne lui a été attribué, il voit l'identité de l'entreprise —
+   * c'est à l'administrateur de la lui donner dans Configuration → Partenaires.
+   */
+  const marqueSession = session.role === "Partenaire"
+    ? marquePartenaire(data, { partenaireId: session.id })
+    : null;
+  const identite = marqueSession
+    ? {
+        nom: marqueSession.nomCommercial,
+        logo: marqueSession.logo,
+        tagline: [marqueSession.siteWeb, marqueSession.telephone].filter(Boolean).join(" · ") || "Espace partenaire",
+      }
+    : {
+        nom: data.branding?.nom || null,
+        logo: data.branding?.logo || DEFAULT_LOGO,
+        tagline: data.branding?.tagline || "Gestion des colis · Conakry - Monde",
+      };
+  /** Pastille de repli quand la marque n'a pas de logo : jamais celui de l'entreprise. */
+  const LogoIdentite = ({ taille }) => (identite.logo
+    ? <img src={identite.logo} alt="" style={{ width: taille, height: taille, borderRadius: 6, objectFit: "cover", flexShrink: 0 }} />
+    : <div style={{ width: taille, height: taille, borderRadius: 6, background: "var(--brand-solid)", color: "#fff", display: "grid", placeItems: "center", fontSize: taille * 0.5, fontWeight: 700, flexShrink: 0 }}>
+        {(identite.nom || "?").trim().charAt(0).toUpperCase()}
+      </div>);
+
   const preAlertesEnAttente = (data.preAlertes || []).filter((p) => p.statut === "En attente").length;
   const declarationsEnAttente = data.colis.reduce((s, c) => s + (c.declarationsPaiement || []).filter((d) => d.statut === "En attente").length, 0);
   const signalementsOuvertsCount = data.colis.reduce((s, c) => s + (c.signalements || []).filter((sig) => sig.statut === "Ouvert").length, 0);
@@ -1659,16 +1689,16 @@ function App() {
           )}
           <div style={{ padding: (collapsed && !isMobile) ? "22px 10px" : "22px 20px", borderBottom: "1px solid rgba(255,255,255,0.12)", overflow: "hidden" }}>
             {(collapsed && !isMobile) ? (
-              <img src={data.branding?.logo || DEFAULT_LOGO} alt="logo" style={{ width: 28, height: 28, borderRadius: 6, objectFit: "cover", margin: "0 auto", display: "block" }} />
+              <div style={{ margin: "0 auto", width: 28 }}><LogoIdentite taille={28} /></div>
             ) : (
               <>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <img src={data.branding?.logo || DEFAULT_LOGO} alt="logo" style={{ width: 26, height: 26, borderRadius: 6, objectFit: "cover" }} />
-                  <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 18, whiteSpace: "nowrap" }}>
-                    {data.branding?.nom ? data.branding.nom : <>BA-DIABY <span style={{ color: "var(--brand-on-dark)" }}>EXPRESS</span></>}
+                <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                  <LogoIdentite taille={26} />
+                  <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 18, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {identite.nom ? identite.nom : <>BA-DIABY <span style={{ color: "var(--brand-on-dark)" }}>EXPRESS</span></>}
                   </div>
                 </div>
-                <div style={{ fontSize: 11.5, color: "var(--nav-muted)", marginTop: 3, whiteSpace: "nowrap" }}>{data.branding?.tagline || "Gestion des colis · Conakry - Monde"}</div>
+                <div style={{ fontSize: 11.5, color: "var(--nav-muted)", marginTop: 3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{identite.tagline}</div>
               </>
             )}
           </div>
@@ -1725,7 +1755,7 @@ function App() {
                 <Menu size={18} />
               </button>
               <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 15, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1 }}>
-                {nav.find((n) => n.key === view)?.label || (data.branding?.nom || "BA-DIABY EXPRESS")}
+                {nav.find((n) => n.key === view)?.label || identite.nom || "BA-DIABY EXPRESS"}
               </div>
               <button onClick={() => setShowGlobalSearch(true)} style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 8, width: 34, height: 34, display: "grid", placeItems: "center", color: "#fff", cursor: "pointer", flexShrink: 0 }}>
                 <Search size={16} />
@@ -4405,12 +4435,33 @@ Dashboard = memo(Dashboard);
 function PartnerDashboard({ data, session, persist, notify }) {
   const [periode, setPeriode] = useState("mois");
   const [showForm, setShowForm] = useState(false);
+  const [onglet, setOnglet] = useState("colis");
   const colisPartenaire = data.colis.filter((c) => c.partenaireId === session.id);
   const moi = (data.users || []).find((u) => u.id === session.id) || session;
   const reglages = reglagesPartenaire(moi);
   const devise = reglages.tarif.devise;
   const mesFactures = (data.facturesPartenaire || []).filter((f) => f.partenaireId === session.id)
     .sort((a, b) => new Date(b.creeeLe) - new Date(a.creeeLe));
+  /*
+   * Le répertoire des clients du partenaire, reconstitué depuis ses colis : chaque destinataire
+   * rencontré, avec ce qu'il a reçu et quand. Le partenaire n'a rien à ressaisir — il retrouve
+   * simplement à qui il a déjà expédié.
+   */
+  const mesClients = useMemo(() => {
+    const map = new Map();
+    colisPartenaire.forEach((c) => {
+      const nom = (c.destinataire || "").trim();
+      if (!nom) return;
+      const cle = `${nom.toLowerCase()}|${(c.telephone || "").replace(/\D/g, "")}`;
+      const e = map.get(cle) || { nom, telephone: c.telephone || "", pays: c.destinatairePays || c.pays, colis: 0, poids: 0, cout: 0, dernier: c.createdAt };
+      e.colis += 1;
+      e.poids += Number(c.poids) || 0;
+      e.cout += Number(c.prixPartenaire) || 0;
+      if (new Date(c.createdAt) > new Date(e.dernier)) { e.dernier = c.createdAt; e.telephone = c.telephone || e.telephone; }
+      map.set(cle, e);
+    });
+    return [...map.values()].sort((a, b) => new Date(b.dernier) - new Date(a.dernier));
+  }, [colisPartenaire]);
   const now = new Date();
   const inPeriod = (dateStr) => {
     const d = new Date(dateStr);
@@ -4441,7 +4492,9 @@ function PartnerDashboard({ data, session, persist, notify }) {
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap", marginBottom: 18 }}>
         <div style={{ minWidth: 0, flex: "1 1 240px" }}>
-          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: "0 0 4px" }}>Espace Partenaire</h1>
+          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: "0 0 4px" }}>
+            {reglages.nomCommercial || "Espace Partenaire"}
+          </h1>
           <p style={{ color: "var(--muted)", fontSize: 13.5, margin: 0 }}>Bienvenue {session.prenom} {session.nom} — enregistrez vos colis et suivez leur acheminement.</p>
         </div>
         <button onClick={() => setShowForm(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>
@@ -4473,7 +4526,20 @@ function PartnerDashboard({ data, session, persist, notify }) {
         <StatCard label="Vérifié, à facturer" value={fmt(enAttenteDeFacture, devise)} icon={Clock} tint="#D6A22E" />
       </div>
 
-      <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 10 }}>Vos colis</div>
+      <div style={{ display: "flex", gap: 22, borderBottom: "1px solid var(--border)", marginBottom: 18, flexWrap: "wrap" }}>
+        {[["colis", "Mes colis", colisPartenaire.length], ["clients", "Mes clients", mesClients.length], ["factures", "Mes factures", mesFactures.length], ["infos", "Mes informations", 0]].map(([cle, libelle, compte]) => (
+          <button key={cle} onClick={() => setOnglet(cle)} style={{
+            background: "none", border: "none", padding: "0 0 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 7,
+            color: onglet === cle ? "var(--info-fg)" : "var(--muted)",
+            borderBottom: onglet === cle ? "2px solid #5B8DEF" : "2px solid transparent", fontSize: 13.5, fontWeight: 600,
+          }}>
+            {libelle}
+            {compte > 0 && <span style={{ background: "var(--surface2)", color: "var(--muted)", borderRadius: 10, padding: "1px 7px", fontSize: 11, fontWeight: 700 }}>{compte}</span>}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ display: onglet === "colis" ? "block" : "none" }}>
       <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", marginBottom: 20 }}>
         <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", minWidth: 760, borderCollapse: "collapse" }}>
@@ -4505,9 +4571,39 @@ function PartnerDashboard({ data, session, persist, notify }) {
         </table>
         </div>
       </div>
+      </div>
 
-      <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 10 }}>Vos factures</div>
-      {mesFactures.length === 0 ? (
+      {onglet === "clients" && (
+        <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", marginBottom: 20 }}>
+          <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)" }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>Vos clients</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
+              Reconstitué depuis vos colis : à qui vous avez expédié, combien de fois, et ce que cela vous a coûté.
+            </div>
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", minWidth: 660, borderCollapse: "collapse" }}>
+              <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["Client", "Téléphone", "Destination", "Colis", "Poids", "Coût total", "Dernier envoi"].map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
+              <tbody>
+                {mesClients.length === 0 && <tr><td colSpan={7} style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucun client pour l’instant — ils apparaîtront dès votre premier colis.</td></tr>}
+                {mesClients.map((cl) => (
+                  <tr key={`${cl.nom}-${cl.telephone}`} style={{ borderTop: "1px solid var(--border)" }}>
+                    <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{cl.nom}</td>
+                    <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{cl.telephone || "—"}</td>
+                    <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{FLAGS[cl.pays] || ""} {COUNTRIES.find((p) => p.code === cl.pays)?.name || cl.pays || "—"}</td>
+                    <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{cl.colis}</td>
+                    <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{cl.poids.toFixed(1)} kg</td>
+                    <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 700, whiteSpace: "nowrap" }}>{fmt(cl.cout, devise)}</td>
+                    <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{new Date(cl.dernier).toLocaleDateString("fr-FR")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {onglet === "factures" && (mesFactures.length === 0 ? (
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 13, marginBottom: 20 }}>
           Aucune facture pour l’instant. Vos colis vérifiés y seront regroupés.
         </div>
@@ -4520,6 +4616,10 @@ function PartnerDashboard({ data, session, persist, notify }) {
                   <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{f.numero}</div>
                   <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
                     {new Date(f.creeeLe).toLocaleDateString("fr-FR")} · {(f.trackings || []).length} colis
+                    {/* La facture n'existe que parce qu'un agent a vérifié chaque colis : le dire
+                        évite au partenaire de la contester par principe. */}
+                    {f.creePar ? ` · vérifiée et arrêtée par ${f.creePar}` : ""}
+                    {f.modifieeLe ? ` · corrigée le ${new Date(f.modifieeLe).toLocaleDateString("fr-FR")}` : ""}
                   </div>
                 </div>
                 <strong style={{ fontSize: 17, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif" }}>{fmt(Number(f.total) || 0, f.devise)}</strong>
@@ -4537,6 +4637,49 @@ function PartnerDashboard({ data, session, persist, notify }) {
               </div>
             </div>
           ))}
+        </div>
+      ))}
+
+      {onglet === "infos" && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(300px,1fr))", gap: 16, marginBottom: 20, alignItems: "start" }}>
+          <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, border: "1px solid var(--border)" }}>
+            <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 14 }}>Votre identité</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 16 }}>
+              {reglages.logo
+                ? <img src={reglages.logo} alt="" style={{ width: 56, height: 56, borderRadius: 10, objectFit: "cover", background: "#fff" }} />
+                : <div style={{ width: 56, height: 56, borderRadius: 10, background: "var(--brand-solid)", color: "#fff", display: "grid", placeItems: "center", fontSize: 24, fontWeight: 700 }}>{(reglages.nomCommercial || session.prenom || "?").charAt(0).toUpperCase()}</div>}
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{reglages.nomCommercial || `${session.prenom} ${session.nom}`.trim()}</div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>@{session.identifiant}</div>
+              </div>
+            </div>
+            {[["Adresse", reglages.adresse], ["Téléphone", reglages.telephone], ["E-mail", reglages.email], ["Site web", reglages.siteWeb],
+              ["Préfixe de vos numéros de suivi", reglages.prefixeTracking || "BDE (identité de l’entreprise)"]].map(([libelle, valeur]) => (
+              <div key={libelle} style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "8px 0", borderTop: "1px solid var(--border)", fontSize: 12.5 }}>
+                <span style={{ color: "var(--muted)" }}>{libelle}</span>
+                <span style={{ color: "var(--text)", fontWeight: 600, textAlign: "end", wordBreak: "break-word" }}>{valeur || "—"}</span>
+              </div>
+            ))}
+          </div>
+          <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, border: "1px solid var(--border)" }}>
+            <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Votre tarif</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>
+              Ce que l’entreprise vous facture par colis. Vos propres prix de vente ne sont pas enregistrés ici.
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 12, marginBottom: 14 }}>
+              <div style={{ background: "var(--surface2)", borderRadius: 12, padding: 14 }}>
+                <div style={{ fontSize: 11.5, color: "var(--muted)" }}>Par kilo</div>
+                <div style={{ fontSize: 19, fontWeight: 700, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif", marginTop: 3 }}>{fmt(reglages.tarif.parKg, devise)}</div>
+              </div>
+              <div style={{ background: "var(--surface2)", borderRadius: 12, padding: 14 }}>
+                <div style={{ fontSize: 11.5, color: "var(--muted)" }}>Par unité</div>
+                <div style={{ fontSize: 19, fontWeight: 700, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif", marginTop: 3 }}>{fmt(reglages.tarif.parUnite, devise)}</div>
+              </div>
+            </div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.55 }}>
+              Ces informations sont fixées par l’entreprise. Pour les faire modifier, contactez votre interlocuteur habituel.
+            </div>
+          </div>
         </div>
       )}
 
@@ -16797,6 +16940,43 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
     setOnglet("facturation");
   }
 
+  /*
+   * Correction d'un montant déjà vérifié, tant qu'il n'est pas facturé.
+   *
+   * Un agent se trompe, une pesée est refaite : le prix doit pouvoir être repris sans avoir à
+   * dévalider le colis et tout recommencer. Une fois sur une facture, en revanche, il est figé —
+   * c'est la facture qu'il faut rouvrir.
+   */
+  function corrigerMontant(tracking, montant) {
+    persist({
+      ...data,
+      colis: (data.colis || []).map((c) => (c.tracking === tracking
+        ? { ...c, prixPartenaire: +(Number(montant) || 0).toFixed(2), validationPartenaire: { ...(c.validationPartenaire || {}), statut: "Validé", par: monNom, le: new Date().toISOString() } }
+        : c)),
+      activityLog: pushActivity(data, session, "Montant partenaire corrigé", `${tracking} — ${fmt(Number(montant) || 0, reglagesPartenaire(partenaire).tarif.devise)}`),
+    });
+    notify?.(`Montant de ${tracking} corrigé`);
+  }
+
+  /*
+   * Réouverture d'une facture.
+   *
+   * Une facture émise n'est pas gravée : une erreur de pesée, un colis annulé ou un montant
+   * discuté doivent pouvoir être repris. La rouvrir la supprime et rend ses colis à la liste des
+   * colis à facturer, où leurs montants redeviennent modifiables. Le numéro n'est pas réutilisé :
+   * la suivante en prendra un nouveau, pour qu'aucune facture ne circule en deux versions.
+   */
+  function rouvrirFacture(facture) {
+    const inclus = new Set(facture.trackings || []);
+    persist({
+      ...data,
+      facturesPartenaire: facturesPartenaire.filter((f) => f.id !== facture.id),
+      colis: (data.colis || []).map((c) => (inclus.has(c.tracking) ? { ...c, facturePartenaireId: null } : c)),
+      activityLog: pushActivity(data, session, "Facture partenaire rouverte", `${facture.numero} — ${inclus.size} colis rendus à la facturation`),
+    });
+    notify?.(`Facture ${facture.numero} rouverte — ses colis reviennent à facturer`);
+  }
+
   async function imprimerFacture(facture) {
     const inclus = (data.colis || []).filter((c) => (facture.trackings || []).includes(c.tracking));
     try {
@@ -16876,6 +17056,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
         <FacturationPartenaire
           partenaire={partenaire} aFacturer={aFacturer} factures={sesFactures}
           colis={data.colis || []} onCreerFacture={creerFacture} onImprimer={imprimerFacture}
+          onCorriger={corrigerMontant} onRouvrir={rouvrirFacture}
         />
       )}
     </div>
@@ -17066,10 +17247,13 @@ function VerificationColisPartenaire({ partenaire, colis, onValider }) {
 }
 
 /** Regroupement des colis vérifiés en une facture unique, et historique des factures émises. */
-function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreerFacture, onImprimer }) {
+function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreerFacture, onImprimer, onCorriger, onRouvrir }) {
   const devise = reglagesPartenaire(partenaire).tarif.devise;
   const total = aFacturer.reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0);
   const [confirmation, setConfirmation] = useState(false);
+  const [aRouvrir, setARouvrir] = useState(null);
+  const [enCorrection, setEnCorrection] = useState(null);
+  const [montant, setMontant] = useState("");
 
   return (
     <div>
@@ -17088,7 +17272,7 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
           <>
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", minWidth: 620, borderCollapse: "collapse" }}>
-                <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Destinataire", "Poids", "Vérifié par", "Montant"].map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
+                <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Destinataire", "Poids", "Vérifié par", "Montant", ""].map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
                 <tbody>
                   {aFacturer.map((c) => (
                     <tr key={c.tracking} style={{ borderTop: "1px solid var(--border)" }}>
@@ -17096,7 +17280,27 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
                       <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{c.destinataire}</td>
                       <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.poids} kg</td>
                       <td style={{ padding: "10px 14px", fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.validationPartenaire?.par || "—"}</td>
-                      <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 700, whiteSpace: "nowrap" }}>{fmt(Number(c.prixPartenaire) || 0, devise)}</td>
+                      <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}>
+                        {enCorrection === c.tracking ? (
+                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            <input value={montant} onChange={(e) => setMontant(e.target.value)} autoFocus
+                              onKeyDown={(e) => { if (e.key === "Enter") { onCorriger(c.tracking, String(montant).replace(",", ".")); setEnCorrection(null); } if (e.key === "Escape") setEnCorrection(null); }}
+                              style={{ ...inputStyle, marginBottom: 0, width: 100 }} />
+                            <button onClick={() => { onCorriger(c.tracking, String(montant).replace(",", ".")); setEnCorrection(null); }}
+                              style={{ background: "#16A163", color: "#fff", border: "none", borderRadius: 7, padding: "7px 11px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>OK</button>
+                            <button onClick={() => setEnCorrection(null)} style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 12, cursor: "pointer" }}>Annuler</button>
+                          </div>
+                        ) : (
+                          <span style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 700 }}>{fmt(Number(c.prixPartenaire) || 0, devise)}</span>
+                        )}
+                      </td>
+                      <td style={{ padding: "10px 14px", textAlign: "right", whiteSpace: "nowrap" }}>
+                        {enCorrection !== c.tracking && (
+                          <button onClick={() => { setEnCorrection(c.tracking); setMontant(String(Number(c.prixPartenaire) || 0)); }}
+                            title="Corriger le montant"
+                            style={{ background: "none", border: "none", color: "var(--info-fg)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>Corriger</button>
+                        )}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -17134,6 +17338,9 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
                 <button onClick={() => onImprimer(f)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
                   <Printer size={14} /> PDF
                 </button>
+                <button onClick={() => setARouvrir(f)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "1.5px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                  <RefreshCw size={14} /> Rouvrir
+                </button>
               </div>
             </div>
           ))}
@@ -17148,6 +17355,17 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
           libelleAction="Créer la facture"
           onConfirmer={() => { setConfirmation(false); onCreerFacture(); }}
           onAnnuler={() => setConfirmation(false)}
+        />
+      )}
+
+      {aRouvrir && (
+        <ConfirmerAction
+          titre="Rouvrir cette facture ?"
+          message={`${aRouvrir.numero} — ${(aRouvrir.trackings || []).length} colis, ${fmt(Number(aRouvrir.total) || 0, aRouvrir.devise)}.`}
+          consequence="La facture est supprimée et ses colis reviennent dans la liste à facturer, où leurs montants redeviennent modifiables. Le numéro n’est pas réutilisé : la prochaine facture en prendra un nouveau. Si le partenaire a déjà reçu ce document, prévenez-le."
+          libelleAction="Rouvrir"
+          onConfirmer={() => { const f = aRouvrir; setARouvrir(null); onRouvrir(f); }}
+          onAnnuler={() => setARouvrir(null)}
         />
       )}
     </div>

@@ -4574,6 +4574,9 @@ function PartnerDashboard({ data, session, persist, notify }) {
   const [periode, setPeriode] = useState("mois");
   const [showForm, setShowForm] = useState(false);
   const [onglet, setOnglet] = useState("accueil");
+  // La facture dont le PDF est en cours de fabrication : le jsPDF se charge depuis Internet, et sur
+  // un téléphone cela prend parfois quelques secondes pendant lesquelles rien ne doit sembler mort.
+  const [pdfEnCours, setPdfEnCours] = useState(null);
   const colisPartenaire = data.colis.filter((c) => c.partenaireId === session.id);
   const moi = (data.users || []).find((u) => u.id === session.id) || session;
   const reglages = reglagesPartenaire(moi);
@@ -4666,6 +4669,27 @@ function PartnerDashboard({ data, session, persist, notify }) {
         : c)),
     });
     notify?.(paye ? `${tracking} marqué payé` : `${tracking} : marque de paiement retirée`);
+  }
+
+  /*
+   * Le partenaire emporte sa facture.
+   *
+   * C'est le même document que celui arrêté par l'entreprise — même numéro, mêmes lignes, même
+   * total : il n'y a pas une version pour nous et une pour lui. Il en a besoin pour sa propre
+   * comptabilité, et devoir la réclamer par téléphone à chaque fin de mois n'a aucun sens.
+   */
+  async function imprimerMaFacture(facture) {
+    const inclus = (data.colis || []).filter((c) => (facture.trackings || []).includes(c.tracking));
+    setPdfEnCours(facture.id);
+    try {
+      const doc = await construireFacturePartenaireDoc(facture, moi, inclus);
+      openPdf(doc, `${facture.numero}.pdf`);
+    } catch (e) {
+      console.error(e);
+      notify?.("Impossible de générer la facture — vérifiez votre connexion.");
+    } finally {
+      setPdfEnCours(null);
+    }
   }
 
   async function enregistrerColis(colis) {
@@ -4962,13 +4986,18 @@ function PartnerDashboard({ data, session, persist, notify }) {
                     {f.modifieeLe ? ` · corrigée le ${new Date(f.modifieeLe).toLocaleDateString("fr-FR")}` : ""}
                   </div>
                 </div>
-                <div style={{ textAlign: "right" }}>
-                  <strong style={{ fontSize: 17, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif" }}>{fmt(Number(f.total) || 0, f.devise)}</strong>
-                  {statut !== "Impayée" && (
-                    <div style={{ fontSize: 11.5, fontWeight: 700, marginTop: 2, color: reste > 0.005 ? "var(--warn-fg)" : "var(--ok-fg)" }}>
-                      {reste > 0.005 ? `reste ${fmt(reste, f.devise)}` : "réglée"}
-                    </div>
-                  )}
+                <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                  <div style={{ textAlign: "right" }}>
+                    <strong style={{ fontSize: 17, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif" }}>{fmt(Number(f.total) || 0, f.devise)}</strong>
+                    {statut !== "Impayée" && (
+                      <div style={{ fontSize: 11.5, fontWeight: 700, marginTop: 2, color: reste > 0.005 ? "var(--warn-fg)" : "var(--ok-fg)" }}>
+                        {reste > 0.005 ? `reste ${fmt(reste, f.devise)}` : "réglée"}
+                      </div>
+                    )}
+                  </div>
+                  <button onClick={() => imprimerMaFacture(f)} disabled={pdfEnCours === f.id} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: pdfEnCours === f.id ? "wait" : "pointer", opacity: pdfEnCours === f.id ? 0.6 : 1 }}>
+                    <Download size={14} /> {pdfEnCours === f.id ? "Préparation…" : "Télécharger en PDF"}
+                  </button>
                 </div>
               </div>
               {/*

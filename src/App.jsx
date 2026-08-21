@@ -679,8 +679,66 @@ function reglagesPartenaire(user) {
     email: p.email || user?.email || "",
     siteWeb: p.siteWeb || "",
     prefixeTracking: String(p.prefixeTracking || "").toUpperCase(),
+    // Devise unique pour tout le partenaire : une facture regroupe plusieurs destinations, elle ne
+    // peut pas mélanger des euros et des francs guinéens sur un même total.
     tarif: { parKg: Number(t.parKg) || 0, parUnite: Number(t.parUnite) || 0, devise: t.devise || "EUR" },
+    destinations: (Array.isArray(p.destinations) ? p.destinations : []).map(normaliserDestinationPartenaire),
   };
+}
+
+/**
+ * Modes d'acheminement final d'un colis partenaire, une fois arrivé dans le pays de destination.
+ *
+ * `direct`        l'entreprise livre elle-même — le cas ordinaire, là où elle a une agence.
+ * `correspondant` le partenaire a quelqu'un sur place qui vient récupérer le colis à l'arrivée.
+ * `poste`         personne sur place : l'entreprise le poste, et les frais sont à la charge du
+ *                 partenaire. C'est un coût réel que l'entreprise avance pour lui.
+ */
+const ACHEMINEMENTS_PARTENAIRE = [
+  { cle: "direct", label: "Livraison par l’entreprise", court: "Livraison directe" },
+  { cle: "correspondant", label: "Récupéré par votre correspondant", court: "Correspondant" },
+  { cle: "poste", label: "Posté par l’entreprise, à votre charge", court: "Envoi postal" },
+];
+
+/** Complète une destination partenaire pour qu'aucun écran n'ait à gérer un champ manquant. */
+function normaliserDestinationPartenaire(d) {
+  const c = d?.correspondant || {};
+  return {
+    pays: d?.pays || "FR",
+    parKg: Number(d?.parKg) || 0,
+    parUnite: Number(d?.parUnite) || 0,
+    acheminement: ACHEMINEMENTS_PARTENAIRE.some((a) => a.cle === d?.acheminement) ? d.acheminement : "direct",
+    correspondant: { nom: c.nom || "", telephone: c.telephone || "", adresse: c.adresse || "" },
+    fraisPoste: Number(d?.fraisPoste) || 0,
+  };
+}
+
+/**
+ * Le contrat qui s'applique à une destination donnée.
+ *
+ * Un partenaire n'est pas autorisé partout : il peut n'avoir que la France, et l'administrateur
+ * lui ouvre d'autres pays au fur et à mesure, chacun à son propre tarif — le coût de revient d'un
+ * colis pour Bruxelles n'est pas celui d'un colis pour Paris.
+ *
+ * Le repli sur le tarif global sert aux partenaires configurés avant les tarifs par pays, et aux
+ * colis déjà enregistrés vers une destination depuis refermée : leur prix ne doit pas s'effondrer
+ * à zéro parce que la ligne du contrat a disparu.
+ */
+function tarifPartenairePourPays(user, pays) {
+  const r = reglagesPartenaire(user);
+  const dest = r.destinations.find((d) => d.pays === pays);
+  if (dest) return { ...dest, devise: r.tarif.devise };
+  return {
+    pays, parKg: r.tarif.parKg, parUnite: r.tarif.parUnite, devise: r.tarif.devise,
+    acheminement: "direct", correspondant: { nom: "", telephone: "", adresse: "" }, fraisPoste: 0,
+  };
+}
+
+/** Un partenaire dont les destinations sont déclarées ne peut expédier que vers celles-là. */
+function paysAutorisesPartenaire(user) {
+  const r = reglagesPartenaire(user);
+  if (r.destinations.length === 0) return COUNTRIES;
+  return COUNTRIES.filter((c) => r.destinations.some((d) => d.pays === c.code));
 }
 
 /** Un partenaire expédie sous sa propre marque dès qu'un nom commercial lui a été attribué. */
@@ -698,13 +756,25 @@ function marquePartenaire(data, colis) {
  * ne connaît pas et n'a pas à connaître. Chaque article est compté au kilo ou à l'unité selon
  * ce qui a été choisi à l'enregistrement, aux taux du contrat de ce partenaire.
  */
-function calcPrixPartenaire(colis, user) {
-  const { tarif } = reglagesPartenaire(user);
+function detailPrixPartenaire(colis, user) {
+  const tarif = tarifPartenairePourPays(user, colis?.pays);
   const articles = colis?.produits || [];
-  if (articles.length === 0) return +((Number(colis?.poids) || 0) * tarif.parKg).toFixed(2);
-  return +articles.reduce((s, a) => (a.tarification === "unite"
-    ? s + tarif.parUnite * (Number(a.quantite) || 1)
-    : s + tarif.parKg * (Number(a.poids) || 0)), 0).toFixed(2);
+  const transport = articles.length === 0
+    ? (Number(colis?.poids) || 0) * tarif.parKg
+    : articles.reduce((s, a) => (a.tarification === "unite"
+      ? s + tarif.parUnite * (Number(a.quantite) || 1)
+      : s + tarif.parKg * (Number(a.poids) || 0)), 0);
+  /*
+   * Les frais de poste ne sont pas une marge : c'est un timbre que l'entreprise achète pour le
+   * compte du partenaire quand personne ne vient récupérer le colis sur place. Ils sont donc
+   * refacturés tels quels, et affichés à part partout pour qu'on ne les confonde pas avec le prix
+   * du transport.
+   */
+  const fraisPoste = tarif.acheminement === "poste" ? (Number(tarif.fraisPoste) || 0) : 0;
+  return { tarif, transport: +transport.toFixed(2), fraisPoste, total: +(transport + fraisPoste).toFixed(2) };
+}
+function calcPrixPartenaire(colis, user) {
+  return detailPrixPartenaire(colis, user).total;
 }
 
 /** État de la vérification d'un colis partenaire par un agent de l'entreprise. */
@@ -4632,6 +4702,27 @@ function PartnerDashboard({ data, session, persist, notify }) {
                         <div style={{ fontSize: 11.5, color: "var(--muted)", textAlign: "end" }}>Aucun départ annoncé pour cette destination</div>
                       )}
                     </div>
+                    {/* Ce qui attend le colis à l'arrivée : son correspondant, ou un envoi postal à sa charge. */}
+                    {(() => {
+                      const t = tarifPartenairePourPays(moi, pays);
+                      const mode = ACHEMINEMENTS_PARTENAIRE.find((a) => a.cle === t.acheminement);
+                      if (!mode || mode.cle === "direct") return null;
+                      return (
+                        <div style={{
+                          padding: "9px 16px", borderBottom: "1px solid var(--border)", fontSize: 11.5, lineHeight: 1.5,
+                          background: mode.cle === "poste" ? "var(--warn-bg)" : "var(--info-bg)",
+                          color: mode.cle === "poste" ? "var(--warn-fg)" : "var(--info-fg)",
+                        }}>
+                          <strong>À l’arrivée : {mode.label.toLowerCase()}</strong>
+                          {mode.cle === "correspondant" && (
+                            <span style={{ color: "var(--muted)" }}> — {[t.correspondant.nom, t.correspondant.telephone].filter(Boolean).join(" · ") || "correspondant non renseigné"}</span>
+                          )}
+                          {mode.cle === "poste" && t.fraisPoste > 0 && (
+                            <span> — {fmt(t.fraisPoste, devise)} de frais de poste par colis, déjà compris dans les montants ci-dessous</span>
+                          )}
+                        </div>
+                      );
+                    })()}
                     <div style={{ overflowX: "auto" }}>
                       <table style={{ width: "100%", minWidth: 560, borderCollapse: "collapse" }}>
                         <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Destinataire", "Contenu", "Poids", "Coût"].map((h) => <th key={h} style={{ padding: "9px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
@@ -4775,22 +4866,40 @@ function PartnerDashboard({ data, session, persist, notify }) {
             ))}
           </div>
           <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, border: "1px solid var(--border)" }}>
-            <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Votre tarif</div>
+            <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Vos destinations et tarifs</div>
             <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>
-              Ce que l’entreprise vous facture par colis. Vos propres prix de vente ne sont pas enregistrés ici.
+              Les pays vers lesquels vous pouvez expédier, ce que l’entreprise vous facture pour chacun,
+              et comment le colis finit sa route à l’arrivée. Vos propres prix de vente ne sont pas enregistrés ici.
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 12, marginBottom: 14 }}>
-              <div style={{ background: "var(--surface2)", borderRadius: 12, padding: 14 }}>
-                <div style={{ fontSize: 11.5, color: "var(--muted)" }}>Par kilo</div>
-                <div style={{ fontSize: 19, fontWeight: 700, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif", marginTop: 3 }}>{fmt(reglages.tarif.parKg, devise)}</div>
+            {reglages.destinations.length === 0 ? (
+              <div style={{ background: "var(--surface2)", borderRadius: 12, padding: 14, fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5 }}>
+                Tarif unique de {fmt(reglages.tarif.parKg, devise)}/kg et {fmt(reglages.tarif.parUnite, devise)}/unité,
+                sans destination déclarée. Contactez l’entreprise pour ouvrir vos destinations.
               </div>
-              <div style={{ background: "var(--surface2)", borderRadius: 12, padding: 14 }}>
-                <div style={{ fontSize: 11.5, color: "var(--muted)" }}>Par unité</div>
-                <div style={{ fontSize: 19, fontWeight: 700, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif", marginTop: 3 }}>{fmt(reglages.tarif.parUnite, devise)}</div>
-              </div>
-            </div>
-            <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.55 }}>
-              Ces informations sont fixées par l’entreprise. Pour les faire modifier, contactez votre interlocuteur habituel.
+            ) : reglages.destinations.map((d) => {
+              const pays = COUNTRIES.find((c) => c.code === d.pays);
+              const mode = ACHEMINEMENTS_PARTENAIRE.find((a) => a.cle === d.acheminement);
+              return (
+                <div key={d.pays} style={{ background: "var(--surface2)", borderRadius: 12, padding: 14, marginBottom: 10 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>{FLAGS[d.pays] || ""} {pays?.name || d.pays}</div>
+                  <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
+                    {fmt(d.parKg, devise)} / kg · {fmt(d.parUnite, devise)} / unité
+                  </div>
+                  <div style={{ fontSize: 11.5, marginTop: 6, color: d.acheminement === "poste" ? "var(--warn-fg)" : "var(--muted)", lineHeight: 1.5 }}>
+                    {mode?.label || "Livraison par l’entreprise"}
+                    {d.acheminement === "correspondant" && (
+                      <> — {[d.correspondant.nom, d.correspondant.telephone].filter(Boolean).join(" · ") || "correspondant non renseigné"}</>
+                    )}
+                    {d.acheminement === "poste" && d.fraisPoste > 0 && (
+                      <> — {fmt(d.fraisPoste, devise)} de frais de poste par colis, à votre charge</>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+            <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.55, marginTop: 4 }}>
+              Ces informations sont fixées par l’entreprise. Pour ouvrir une destination ou revoir un tarif,
+              contactez votre interlocuteur habituel.
             </div>
           </div>
         </div>
@@ -4839,16 +4948,33 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
   const [articles, setArticles] = useState(() => [{ ...emptyProduit(), tarification: "kg" }]);
   const [err, setErr] = useState("");
 
-  const paysDisponibles = allowedCountries(session);
+  const partenaire = (partenaires || []).find((p) => p.id === partenaireId);
+  const reglages = reglagesPartenaire(partenaire);
+  /*
+   * Un partenaire n'expédie que vers les destinations que l'administrateur lui a ouvertes, et
+   * chacune a son tarif. Lui proposer un pays qu'il n'a pas au contrat produirait un colis
+   * chiffré à zéro, découvert seulement à la vérification.
+   */
+  const paysDisponibles = partenaire ? paysAutorisesPartenaire(partenaire) : allowedCountries(session);
+  const [destPaysAjuste, setDestPaysAjuste] = useState(false);
+  useEffect(() => {
+    // Le pays retenu doit rester dans les destinations du partenaire choisi.
+    if (paysDisponibles.length && !paysDisponibles.some((c) => c.code === destPays)) {
+      setDestPays(paysDisponibles[0].code);
+      setDestPaysAjuste(true);
+    }
+  }, [partenaireId]);
   const direction = destPays === "GN" ? "import" : "export";
   const paysRoute = destPays === "GN" ? "GN" : destPays;
   const poidsTotal = articles.reduce((s, a) => s + (Number(a.poids) || 0), 0);
-  const partenaire = (partenaires || []).find((p) => p.id === partenaireId);
-  const reglages = reglagesPartenaire(partenaire);
-  const tarifDefini = reglages.tarif.parKg > 0 || reglages.tarif.parUnite > 0;
-  // Coût du colis pour le partenaire, au tarif de son contrat. Reste une estimation tant qu'un
-  // agent ne l'a pas vérifié : c'est la pesée au comptoir qui fait foi, pas la déclaration.
-  const coutEstime = partenaire ? calcPrixPartenaire({ produits: articles, poids: poidsTotal }, partenaire) : 0;
+  const contrat = tarifPartenairePourPays(partenaire, paysRoute);
+  const tarifDefini = contrat.parKg > 0 || contrat.parUnite > 0;
+  const acheminement = ACHEMINEMENTS_PARTENAIRE.find((a) => a.cle === contrat.acheminement);
+  // Coût du colis pour le partenaire, au tarif de son contrat pour CETTE destination. Reste une
+  // estimation tant qu'un agent ne l'a pas vérifié : c'est la pesée au comptoir qui fait foi.
+  const detailCout = partenaire
+    ? detailPrixPartenaire({ produits: articles, poids: poidsTotal, pays: paysRoute }, partenaire)
+    : { transport: 0, fraisPoste: 0, total: 0 };
   const saisieEnCours = !!expNom || !!clientNom || articles.some((a) => a.nom);
 
   function majArticle(id, patch) { setErr(""); setArticles((l) => l.map((a) => (a.id === id ? { ...a, ...patch } : a))); }
@@ -4863,8 +4989,9 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
     if (articles.some((a) => !a.nom.trim())) { setErr("Décrivez le contenu de chaque article."); return; }
     if (articles.some((a) => !(Number(a.poids) > 0))) { setErr("Indiquez le poids de chaque article, en kilogrammes."); return; }
     if (articles.some((a) => a.tarification === "unite" && !(Number(a.quantite) >= 1))) { setErr("Un article facturé à l’unité doit avoir une quantité d’au moins 1."); return; }
+    if (!paysDisponibles.some((c) => c.code === destPays)) { setErr("Cette destination n’est pas ouverte à ce partenaire."); return; }
     const produits = articles.map((a) => ({ ...a, nom: a.nom.trim(), categorie: "", personnalise: true, montant: "0", typePrix: "unitaire" }));
-    const prixPartenaire = calcPrixPartenaire({ produits, poids: poidsTotal }, partenaire);
+    const detail = detailPrixPartenaire({ produits, poids: poidsTotal, pays: paysRoute }, partenaire);
     onSave({
       // Colis expédié sous la marque du partenaire : son numéro de suivi porte son préfixe, pas
       // celui de l'entreprise — son client n'a jamais entendu parler de Ba-Diaby Express.
@@ -4884,7 +5011,15 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
        */
       valeurDeclaree: 0, prixBrut: 0, discountLoyalty: 0, rabaisMontant: 0, rabaisDevise: "GNF", rabaisEUR: 0,
       prix: 0, paye: 0, reste: 0, paiements: [], photos: [],
-      prixPartenaire, devisePartenaire: reglages.tarif.devise,
+      prixPartenaire: detail.total, devisePartenaire: reglages.tarif.devise,
+      /*
+       * Acheminement final figé sur le colis, et non relu du contrat à l'affichage : si le
+       * partenaire change de correspondant l'an prochain, la fiche d'un colis déjà livré doit
+       * continuer de dire qui l'avait réellement récupéré.
+       */
+      acheminementFinal: detail.tarif.acheminement,
+      correspondantFinal: detail.tarif.acheminement === "correspondant" ? detail.tarif.correspondant : null,
+      fraisPostePartenaire: detail.fraisPoste,
       validationPartenaire: { statut: "En attente", par: null, le: null },
       facturePartenaireId: null,
       site: session?.agence || "", partenaireId, clientAccountId: null, provenance: null,
@@ -4929,14 +5064,22 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
           <Field label="Prénom"><input value={expPrenom} onChange={(e) => setExpPrenom(e.target.value)} style={inputStyle} /></Field>
           <Field label="Nom *"><input value={expNom} onChange={(e) => { setErr(""); setExpNom(e.target.value); }} style={inputStyle} /></Field>
         </div>
-        <Field label="Téléphone (facultatif)"><PhoneInput value={expTelephone} onChange={setExpTelephone} /></Field>
+        <Field label="Téléphone (facultatif)">
+          <PhoneInput value={expTelephone} onChange={setExpTelephone}
+            defaultDial={DIAL_CODES.find((c) => c.name === COUNTRIES.find((p) => p.code === (partenaire?.paysOperation || "GN"))?.name)?.dial} />
+        </Field>
 
         <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>Destinataire</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
           <Field label="Prénom"><input value={clientPrenom} onChange={(e) => setClientPrenom(e.target.value)} style={inputStyle} /></Field>
           <Field label="Nom *"><input value={clientNom} onChange={(e) => { setErr(""); setClientNom(e.target.value); }} style={inputStyle} /></Field>
         </div>
-        <Field label="Téléphone (facultatif)"><PhoneInput value={clientTelephone} onChange={setClientTelephone} /></Field>
+        {/* Indicatif calé sur le pays de destination : un destinataire allemand n'a pas un
+            numéro guinéen, et le champ le refuserait comme invalide. */}
+        <Field label="Téléphone (facultatif)">
+          <PhoneInput value={clientTelephone} onChange={setClientTelephone}
+            defaultDial={DIAL_CODES.find((c) => c.name === COUNTRIES.find((p) => p.code === destPays)?.name)?.dial} />
+        </Field>
 
         <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>Destination</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
@@ -4952,11 +5095,42 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
             </select>
           </Field>
         </div>
+        {destPaysAjuste && (
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -8, marginBottom: 12 }}>
+            Seules les destinations ouvertes à ce partenaire sont proposées.
+          </div>
+        )}
+        {/*
+          L'acheminement à l'arrivée est annoncé dès la saisie : c'est là que se joue la différence
+          entre un colis livré par l'entreprise, un colis récupéré par le correspondant du
+          partenaire, et un colis posté dont le timbre lui sera refacturé.
+        */}
+        {partenaire && acheminement && (
+          <div style={{
+            background: contrat.acheminement === "poste" ? "var(--warn-bg)" : "var(--info-bg)",
+            border: `1px solid ${contrat.acheminement === "poste" ? "var(--warn-border)" : "var(--info-border)"}`,
+            borderRadius: 10, padding: "11px 13px", marginBottom: 14, fontSize: 12, lineHeight: 1.55,
+            color: contrat.acheminement === "poste" ? "var(--warn-fg)" : "var(--text)",
+          }}>
+            <strong>À l’arrivée : {acheminement.label.toLowerCase()}</strong>
+            {contrat.acheminement === "correspondant" && (
+              <div style={{ marginTop: 3, color: "var(--muted)" }}>
+                {[contrat.correspondant.nom, contrat.correspondant.telephone, contrat.correspondant.adresse].filter(Boolean).join(" · ") || "Correspondant non renseigné"}
+              </div>
+            )}
+            {contrat.acheminement === "poste" && (
+              <div style={{ marginTop: 3 }}>
+                Personne sur place : l’entreprise postera le colis et vous refacturera le timbre,
+                {contrat.fraisPoste > 0 ? ` soit ${fmt(contrat.fraisPoste, contrat.devise)} ajoutés au prix du transport.` : " dont le montant reste à fixer avec l’entreprise."}
+              </div>
+            )}
+          </div>
+        )}
 
         <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 4px" }}>Contenu du colis</div>
         <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 10, lineHeight: 1.5 }}>
-          Chaque article est facturé au kilo ou à l’unité, selon le tarif convenu avec le partenaire
-          {tarifDefini ? ` (${fmt(reglages.tarif.parKg, reglages.tarif.devise)}/kg · ${fmt(reglages.tarif.parUnite, reglages.tarif.devise)}/unité)` : ""}.
+          Chaque article est facturé au kilo ou à l’unité, au tarif convenu pour cette destination
+          {tarifDefini ? ` (${fmt(contrat.parKg, contrat.devise)}/kg · ${fmt(contrat.parUnite, contrat.devise)}/unité)` : ""}.
         </div>
         {articles.map((a, i) => (
           <div key={a.id} style={{ background: "var(--surface2)", borderRadius: 10, padding: 12, marginBottom: 10 }}>
@@ -4980,10 +5154,14 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
             {tarifDefini && (
               <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8 }}>
                 {a.tarification === "unite"
-                  ? `${Number(a.quantite) || 1} × ${fmt(reglages.tarif.parUnite, reglages.tarif.devise)}`
-                  : `${Number(a.poids) || 0} kg × ${fmt(reglages.tarif.parKg, reglages.tarif.devise)}`}
+                  ? `${Number(a.quantite) || 1} × ${fmt(contrat.parUnite, contrat.devise)}`
+                  : `${Number(a.poids) || 0} kg × ${fmt(contrat.parKg, contrat.devise)}`}
                 {" = "}
-                <strong style={{ color: "var(--text)" }}>{fmt(calcPrixPartenaire({ produits: [a] }, partenaire), reglages.tarif.devise)}</strong>
+                <strong style={{ color: "var(--text)" }}>
+                  {fmt(a.tarification === "unite"
+                    ? contrat.parUnite * (Number(a.quantite) || 1)
+                    : contrat.parKg * (Number(a.poids) || 0), contrat.devise)}
+                </strong>
               </div>
             )}
           </div>
@@ -4998,9 +5176,21 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
             <strong style={{ fontSize: 16, color: "var(--text)" }}>{poidsTotal.toFixed(2)} kg</strong>
           </div>
           {tarifDefini && (
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
-              <span style={{ fontSize: 12.5, color: "var(--muted)" }}>Coût pour le partenaire <span style={{ fontSize: 11 }}>(à vérifier par un agent)</span></span>
-              <strong style={{ fontSize: 18, color: "var(--info-fg)", fontFamily: "'Space Grotesk',sans-serif" }}>{fmt(coutEstime, reglages.tarif.devise)}</strong>
+            <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+              {detailCout.fraisPoste > 0 && (
+                <>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: "var(--muted)", marginBottom: 5 }}>
+                    <span>Transport</span><span>{fmt(detailCout.transport, contrat.devise)}</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12.5, color: "var(--warn-fg)", marginBottom: 8 }}>
+                    <span>Frais de poste à votre charge</span><span>{fmt(detailCout.fraisPoste, contrat.devise)}</span>
+                  </div>
+                </>
+              )}
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 12.5, color: "var(--muted)" }}>Coût pour le partenaire <span style={{ fontSize: 11 }}>(à vérifier par un agent)</span></span>
+                <strong style={{ fontSize: 18, color: "var(--info-fg)", fontFamily: "'Space Grotesk',sans-serif" }}>{fmt(detailCout.total, contrat.devise)}</strong>
+              </div>
             </div>
           )}
         </div>
@@ -16949,7 +17139,10 @@ async function construireFacturePartenaireDoc(facture, partenaire, colisFactures
     doc.setTextColor(...INK);
     doc.text(String(c.tracking || "—"), colX[0], y + 5.4);
     doc.text(doc.splitTextToSize(String(c.destinataire || "—"), 56)[0], colX[1], y + 5.4);
-    const contenu = (c.produits || []).map((p) => `${p.quantite || 1}× ${p.nom || "article"}`).join(", ") || "—";
+    // Le timbre refacturé apparaît sur la ligne : le partenaire doit pouvoir vérifier qu'il paie
+    // un envoi postal, et non une majoration de transport inexpliquée.
+    const contenu = ((c.produits || []).map((p) => `${p.quantite || 1}× ${p.nom || "article"}`).join(", ") || "—")
+      + (Number(c.fraisPostePartenaire) > 0 ? ` + poste ${fmt(Number(c.fraisPostePartenaire), facture.devise)}` : "");
     doc.setTextColor(...MUTED);
     doc.text(doc.splitTextToSize(contenu, 60)[0], colX[2], y + 5.4);
     doc.text(`${Number(c.poids) || 0} kg`, colX[3], y + 5.4, { align: "right" });
@@ -17186,12 +17379,36 @@ function ContratPartenaire({ partenaire, autres, onSave }) {
   const [email, setEmail] = useState(r.email);
   const [siteWeb, setSiteWeb] = useState(r.siteWeb);
   const [prefixe, setPrefixe] = useState(r.prefixeTracking);
-  const [parKg, setParKg] = useState(String(r.tarif.parKg));
-  const [parUnite, setParUnite] = useState(String(r.tarif.parUnite));
   const [devise, setDevise] = useState(r.tarif.devise);
+  /*
+   * Destinations ouvertes à ce partenaire. Un partenaire peut n'être autorisé que pour la France ;
+   * l'administrateur lui ouvre d'autres pays au fur et à mesure, chacun à son propre tarif.
+   * On part de son tarif global quand il en avait un, pour ne pas le perdre à la migration.
+   */
+  const [destinations, setDestinations] = useState(() => (r.destinations.length
+    ? r.destinations
+    : [normaliserDestinationPartenaire({ pays: "FR", parKg: r.tarif.parKg, parUnite: r.tarif.parUnite })]));
+  const [nouveauPays, setNouveauPays] = useState("");
   const [err, setErr] = useState("");
 
   const prefixesPris = new Set(["BDE", ...autres.map((p) => reglagesPartenaire(p).prefixeTracking).filter(Boolean)]);
+  const paysDisponibles = COUNTRIES.filter((c) => c.code !== "GN" && !destinations.some((d) => d.pays === c.code));
+
+  function majDestination(pays, patch) {
+    setErr("");
+    setDestinations((l) => l.map((d) => (d.pays === pays ? { ...d, ...patch } : d)));
+  }
+  function majCorrespondant(pays, patch) {
+    setDestinations((l) => l.map((d) => (d.pays === pays ? { ...d, correspondant: { ...d.correspondant, ...patch } } : d)));
+  }
+  function ajouterDestination() {
+    if (!nouveauPays) return;
+    setDestinations((l) => [...l, normaliserDestinationPartenaire({ pays: nouveauPays })]);
+    setNouveauPays("");
+  }
+  function retirerDestination(pays) {
+    setDestinations((l) => l.filter((d) => d.pays !== pays));
+  }
 
   async function choisirLogo(e) {
     const file = e.target.files?.[0];
@@ -17208,38 +17425,122 @@ function ContratPartenaire({ partenaire, autres, onSave }) {
      * le même jour — deux colis différents sous un seul code, impossible à démêler au comptoir.
      */
     if (p && prefixesPris.has(p)) { setErr(`Le préfixe « ${p} » est déjà utilisé — choisissez-en un autre.`); return; }
-    const kg = Number(String(parKg).replace(",", "."));
-    const unite = Number(String(parUnite).replace(",", "."));
-    if (isNaN(kg) || kg < 0 || isNaN(unite) || unite < 0) { setErr("Les tarifs doivent être des montants positifs."); return; }
+    if (destinations.length === 0) { setErr("Ouvrez au moins une destination : sans cela ce partenaire ne peut rien expédier."); return; }
+    const nombre = (v) => Number(String(v).replace(",", "."));
+    for (const d of destinations) {
+      const nom = COUNTRIES.find((c) => c.code === d.pays)?.name || d.pays;
+      if ([d.parKg, d.parUnite, d.fraisPoste].some((v) => isNaN(nombre(v)) || nombre(v) < 0)) {
+        setErr(`Les montants de la destination « ${nom} » doivent être positifs.`); return;
+      }
+      /*
+       * Un correspondant sans nom ni téléphone n'est pas un correspondant : à l'arrivée, personne
+       * ne saurait qui appeler et le colis resterait en souffrance à l'agence.
+       */
+      if (d.acheminement === "correspondant" && !d.correspondant.nom.trim() && !d.correspondant.telephone.trim()) {
+        setErr(`Indiquez au moins le nom ou le téléphone du correspondant pour « ${nom} ».`); return;
+      }
+    }
     setErr("");
+    const propres = destinations.map((d) => normaliserDestinationPartenaire({
+      ...d, parKg: nombre(d.parKg), parUnite: nombre(d.parUnite), fraisPoste: nombre(d.fraisPoste),
+      correspondant: { nom: d.correspondant.nom.trim(), telephone: d.correspondant.telephone.trim(), adresse: d.correspondant.adresse.trim() },
+    }));
     onSave({
       nomCommercial: nomCommercial.trim(), logo, adresse: adresse.trim(), telephone: telephone.trim(),
       email: email.trim(), siteWeb: siteWeb.trim(), prefixeTracking: p,
-      tarif: { parKg: kg, parUnite: unite, devise },
+      // Le tarif global reste écrit : il sert de repli pour un colis déjà enregistré vers une
+      // destination qu'on refermerait plus tard, et porte la devise commune du partenaire.
+      tarif: { parKg: propres[0]?.parKg || 0, parUnite: propres[0]?.parUnite || 0, devise },
+      destinations: propres,
     });
   }
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(320px,1fr))", gap: 16, alignItems: "start" }}>
       <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, border: "1px solid var(--border)" }}>
-        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Tarif du partenaire</div>
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Destinations autorisées et tarifs</div>
         <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>
-          Ce que ce partenaire paie à l’entreprise. Chaque article de ses colis est compté au kilo
-          ou à l’unité selon ce qu’il choisit à l’enregistrement. Sans rapport avec les prix qu’il
-          applique, lui, à ses propres clients.
+          Ce partenaire ne peut expédier que vers les pays ouverts ici, chacun à son propre tarif —
+          un colis pour Bruxelles ne coûte pas la même chose qu’un colis pour Paris. Sans rapport
+          avec les prix qu’il applique, lui, à ses propres clients.
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 12 }}>
-          <Field label="Par kilo"><input value={parKg} onChange={(e) => setParKg(e.target.value)} style={inputStyle} placeholder="0" /></Field>
-          <Field label="Par unité"><input value={parUnite} onChange={(e) => setParUnite(e.target.value)} style={inputStyle} placeholder="0" /></Field>
-          <Field label="Devise">
-            <select value={devise} onChange={(e) => setDevise(e.target.value)} style={inputStyle}>
-              {["EUR", "GNF", "USD", "XOF", "MAD", "CAD"].map((d) => <option key={d} value={d}>{d}</option>)}
-            </select>
-          </Field>
+        <Field label="Devise du contrat">
+          <select value={devise} onChange={(e) => setDevise(e.target.value)} style={{ ...inputStyle, maxWidth: 160 }}>
+            {["EUR", "GNF", "USD", "XOF", "MAD", "CAD"].map((d) => <option key={d} value={d}>{d}</option>)}
+          </select>
+        </Field>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -8, marginBottom: 16 }}>
+          Une seule devise pour toutes ses destinations : une facture les regroupe, elle ne peut pas en mélanger deux.
         </div>
-        <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "10px 12px", fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
-          Exemple : un colis de 10 kg facturé au kilo coûterait <strong style={{ color: "var(--text)" }}>{fmt((Number(String(parKg).replace(",", ".")) || 0) * 10, devise)}</strong> à ce partenaire.
-        </div>
+
+        {destinations.map((d) => {
+          const pays = COUNTRIES.find((c) => c.code === d.pays);
+          return (
+            <div key={d.pays} style={{ background: "var(--surface2)", borderRadius: 12, padding: 14, marginBottom: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{FLAGS[d.pays] || ""} {pays?.name || d.pays}</div>
+                <button type="button" onClick={() => retirerDestination(d.pays)} title="Fermer cette destination"
+                  style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer", display: "flex", alignItems: "center" }}><Trash2 size={14} /></button>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(110px,1fr))", gap: 10 }}>
+                <Field label={`Par kilo (${devise})`}><input value={d.parKg} onChange={(e) => majDestination(d.pays, { parKg: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="0" /></Field>
+                <Field label={`Par unité (${devise})`}><input value={d.parUnite} onChange={(e) => majDestination(d.pays, { parUnite: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="0" /></Field>
+              </div>
+              <Field label="Acheminement à l’arrivée">
+                <select value={d.acheminement} onChange={(e) => majDestination(d.pays, { acheminement: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }}>
+                  {ACHEMINEMENTS_PARTENAIRE.map((a) => <option key={a.cle} value={a.cle}>{a.label}</option>)}
+                </select>
+              </Field>
+              {d.acheminement === "correspondant" && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 8, lineHeight: 1.5 }}>
+                    La personne du partenaire qui vient récupérer les colis sur place. Elle apparaîtra à la vérification et sur la fiche colis.
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 10 }}>
+                    <Field label="Nom du correspondant"><input value={d.correspondant.nom} onChange={(e) => majCorrespondant(d.pays, { nom: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
+                    <Field label="Téléphone"><input value={d.correspondant.telephone} onChange={(e) => majCorrespondant(d.pays, { telephone: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
+                  </div>
+                  <Field label="Adresse (facultatif)"><input value={d.correspondant.adresse} onChange={(e) => majCorrespondant(d.pays, { adresse: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
+                </div>
+              )}
+              {d.acheminement === "poste" && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontSize: 11.5, color: "var(--warn-fg)", marginBottom: 8, lineHeight: 1.5 }}>
+                    Personne sur place : l’entreprise poste le colis et refacture le timbre au partenaire.
+                    Le montant s’ajoute au prix du transport, affiché à part sur sa facture.
+                  </div>
+                  <Field label={`Frais de poste par colis (${devise})`}>
+                    <input value={d.fraisPoste} onChange={(e) => majDestination(d.pays, { fraisPoste: e.target.value })} style={{ ...inputStyle, marginBottom: 0, maxWidth: 160 }} placeholder="0" />
+                  </Field>
+                </div>
+              )}
+              <div style={{ background: "var(--surface)", borderRadius: 8, padding: "8px 11px", fontSize: 11.5, color: "var(--muted)", marginTop: 10 }}>
+                Un colis de 10 kg au kilo : <strong style={{ color: "var(--text)" }}>
+                  {fmt((Number(String(d.parKg).replace(",", ".")) || 0) * 10 + (d.acheminement === "poste" ? (Number(String(d.fraisPoste).replace(",", ".")) || 0) : 0), devise)}
+                </strong>
+                {d.acheminement === "poste" ? " (frais de poste compris)" : ""}
+              </div>
+            </div>
+          );
+        })}
+
+        {paysDisponibles.length > 0 && (
+          <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
+            <div style={{ flex: "1 1 180px", minWidth: 0 }}>
+              <Field label="Ouvrir une destination">
+                <select value={nouveauPays} onChange={(e) => setNouveauPays(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }}>
+                  <option value="">Choisir un pays…</option>
+                  {paysDisponibles.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code] || ""} {c.name}</option>)}
+                </select>
+              </Field>
+            </div>
+            <button type="button" onClick={ajouterDestination} disabled={!nouveauPays} style={{
+              display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1.5px solid var(--border)",
+              color: "var(--text)", borderRadius: 8, padding: "9px 14px", fontSize: 12.5, fontWeight: 700,
+              cursor: nouveauPays ? "pointer" : "not-allowed", opacity: nouveauPays ? 1 : 0.6, flexShrink: 0,
+            }}><Plus size={14} /> Ajouter</button>
+          </div>
+        )}
       </div>
 
       <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, border: "1px solid var(--border)" }}>
@@ -17337,6 +17638,26 @@ function VerificationColisPartenaire({ partenaire, colis, onValider }) {
                     <span style={{ marginInlineStart: 6, fontSize: 11 }}>({p.tarification === "unite" ? "à l’unité" : "au kilo"})</span>
                   </div>
                 ))}
+                {/*
+                  L'agent doit savoir, au moment où il arrête le prix, comment le colis finira sa
+                  route : un envoi postal porte un timbre refacturé au partenaire, un correspondant
+                  veut dire que quelqu'un viendra le chercher à l'agence d'arrivée.
+                */}
+                {(() => {
+                  const mode = ACHEMINEMENTS_PARTENAIRE.find((a) => a.cle === (c.acheminementFinal || "direct"));
+                  if (!mode || mode.cle === "direct") return null;
+                  return (
+                    <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)", color: mode.cle === "poste" ? "var(--warn-fg)" : "var(--info-fg)" }}>
+                      <strong>{mode.court}</strong>
+                      {mode.cle === "correspondant" && c.correspondantFinal && (
+                        <span style={{ color: "var(--muted)" }}> — {[c.correspondantFinal.nom, c.correspondantFinal.telephone].filter(Boolean).join(" · ") || "coordonnées non renseignées"}</span>
+                      )}
+                      {mode.cle === "poste" && (
+                        <span style={{ color: "var(--muted)" }}> — dont {fmt(Number(c.fraisPostePartenaire) || 0, devise)} de frais de poste refacturés</span>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
               <div style={{ display: "flex", alignItems: "flex-end", gap: 12, flexWrap: "wrap" }}>
                 <div style={{ flex: "1 1 160px", minWidth: 0 }}>

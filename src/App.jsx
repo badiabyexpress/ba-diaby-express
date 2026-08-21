@@ -711,6 +711,19 @@ function calcPrixPartenaire(colis, user) {
 function statutValidationPartenaire(colis) {
   return colis?.validationPartenaire?.statut === "Validé" ? "Validé" : "En attente";
 }
+
+/**
+ * Colis partenaire prêt à partir au prochain départ.
+ *
+ * Deux conditions, et seulement deux : il a été vérifié par un agent — tant que son contenu et
+ * son poids n'ont pas été contrôlés, il ne monte pas dans l'avion — et il attend encore au dépôt.
+ * Dès qu'il est en transit, il n'est plus « à expédier », il est parti.
+ */
+function estColisExpediable(colis) {
+  return estColisPartenaire(colis)
+    && statutValidationPartenaire(colis) === "Validé"
+    && colis.status === "Enregistré";
+}
 /** Colis partenaires validés qui n'ont pas encore été portés sur une facture. */
 function colisPartenaireAFacturer(colis, partenaireId) {
   return (colis || []).filter((c) => c.partenaireId === partenaireId
@@ -4475,6 +4488,16 @@ function PartnerDashboard({ data, session, persist, notify }) {
   // Ce qui est vérifié mais pas encore porté sur une facture : le partenaire sait ce qui va tomber.
   const enAttenteDeFacture = colisPartenaireAFacturer(data.colis, session.id)
     .reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0);
+  /*
+   * Ce qui part au prochain départ, et ce qui le retient.
+   *
+   * Le partenaire a besoin de savoir, avant chaque rotation, ce qui est prêt et ce qui ne l'est
+   * pas encore. Un colis non vérifié n'est pas un colis perdu : il attend le passage d'un agent,
+   * et le dire évite l'appel téléphonique qui suit toujours.
+   */
+  const prets = colisPartenaire.filter(estColisExpediable);
+  const bloques = colisPartenaire.filter((c) => statutValidationPartenaire(c) === "En attente"
+    && c.status === "Enregistré");
 
   async function enregistrerColis(colis) {
     const resultat = await persist({
@@ -4522,12 +4545,13 @@ function PartnerDashboard({ data, session, persist, notify }) {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 14, marginBottom: 24 }}>
         <StatCard label="Colis enregistrés" value={scoped.length} icon={Package} tint="#3D63FF" />
         <StatCard label="Poids total" value={`${poidsTotal.toFixed(1)} kg`} icon={Truck} tint="#8B5CF6" />
+        <StatCard label="Prêts à expédier" value={prets.length} icon={Plane} tint="#16A163" />
         <StatCard label="Coût sur la période" value={fmt(coutPeriode, devise)} icon={Receipt} tint="#0EA5E9" />
         <StatCard label="Vérifié, à facturer" value={fmt(enAttenteDeFacture, devise)} icon={Clock} tint="#D6A22E" />
       </div>
 
       <div style={{ display: "flex", gap: 22, borderBottom: "1px solid var(--border)", marginBottom: 18, flexWrap: "wrap" }}>
-        {[["colis", "Mes colis", colisPartenaire.length], ["clients", "Mes clients", mesClients.length], ["factures", "Mes factures", mesFactures.length], ["infos", "Mes informations", 0]].map(([cle, libelle, compte]) => (
+        {[["colis", "Mes colis", colisPartenaire.length], ["expedier", "À expédier", prets.length], ["clients", "Mes clients", mesClients.length], ["factures", "Mes factures", mesFactures.length], ["infos", "Mes informations", 0]].map(([cle, libelle, compte]) => (
           <button key={cle} onClick={() => setOnglet(cle)} style={{
             background: "none", border: "none", padding: "0 0 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 7,
             color: onglet === cle ? "var(--info-fg)" : "var(--muted)",
@@ -4572,6 +4596,95 @@ function PartnerDashboard({ data, session, persist, notify }) {
         </div>
       </div>
       </div>
+
+      {onglet === "expedier" && (
+        <div style={{ marginBottom: 20 }}>
+          {prets.length === 0 && bloques.length === 0 ? (
+            <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+              Rien en attente de départ — tous vos colis sont partis, ou il n’y en a pas encore.
+            </div>
+          ) : (
+            <>
+              {/*
+                Groupés par destination, parce que c'est par destination que partent les avions :
+                le partenaire voit d'un coup d'œil ce qui monte dans le prochain vol pour Paris,
+                et jusqu'à quand il peut encore y ajouter des colis.
+              */}
+              {[...new Set(prets.map((c) => c.pays))].map((pays) => {
+                const lot = prets.filter((c) => c.pays === pays);
+                const depart = departsAVenir(data.departs, pays)[0];
+                const paysNom = COUNTRIES.find((p) => p.code === pays)?.name || pays;
+                return (
+                  <div key={pays} style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", marginBottom: 14 }}>
+                    <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{FLAGS[pays] || ""} {routeLabel(pays, lot[0]?.direction) || paysNom}</div>
+                        <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
+                          {lot.length} colis · {lot.reduce((s, c) => s + (Number(c.poids) || 0), 0).toFixed(1)} kg · {fmt(lot.reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0), devise)}
+                        </div>
+                      </div>
+                      {depart ? (
+                        <div style={{ background: "var(--ok-bg)", border: "1px solid var(--ok-border)", borderRadius: 9, padding: "8px 12px", fontSize: 12, color: "var(--ok-fg)", textAlign: "end" }}>
+                          <div style={{ fontWeight: 700 }}>Départ le {new Date(depart.dateDepart).toLocaleDateString("fr-FR", { day: "numeric", month: "long" })}</div>
+                          <div style={{ fontSize: 11, marginTop: 2 }}>Dépôt jusqu’au {new Date(depart.dateLimite).toLocaleDateString("fr-FR", { day: "numeric", month: "long" })}</div>
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: 11.5, color: "var(--muted)", textAlign: "end" }}>Aucun départ annoncé pour cette destination</div>
+                      )}
+                    </div>
+                    <div style={{ overflowX: "auto" }}>
+                      <table style={{ width: "100%", minWidth: 560, borderCollapse: "collapse" }}>
+                        <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Destinataire", "Contenu", "Poids", "Coût"].map((h) => <th key={h} style={{ padding: "9px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
+                        <tbody>
+                          {lot.map((c) => (
+                            <tr key={c.tracking} style={{ borderTop: "1px solid var(--border)", verticalAlign: "top" }}>
+                              <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.tracking}</td>
+                              <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{c.destinataire}</td>
+                              <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
+                                {(c.produits || []).map((p, i) => <div key={p.id || i}>×{p.quantite || 1} {p.nom || "article"}</div>)}
+                              </td>
+                              <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.poids} kg</td>
+                              <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 700, whiteSpace: "nowrap" }}>{fmt(Number(c.prixPartenaire) || 0, c.devisePartenaire || devise)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {bloques.length > 0 && (
+                <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--warn-border)", overflow: "hidden" }}>
+                  <div style={{ padding: "14px 16px", background: "var(--warn-bg)" }}>
+                    <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>
+                      {bloques.length} colis en attente de vérification
+                    </div>
+                    <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 }}>
+                      Ils ne partiront qu’une fois pesés et contrôlés par un agent. Rien à faire de votre côté.
+                    </div>
+                  </div>
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={{ width: "100%", minWidth: 500, borderCollapse: "collapse" }}>
+                      <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Destinataire", "Destination", "Poids déclaré"].map((h) => <th key={h} style={{ padding: "9px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
+                      <tbody>
+                        {bloques.map((c) => (
+                          <tr key={c.tracking} style={{ borderTop: "1px solid var(--border)" }}>
+                            <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.tracking}</td>
+                            <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{c.destinataire}</td>
+                            <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{routeLabel(c.pays, c.direction) || "—"}</td>
+                            <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.poids} kg</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
 
       {onglet === "clients" && (
         <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", marginBottom: 20 }}>

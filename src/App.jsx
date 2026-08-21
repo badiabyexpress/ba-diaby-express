@@ -562,12 +562,17 @@ function departsAVenir(departs, pays = null) {
     .sort((a, b) => new Date(a.dateDepart) - new Date(b.dateDepart));
 }
 
-function genTracking(existingTrackings, dateDepot) {
+function genTracking(existingTrackings, dateDepot, marque) {
   const taken = new Set(existingTrackings || []);
   const d = dateDepot ? new Date(dateDepot) : new Date();
   const jour = String(d.getDate()).padStart(2, "0");
   const mois = String(d.getMonth() + 1).padStart(2, "0");
-  const prefixe = `BDE${jour}${mois}`;
+  /*
+   * `marque` remplace « BDE » pour les colis d'un partenaire qui expédie sous son propre nom :
+   * le client de ce partenaire ne doit pas recevoir un code de suivi Ba-Diaby Express, il
+   * n'a jamais entendu parler de nous. Trois lettres, comme BDE, pour rester lisible au comptoir.
+   */
+  const prefixe = `${(marque || "BDE").toUpperCase()}${jour}${mois}`;
 
   for (let ordre = 1; ordre <= 99; ordre++) {
     const code = `${prefixe}${String(ordre).padStart(2, "0")}`;
@@ -647,6 +652,78 @@ function libelleCategoriePrix(c, ...devises) {
  */
 function estColisPartenaire(colis) {
   return !!colis?.partenaireId;
+}
+
+/** Le compte partenaire auquel un colis est rattaché, s'il en a un. */
+function partenaireDuColis(data, colis) {
+  if (!colis?.partenaireId) return null;
+  return (data?.users || []).find((u) => u.id === colis.partenaireId) || null;
+}
+
+/**
+ * Réglages d'un compte partenaire, toujours complets même sur un compte jamais configuré.
+ *
+ * Tout est décidé par l'administrateur au moment où il crée le compte : le tarif que le
+ * partenaire paiera à l'entreprise, l'identité sous laquelle ses colis voyagent (son logo, son
+ * nom, ses coordonnées) et le préfixe de ses numéros de suivi. Le partenaire ne peut rien y
+ * changer — c'est un contrat, pas un réglage.
+ */
+function reglagesPartenaire(user) {
+  const p = user?.partenaire || {};
+  const t = p.tarif || {};
+  return {
+    nomCommercial: p.nomCommercial || "",
+    logo: p.logo || null,
+    adresse: p.adresse || "",
+    telephone: p.telephone || user?.telephone || "",
+    email: p.email || user?.email || "",
+    siteWeb: p.siteWeb || "",
+    prefixeTracking: String(p.prefixeTracking || "").toUpperCase(),
+    tarif: { parKg: Number(t.parKg) || 0, parUnite: Number(t.parUnite) || 0, devise: t.devise || "EUR" },
+  };
+}
+
+/** Un partenaire expédie sous sa propre marque dès qu'un nom commercial lui a été attribué. */
+function marquePartenaire(data, colis) {
+  const p = partenaireDuColis(data, colis);
+  if (!p) return null;
+  const r = reglagesPartenaire(p);
+  return r.nomCommercial ? r : null;
+}
+
+/**
+ * Prix facturé par l'entreprise AU partenaire, dans la devise de son tarif.
+ *
+ * À ne pas confondre avec ce que le partenaire facture à son propre client, que l'application
+ * ne connaît pas et n'a pas à connaître. Chaque article est compté au kilo ou à l'unité selon
+ * ce qui a été choisi à l'enregistrement, aux taux du contrat de ce partenaire.
+ */
+function calcPrixPartenaire(colis, user) {
+  const { tarif } = reglagesPartenaire(user);
+  const articles = colis?.produits || [];
+  if (articles.length === 0) return +((Number(colis?.poids) || 0) * tarif.parKg).toFixed(2);
+  return +articles.reduce((s, a) => (a.tarification === "unite"
+    ? s + tarif.parUnite * (Number(a.quantite) || 1)
+    : s + tarif.parKg * (Number(a.poids) || 0)), 0).toFixed(2);
+}
+
+/** État de la vérification d'un colis partenaire par un agent de l'entreprise. */
+function statutValidationPartenaire(colis) {
+  return colis?.validationPartenaire?.statut === "Validé" ? "Validé" : "En attente";
+}
+/** Colis partenaires validés qui n'ont pas encore été portés sur une facture. */
+function colisPartenaireAFacturer(colis, partenaireId) {
+  return (colis || []).filter((c) => c.partenaireId === partenaireId
+    && statutValidationPartenaire(c) === "Validé"
+    && !c.facturePartenaireId
+    && c.status !== "Annulé");
+}
+/** Numéro de facture partenaire, continu sur l'année : FP-2026-0001. */
+function genNumeroFacturePartenaire(factures) {
+  const annee = new Date().getFullYear();
+  const prefixe = `FP-${annee}-`;
+  const rang = (factures || []).filter((f) => String(f.numero || "").startsWith(prefixe)).length + 1;
+  return `${prefixe}${String(rang).padStart(4, "0")}`;
 }
 
 /** Calcule la commission d’agence gagnée sur un colis, en EUR, selon les taux (globaux ou par catégorie). */
@@ -762,7 +839,7 @@ async function notifierEvenement(data, evenement, colis, message) {
   // doit jamais empêcher l'envoi du message texte — on retombe simplement sans pièce jointe.
   let mediaUrl = null;
   if (evenement === "enregistrement" && data?.notificationSettings?.joindreEtiquette) {
-    try { mediaUrl = await genererUrlEtiquette(colis); } catch (e) { /* le message texte part quand même */ }
+    try { mediaUrl = await genererUrlEtiquette(colis, data); } catch (e) { /* le message texte part quand même */ }
   }
 
   const destinations = [];
@@ -4320,15 +4397,20 @@ Dashboard = memo(Dashboard);
 /**
  * Espace Partenaire.
  *
- * Un partenaire fixe ses prix et facture ses clients lui-même : l'application ne connaît ni son
- * tarif, ni sa marge. Cet écran ne montre donc aucun montant — seulement ce qu'il a confié à
- * l'entreprise (client, articles, poids) et où en est chaque envoi. Il lui sert aussi à
- * enregistrer ses colis lui-même, sans passer par le comptoir.
+ * Ce que le partenaire facture à ses propres clients ne regarde pas l'application : elle ignore
+ * ses prix de vente et sa marge. Ce qu'il voit ici, c'est ce que l'entreprise lui coûte à lui —
+ * au tarif de son contrat, fixé par l'administrateur — colis par colis, puis regroupé sur ses
+ * factures. Il dépose ses colis depuis cet écran ; un agent les vérifie ensuite un à un.
  */
 function PartnerDashboard({ data, session, persist, notify }) {
   const [periode, setPeriode] = useState("mois");
   const [showForm, setShowForm] = useState(false);
   const colisPartenaire = data.colis.filter((c) => c.partenaireId === session.id);
+  const moi = (data.users || []).find((u) => u.id === session.id) || session;
+  const reglages = reglagesPartenaire(moi);
+  const devise = reglages.tarif.devise;
+  const mesFactures = (data.facturesPartenaire || []).filter((f) => f.partenaireId === session.id)
+    .sort((a, b) => new Date(b.creeeLe) - new Date(a.creeeLe));
   const now = new Date();
   const inPeriod = (dateStr) => {
     const d = new Date(dateStr);
@@ -4338,7 +4420,10 @@ function PartnerDashboard({ data, session, persist, notify }) {
   };
   const scoped = colisPartenaire.filter((c) => c.status !== "Annulé" && inPeriod(c.createdAt));
   const poidsTotal = scoped.reduce((s, c) => s + (Number(c.poids) || 0), 0);
-  const articlesTotal = scoped.reduce((s, c) => s + nombreArticles(c), 0);
+  const coutPeriode = scoped.reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0);
+  // Ce qui est vérifié mais pas encore porté sur une facture : le partenaire sait ce qui va tomber.
+  const enAttenteDeFacture = colisPartenaireAFacturer(data.colis, session.id)
+    .reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0);
 
   async function enregistrerColis(colis) {
     const resultat = await persist({
@@ -4366,8 +4451,12 @@ function PartnerDashboard({ data, session, persist, notify }) {
 
       <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 16px", marginBottom: 18 }}>
         <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
-          Vos prix et vos factures restent les vôtres : l’application ne les connaît pas. L’enregistrement sert
-          à tracer le client, les articles et le poids, et à vérifier le contenu avant le départ de chaque voyage.
+          Les montants ci-dessous sont ce que <strong>l’entreprise vous facture</strong>, au tarif convenu
+          {reglages.tarif.parKg > 0 || reglages.tarif.parUnite > 0
+            ? ` (${fmt(reglages.tarif.parKg, devise)}/kg · ${fmt(reglages.tarif.parUnite, devise)}/unité)`
+            : ""}.
+          Ce que vous facturez, vous, à vos clients ne figure nulle part ici. Chaque colis est vérifié
+          par un agent avant d’entrer sur une facture.
         </div>
       </div>
 
@@ -4380,25 +4469,34 @@ function PartnerDashboard({ data, session, persist, notify }) {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 14, marginBottom: 24 }}>
         <StatCard label="Colis enregistrés" value={scoped.length} icon={Package} tint="#3D63FF" />
         <StatCard label="Poids total" value={`${poidsTotal.toFixed(1)} kg`} icon={Truck} tint="#8B5CF6" />
-        <StatCard label="Articles" value={articlesTotal} icon={FileStack} tint="#16A163" />
+        <StatCard label="Coût sur la période" value={fmt(coutPeriode, devise)} icon={Receipt} tint="#0EA5E9" />
+        <StatCard label="Vérifié, à facturer" value={fmt(enAttenteDeFacture, devise)} icon={Clock} tint="#D6A22E" />
       </div>
 
       <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 10 }}>Vos colis</div>
       <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", marginBottom: 20 }}>
         <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", minWidth: 620, borderCollapse: "collapse" }}>
-          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Client", "Destination", "Articles", "Poids", "Statut"].map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
+        <table style={{ width: "100%", minWidth: 760, borderCollapse: "collapse" }}>
+          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Expéditeur", "Destinataire", "Poids", "Coût", "Vérification", "Acheminement"].map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
           <tbody>
-            {colisPartenaire.length === 0 && <tr><td colSpan={6} style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucun colis enregistré pour l’instant — utilisez « Enregistrer un colis ».</td></tr>}
+            {colisPartenaire.length === 0 && <tr><td colSpan={7} style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucun colis enregistré pour l’instant — utilisez « Enregistrer un colis ».</td></tr>}
             {colisPartenaire.map((c) => {
               const st = STATUS_STYLE[c.status];
+              const valide = statutValidationPartenaire(c) === "Validé";
+              const facture = mesFactures.find((f) => f.id === c.facturePartenaireId);
               return (
                 <tr key={c.tracking} style={{ borderTop: "1px solid var(--border)" }}>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.tracking}</td>
+                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.expediteur || "—"}</td>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{c.destinataire}</td>
-                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{routeLabel(c.pays, c.direction) || "—"}</td>
-                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{nombreArticles(c)}</td>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.poids} kg</td>
+                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 700, whiteSpace: "nowrap" }}>{fmt(Number(c.prixPartenaire) || 0, c.devisePartenaire || devise)}</td>
+                  <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}>
+                    <span style={{ background: valide ? "var(--ok-bg-soft)" : "var(--warn-bg)", color: valide ? "var(--ok-fg)" : "var(--warn-fg)", padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>
+                      {valide ? "Vérifié" : "En attente"}
+                    </span>
+                    {facture && <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 3 }}>{facture.numero}</div>}
+                  </td>
                   <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}><span style={{ background: st?.bg, color: st?.fg, padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>{c.status}</span></td>
                 </tr>
               );
@@ -4407,6 +4505,40 @@ function PartnerDashboard({ data, session, persist, notify }) {
         </table>
         </div>
       </div>
+
+      <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 10 }}>Vos factures</div>
+      {mesFactures.length === 0 ? (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 13, marginBottom: 20 }}>
+          Aucune facture pour l’instant. Vos colis vérifiés y seront regroupés.
+        </div>
+      ) : (
+        <div style={{ display: "grid", gap: 10, marginBottom: 20 }}>
+          {mesFactures.map((f) => (
+            <div key={f.id} style={{ background: "var(--surface)", borderRadius: 12, border: "1px solid var(--border)", padding: "14px 16px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{f.numero}</div>
+                  <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
+                    {new Date(f.creeeLe).toLocaleDateString("fr-FR")} · {(f.trackings || []).length} colis
+                  </div>
+                </div>
+                <strong style={{ fontSize: 17, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif" }}>{fmt(Number(f.total) || 0, f.devise)}</strong>
+              </div>
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)", fontSize: 12, color: "var(--muted)", lineHeight: 1.7 }}>
+                {(f.trackings || []).map((t) => {
+                  const c = colisPartenaire.find((x) => x.tracking === t);
+                  return (
+                    <div key={t} style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
+                      <span>{t}{c ? ` — ${c.destinataire}` : ""}</span>
+                      <span style={{ color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{fmt(Number(c?.prixPartenaire) || 0, f.devise)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {showForm && (
         <ColisPartenaireForm
@@ -4440,12 +4572,15 @@ function nombreArticles(colis) {
  */
 function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenaires, partenaireImpose }) {
   const [partenaireId, setPartenaireId] = useState(partenaireImpose || "");
+  const [expPrenom, setExpPrenom] = useState("");
+  const [expNom, setExpNom] = useState("");
+  const [expTelephone, setExpTelephone] = useState("");
   const [clientPrenom, setClientPrenom] = useState("");
   const [clientNom, setClientNom] = useState("");
   const [clientTelephone, setClientTelephone] = useState("");
   const [destPays, setDestPays] = useState("FR");
   const [mode, setMode] = useState("air");
-  const [articles, setArticles] = useState(() => [emptyProduit()]);
+  const [articles, setArticles] = useState(() => [{ ...emptyProduit(), tarification: "kg" }]);
   const [err, setErr] = useState("");
 
   const paysDisponibles = allowedCountries(session);
@@ -4453,40 +4588,49 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
   const paysRoute = destPays === "GN" ? "GN" : destPays;
   const poidsTotal = articles.reduce((s, a) => s + (Number(a.poids) || 0), 0);
   const partenaire = (partenaires || []).find((p) => p.id === partenaireId);
-  const saisieEnCours = !!clientPrenom || !!clientNom || articles.some((a) => a.nom);
+  const reglages = reglagesPartenaire(partenaire);
+  const tarifDefini = reglages.tarif.parKg > 0 || reglages.tarif.parUnite > 0;
+  // Coût du colis pour le partenaire, au tarif de son contrat. Reste une estimation tant qu'un
+  // agent ne l'a pas vérifié : c'est la pesée au comptoir qui fait foi, pas la déclaration.
+  const coutEstime = partenaire ? calcPrixPartenaire({ produits: articles, poids: poidsTotal }, partenaire) : 0;
+  const saisieEnCours = !!expNom || !!clientNom || articles.some((a) => a.nom);
 
   function majArticle(id, patch) { setErr(""); setArticles((l) => l.map((a) => (a.id === id ? { ...a, ...patch } : a))); }
-  function ajouterArticle() { setArticles((l) => [...l, emptyProduit()]); }
+  function ajouterArticle() { setArticles((l) => [...l, { ...emptyProduit(), tarification: "kg" }]); }
   function retirerArticle(id) { setArticles((l) => (l.length > 1 ? l.filter((a) => a.id !== id) : l)); }
 
   function submit(e) {
     e.preventDefault();
     if (!partenaireId) { setErr("Choisissez le partenaire pour le compte duquel ce colis est enregistré."); return; }
-    if (!clientNom.trim()) { setErr("Indiquez le nom du client — c’est lui qui identifie le colis à l’arrivée."); return; }
-    if (articles.some((a) => !a.nom.trim())) { setErr("Donnez une désignation à chaque article."); return; }
+    if (!expNom.trim()) { setErr("Indiquez le nom de l’expéditeur — la personne qui remet le colis."); return; }
+    if (!clientNom.trim()) { setErr("Indiquez le nom du destinataire — c’est lui qui identifie le colis à l’arrivée."); return; }
+    if (articles.some((a) => !a.nom.trim())) { setErr("Décrivez le contenu de chaque article."); return; }
     if (articles.some((a) => !(Number(a.poids) > 0))) { setErr("Indiquez le poids de chaque article, en kilogrammes."); return; }
-    const client = `${clientPrenom} ${clientNom}`.trim();
+    if (articles.some((a) => a.tarification === "unite" && !(Number(a.quantite) >= 1))) { setErr("Un article facturé à l’unité doit avoir une quantité d’au moins 1."); return; }
+    const produits = articles.map((a) => ({ ...a, nom: a.nom.trim(), categorie: "", personnalise: true, montant: "0", typePrix: "unitaire" }));
+    const prixPartenaire = calcPrixPartenaire({ produits, poids: poidsTotal }, partenaire);
     onSave({
-      tracking: genTracking((existingColis || []).map((c) => c.tracking)),
-      /*
-       * Le partenaire est l'expéditeur vis-à-vis de l'entreprise : c'est lui qui dépose la
-       * marchandise et à qui l'on rend des comptes. Son client est le destinataire.
-       */
-      expediteur: partenaire ? `${partenaire.prenom} ${partenaire.nom}`.trim() : "Partenaire",
-      expediteurTelephone: partenaire?.telephone || "", expediteurEmail: "", expediteurAdresse: "",
+      // Colis expédié sous la marque du partenaire : son numéro de suivi porte son préfixe, pas
+      // celui de l'entreprise — son client n'a jamais entendu parler de Ba-Diaby Express.
+      tracking: genTracking((existingColis || []).map((c) => c.tracking), null, reglages.prefixeTracking || undefined),
+      expediteur: `${expPrenom} ${expNom}`.trim(), expediteurTelephone: expTelephone, expediteurEmail: "", expediteurAdresse: "",
       expediteurPays: partenaire?.paysOperation || "GN",
-      destinataire: client, telephone: clientTelephone, destinataireEmail: "", destinataireAdresse: "",
+      destinataire: `${clientPrenom} ${clientNom}`.trim(), telephone: clientTelephone, destinataireEmail: "", destinataireAdresse: "",
       destinataireVille: "", destinataireCodePostal: "", destinatairePays: destPays,
       pays: paysRoute, direction, mode,
-      produits: articles.map((a) => ({ ...a, nom: a.nom.trim(), categorie: "", personnalise: true, montant: "0", typePrix: "unitaire" })),
+      produits,
       poids: +poidsTotal.toFixed(2), volume: 0,
       /*
-       * Aucun montant : ni valeur déclarée, ni prix, ni acompte. Ces champs restent à zéro pour
-       * que le colis traverse sans dommage tout ce qui additionne des recettes — la recette de ce
-       * colis appartient au partenaire, elle n'a jamais été encaissée par l'entreprise.
+       * Les champs de prix ordinaires restent à zéro : ce colis n'est pas une vente de
+       * l'entreprise à un client, il ne doit donc entrer dans aucune recette ni aucune caisse.
+       * Ce que le partenaire doit à l'entreprise vit à part, dans prixPartenaire, et ne devient
+       * exigible qu'une fois le colis vérifié puis porté sur une facture.
        */
       valeurDeclaree: 0, prixBrut: 0, discountLoyalty: 0, rabaisMontant: 0, rabaisDevise: "GNF", rabaisEUR: 0,
       prix: 0, paye: 0, reste: 0, paiements: [], photos: [],
+      prixPartenaire, devisePartenaire: reglages.tarif.devise,
+      validationPartenaire: { statut: "En attente", par: null, le: null },
+      facturePartenaireId: null,
       site: session?.agence || "", partenaireId, clientAccountId: null, provenance: null,
       agentCreation: session ? `${session.prenom} ${session.nom}`.trim() || session.identifiant : "",
       notesInternes: "",
@@ -4498,8 +4642,8 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
   return (
     <Modal onClose={onClose} title="Colis partenaire" wide saisieEnCours={saisieEnCours}>
       <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 16, lineHeight: 1.55 }}>
-        Ni catégorie ni tarif : le partenaire facture son client lui-même. Seuls le client, les articles
-        et le poids sont enregistrés, pour le suivi et la vérification avant départ.
+        Expéditeur, destinataire, contenu et poids. Le coût affiché est celui du tarif convenu avec
+        l’entreprise ; il sera vérifié par un agent avant d’entrer sur une facture.
       </div>
       <form onSubmit={submit}>
         {!partenaireImpose && (
@@ -4510,13 +4654,28 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
             </select>
             {(partenaires || []).length === 0 && (
               <div style={{ fontSize: 11.5, color: "var(--warn-fg)", marginTop: -8, marginBottom: 10 }}>
-                Aucun compte partenaire n’existe encore — créez-le dans Configuration → Gestion Utilisateurs, rôle « Partenaire ».
+                Aucun compte partenaire n’existe encore — créez-le dans Configuration → Gestion Utilisateurs
+                (rôle « Partenaire »), puis fixez son tarif dans Configuration → Partenaires.
               </div>
             )}
           </Field>
         )}
 
-        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "4px 0 10px" }}>Client du partenaire</div>
+        {partenaire && !tarifDefini && (
+          <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "10px 12px", fontSize: 12, color: "var(--warn-fg)", marginBottom: 14, lineHeight: 1.5 }}>
+            Aucun tarif n’est encore fixé pour ce partenaire : le colis sera enregistré à 0. Renseignez son tarif
+            dans Configuration → Partenaires pour que ses colis soient chiffrés.
+          </div>
+        )}
+
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "4px 0 10px" }}>Expéditeur</div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
+          <Field label="Prénom"><input value={expPrenom} onChange={(e) => setExpPrenom(e.target.value)} style={inputStyle} /></Field>
+          <Field label="Nom *"><input value={expNom} onChange={(e) => { setErr(""); setExpNom(e.target.value); }} style={inputStyle} /></Field>
+        </div>
+        <Field label="Téléphone (facultatif)"><PhoneInput value={expTelephone} onChange={setExpTelephone} /></Field>
+
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>Destinataire</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
           <Field label="Prénom"><input value={clientPrenom} onChange={(e) => setClientPrenom(e.target.value)} style={inputStyle} /></Field>
           <Field label="Nom *"><input value={clientNom} onChange={(e) => { setErr(""); setClientNom(e.target.value); }} style={inputStyle} /></Field>
@@ -4538,7 +4697,11 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
           </Field>
         </div>
 
-        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>Articles</div>
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 4px" }}>Contenu du colis</div>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 10, lineHeight: 1.5 }}>
+          Chaque article est facturé au kilo ou à l’unité, selon le tarif convenu avec le partenaire
+          {tarifDefini ? ` (${fmt(reglages.tarif.parKg, reglages.tarif.devise)}/kg · ${fmt(reglages.tarif.parUnite, reglages.tarif.devise)}/unité)` : ""}.
+        </div>
         {articles.map((a, i) => (
           <div key={a.id} style={{ background: "var(--surface2)", borderRadius: 10, padding: 12, marginBottom: 10 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
@@ -4547,20 +4710,43 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
                 <button type="button" onClick={() => retirerArticle(a.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer", display: "flex", alignItems: "center" }}><Trash2 size={14} /></button>
               )}
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 10 }}>
-              <Field label="Désignation *"><input value={a.nom} onChange={(e) => majArticle(a.id, { nom: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="ex : cartons de vêtements" /></Field>
+            <Field label="Désignation *"><input value={a.nom} onChange={(e) => majArticle(a.id, { nom: e.target.value })} style={inputStyle} placeholder="ex : cartons de vêtements" /></Field>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 10 }}>
+              <Field label="Facturé">
+                <select value={a.tarification || "kg"} onChange={(e) => majArticle(a.id, { tarification: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }}>
+                  <option value="kg">Au kilo</option>
+                  <option value="unite">À l’unité</option>
+                </select>
+              </Field>
               <Field label="Quantité"><input type="number" min="1" value={a.quantite} onChange={(e) => majArticle(a.id, { quantite: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
               <Field label="Poids (kg) *"><input type="number" step="0.01" min="0" value={a.poids} onChange={(e) => majArticle(a.id, { poids: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="0" /></Field>
             </div>
+            {tarifDefini && (
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8 }}>
+                {a.tarification === "unite"
+                  ? `${Number(a.quantite) || 1} × ${fmt(reglages.tarif.parUnite, reglages.tarif.devise)}`
+                  : `${Number(a.poids) || 0} kg × ${fmt(reglages.tarif.parKg, reglages.tarif.devise)}`}
+                {" = "}
+                <strong style={{ color: "var(--text)" }}>{fmt(calcPrixPartenaire({ produits: [a] }, partenaire), reglages.tarif.devise)}</strong>
+              </div>
+            )}
           </div>
         ))}
         <button type="button" onClick={ajouterArticle} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", marginBottom: 14 }}>
           <Plus size={14} /> Ajouter un article
         </button>
 
-        <div style={{ background: "var(--surface2)", borderRadius: 10, padding: "12px 14px", marginBottom: 14, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-          <span style={{ fontSize: 12.5, color: "var(--muted)" }}>Poids total du colis</span>
-          <strong style={{ fontSize: 16, color: "var(--text)" }}>{poidsTotal.toFixed(2)} kg</strong>
+        <div style={{ background: "var(--surface2)", borderRadius: 10, padding: "12px 14px", marginBottom: 14 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 12.5, color: "var(--muted)" }}>Poids total du colis</span>
+            <strong style={{ fontSize: 16, color: "var(--text)" }}>{poidsTotal.toFixed(2)} kg</strong>
+          </div>
+          {tarifDefini && (
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+              <span style={{ fontSize: 12.5, color: "var(--muted)" }}>Coût pour le partenaire <span style={{ fontSize: 11 }}>(à vérifier par un agent)</span></span>
+              <strong style={{ fontSize: 18, color: "var(--info-fg)", fontFamily: "'Space Grotesk',sans-serif" }}>{fmt(coutEstime, reglages.tarif.devise)}</strong>
+            </div>
+          )}
         </div>
 
         {err && (
@@ -4602,6 +4788,7 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
   if (sub === "paiement") return <PaiementConfigPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "branding") return <BrandingPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "users") return <UtilisateursPage data={data} persist={persist} notify={notify} onBack={back} session={session} />;
+  if (sub === "partenaires") return <PartenairesPage data={data} persist={persist} notify={notify} onBack={back} session={session} />;
   if (sub === "performance") return <PerformanceAgentsPage data={data} onBack={back} />;
   if (sub === "systeme") return <ParametresSystemePage data={data} persist={persist} notify={notify} onBack={back} offline={offline} />;
   if (sub === "journal") return <JournalActivitePage data={data} onBack={back} />;
@@ -4659,6 +4846,15 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14 }}>
         <Card icon={ShieldCheck} tint="var(--danger-fg)" title="Branding &amp; Identité" desc="Logo, textes légaux et personnalisation de l’identité." onClick={() => setSub("branding")} />
         <Card icon={Users} tint="#6366F1" title="Gestion Utilisateurs" desc="Accès, rôles et permissions de l’équipe." onClick={() => setSub("users")} />
+        {(() => {
+          // Le nombre de colis partenaires en attente est porté sur la carte : c'est le seul
+          // endroit d'où l'on peut les vérifier, et rien d'autre ne signale qu'il y en a.
+          const aVerifier = (data.colis || []).filter((c) => estColisPartenaire(c)
+            && statutValidationPartenaire(c) === "En attente" && c.status !== "Annulé").length;
+          return <Card icon={Truck} tint="#0EA5E9" title="Partenaires"
+            desc={`Tarif de chaque partenaire, identité de ses étiquettes, vérification de ses colis et facturation.${aVerifier > 0 ? ` — ${aVerifier} colis à vérifier` : ""}`}
+            onClick={() => setSub("partenaires")} />;
+        })()}
         <Card icon={LayoutDashboard} tint="#3D63FF" title="Performance des agents" desc="Colis enregistrés, chiffre d’affaires et paiements encaissés, par agent." onClick={() => setSub("performance")} />
         <Card icon={Settings} tint="#6B7280" title="Paramètres Système" desc="Options avancées de la plateforme." onClick={() => setSub("systeme")} />
         <Card icon={FileStack} tint="#5B8DEF" title="Journal d’activité" desc="Historique complet des actions effectuées par les utilisateurs." onClick={() => setSub("journal")} />
@@ -6324,7 +6520,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     const colisSelectionnes = data.colis.filter((c) => selectionLot.includes(c.tracking));
     for (const c of colisSelectionnes) {
       try {
-        if (type === "etiquette") await downloadLabel(c);
+        if (type === "etiquette") await downloadLabel(c, data);
         else if (type === "ticket") await downloadTicketThermal(c);
         else await downloadInvoice(c, data);
       } catch (e) { console.error(`Échec impression pour ${c.tracking}`, e); }
@@ -6353,8 +6549,11 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
       ? `Colis ${colis.tracking} en attente de synchronisation — ne fermez pas cette page avant confirmation`
       : `Colis ${colis.tracking} enregistré`);
     // Notification automatique selon les préférences (Configuration → Notifications WhatsApp).
+    // Sous la marque d'un partenaire, le client ne doit pas recevoir un message signé
+    // Ba-Diaby Express : il a commandé chez le partenaire et ne nous connaît pas.
+    const marque = marquePartenaire(data, colis);
     notifierEvenement(data, "enregistrement", colis,
-      `Bonjour ${colis.destinataire}, votre colis Ba-Diaby Express ${colis.tracking} a bien été enregistré`
+      `Bonjour ${colis.destinataire}, votre colis ${marque ? marque.nomCommercial : "Ba-Diaby Express"} ${colis.tracking} a bien été enregistré`
       + `${colis.poids ? ` (${colis.poids} kg)` : ""}. Suivez-le à tout moment sur notre plateforme.`);
     setShowForm(false);
   }
@@ -8778,7 +8977,7 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
 
 /** Construit le document jsPDF de l'étiquette, sans l'ouvrir — réutilisé par downloadLabel()
  * (ouverture dans un onglet) et par l'envoi WhatsApp (upload du PDF généré vers Supabase Storage). */
-async function construireEtiquetteDoc(colis) {
+async function construireEtiquetteDoc(colis, data) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: [100, 150] }));
   // colis.pays est le pays de route (origine pour un import) ; le pays réellement affiché comme
@@ -8846,15 +9045,32 @@ async function construireEtiquetteDoc(colis) {
   // Cadre extérieur
   doc.setDrawColor(...INK); doc.setLineWidth(0.5); doc.rect(0.6, 0.6, W - 1.2, H - 1.2);
 
-  // ── En-tête : logo + wordmark + mode de transport ──────────────────────────
-  // Double filet (rouge fin + marine épais) sous l'en-tête : traitement en bloc de couleur plein,
-  // comme les étiquettes des grands transporteurs internationaux (DHL, FedEx), plutôt qu'un trait
-  // de séparation discret — l'étiquette doit s'identifier au premier coup d'œil, même de loin.
-  doc.addImage(DEFAULT_LOGO, "PNG", M, 4.5, 14, 14);
+  /*
+   * En-tête : logo + nom + mode de transport.
+   *
+   * Double filet (rouge fin + marine épais) sous l'en-tête : traitement en bloc de couleur plein,
+   * comme les étiquettes des grands transporteurs internationaux (DHL, FedEx), plutôt qu'un trait
+   * de séparation discret — l'étiquette doit s'identifier au premier coup d'œil, même de loin.
+   *
+   * Le colis d'un partenaire qui expédie sous sa propre marque porte SON logo et SON nom : son
+   * client a commandé chez lui, pas chez nous, et n'a aucune raison de lire un autre nom que le
+   * sien sur le colis qu'il reçoit.
+   */
+  const marque = marquePartenaire(data, colis);
+  if (marque?.logo) {
+    try { doc.addImage(marque.logo, "PNG", M, 4.5, 14, 14); } catch (e) { /* logo illisible : on continue sans */ }
+  } else if (!marque) {
+    doc.addImage(DEFAULT_LOGO, "PNG", M, 4.5, 14, 14);
+  }
   doc.setTextColor(...NAVY); doc.setFont(undefined, "bold"); doc.setFontSize(12.5);
-  doc.text("BA-DIABY", M + 17, 10.5);
-  doc.setTextColor(...RED);
-  doc.text("EXPRESS", M + 17, 16.5);
+  if (marque) {
+    const lignes = doc.splitTextToSize(marque.nomCommercial.toUpperCase(), W - M - (marque.logo ? 17 : 0) - 34);
+    doc.text(lignes.slice(0, 2), M + (marque.logo ? 17 : 0), lignes.length > 1 ? 10.5 : 13.5);
+  } else {
+    doc.text("BA-DIABY", M + 17, 10.5);
+    doc.setTextColor(...RED);
+    doc.text("EXPRESS", M + 17, 16.5);
+  }
   const modeLabel = colis.mode === "air" ? "AÉRIEN" : "MARITIME";
   doc.setFontSize(7.5); doc.setFont(undefined, "bold");
   const modeW = doc.getTextWidth(modeLabel) + 12;
@@ -8988,13 +9204,18 @@ async function construireEtiquetteDoc(colis) {
    * soit 1,47 mm de haut) : la mention des CGV renvoie désormais au site, comme il est d'usage.
    */
   doc.setFontSize(6.8); doc.setTextColor(255, 255, 255);
-  doc.text("WWW.BA-DIABY-EXPRESS.COM · CGV SUR NOTRE SITE", W / 2, Z.bandeau + 5.9, { align: "center" });
+  // Sous la marque d'un partenaire, c'est SON site et SON téléphone qui doivent figurer : son
+  // client doit pouvoir le joindre, lui, pas nous.
+  const piedDePage = marque
+    ? [marque.siteWeb, marque.telephone].filter(Boolean).join(" · ").toUpperCase() || marque.nomCommercial.toUpperCase()
+    : "WWW.BA-DIABY-EXPRESS.COM · CGV SUR NOTRE SITE";
+  doc.text(ajuster(piedDePage, W - 2 * M, 1), W / 2, Z.bandeau + 5.9, { align: "center" });
 
   return doc;
 }
 
-async function downloadLabel(colis) {
-  const doc = await construireEtiquetteDoc(colis);
+async function downloadLabel(colis, data) {
+  const doc = await construireEtiquetteDoc(colis, data);
   openPdf(doc, `etiquette-${colis.tracking}.pdf`);
 }
 
@@ -9005,8 +9226,8 @@ async function downloadLabel(colis) {
  * réécrit à chaque appel (upsert) : il n'y a pas besoin d'historiser les étiquettes, seule la
  * dernière version compte. Lève une erreur si l'upload échoue — à l'appelant de décider quoi faire.
  */
-async function genererUrlEtiquette(colis) {
-  const doc = await construireEtiquetteDoc(colis);
+async function genererUrlEtiquette(colis, data) {
+  const doc = await construireEtiquetteDoc(colis, data);
   const blob = doc.output("blob");
   const chemin = `etiquettes/${colis.tracking}.pdf`;
   const { error: erreurUpload } = await clientSupabase().storage
@@ -9018,11 +9239,14 @@ async function genererUrlEtiquette(colis) {
 }
 
 /** Envoi manuel de l'étiquette au destinataire sur WhatsApp (bouton "Ticket d'envoi" de la fiche colis). */
-async function envoyerEtiquetteWhatsApp(colis) {
+async function envoyerEtiquetteWhatsApp(colis, data) {
   let publicUrl;
-  try { publicUrl = await genererUrlEtiquette(colis); }
+  try { publicUrl = await genererUrlEtiquette(colis, data); }
   catch (e) { return { envoye: false, raison: "Échec de l’envoi du PDF vers le stockage." }; }
-  const message = `Bonjour ${colis.destinataire}, voici l’étiquette de votre colis Ba-Diaby Express (${colis.tracking}).`;
+  // Sous la marque d'un partenaire, le message ne doit pas nommer Ba-Diaby Express : son client
+  // ne nous connaît pas.
+  const marque = marquePartenaire(data, colis);
+  const message = `Bonjour ${colis.destinataire}, voici l’étiquette de votre colis ${marque ? marque.nomCommercial : "Ba-Diaby Express"} (${colis.tracking}).`;
   const resultat = await envoyerWhatsApp(colis.telephone, message, publicUrl);
   // Contrairement à notifierWhatsApp() (message texte), il n'existe pas de brouillon WhatsApp de
   // secours pour une pièce jointe — wa.me ne sait pré-remplir que du texte. Sans Twilio configuré,
@@ -9092,13 +9316,15 @@ function chargerImage(src) {
  * simplifiée par rapport au PDF (pas de couleur, une impression thermique ne les rend pas), mais
  * les mêmes informations, dans le même ordre.
  */
-async function renderLabelCanvas(colis, largeurDots) {
+async function renderLabelCanvas(colis, largeurDots, data) {
   const dest = COUNTRIES.find((c) => c.code === (colis.destinatairePays || colis.pays));
   const trackingUrl = trackingUrlFor(colis.tracking);
+  // Comme la version PDF : sous la marque d'un partenaire, l'étiquette porte son logo et son nom.
+  const marque = marquePartenaire(data, colis);
   const [qrData, barcodeData, logo] = await Promise.all([
     generateQRDataUrl(trackingUrl, 300),
     generateBarcodeDataUrl(colis.tracking).catch(() => null),
-    chargerImage(DEFAULT_LOGO).catch(() => null),
+    chargerImage(marque?.logo || DEFAULT_LOGO).catch(() => null),
   ]);
   const W = Math.round(largeurDots), H = Math.round(largeurDots * 1.5); // ratio 100×150mm
   const s = W / 100; // échelle mm → px
@@ -9117,7 +9343,7 @@ async function renderLabelCanvas(colis, largeurDots) {
   // ── En-tête ────────────────────────────────────────────────────────────
   if (logo) ctx.drawImage(logo, M, 4.5 * s, 14 * s, 14 * s);
   ctx.font = `bold ${12 * s}px Arial`; ctx.textAlign = "left";
-  ctx.fillText("BA-DIABY EXPRESS", M + 17 * s, 13 * s);
+  ctx.fillText(envelopperTexteCanvas(ctx, (marque?.nomCommercial || "BA-DIABY EXPRESS").toUpperCase(), W - M - 17 * s - 30 * s, 1)[0] || "", M + 17 * s, 13 * s);
   const modeLabel = colis.mode === "air" ? "AÉRIEN" : "MARITIME";
   ctx.font = `bold ${7.5 * s}px Arial`;
   const modeW = ctx.measureText(modeLabel).width + 11 * s;
@@ -9236,7 +9462,7 @@ async function renderLabelCanvas(colis, largeurDots) {
   ctx.font = `bold ${7.4 * s}px Arial`;
   ctx.fillText(routeLabel(colis.pays, colis.direction).toUpperCase(), W / 2, 143.4 * s);
   ctx.font = `bold ${5.4 * s}px Arial`;
-  ctx.fillText("WWW.BA-DIABY-EXPRESS.COM", W / 2, 146.3 * s);
+  ctx.fillText(marque ? ([marque.siteWeb, marque.telephone].filter(Boolean).join(" · ").toUpperCase() || marque.nomCommercial.toUpperCase()) : "WWW.BA-DIABY-EXPRESS.COM", W / 2, 146.3 * s);
   ctx.restore();
 
   return canvas;
@@ -10709,7 +10935,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
  * pour le fonctionnement et les limites (fonctionnalité expérimentale, dépend du modèle exact
  * de l'imprimante).
  */
-function ImpressionDirecteModal({ colis, onClose }) {
+function ImpressionDirecteModal({ colis, onClose, data }) {
   const [onglet, setOnglet] = useState("bluetooth");
   const [reglages, setReglages] = useState(lireReglagesImprimante());
   const [connexion, setConnexion] = useState(null);
@@ -10755,7 +10981,7 @@ function ImpressionDirecteModal({ colis, onClose }) {
   async function imprimerEtiquette() {
     setEtat("impression"); setErreur("");
     try {
-      const canvas = await renderLabelCanvas(colis, reglages.largeurDots);
+      const canvas = await renderLabelCanvas(colis, reglages.largeurDots, data);
       if (onglet === "reseau") {
         if (!reglages.ip) throw new Error("Indiquez l'adresse IP de l'imprimante.");
         await imprimerReseauEpson(reglages.ip, canvas);
@@ -10896,7 +11122,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
   async function handleEnvoyerEtiquetteWhatsApp() {
     setEtiquetteWaErreur(""); setEtiquetteWaState("envoi");
     try {
-      const { envoye, raison } = await envoyerEtiquetteWhatsApp(colis);
+      const { envoye, raison } = await envoyerEtiquetteWhatsApp(colis, data);
       if (envoye) { setEtiquetteWaState("envoye"); return; }
       setEtiquetteWaErreur(raison || "Échec de l’envoi.");
       setEtiquetteWaState("idle");
@@ -10936,7 +11162,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
 
   async function handleDownloadLabel() {
     setLabelState("loading");
-    try { await downloadLabel(colis); setLabelState("idle"); }
+    try { await downloadLabel(colis, data); setLabelState("idle"); }
     catch (e) { console.error(e); setLabelState("error"); }
   }
   async function handleDownloadInvoice() {
@@ -11590,7 +11816,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
         />
       )}
       {editing && <EditColisForm colis={colis} categories={data?.categories} remiseVolumeConfig={data?.remiseVolume} tarifsReception={data?.receptionTarifs} session={session} onClose={() => setEditing(false)} onSave={(patch) => { onUpdate(patch); setEditing(false); }} />}
-      {showImpressionDirecte && <ImpressionDirecteModal colis={colis} onClose={() => setShowImpressionDirecte(false)} />}
+      {showImpressionDirecte && <ImpressionDirecteModal colis={colis} data={data} onClose={() => setShowImpressionDirecte(false)} />}
       {bonSortieOuvert && (
         <Modal onClose={() => setBonSortieOuvert(false)} title="Enregistrer la remise du colis">
           <Field label="Nom de la personne qui récupère le colis *"><input value={recupNom} onChange={(e) => setRecupNom(e.target.value)} style={inputStyle} /></Field>
@@ -16377,6 +16603,553 @@ function PerformanceAgentsPage({ data, onBack }) {
         </div>
       )}
       <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 14 }}>Les colis créés avant cette mise à jour n’ont pas d’agent enregistré et apparaissent sous "Non renseigné". De même, le temps de réponse ne peut être calculé que pour les messages envoyés depuis cette mise à jour.</div>
+    </div>
+  );
+}
+
+/**
+ * Redimensionne un logo de partenaire pour l'impression.
+ *
+ * Fond blanc appliqué avant le dessin : un PNG transparent exporté tel quel ressortirait noir sur
+ * l'étiquette, le canvas partant transparent. 320 px de large suffisent à une étiquette imprimée
+ * à 203 dpi, et gardent le logo assez léger pour voyager dans la sauvegarde.
+ */
+function redimensionnerLogo(file, maxWidth = 320) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = reject;
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = reject;
+      img.onload = () => {
+        const scale = Math.min(1, maxWidth / img.width);
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/png"));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Facture adressée à un partenaire — une seule pour plusieurs colis.
+ *
+ * Elle est émise par l'entreprise AU partenaire, au tarif de son contrat : ce n'est pas la facture
+ * que lui-même adresse à ses clients, dont l'application ignore tout. Elle porte l'identité de
+ * l'entreprise, pas celle du partenaire : c'est nous qui réclamons le paiement.
+ */
+async function construireFacturePartenaireDoc(facture, partenaire, colisFactures) {
+  const jspdf = await loadJsPDF();
+  const doc = preparerDocPdf(new jspdf.jsPDF());
+  const W = 210, M = 16;
+  const NAVY = [10, 38, 71], RED = [214, 39, 63], INK = [17, 20, 26], MUTED = [122, 130, 142], LINE = [225, 228, 234];
+  const r = reglagesPartenaire(partenaire);
+
+  doc.addImage(DEFAULT_LOGO, "PNG", M, 14, 18, 18);
+  doc.setFont(undefined, "bold"); doc.setFontSize(15); doc.setTextColor(...NAVY);
+  doc.text("BA-DIABY", M + 22, 22);
+  doc.setTextColor(...RED); doc.text("EXPRESS", M + 22, 29);
+  doc.setFont(undefined, "bold"); doc.setFontSize(19); doc.setTextColor(...INK);
+  doc.text("FACTURE PARTENAIRE", W - M, 22, { align: "right" });
+  doc.setFont(undefined, "normal"); doc.setFontSize(10); doc.setTextColor(...MUTED);
+  doc.text(facture.numero, W - M, 29, { align: "right" });
+  doc.setDrawColor(...LINE); doc.setLineWidth(0.4); doc.line(M, 38, W - M, 38);
+
+  doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...MUTED);
+  doc.text("FACTURÉ À", M, 47);
+  doc.setFont(undefined, "bold"); doc.setFontSize(12); doc.setTextColor(...INK);
+  doc.text(r.nomCommercial || `${partenaire?.prenom || ""} ${partenaire?.nom || ""}`.trim() || "Partenaire", M, 54);
+  doc.setFont(undefined, "normal"); doc.setFontSize(9.5); doc.setTextColor(...MUTED);
+  let y = 60;
+  [r.adresse, r.telephone, r.email].filter(Boolean).forEach((ligne) => { doc.text(String(ligne), M, y); y += 5; });
+
+  doc.setFont(undefined, "normal"); doc.setFontSize(9.5); doc.setTextColor(...MUTED);
+  doc.text(`Émise le ${new Date(facture.creeeLe).toLocaleDateString("fr-FR")}`, W - M, 47, { align: "right" });
+  doc.text(`${colisFactures.length} colis`, W - M, 52, { align: "right" });
+  if (facture.creePar) doc.text(`Par ${facture.creePar}`, W - M, 57, { align: "right" });
+
+  y = Math.max(y + 6, 74);
+  doc.setFillColor(...NAVY); doc.rect(M, y, W - 2 * M, 8, "F");
+  doc.setFont(undefined, "bold"); doc.setFontSize(8.5); doc.setTextColor(255, 255, 255);
+  const colX = [M + 3, M + 36, M + 96, W - M - 30, W - M - 3];
+  doc.text("N° DE SUIVI", colX[0], y + 5.4);
+  doc.text("DESTINATAIRE", colX[1], y + 5.4);
+  doc.text("CONTENU", colX[2], y + 5.4);
+  doc.text("POIDS", colX[3], y + 5.4, { align: "right" });
+  doc.text("MONTANT", colX[4], y + 5.4, { align: "right" });
+  y += 8;
+
+  doc.setFont(undefined, "normal"); doc.setFontSize(9);
+  colisFactures.forEach((c, i) => {
+    if (y > 262) { doc.addPage(); y = 24; }
+    if (i % 2 === 1) { doc.setFillColor(247, 249, 252); doc.rect(M, y, W - 2 * M, 8, "F"); }
+    doc.setTextColor(...INK);
+    doc.text(String(c.tracking || "—"), colX[0], y + 5.4);
+    doc.text(doc.splitTextToSize(String(c.destinataire || "—"), 56)[0], colX[1], y + 5.4);
+    const contenu = (c.produits || []).map((p) => `${p.quantite || 1}× ${p.nom || "article"}`).join(", ") || "—";
+    doc.setTextColor(...MUTED);
+    doc.text(doc.splitTextToSize(contenu, 60)[0], colX[2], y + 5.4);
+    doc.text(`${Number(c.poids) || 0} kg`, colX[3], y + 5.4, { align: "right" });
+    doc.setTextColor(...INK); doc.setFont(undefined, "bold");
+    doc.text(fmt(Number(c.prixPartenaire) || 0, facture.devise), colX[4], y + 5.4, { align: "right" });
+    doc.setFont(undefined, "normal");
+    y += 8;
+  });
+
+  if (y > 250) { doc.addPage(); y = 24; }
+  y += 4;
+  doc.setDrawColor(...LINE); doc.line(W / 2, y, W - M, y);
+  y += 8;
+  doc.setFont(undefined, "bold"); doc.setFontSize(12); doc.setTextColor(...INK);
+  doc.text("TOTAL À RÉGLER", W / 2, y);
+  doc.setFontSize(15); doc.setTextColor(...RED);
+  doc.text(fmt(Number(facture.total) || 0, facture.devise), W - M, y, { align: "right" });
+
+  y += 14;
+  doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
+  doc.text(doc.splitTextToSize(
+    "Montants calculés au tarif convenu avec le partenaire, sur des colis vérifiés et pesés par nos agents. "
+    + "Les prix que le partenaire applique à ses propres clients ne figurent pas sur cette facture.", W - 2 * M), M, y);
+
+  return doc;
+}
+
+/**
+ * Portail partenaires de l'administrateur.
+ *
+ * Tout ce qui concerne un partenaire est décidé ici, et nulle part ailleurs : le tarif qu'il paie,
+ * l'identité sous laquelle ses colis voyagent, la vérification de chacun de ses colis, et la
+ * facture unique qui les regroupe. Le partenaire, lui, n'a qu'un espace de consultation et de
+ * dépôt — il ne fixe rien.
+ */
+function PartenairesPage({ data, persist, notify, onBack, session }) {
+  const partenaires = useMemo(() => (data.users || []).filter((u) => u.role === "Partenaire"), [data.users]);
+  const [selection, setSelection] = useState(() => partenaires[0]?.id || "");
+  const [onglet, setOnglet] = useState("contrat");
+  const partenaire = partenaires.find((p) => p.id === selection) || null;
+  const monNom = `${session?.prenom || ""} ${session?.nom || ""}`.trim() || session?.identifiant || "";
+  const facturesPartenaire = data.facturesPartenaire || [];
+
+  const enAttente = useMemo(() => (data.colis || []).filter((c) => c.partenaireId === selection
+    && statutValidationPartenaire(c) === "En attente" && c.status !== "Annulé"), [data.colis, selection]);
+  const aFacturer = useMemo(() => colisPartenaireAFacturer(data.colis, selection), [data.colis, selection]);
+  const sesFactures = useMemo(() => facturesPartenaire.filter((f) => f.partenaireId === selection)
+    .sort((a, b) => new Date(b.creeeLe) - new Date(a.creeeLe)), [facturesPartenaire, selection]);
+
+  function enregistrerContrat(reglages) {
+    /*
+     * Les colis déjà enregistrés et non encore vérifiés sont rechiffrés au nouveau tarif : un
+     * tarif corrigé doit s'appliquer à ce qui n'a pas encore été arrêté, sinon l'administrateur
+     * devrait ressaisir chaque prix à la main. Les colis vérifiés, eux, ne bougent plus — leur
+     * prix a été constaté et engage l'entreprise.
+     */
+    const majPartenaire = { ...partenaire, partenaire: reglages };
+    persist({
+      ...data,
+      users: (data.users || []).map((u) => (u.id === partenaire.id ? majPartenaire : u)),
+      colis: (data.colis || []).map((c) => (c.partenaireId === partenaire.id && statutValidationPartenaire(c) === "En attente"
+        ? { ...c, prixPartenaire: calcPrixPartenaire(c, majPartenaire), devisePartenaire: reglages.tarif.devise }
+        : c)),
+      activityLog: pushActivity(data, session, "Contrat partenaire modifié", `${partenaire.prenom} ${partenaire.nom} — ${reglages.tarif.parKg}/kg, ${reglages.tarif.parUnite}/unité ${reglages.tarif.devise}`),
+    });
+    notify?.(`Contrat de ${partenaire.prenom} ${partenaire.nom} enregistré`);
+  }
+
+  function validerColis(tracking, montant) {
+    persist({
+      ...data,
+      colis: (data.colis || []).map((c) => (c.tracking === tracking
+        ? { ...c, prixPartenaire: +(Number(montant) || 0).toFixed(2), validationPartenaire: { statut: "Validé", par: monNom, le: new Date().toISOString() } }
+        : c)),
+      activityLog: pushActivity(data, session, "Colis partenaire vérifié", `${tracking} — ${fmt(Number(montant) || 0, reglagesPartenaire(partenaire).tarif.devise)}`),
+    });
+    notify?.(`Colis ${tracking} vérifié`);
+  }
+
+  function creerFacture() {
+    if (aFacturer.length === 0) return;
+    const devise = reglagesPartenaire(partenaire).tarif.devise;
+    const facture = {
+      id: `fp${Date.now()}`,
+      numero: genNumeroFacturePartenaire(facturesPartenaire),
+      partenaireId: partenaire.id,
+      trackings: aFacturer.map((c) => c.tracking),
+      total: +aFacturer.reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0).toFixed(2),
+      devise,
+      creeeLe: new Date().toISOString(),
+      creePar: monNom,
+    };
+    const aFacturerSet = new Set(facture.trackings);
+    persist({
+      ...data,
+      facturesPartenaire: [facture, ...facturesPartenaire],
+      colis: (data.colis || []).map((c) => (aFacturerSet.has(c.tracking) ? { ...c, facturePartenaireId: facture.id } : c)),
+      activityLog: pushActivity(data, session, "Facture partenaire créée", `${facture.numero} — ${partenaire.prenom} ${partenaire.nom} · ${facture.trackings.length} colis · ${fmt(facture.total, devise)}`),
+    });
+    notify?.(`Facture ${facture.numero} créée — ${facture.trackings.length} colis`);
+    setOnglet("facturation");
+  }
+
+  async function imprimerFacture(facture) {
+    const inclus = (data.colis || []).filter((c) => (facture.trackings || []).includes(c.tracking));
+    try {
+      const doc = await construireFacturePartenaireDoc(facture, partenaire, inclus);
+      openPdf(doc, `${facture.numero}.pdf`);
+    } catch (e) {
+      console.error(e);
+      notify?.("Impossible de générer la facture — vérifiez votre connexion.");
+    }
+  }
+
+  if (partenaires.length === 0) {
+    return (
+      <div>
+        <ConfigPageHeader title="Partenaires" desc="Tarif, identité, vérification des colis et facturation de chaque partenaire." onBack={onBack} />
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center" }}>
+          <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>Aucun compte partenaire</div>
+          <div style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.55, maxWidth: 460, margin: "0 auto" }}>
+            Créez d’abord le compte dans Configuration → Gestion Utilisateurs, avec le rôle « Partenaire ».
+            Vous fixerez ensuite ici son tarif, l’identité de ses étiquettes et ses factures.
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const onglets = [
+    ["contrat", "Contrat & identité", 0],
+    ["verification", "Colis à vérifier", enAttente.length],
+    ["facturation", "Facturation", aFacturer.length],
+  ];
+
+  return (
+    <div>
+      <ConfigPageHeader title="Partenaires" desc="Tarif, identité, vérification des colis et facturation de chaque partenaire." onBack={onBack} />
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
+        {partenaires.map((p) => {
+          const actif = p.id === selection;
+          const attente = (data.colis || []).filter((c) => c.partenaireId === p.id && statutValidationPartenaire(c) === "En attente" && c.status !== "Annulé").length;
+          return (
+            <button key={p.id} onClick={() => setSelection(p.id)} style={{
+              display: "flex", alignItems: "center", gap: 8, padding: "9px 15px", borderRadius: 22,
+              border: "1.5px solid " + (actif ? "var(--brand-solid)" : "var(--border)"),
+              background: actif ? "var(--brand-solid)" : "var(--surface)", color: actif ? "#fff" : "var(--muted)",
+              fontSize: 13, fontWeight: 600, cursor: "pointer",
+            }}>
+              {p.prenom} {p.nom}
+              {attente > 0 && <span style={{ background: actif ? "rgba(255,255,255,0.25)" : "var(--warn-bg)", color: actif ? "#fff" : "var(--warn-fg)", borderRadius: 10, padding: "1px 7px", fontSize: 11, fontWeight: 700 }}>{attente}</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      <div style={{ display: "flex", gap: 22, borderBottom: "1px solid var(--border)", marginBottom: 20, flexWrap: "wrap" }}>
+        {onglets.map(([cle, libelle, badge]) => (
+          <button key={cle} onClick={() => setOnglet(cle)} style={{
+            background: "none", border: "none", padding: "0 0 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 7,
+            color: onglet === cle ? "var(--info-fg)" : "var(--muted)",
+            borderBottom: onglet === cle ? "2px solid #5B8DEF" : "2px solid transparent", fontSize: 13.5, fontWeight: 600,
+          }}>
+            {libelle}
+            {badge > 0 && <span style={{ background: "var(--brand-solid)", color: "#fff", borderRadius: 10, padding: "1px 7px", fontSize: 11, fontWeight: 700 }}>{badge}</span>}
+          </button>
+        ))}
+      </div>
+
+      {onglet === "contrat" && partenaire && (
+        <ContratPartenaire key={partenaire.id} partenaire={partenaire} autres={partenaires.filter((p) => p.id !== partenaire.id)} onSave={enregistrerContrat} />
+      )}
+
+      {onglet === "verification" && partenaire && (
+        <VerificationColisPartenaire partenaire={partenaire} colis={enAttente} onValider={validerColis} />
+      )}
+
+      {onglet === "facturation" && partenaire && (
+        <FacturationPartenaire
+          partenaire={partenaire} aFacturer={aFacturer} factures={sesFactures}
+          colis={data.colis || []} onCreerFacture={creerFacture} onImprimer={imprimerFacture}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Contrat d'un partenaire : ce qu'il paie, et sous quelle identité ses colis voyagent. */
+function ContratPartenaire({ partenaire, autres, onSave }) {
+  const r = reglagesPartenaire(partenaire);
+  const [nomCommercial, setNomCommercial] = useState(r.nomCommercial);
+  const [logo, setLogo] = useState(r.logo);
+  const [adresse, setAdresse] = useState(r.adresse);
+  const [telephone, setTelephone] = useState(r.telephone);
+  const [email, setEmail] = useState(r.email);
+  const [siteWeb, setSiteWeb] = useState(r.siteWeb);
+  const [prefixe, setPrefixe] = useState(r.prefixeTracking);
+  const [parKg, setParKg] = useState(String(r.tarif.parKg));
+  const [parUnite, setParUnite] = useState(String(r.tarif.parUnite));
+  const [devise, setDevise] = useState(r.tarif.devise);
+  const [err, setErr] = useState("");
+
+  const prefixesPris = new Set(["BDE", ...autres.map((p) => reglagesPartenaire(p).prefixeTracking).filter(Boolean)]);
+
+  async function choisirLogo(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try { setLogo(await redimensionnerLogo(file)); setErr(""); }
+    catch (ex) { setErr("Ce fichier n’a pas pu être lu comme une image."); }
+  }
+
+  function enregistrer() {
+    const p = prefixe.trim().toUpperCase();
+    if (p && !/^[A-Z]{2,4}$/.test(p)) { setErr("Le préfixe de suivi doit compter 2 à 4 lettres, sans chiffre ni espace."); return; }
+    /*
+     * Deux partenaires qui partageraient un préfixe produiraient des numéros de suivi identiques
+     * le même jour — deux colis différents sous un seul code, impossible à démêler au comptoir.
+     */
+    if (p && prefixesPris.has(p)) { setErr(`Le préfixe « ${p} » est déjà utilisé — choisissez-en un autre.`); return; }
+    const kg = Number(String(parKg).replace(",", "."));
+    const unite = Number(String(parUnite).replace(",", "."));
+    if (isNaN(kg) || kg < 0 || isNaN(unite) || unite < 0) { setErr("Les tarifs doivent être des montants positifs."); return; }
+    setErr("");
+    onSave({
+      nomCommercial: nomCommercial.trim(), logo, adresse: adresse.trim(), telephone: telephone.trim(),
+      email: email.trim(), siteWeb: siteWeb.trim(), prefixeTracking: p,
+      tarif: { parKg: kg, parUnite: unite, devise },
+    });
+  }
+
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(320px,1fr))", gap: 16, alignItems: "start" }}>
+      <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, border: "1px solid var(--border)" }}>
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Tarif du partenaire</div>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>
+          Ce que ce partenaire paie à l’entreprise. Chaque article de ses colis est compté au kilo
+          ou à l’unité selon ce qu’il choisit à l’enregistrement. Sans rapport avec les prix qu’il
+          applique, lui, à ses propres clients.
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(120px,1fr))", gap: 12 }}>
+          <Field label="Par kilo"><input value={parKg} onChange={(e) => setParKg(e.target.value)} style={inputStyle} placeholder="0" /></Field>
+          <Field label="Par unité"><input value={parUnite} onChange={(e) => setParUnite(e.target.value)} style={inputStyle} placeholder="0" /></Field>
+          <Field label="Devise">
+            <select value={devise} onChange={(e) => setDevise(e.target.value)} style={inputStyle}>
+              {["EUR", "GNF", "USD", "XOF", "MAD", "CAD"].map((d) => <option key={d} value={d}>{d}</option>)}
+            </select>
+          </Field>
+        </div>
+        <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "10px 12px", fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
+          Exemple : un colis de 10 kg facturé au kilo coûterait <strong style={{ color: "var(--text)" }}>{fmt((Number(String(parKg).replace(",", ".")) || 0) * 10, devise)}</strong> à ce partenaire.
+        </div>
+      </div>
+
+      <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, border: "1px solid var(--border)" }}>
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Identité sur les étiquettes</div>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>
+          Renseignez un nom commercial pour que les colis de ce partenaire voyagent sous SA marque :
+          son logo et son nom sur l’étiquette, son préfixe sur les numéros de suivi. Laissez vide
+          pour qu’ils partent sous l’identité Ba-Diaby Express.
+        </div>
+        <Field label="Nom commercial"><input value={nomCommercial} onChange={(e) => setNomCommercial(e.target.value)} style={inputStyle} placeholder="ex : Tombolia Cargo" /></Field>
+        <Field label="Préfixe des numéros de suivi">
+          <input value={prefixe} onChange={(e) => setPrefixe(e.target.value.toUpperCase())} maxLength={4} style={inputStyle} placeholder="ex : TBC" />
+        </Field>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -8, marginBottom: 12 }}>
+          2 à 4 lettres. Aperçu : <strong style={{ color: "var(--text)" }}>{(prefixe.trim() || "BDE")}{String(new Date().getDate()).padStart(2, "0")}{String(new Date().getMonth() + 1).padStart(2, "0")}01</strong>
+        </div>
+        <Field label="Logo">
+          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ width: 56, height: 56, borderRadius: 10, background: "#fff", border: "1px solid var(--border)", display: "grid", placeItems: "center", overflow: "hidden", flexShrink: 0 }}>
+              {logo ? <img src={logo} alt="" style={{ maxWidth: "100%", maxHeight: "100%" }} /> : <span style={{ fontSize: 10, color: "#999" }}>aucun</span>}
+            </div>
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+              <Upload size={14} /> Choisir une image
+              <input type="file" accept="image/*" onChange={choisirLogo} style={{ display: "none" }} />
+            </label>
+            {logo && <button type="button" onClick={() => setLogo(null)} style={{ background: "none", border: "none", color: "var(--danger-fg)", fontSize: 12.5, cursor: "pointer" }}>Retirer</button>}
+          </div>
+        </Field>
+        <Field label="Adresse"><input value={adresse} onChange={(e) => setAdresse(e.target.value)} style={inputStyle} /></Field>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 12 }}>
+          <Field label="Téléphone"><input value={telephone} onChange={(e) => setTelephone(e.target.value)} style={inputStyle} /></Field>
+          <Field label="E-mail"><input value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} /></Field>
+        </div>
+        <Field label="Site web"><input value={siteWeb} onChange={(e) => setSiteWeb(e.target.value)} style={inputStyle} placeholder="www.exemple.com" /></Field>
+      </div>
+
+      <div style={{ gridColumn: "1 / -1" }}>
+        {err && (
+          <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "10px 12px", fontSize: 12.5, color: "var(--danger-fg)", marginBottom: 12, lineHeight: 1.5 }}>{err}</div>
+        )}
+        <button onClick={enregistrer} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 22px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+          Enregistrer le contrat
+        </button>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 10, lineHeight: 1.5 }}>
+          Un changement de tarif rechiffre les colis pas encore vérifiés. Les colis déjà vérifiés gardent
+          leur prix : il a été constaté au comptoir et engage l’entreprise.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Vérification par un agent de l'entreprise, colis par colis, avant qu'il entre sur une facture. */
+function VerificationColisPartenaire({ partenaire, colis, onValider }) {
+  const devise = reglagesPartenaire(partenaire).tarif.devise;
+  const [montants, setMontants] = useState({});
+
+  if (colis.length === 0) {
+    return (
+      <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>
+        Aucun colis en attente de vérification pour ce partenaire.
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 16px", marginBottom: 16 }}>
+        <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
+          Le montant proposé vient du tarif du partenaire et du poids qu’il a déclaré. Pesez le colis,
+          contrôlez son contenu, corrigez le montant si nécessaire, puis validez : seuls les colis
+          validés peuvent entrer sur une facture.
+        </div>
+      </div>
+      <div style={{ display: "grid", gap: 12 }}>
+        {colis.map((c) => {
+          const propose = montants[c.tracking] !== undefined ? montants[c.tracking] : String(Number(c.prixPartenaire) || 0);
+          return (
+            <div key={c.tracking} style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", padding: 16 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{c.tracking}</div>
+                  <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 3 }}>
+                    {c.expediteur || "—"} → {c.destinataire || "—"} · {routeLabel(c.pays, c.direction) || "—"}
+                  </div>
+                </div>
+                <div style={{ fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>
+                  {new Date(c.createdAt).toLocaleDateString("fr-FR")} · <strong style={{ color: "var(--text)" }}>{c.poids} kg</strong>
+                </div>
+              </div>
+              <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "10px 12px", fontSize: 12, color: "var(--muted)", lineHeight: 1.6, marginBottom: 12 }}>
+                {(c.produits || []).length === 0 ? "Contenu non détaillé" : (c.produits || []).map((p, i) => (
+                  <div key={p.id || i}>
+                    ×{p.quantite || 1} {p.nom || "article sans nom"} — {p.poids || 0} kg
+                    <span style={{ marginInlineStart: 6, fontSize: 11 }}>({p.tarification === "unite" ? "à l’unité" : "au kilo"})</span>
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: "flex", alignItems: "flex-end", gap: 12, flexWrap: "wrap" }}>
+                <div style={{ flex: "1 1 160px", minWidth: 0 }}>
+                  <Field label={`Montant facturé au partenaire (${devise})`}>
+                    <input value={propose} onChange={(e) => setMontants((m) => ({ ...m, [c.tracking]: e.target.value }))} style={{ ...inputStyle, marginBottom: 0 }} />
+                  </Field>
+                </div>
+                <button onClick={() => onValider(c.tracking, String(propose).replace(",", "."))} style={{
+                  display: "flex", alignItems: "center", gap: 7, background: "#16A163", color: "#fff", border: "none",
+                  borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0,
+                }}>
+                  <CheckCircle2 size={16} /> Vérifier et valider
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** Regroupement des colis vérifiés en une facture unique, et historique des factures émises. */
+function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreerFacture, onImprimer }) {
+  const devise = reglagesPartenaire(partenaire).tarif.devise;
+  const total = aFacturer.reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0);
+  const [confirmation, setConfirmation] = useState(false);
+
+  return (
+    <div>
+      <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", marginBottom: 22 }}>
+        <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)" }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>Colis vérifiés, pas encore facturés</div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
+            Ils seront regroupés sur une seule facture, que le partenaire retrouvera dans son espace.
+          </div>
+        </div>
+        {aFacturer.length === 0 ? (
+          <div style={{ padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+            Rien à facturer — vérifiez d’abord des colis dans l’onglet précédent.
+          </div>
+        ) : (
+          <>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", minWidth: 620, borderCollapse: "collapse" }}>
+                <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Destinataire", "Poids", "Vérifié par", "Montant"].map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
+                <tbody>
+                  {aFacturer.map((c) => (
+                    <tr key={c.tracking} style={{ borderTop: "1px solid var(--border)" }}>
+                      <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.tracking}</td>
+                      <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{c.destinataire}</td>
+                      <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.poids} kg</td>
+                      <td style={{ padding: "10px 14px", fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.validationPartenaire?.par || "—"}</td>
+                      <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 700, whiteSpace: "nowrap" }}>{fmt(Number(c.prixPartenaire) || 0, devise)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ padding: "14px 16px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+              <div style={{ fontSize: 13, color: "var(--muted)" }}>
+                {aFacturer.length} colis · total <strong style={{ color: "var(--text)", fontSize: 16 }}>{fmt(total, devise)}</strong>
+              </div>
+              <button onClick={() => setConfirmation(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+                <Receipt size={16} /> Créer la facture
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+
+      <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 10 }}>Factures émises</div>
+      {factures.length === 0 ? (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 24, textAlign: "center", color: "var(--muted)", fontSize: 13 }}>
+          Aucune facture émise pour ce partenaire.
+        </div>
+      ) : (
+        <div style={{ display: "grid", gap: 10 }}>
+          {factures.map((f) => (
+            <div key={f.id} style={{ background: "var(--surface)", borderRadius: 12, border: "1px solid var(--border)", padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{f.numero}</div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
+                  {new Date(f.creeeLe).toLocaleDateString("fr-FR")} · {(f.trackings || []).length} colis{f.creePar ? ` · par ${f.creePar}` : ""}
+                </div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+                <strong style={{ fontSize: 16, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif" }}>{fmt(Number(f.total) || 0, f.devise)}</strong>
+                <button onClick={() => onImprimer(f)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                  <Printer size={14} /> PDF
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {confirmation && (
+        <ConfirmerAction
+          titre="Créer cette facture ?"
+          message={`${aFacturer.length} colis vérifiés, pour un total de ${fmt(total, devise)}.`}
+          consequence="Ces colis seront rattachés à la facture et n’apparaîtront plus ici. Le partenaire la verra aussitôt dans son espace."
+          libelleAction="Créer la facture"
+          onConfirmer={() => { setConfirmation(false); onCreerFacture(); }}
+          onAnnuler={() => setConfirmation(false)}
+        />
+      )}
     </div>
   );
 }

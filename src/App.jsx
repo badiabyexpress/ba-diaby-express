@@ -883,6 +883,29 @@ const ACHEMINEMENTS_PARTENAIRE = [
   { cle: "poste", label: "Posté par l’entreprise, à votre charge", court: "Envoi postal" },
 ];
 
+/*
+ * Faut-il l'identité du client, ou un simple repère ?
+ *
+ * Cela dépend de qui remet le colis à l'arrivée, et de personne d'autre.
+ *
+ * Quand le correspondant du partenaire vient chercher le lot, l'entreprise ne rencontre jamais le
+ * client final : elle n'a pas besoin de son nom, encore moins de son numéro. Un repère suffit —
+ * une enseigne, un mot, un code — pour que le correspondant reconnaisse le paquet dans la pile.
+ * Le partenaire garde ainsi son fichier clients pour lui, ce qui est sa crainte la plus légitime :
+ * le système appartient à son transporteur.
+ *
+ * Quand c'est l'entreprise qui livre ou qui poste, elle doit joindre le destinataire et le
+ * reconnaître à la remise. L'identité devient alors nécessaire, et le partenaire doit la fournir —
+ * ce n'est pas une curiosité de notre part, c'est la condition du service qu'il nous demande.
+ */
+function identiteClientRequise(acheminement) {
+  return acheminement !== "correspondant";
+}
+/** Un colis qui ne voyage que sous un repère, sans identité de client. */
+function colisSousRepere(colis) {
+  return !!colis?.repereSeul;
+}
+
 /** Complète une destination partenaire pour qu'aucun écran n'ait à gérer un champ manquant. */
 function normaliserDestinationPartenaire(d) {
   const c = d?.correspondant || {};
@@ -5374,7 +5397,10 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
                 <tr key={c.tracking} style={{ borderTop: "1px solid var(--border)" }}>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.tracking}</td>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.expediteur || "—"}</td>
-                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{c.destinataire}</td>
+                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>
+                    {c.destinataire}
+                    {colisSousRepere(c) && <div style={{ fontSize: 10.5, color: "var(--muted)" }}>repère</div>}
+                  </td>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.poids} kg</td>
                   {montantsVisibles && <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 700, whiteSpace: "nowrap" }}>{fmt(Number(c.prixPartenaire) || 0, c.devisePartenaire || devise)}</td>}
                   <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}>
@@ -6123,6 +6149,10 @@ function AnnoncerDepotModal({ partenaire, onClose, onAnnoncer }) {
   const [destinataire, setDestinataire] = useState("");
   const [telephone, setTelephone] = useState("");
   const [pays, setPays] = useState(paysDisponibles[0]?.code || "FR");
+  // Même règle qu'à l'enregistrement : c'est l'acheminement de la destination qui décide si nous
+  // avons besoin de l'identité du client, ou si un repère suffit.
+  const contrat = tarifPartenairePourPays(partenaire, pays);
+  const identiteRequise = identiteClientRequise(contrat.acheminement);
   const [articles, setArticles] = useState([{ id: `a${Date.now()}`, nom: "", quantite: "1", poids: "" }]);
   const [note, setNote] = useState("");
   const [err, setErr] = useState("");
@@ -6135,13 +6165,21 @@ function AnnoncerDepotModal({ partenaire, onClose, onAnnoncer }) {
 
   function valider(e) {
     e.preventDefault();
-    if (!destinataire.trim()) { setErr("Indiquez le nom du destinataire."); return; }
+    if (!destinataire.trim()) {
+      setErr(identiteRequise ? "Indiquez le nom du destinataire." : "Indiquez le repère du colis.");
+      return;
+    }
     const propres = articles
       .map((a) => ({ nom: a.nom.trim(), quantite: Math.max(1, Number(a.quantite) || 1), poids: Number(String(a.poids).replace(",", ".")) || 0 }))
       .filter((a) => a.nom);
     if (propres.length === 0) { setErr("Décrivez au moins un article."); return; }
     if (propres.some((a) => a.poids < 0)) { setErr("Les poids annoncés doivent être positifs."); return; }
-    onAnnoncer({ destinataire: destinataire.trim(), telephone: telephone.trim(), pays, articles: propres, note: note.trim() });
+    onAnnoncer({
+      destinataire: destinataire.trim(),
+      telephone: identiteRequise ? telephone.trim() : "",
+      repereSeul: !identiteRequise,
+      pays, articles: propres, note: note.trim(),
+    });
   }
 
   return (
@@ -6154,10 +6192,26 @@ function AnnoncerDepotModal({ partenaire, onClose, onAnnoncer }) {
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 10 }}>
-        <Field label="Destinataire *"><input value={destinataire} onChange={(e) => setDestinataire(e.target.value)} autoFocus style={inputStyle} placeholder="Nom du client à qui le colis est destiné" /></Field>
-        <Field label="Téléphone du destinataire"><input value={telephone} onChange={(e) => setTelephone(e.target.value)} style={inputStyle} placeholder="+33 6 XX XX XX XX" /></Field>
-      </div>
+      {identiteRequise ? (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 10 }}>
+          <Field label="Destinataire *"><input value={destinataire} onChange={(e) => setDestinataire(e.target.value)} autoFocus style={inputStyle} placeholder="Nom du client à qui le colis est destiné" /></Field>
+          <Field label="Téléphone du destinataire"><input value={telephone} onChange={(e) => setTelephone(e.target.value)} style={inputStyle} placeholder="+33 6 XX XX XX XX" /></Field>
+        </div>
+      ) : (
+        <>
+          <div style={{ background: "var(--ok-bg-soft)", border: "1px solid var(--ok-border)", borderRadius: 10, padding: "11px 13px", marginBottom: 12 }}>
+            <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
+              Sur cette destination, c’est <strong>votre correspondant</strong> qui récupère le lot.
+              Nous ne vous demandons donc ni le nom ni le numéro de votre client : indiquez
+              simplement un repère pour reconnaître le paquet.
+            </div>
+          </div>
+          <Field label="Repère du colis *">
+            <input value={destinataire} onChange={(e) => setDestinataire(e.target.value)} autoFocus style={inputStyle}
+              placeholder="une enseigne, un mot, un code — ex : SIRA BOUTIQUE, ou AB-07" />
+          </Field>
+        </>
+      )}
       <Field label="Destination">
         <select value={pays} onChange={(e) => setPays(e.target.value)} style={inputStyle}>
           {(paysDisponibles.length ? paysDisponibles : COUNTRIES).map((c) => (
@@ -6426,8 +6480,16 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
     const a = (annonces || []).find((x) => x.id === id);
     if (!a) return;
     if (!partenaireImpose && a.partenaireId) setPartenaireId(a.partenaireId);
-    const { prenom, nom } = splitNom(a.destinataire);
-    setClientPrenom(prenom); setClientNom(nom);
+    /*
+     * Un repère n'est pas un nom : « SIRA BOUTIQUE » découpé en prénom et nom donnerait
+     * « SIRA » / « BOUTIQUE », et le colis partirait sous une identité inventée.
+     */
+    if (a.repereSeul) {
+      setClientPrenom(""); setClientNom(a.destinataire || "");
+    } else {
+      const { prenom, nom } = splitNom(a.destinataire);
+      setClientPrenom(prenom); setClientNom(nom);
+    }
     setClientTelephone(a.telephone || "");
     /*
      * L'expéditeur d'un colis annoncé, c'est le partenaire lui-même : c'est lui qui pose le
@@ -6467,6 +6529,7 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
   const paysRoute = destPays === "GN" ? "GN" : destPays;
   const poidsTotal = articles.reduce((s, a) => s + (Number(a.poids) || 0), 0);
   const contrat = tarifPartenairePourPays(partenaire, paysRoute);
+  const identiteRequise = identiteClientRequise(contrat.acheminement);
   const tarifDefini = contrat.parKg > 0 || contrat.parUnite > 0;
   const acheminement = ACHEMINEMENTS_PARTENAIRE.find((a) => a.cle === contrat.acheminement);
   // Coût du colis pour le partenaire, au tarif de son contrat pour CETTE destination. Reste une
@@ -6484,7 +6547,12 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
     e.preventDefault();
     if (!partenaireId) { setErr("Choisissez le partenaire pour le compte duquel ce colis est enregistré."); return; }
     if (!expNom.trim()) { setErr("Indiquez le nom de l’expéditeur — la personne qui remet le colis."); return; }
-    if (!clientNom.trim()) { setErr("Indiquez le nom du destinataire — c’est lui qui identifie le colis à l’arrivée."); return; }
+    if (!clientNom.trim()) {
+      setErr(identiteRequise
+        ? "Indiquez le nom du destinataire — c’est lui qui identifie le colis à l’arrivée."
+        : "Indiquez le repère du colis — c’est lui qui permettra au correspondant de le reconnaître.");
+      return;
+    }
     if (articles.some((a) => !a.nom.trim())) { setErr("Décrivez le contenu de chaque article."); return; }
     if (articles.some((a) => !(Number(a.poids) > 0))) { setErr("Indiquez le poids de chaque article, en kilogrammes."); return; }
     if (articles.some((a) => a.tarification === "unite" && !(Number(a.quantite) >= 1))) { setErr("Un article facturé à l’unité doit avoir une quantité d’au moins 1."); return; }
@@ -6506,7 +6574,16 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
       tracking: genTracking((existingColis || []).map((c) => c.tracking), null, reglages.prefixeTracking || undefined),
       expediteur: `${expPrenom} ${expNom}`.trim(), expediteurTelephone: expTelephone, expediteurEmail: "", expediteurAdresse: "",
       expediteurPays: partenaire?.paysOperation || "GN",
-      destinataire: `${clientPrenom} ${clientNom}`.trim(), telephone: clientTelephone, destinataireEmail: "", destinataireAdresse: "",
+      /*
+       * Sous repère, le champ « destinataire » porte le repère et le téléphone reste vide : tous
+       * les écrans, étiquettes et documents continuent d'afficher quelque chose d'utile, sans
+       * qu'aucun d'eux ait à connaître la règle. `repereSeul` dit à ceux qui doivent le savoir
+       * qu'il ne s'agit pas d'un nom de personne.
+       */
+      destinataire: identiteRequise ? `${clientPrenom} ${clientNom}`.trim() : clientNom.trim(),
+      telephone: identiteRequise ? clientTelephone : "",
+      repereSeul: !identiteRequise,
+      destinataireEmail: "", destinataireAdresse: "",
       destinataireVille: "", destinataireCodePostal: "", destinatairePays: destPays,
       pays: paysRoute, direction, mode,
       produits,
@@ -6603,17 +6680,44 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
             defaultDial={DIAL_CODES.find((c) => c.name === COUNTRIES.find((p) => p.code === (partenaire?.paysOperation || "GN"))?.name)?.dial} />
         </Field>
 
-        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>Destinataire</div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
-          <Field label="Prénom"><input value={clientPrenom} onChange={(e) => setClientPrenom(e.target.value)} style={inputStyle} /></Field>
-          <Field label="Nom *"><input value={clientNom} onChange={(e) => { setErr(""); setClientNom(e.target.value); }} style={inputStyle} /></Field>
-        </div>
-        {/* Indicatif calé sur le pays de destination : un destinataire allemand n'a pas un
-            numéro guinéen, et le champ le refuserait comme invalide. */}
-        <Field label="Téléphone (facultatif)">
-          <PhoneInput value={clientTelephone} onChange={setClientTelephone}
-            defaultDial={DIAL_CODES.find((c) => c.name === COUNTRIES.find((p) => p.code === destPays)?.name)?.dial} />
-        </Field>
+        {/*
+          Identité du client, ou simple repère — c'est l'acheminement qui tranche.
+
+          Quand le correspondant du partenaire vient chercher le lot, nous ne rencontrons jamais
+          son client : lui réclamer son nom et son numéro n'aurait aucun usage pour nous, et lui
+          coûterait son fichier. Un repère suffit à retrouver le paquet dans la pile.
+        */}
+        {identiteRequise ? (
+          <>
+            <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>Destinataire</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
+              <Field label="Prénom"><input value={clientPrenom} onChange={(e) => setClientPrenom(e.target.value)} style={inputStyle} /></Field>
+              <Field label="Nom *"><input value={clientNom} onChange={(e) => { setErr(""); setClientNom(e.target.value); }} style={inputStyle} /></Field>
+            </div>
+            {/* Indicatif calé sur le pays de destination : un destinataire allemand n'a pas un
+                numéro guinéen, et le champ le refuserait comme invalide. */}
+            <Field label="Téléphone (facultatif)">
+              <PhoneInput value={clientTelephone} onChange={setClientTelephone}
+                defaultDial={DIAL_CODES.find((c) => c.name === COUNTRIES.find((p) => p.code === destPays)?.name)?.dial} />
+            </Field>
+          </>
+        ) : (
+          <>
+            <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>Repère du colis</div>
+            <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 10, padding: "11px 13px", marginBottom: 12 }}>
+              <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
+                Sur cette destination, le colis est récupéré par le correspondant du partenaire
+                {contrat.correspondant?.nom ? ` (${contrat.correspondant.nom})` : ""}. Nous n’avons
+                donc pas besoin de l’identité du client : un repère suffit à reconnaître le paquet
+                à la remise du lot.
+              </div>
+            </div>
+            <Field label="Repère *">
+              <input value={clientNom} onChange={(e) => { setErr(""); setClientNom(e.target.value); }} style={inputStyle}
+                placeholder="une enseigne, un mot, un code — ex : SIRA BOUTIQUE, ou AB-07" />
+            </Field>
+          </>
+        )}
 
         <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>Destination</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
@@ -11109,14 +11213,21 @@ async function construireEtiquetteDoc(colis, data) {
   // couleur sert lui-même de séparateur visuel, plus net qu'un simple filet.
   doc.setFillColor(244, 247, 251); doc.rect(0.6, Z.sepStatut, W - 1.2, Z.destMax - Z.sepStatut, "F");
   let y = Z.destinataire + 4.5;
-  eyebrow("Livrer à / Deliver to", M, y);
+  /*
+   * Un colis remis à un correspondant ne porte pas de destinataire : le partenaire n'a fourni
+   * qu'un repère, et c'est par lui que le paquet sera reconnu à la remise du lot. Écrire
+   * « Livrer à » au-dessus d'une enseigne ferait chercher une personne qui n'existe pas, et le
+   * tiret à la place du téléphone laisserait croire à une saisie oubliée.
+   */
+  const sousRepere = colisSousRepere(colis);
+  eyebrow(sousRepere ? "Repère / Reference" : "Livrer à / Deliver to", M, y);
   y += 5.5;
   doc.setTextColor(...INK); doc.setFont(undefined, "bold"); doc.setFontSize(13.5);
   const nomLines = ajuster(String(colis.destinataire || "").toUpperCase(), W - 2 * M, 2);
   doc.text(nomLines, M, y);
   y += nomLines.length * 5.2 + 0.5;
   doc.setFont(undefined, "bold"); doc.setFontSize(9.2); doc.setTextColor(35, 42, 55);
-  doc.text(colis.telephone || "—", M, y);
+  doc.text(sousRepere ? "Remis au correspondant" : (colis.telephone || "—"), M, y);
   y += 4.2;
   if (colis.destinataireEmail) {
     doc.setFont(undefined, "normal"); doc.setFontSize(7.4); doc.setTextColor(...MUTED);
@@ -14419,6 +14530,20 @@ const DONNEES_REFERENCE = {
 function buildClientDirectory(colisList, repertoireEnBase = null) {
   const map = {};
   colisList.forEach((c) => {
+    /*
+     * Les clients d'un partenaire ne sont pas les nôtres.
+     *
+     * Ils entraient jusqu'ici dans ce répertoire comme les autres : consultables dans la page
+     * Clients, remontés dans la recherche globale, comptés dans la fidélité — un client de
+     * Barry Cargo pouvait atteindre un palier de remise chez nous, sur des colis qu'il ne nous a
+     * jamais confiés — et exportés dans le fichier Excel des clients proches du palier.
+     *
+     * C'est exactement ce qu'un partenaire redoute en nous confiant son activité, et il aurait eu
+     * raison. Nous transportons pour lui ; son fichier reste le sien. Ses colis continuent bien
+     * sûr d'apparaître partout où l'on suit des colis — c'est la liste commerciale qui est
+     * écartée, pas l'exploitation.
+     */
+    if (estColisPartenaire(c)) return;
     if (c.telephone) {
       const key = c.telephone.trim();
       const entry = { telephone: c.telephone, nomComplet: c.destinataire, prenom: "", nom: c.destinataire, email: c.destinataireEmail || "", adresse: c.destinataireAdresse || "", ville: c.destinataireVille || "", codePostal: c.destinataireCodePostal || "", pays: c.destinatairePays || c.pays, date: c.createdAt, count: 0, total: 0 };
@@ -19549,6 +19674,28 @@ function ContratPartenaire({ partenaire, autres, onSave }) {
                   {ACHEMINEMENTS_PARTENAIRE.map((a) => <option key={a.cle} value={a.cle}>{a.label}</option>)}
                 </select>
               </Field>
+              {/*
+                Choisir « correspondant », c'est aussi renoncer à l'identité des clients de ce
+                partenaire sur cette destination. C'est une conséquence importante — et un
+                argument commercial : autant qu'elle soit écrite là où la décision se prend.
+              */}
+              {d.acheminement === "correspondant" && (
+                <div style={{ background: "var(--ok-bg-soft)", border: "1px solid var(--ok-border)", borderRadius: 10, padding: "10px 12px", marginTop: 10 }}>
+                  <div style={{ fontSize: 12, color: "var(--text)", lineHeight: 1.55 }}>
+                    Sur cette destination, les colis voyagent <strong>sous un simple repère</strong> —
+                    une enseigne, un mot, un code. Ni le nom ni le numéro des clients de ce partenaire
+                    ne sont demandés, ni enregistrés : c’est son correspondant qui les remet, nous ne
+                    les rencontrons jamais.
+                  </div>
+                </div>
+              )}
+              {d.acheminement !== "correspondant" && (
+                <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 }}>
+                  {d.acheminement === "poste"
+                    ? "Nous postons le colis : l’identité et l’adresse du client sont nécessaires, et seront demandées à l’enregistrement."
+                    : "Nous livrons nous-mêmes : l’identité du client est nécessaire pour le joindre et le reconnaître à la remise."}
+                </div>
+              )}
               {d.acheminement === "correspondant" && (
                 <div style={{ marginTop: 10 }}>
                   <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 8, lineHeight: 1.5 }}>

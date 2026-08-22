@@ -10679,7 +10679,15 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
     if (brouillon?.agence) return brouillon.agence;
     return expPays === "GN" ? (siteLocalParDefaut?.nom || "Bambeto") : "";
   });
-  const [partenaireId, setPartenaireId] = useState(() => brouillon?.partenaireId ?? "");
+  /*
+   * Un colis créé ici est un colis de l'entreprise : il se facture et il s'encaisse.
+   *
+   * Ce formulaire gardait un `partenaireId` qu'aucun champ ne remplissait plus, repris d'un
+   * brouillon vieux de vingt-quatre heures. Un colis ordinaire, chiffré et encaissable, pouvait
+   * ainsi ressortir marqué « colis partenaire — non facturé par l'entreprise », donc sans recette
+   * et sans caisse. Le dépôt d'un partenaire se saisit dans son propre formulaire, jamais ici.
+   */
+  const partenaireId = "";
   // Le compte client et la pré-alerte rattachée ne sont volontairement PAS restaurés depuis un
   // brouillon : une pré-alerte marquée "Rapproché" entre-temps par un autre agent ne doit jamais
   // être re-consommée à l'aveugle. L'agent les re-sélectionne, ce qui ne prend qu'un instant.
@@ -13357,8 +13365,21 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
    * l'entreprise n'encaisse rien sur ces colis. Un agent qui corrigeait un poids y voyait trois
    * champs sans objet et aucun moyen de reprendre la vraie catégorie.
    */
-  const estPartenaire = estColisPartenaire(colis);
+  /*
+   * Le rattachement à un partenaire se corrige.
+   *
+   * Un colis marqué « partenaire » n'entre dans aucune recette et ne s'encaisse pas : c'est
+   * voulu quand un partenaire l'a déposé, et c'est une perte sèche quand la marque est fausse.
+   * Un colis ordinaire ainsi étiqueté restait donc à zéro pour toujours, sans moyen de le
+   * rendre à la caisse. L'administrateur peut désormais le détacher — le colis retrouve alors
+   * le tarif du catalogue, son prix, son reste à payer, et l'encaissement redevient possible.
+   */
+  const [rattacheAuPartenaire, setRattacheAuPartenaire] = useState(estColisPartenaire(colis));
+  const estPartenaire = rattacheAuPartenaire && !!partenaire;
   const contratPartenaire = estPartenaire ? tarifPartenairePourPays(partenaire, colis.pays) : null;
+  // Un colis déjà porté sur une facture partenaire ne se détache pas : la facture est émise, et
+  // la retirer d'un colis laisserait une ligne réclamée qui ne correspond plus à rien.
+  const detacheBloqueParFacture = !!colis.facturePartenaireId;
   const [expediteur, setExpediteur] = useState(colis.expediteur);
   // Le téléphone et l'adresse de l'expéditeur, ainsi que l'e-mail et l'adresse complète du
   // destinataire, n'étaient pas repris dans le formulaire de modification — seuls le nom, le
@@ -13550,6 +13571,18 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
        * passer le prix ordinaire ferait entrer le colis dans les recettes et la caisse, ce que
        * tout le circuit partenaire s'attache justement à éviter.
        */
+      /*
+       * Détacher, c'est rendre le colis à l'entreprise : il reprend le prix du catalogue calculé
+       * ci-dessus, son reste à payer, et tout ce qui le rattachait au partenaire est effacé —
+       * sinon la fiche continuerait d'annoncer « déposé par », et le colis reviendrait dans les
+       * listes à vérifier et à facturer du partenaire.
+       */
+      partenaireId: estPartenaire ? colis.partenaireId : null,
+      ...(estPartenaire ? {} : {
+        prixPartenaire: 0, devisePartenaire: null, validationPartenaire: null,
+        facturePartenaireId: null, acheminementFinal: null, correspondantFinal: null,
+        fraisPostePartenaire: 0, repereSeul: false, repere: "",
+      }),
       ...(estPartenaire
         ? {
             prixPartenaire: detailPrixPartenaire({ produits, poids: Number(poids) || 0, pays }, partenaire).total,
@@ -13576,9 +13609,45 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
       destinataireEmail !== (colis.destinataireEmail || "") || destinataireAdresse !== (colis.destinataireAdresse || "") ||
       destinataireVille !== (colis.destinataireVille || "") || destinataireCodePostal !== (colis.destinataireCodePostal || "") ||
       Math.abs(ecartPaye) >= 0.005 ||
+      rattacheAuPartenaire !== estColisPartenaire(colis) ||
       JSON.stringify(produits) !== JSON.stringify(colis.produits || [])
     }>
       <form onSubmit={submit} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14 }}>
+        {/*
+          Le rattachement au partenaire, en tête : c'est lui qui décide si le colis se facture au
+          client ou pas, donc la première chose à vérifier quand un montant paraît faux.
+        */}
+        {!!colis.partenaireId && (
+          <div style={{ gridColumn: "1 / -1", background: estPartenaire ? "var(--info-bg)" : "var(--ok-bg-soft)", border: `1px solid ${estPartenaire ? "var(--info-border)" : "var(--ok-border)"}`, borderRadius: 10, padding: "12px 14px" }}>
+            <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55, marginBottom: 10 }}>
+              {estPartenaire ? (
+                <>
+                  Ce colis est enregistré comme un <strong>dépôt de {reglagesPartenaire(partenaire).nomCommercial
+                    || `${partenaire?.prenom || ""} ${partenaire?.nom || ""}`.trim() || "partenaire"}</strong> :
+                  l’entreprise n’encaisse rien dessus, c’est le partenaire qui facture son client.
+                  Si ce colis a en réalité été enregistré par un agent pour un client de l’entreprise,
+                  détachez-le — il redeviendra facturable et encaissable.
+                </>
+              ) : (
+                <>
+                  Ce colis redevient un <strong>colis de l’entreprise</strong> : il sera chiffré au tarif
+                  du catalogue et encaissable au comptoir. Enregistrez pour appliquer le changement.
+                </>
+              )}
+            </div>
+            {detacheBloqueParFacture && estPartenaire ? (
+              <div style={{ fontSize: 11.5, color: "var(--warn-fg)", lineHeight: 1.5 }}>
+                Impossible de le détacher : il figure déjà sur une facture partenaire. Rouvrez cette
+                facture depuis Partenaires → Facturation, puis revenez ici.
+              </div>
+            ) : (
+              <button type="button" onClick={() => setRattacheAuPartenaire((v) => !v)}
+                style={{ background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                {estPartenaire ? "Détacher du partenaire" : "Rattacher au partenaire"}
+              </button>
+            )}
+          </div>
+        )}
         <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Expéditeur</div>
         <Field label="Nom"><input value={expediteur} onChange={(e) => setExpediteur(e.target.value)} style={inputStyle} /></Field>
         <Field label="Téléphone"><PhoneInput value={expediteurTelephone} onChange={setExpediteurTelephone} /></Field>
@@ -14408,7 +14477,14 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
         {[
           ["Poids / Volume", `${colis.poids} kg${colis.volume ? ` · ${colis.volume} m³` : ""}`],
           ["Valeur déclarée", colis.valeurDeclaree > 0 ? `${fmtGNF(colis.valeurDeclaree)}  ~ ${fmt(colis.valeurDeclaree / (LIVE_RATES.GNF || 9500), "EUR")}` : "Non déclarée"],
-          ["Prix total", `${fmt(colis.prix, "GNF")}  ~ ${fmt(colis.prix, "EUR")}`],
+          /*
+           * Sur un colis partenaire, le prix de l'entreprise vaut zéro par construction : c'est le
+           * partenaire qui est facturé, à son tarif. Afficher « Prix total : 0 GNF » donnait un
+           * colis qui semblait ne rien valoir. On montre le montant réellement dû, et par qui.
+           */
+          colisPartenaire
+            ? ["Facturé au partenaire", fmtDeuxDevises(Number(colis.prixPartenaire) || 0, colis.devisePartenaire || "EUR")]
+            : ["Prix total", `${fmt(colis.prix, "GNF")}  ~ ${fmt(colis.prix, "EUR")}`],
         ].map(([label, value]) => (
           <div key={label} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: "1px solid var(--border)" }}>
             <span style={{ fontSize: 12.5, color: "var(--muted)" }}>{label}</span>
@@ -14466,23 +14542,50 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
        * rien n'a jamais été demandé au client. Seul le partenaire peut dire, à l'arrivée, que
        * son client l'a payé — et c'est le seul « payé » qui s'affiche ici.
        */}
-      {colisPartenaire ? (
+      {colisPartenaire ? (() => {
+        /*
+         * Un colis partenaire se facture, lui aussi — au partenaire, et au prix de son contrat.
+         *
+         * La fiche disait « non facturé par l'entreprise » et affichait zéro : de quoi croire que
+         * ce colis ne rapporte rien. Il rapporte, simplement pas au comptoir : le montant est dû
+         * par le partenaire, il entre sur sa facture après vérification, et c'est là qu'il
+         * s'encaisse. On montre donc la somme, son état, et à qui elle est réclamée.
+         */
+        const duPartenaire = Number(colis.prixPartenaire) || 0;
+        const deviseDue = colis.devisePartenaire || reglagesPartenaire(partenaireColis).tarif.devise;
+        const verifie = statutValidationPartenaire(colis) === "Validé";
+        const facture = (data?.facturesPartenaire || []).find((f) => f.id === colis.facturePartenaireId) || null;
+        const soldee = facture ? statutFacturePartenaire(facture) === "Réglée" : false;
+        return (
         <div style={{ background: "var(--surface)", border: "1.5px solid var(--info-fg)", borderRadius: 12, padding: 16, marginBottom: 18 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Colis partenaire</div>
-            {colis.paiementPartenaire?.paye
-              ? <span style={{ background: "#0F7A45", color: "#fff", padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>Payé au partenaire</span>
-              : <span style={{ background: "#3D63FF", color: "#fff", padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>Non facturé par l’entreprise</span>}
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Facturé au partenaire</div>
+            {soldee
+              ? <span style={{ background: "#0F7A45", color: "#fff", padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>Réglé</span>
+              : facture
+                ? <span style={{ background: "#3D63FF", color: "#fff", padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>Sur la facture {facture.numero}</span>
+                : verifie
+                  ? <span style={{ background: "#3D63FF", color: "#fff", padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>À porter sur une facture</span>
+                  : <span style={{ background: "var(--warn-bg)", color: "var(--warn-fg)", padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>En attente de vérification</span>}
+          </div>
+          <div style={{ fontSize: 20, fontWeight: 800, color: "var(--text)", marginTop: 8 }}>
+            {fmt(duPartenaire, deviseDue)}
+          </div>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 2 }}>
+            soit {fmt(duPartenaire, deviseCompagnon(deviseDue))}
           </div>
           <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 8, lineHeight: 1.55 }}>
             {partenaireColis ? `Déposé par ${reglagesPartenaire(partenaireColis).nomCommercial || `${partenaireColis.prenom} ${partenaireColis.nom}`.trim()}. ` : ""}
-            L’entreprise n’encaisse rien sur ce colis : le partenaire facture son client lui-même.
+            Montant dû par le partenaire, au tarif de son contrat. Il s’encaisse sur sa facture,
+            dans Partenaires → Facturation, et non au comptoir : ce que le partenaire demande à
+            son propre client ne nous regarde pas.
             {colis.paiementPartenaire?.paye
-              ? ` Marqué payé par le partenaire le ${new Date(colis.paiementPartenaire.le).toLocaleDateString("fr-FR")}.`
+              ? ` Le partenaire a marqué son client payé le ${new Date(colis.paiementPartenaire.le).toLocaleDateString("fr-FR")}.`
               : ""}
           </div>
         </div>
-      ) : (
+        );
+      })() : (
       <div style={{ background: "var(--surface)", border: `1.5px solid ${statutFg}`, borderRadius: 12, padding: 16, marginBottom: 18 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Paiements</div>

@@ -691,6 +691,23 @@ function estColisPartenaire(colis) {
   return !!colis?.partenaireId;
 }
 
+/*
+ * Le nom sous lequel un partenaire s'affiche partout.
+ *
+ * Un partenaire est une entreprise, pas une personne : c'est « Tombolia Cargo » qui dépose des
+ * colis, qui reçoit une facture et que l'agent cherche dans une liste. Afficher le prénom et le
+ * nom de son gérant obligeait tout le monde à se souvenir de qui tient quoi — et deux partenaires
+ * peuvent avoir le même gérant. On retombe sur l'état civil seulement si aucun nom commercial
+ * n'a été renseigné, pour ne jamais afficher une ligne vide.
+ */
+function nomPartenaire(partenaire) {
+  const r = reglagesPartenaire(partenaire);
+  return r.nomCommercial
+    || `${partenaire?.prenom || ""} ${partenaire?.nom || ""}`.trim()
+    || partenaire?.identifiant
+    || "Partenaire";
+}
+
 /** Le compte partenaire auquel un colis est rattaché, s'il en a un. */
 function partenaireDuColis(data, colis) {
   if (!colis?.partenaireId) return null;
@@ -6961,7 +6978,7 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
     if (retard.length === 0) return null;
     return {
       retard,
-      libelle: r.nomCommercial || `${partenaire.prenom} ${partenaire.nom}`.trim(),
+      libelle: nomPartenaire(partenaire),
       montant: +retard.reduce((somme, f) => somme + resteDuFacture(f), 0).toFixed(2),
       devise: retard[0].devise || r.tarif.devise,
       jours: retardFacture(retard[0], r.delaiReglementJours),
@@ -7095,7 +7112,7 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
           <Field label="Partenaire *">
             <select value={partenaireId} onChange={(e) => { setErr(""); setPartenaireId(e.target.value); }} style={inputStyle}>
               <option value="">Choisir un partenaire…</option>
-              {(partenaires || []).map((p) => <option key={p.id} value={p.id}>{p.prenom} {p.nom}</option>)}
+              {(partenaires || []).map((p) => <option key={p.id} value={p.id}>{nomPartenaire(p)}</option>)}
             </select>
             {(partenaires || []).length === 0 && (
               <div style={{ fontSize: 11.5, color: "var(--warn-fg)", marginTop: -8, marginBottom: 10 }}>
@@ -20197,9 +20214,9 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
       colis: (data.colis || []).map((c) => (c.partenaireId === partenaire.id && statutValidationPartenaire(c) === "En attente"
         ? { ...c, prixPartenaire: calcPrixPartenaire(c, majPartenaire), devisePartenaire: reglages.tarif.devise }
         : c)),
-      activityLog: pushActivity(data, session, "Contrat partenaire modifié", `${partenaire.prenom} ${partenaire.nom} — ${reglages.tarif.parKg}/kg, ${reglages.tarif.parUnite}/unité ${reglages.tarif.devise}`),
+      activityLog: pushActivity(data, session, "Contrat partenaire modifié", `${nomPartenaire(partenaire)} — ${reglages.tarif.parKg}/kg, ${reglages.tarif.parUnite}/unité ${reglages.tarif.devise}`),
     });
-    notify?.(`Contrat de ${partenaire.prenom} ${partenaire.nom} enregistré`);
+    notify?.(`Contrat de ${nomPartenaire(partenaire)} enregistré`);
   }
 
   function validerColis(tracking, montant, photo) {
@@ -20258,7 +20275,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
       ...data,
       facturesPartenaire: [facture, ...facturesPartenaire],
       colis: (data.colis || []).map((c) => (aFacturerSet.has(c.tracking) ? { ...c, facturePartenaireId: facture.id } : c)),
-      activityLog: pushActivity(data, session, "Facture partenaire créée", `${facture.numero} — ${partenaire.prenom} ${partenaire.nom} · ${facture.trackings.length} colis · ${fmtDeuxDevises(facture.total, devise)}`),
+      activityLog: pushActivity(data, session, "Facture partenaire créée", `${facture.numero} — ${nomPartenaire(partenaire)} · ${facture.trackings.length} colis · ${fmtDeuxDevises(facture.total, devise)}`),
     });
     notify?.(`Facture ${facture.numero} créée — ${facture.trackings.length} colis`);
     setOnglet("facturation");
@@ -20413,7 +20430,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
       users: (data.users || []).map((u) => (u.id === partenaire.id
         ? { ...u, partenaireMessages: [...messagesPartenaire(u), message] }
         : u)),
-      activityLog: pushActivity(data, session, "Message envoyé à un partenaire", `${partenaire.prenom} ${partenaire.nom}`),
+      activityLog: pushActivity(data, session, "Message envoyé à un partenaire", nomPartenaire(partenaire)),
     });
   }
 
@@ -20538,7 +20555,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
               background: actif ? "var(--brand-solid)" : "var(--surface)", color: actif ? "#fff" : "var(--muted)",
               fontSize: 13, fontWeight: 600, cursor: "pointer",
             }}>
-              {p.prenom} {p.nom}
+              {nomPartenaire(p)}
               {attente > 0 && <span style={{ background: actif ? "rgba(255,255,255,0.25)" : "var(--warn-bg)", color: actif ? "#fff" : "var(--warn-fg)", borderRadius: 10, padding: "1px 7px", fontSize: 11, fontWeight: 700 }}>{attente}</span>}
             </button>
           );
@@ -20579,7 +20596,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
           key={partenaire.id}
           messages={messagesPartenaire(partenaire)}
           cote="entreprise"
-          nomEnFace={reglagesPartenaire(partenaire).nomCommercial || `${partenaire.prenom} ${partenaire.nom}`.trim()}
+          nomEnFace={nomPartenaire(partenaire)}
           onEnvoyer={envoyerAuPartenaire}
         />
       )}
@@ -21756,7 +21773,8 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
             {data.users.map((u) => (
               <tr key={u.id} onClick={() => setEditingUser(u)} style={{ borderTop: "1px solid var(--surface2)", cursor: "pointer" }}>
                 <td style={{ padding: "12px 16px" }}>
-                  <div style={{ fontSize: 13.5, color: "var(--text)", fontWeight: 600, display: "flex", alignItems: "center", gap: 8, whiteSpace: "nowrap" }}>{u.role === "Administrateur" && <Shield size={14} color="#E23F52" />} {u.prenom} {u.nom}</div>
+                  {/* Un partenaire se lit sous son nom commercial : c'est une entreprise, pas un employé. */}
+                  <div style={{ fontSize: 13.5, color: "var(--text)", fontWeight: 600, display: "flex", alignItems: "center", gap: 8, whiteSpace: "nowrap" }}>{u.role === "Administrateur" && <Shield size={14} color="#E23F52" />} {u.role === "Partenaire" ? nomPartenaire(u) : `${u.prenom} ${u.nom}`}</div>
                   <div style={{ fontSize: 11.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{u.email}</div>
                 </td>
                 <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" }}>{u.identifiant}</td>
@@ -21869,8 +21887,23 @@ function UserProfilePage({ user, onSave, onBack, sites }) {
 
       {tab === "profil" ? (
         <div style={{ maxWidth: 460 }}>
-          <Field label="Prénom"><input value={prenom} onChange={(e) => setPrenom(e.target.value)} style={inputStyle} /></Field>
-          <Field label="Nom"><input value={nom} onChange={(e) => setNom(e.target.value)} style={inputStyle} /></Field>
+          {/* Même règle qu'à la création : un partenaire est une entreprise, pas un prénom. */}
+          {role === "Partenaire" ? (
+            <div style={{ gridColumn: "1 / -1" }}>
+              <Field label="Nom de l’entreprise">
+                <input value={nom} onChange={(e) => { setPrenom(""); setNom(e.target.value); }} style={inputStyle} placeholder="ex : Tombolia Cargo" />
+              </Field>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -8, marginBottom: 10, lineHeight: 1.5 }}>
+                Le nom commercial affiché sur les étiquettes et les factures se règle dans
+                Partenaires → Contrat &amp; identité.
+              </div>
+            </div>
+          ) : (
+            <>
+              <Field label="Prénom"><input value={prenom} onChange={(e) => setPrenom(e.target.value)} style={inputStyle} /></Field>
+              <Field label="Nom"><input value={nom} onChange={(e) => setNom(e.target.value)} style={inputStyle} /></Field>
+            </>
+          )}
           <Field label="Email"><input value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} /></Field>
           <Field label="Identifiant"><input value={user.identifiant} disabled style={{ ...inputStyle, opacity: 0.6 }} /></Field>
           <Field label="Téléphone"><PhoneInput value={telephone} onChange={setTelephone} /></Field>
@@ -21986,6 +22019,17 @@ function UserForm({ onClose, onSave, existing, sites }) {
   const [paysAutorises, setPaysAutorises] = useState(COUNTRIES.filter((c) => c.code !== "GN").map((c) => c.code));
   const [err, setErr] = useState("");
   const [showPw, setShowPw] = useState(false);
+  /*
+   * Un partenaire n'est pas un employé : on ouvre un compte à une entreprise.
+   *
+   * Le formulaire demandait un prénom et un nom, et c'est ce couple qui ressortait ensuite dans
+   * la liste des partenaires, sur les factures et au comptoir — « Ibrahima Diallo » là où l'agent
+   * cherche « Tombolia Cargo ». Deux entreprises peuvent d'ailleurs avoir le même gérant. Pour un
+   * partenaire on ne demande donc que la raison sociale et les coordonnées de l'entreprise, et
+   * c'est ce nom-là qui devient son nom commercial, dès la création du compte.
+   */
+  const [nomEntreprise, setNomEntreprise] = useState("");
+  const estPartenaire = role === "Partenaire";
   function toggleCountry(code) {
     setPaysAutorises((list) => (list.includes(code) ? list.filter((c) => c !== code) : [...list, code]));
   }
@@ -21997,22 +22041,51 @@ function UserForm({ onClose, onSave, existing, sites }) {
   }
   async function submit(e) {
     e.preventDefault();
-    if (!prenom || !nom || !email || !telephone || !identifiant || !motdepasse) { setErr("Merci de renseigner tous les champs."); return; }
+    if (estPartenaire ? !nomEntreprise.trim() : (!prenom || !nom)) {
+      setErr(estPartenaire ? "Indiquez le nom de l’entreprise partenaire." : "Merci de renseigner tous les champs."); return;
+    }
+    if (!email || !telephone || !identifiant || !motdepasse) { setErr("Merci de renseigner tous les champs."); return; }
     if (!/^\S+@\S+\.\S+$/.test(email)) { setErr("Adresse email invalide."); return; }
     if (existing.some((u) => u.identifiant === identifiant.trim())) { setErr("Cet identifiant existe déjà."); return; }
     const identifiants = await creerIdentifiantsMotDePasse(motdepasse);
-    onSave({ id: `u${Date.now()}`, prenom, nom, email: email.trim(), telephone, identifiant: identifiant.trim(), ...identifiants, role, paysOperation, agence: role === "Administrateur" || role === "Comptable" ? "" : agence, twoFA, paysAutorises: role === "Administrateur" ? [] : paysAutorises });
+    onSave({
+      id: `u${Date.now()}`,
+      // Le nom commercial tient lieu d'état civil : c'est sous ce nom que l'entreprise existe ici.
+      prenom: estPartenaire ? "" : prenom,
+      nom: estPartenaire ? nomEntreprise.trim() : nom,
+      email: email.trim(), telephone, identifiant: identifiant.trim(), ...identifiants, role, paysOperation,
+      agence: role === "Administrateur" || role === "Comptable" ? "" : agence, twoFA,
+      paysAutorises: role === "Administrateur" ? [] : paysAutorises,
+      // Le contrat s'ouvre ensuite déjà rempli de ce que l'administrateur vient de saisir.
+      ...(estPartenaire ? { partenaire: { nomCommercial: nomEntreprise.trim(), telephone, email: email.trim() } } : {}),
+    });
   }
   return (
-    <Modal onClose={onClose} title="Créer un compte utilisateur">
+    <Modal onClose={onClose} title={estPartenaire ? "Créer un compte partenaire" : "Créer un compte utilisateur"}>
       <form onSubmit={submit} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14 }}>
-        <Field label="Prénom"><input value={prenom} onChange={(e) => setPrenom(e.target.value)} style={inputStyle} /></Field>
-        <Field label="Nom"><input value={nom} onChange={(e) => setNom(e.target.value)} style={inputStyle} /></Field>
+        {estPartenaire ? (
+          <div style={{ gridColumn: "1 / -1" }}>
+            <Field label="Nom de l’entreprise *">
+              <input value={nomEntreprise} onChange={(e) => setNomEntreprise(e.target.value)} style={inputStyle} placeholder="ex : Tombolia Cargo" />
+            </Field>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -8, marginBottom: 10, lineHeight: 1.5 }}>
+              C’est sous ce nom que le partenaire apparaîtra partout : au comptoir, sur ses factures
+              et sur les étiquettes de ses colis. Ni prénom ni nom de gérant ne sont demandés.
+            </div>
+          </div>
+        ) : (
+          <>
+            <Field label="Prénom"><input value={prenom} onChange={(e) => setPrenom(e.target.value)} style={inputStyle} /></Field>
+            <Field label="Nom"><input value={nom} onChange={(e) => setNom(e.target.value)} style={inputStyle} /></Field>
+          </>
+        )}
         <div style={{ gridColumn: "1 / -1" }}>
-          <Field label="Adresse email"><input type="email" value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} placeholder="nom@badiaby-express.com" /></Field>
+          <Field label={estPartenaire ? "E-mail de l’entreprise" : "Adresse email"}>
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} placeholder={estPartenaire ? "contact@entreprise.com" : "nom@badiaby-express.com"} />
+          </Field>
         </div>
         <div style={{ gridColumn: "1 / -1" }}>
-          <Field label="Numéro de téléphone"><PhoneInput value={telephone} onChange={setTelephone} /></Field>
+          <Field label={estPartenaire ? "Téléphone de l’entreprise" : "Numéro de téléphone"}><PhoneInput value={telephone} onChange={setTelephone} /></Field>
         </div>
         <Field label="Identifiant"><input value={identifiant} onChange={(e) => setIdentifiant(e.target.value)} style={inputStyle} /></Field>
         <Field label="Mot de passe">

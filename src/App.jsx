@@ -939,6 +939,17 @@ function normaliserDestinationPartenaire(d) {
     parUnite: Number(d?.parUnite) || 0,
     acheminement: ACHEMINEMENTS_PARTENAIRE.some((a) => a.cle === d?.acheminement) ? d.acheminement : "direct",
     correspondant: { nom: c.nom || "", telephone: c.telephone || "", adresse: c.adresse || "" },
+    /*
+     * Notre agent sur place, quand c'est nous qui distribuons.
+     *
+     * Un partenaire qui n'a personne à l'arrivée nous confie tout : la distribution, mais aussi
+     * l'enregistrement des colis qui repartent de là-bas. On désigne alors l'un de nos agents,
+     * basé dans ce pays. Il n'a plus qu'à choisir le partenaire au comptoir : la route part de
+     * chez lui, l'expéditeur est déjà rempli, et il ne saisit que ce qu'il pèse.
+     */
+    agentResponsable: d?.agentResponsable
+      ? { id: d.agentResponsable.id || "", nom: d.agentResponsable.nom || "" }
+      : null,
     fraisPoste: Number(d?.fraisPoste) || 0,
     /*
      * Catégories tarifaires propres à ce partenaire, sur cette destination.
@@ -952,10 +963,20 @@ function normaliserDestinationPartenaire(d) {
       nom: cat?.nom || "",
       type: cat?.type === "kg" ? "kg" : "unite",
       montant: Number(cat?.montant) || 0,
+      /*
+       * L'icône, comme sur les catégories de nos propres colis. Une liste de dix lignes de texte
+       * se lit mal au comptoir ; l'agent reconnaît « 👕 » avant d'avoir lu « vêtements », et il
+       * choisit alors la bonne ligne du premier coup. Le carton par défaut vaut mieux qu'un vide.
+       */
+      emoji: cat?.emoji || "📦",
     })),
   };
 }
 
+/** Libellé d'une catégorie du contrat, icône comprise, tel qu'il s'affiche dans les listes. */
+function libelleCategoriePartenaire(cat, devise) {
+  return `${cat.emoji || "📦"} ${cat.nom} — ${fmt(cat.montant, devise)}/${cat.type === "unite" ? "unité" : "kg"}`;
+}
 /** Prix d'un article : celui de sa catégorie si elle est choisie, sinon le tarif général du pays. */
 function prixArticlePartenaire(article, tarif) {
   const quantite = Number(article?.quantite) || 1;
@@ -5813,7 +5834,7 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
                   {d.categories.length > 0 && (
                     <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6, lineHeight: 1.6 }}>
                       {d.categories.map((cat) => (
-                        <div key={cat.id}>{cat.nom} : <strong style={{ color: "var(--text)" }}>{fmt(cat.montant, devise)}</strong> / {cat.type === "unite" ? "unité" : "kg"}</div>
+                        <div key={cat.id}>{cat.emoji || "📦"} {cat.nom} : <strong style={{ color: "var(--text)" }}>{fmt(cat.montant, devise)}</strong> / {cat.type === "unite" ? "unité" : "kg"}</div>
                       ))}
                     </div>
                   )}
@@ -5826,6 +5847,13 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
                       <> — {fmt(d.fraisPoste, devise)} de frais de poste par colis, à votre charge</>
                     )}
                   </div>
+                  {/* Savoir qui, chez nous, s'occupe de ses colis sur place évite l'appel au standard. */}
+                  {d.agentResponsable?.nom && (
+                    <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 5, lineHeight: 1.5 }}>
+                      Votre interlocuteur sur place : <strong style={{ color: "var(--text)" }}>{d.agentResponsable.nom}</strong> —
+                      il distribue vos colis et enregistre ceux que vous déposez là-bas.
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -6584,6 +6612,23 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
     const lieu = session?.lieuOperation;
     if (lieu && lieu !== "GN" && paysDisponibles.some((c) => c.code === lieu)) setDestPays(lieu);
   }, []);
+  /*
+   * L'agent que nous avons placé chez ce partenaire.
+   *
+   * Quand le partenaire n'a personne à l'arrivée, l'un de nos agents en est responsable sur place :
+   * il distribue, et il enregistre les colis qui repartent de ce pays. Pour lui, la route va de
+   * là où il est vers Conakry — la lui présenter à l'envers, c'est le faire corriger vingt fois
+   * par jour. Un autre agent peut toujours choisir une autre route : ce n'est qu'un défaut.
+   */
+  const maDestinationAffectee = useMemo(() => {
+    if (!partenaire || !session?.id) return null;
+    return reglagesPartenaire(partenaire).destinations.find((d) => d.agentResponsable?.id === session.id) || null;
+  }, [partenaire, session?.id]);
+  useEffect(() => {
+    if (!maDestinationAffectee) return;
+    setDestPays(maDestinationAffectee.pays);
+    setSens("import");
+  }, [maDestinationAffectee]);
   useEffect(() => {
     // Le pays retenu doit rester dans les destinations du partenaire choisi.
     if (paysDisponibles.length && !paysDisponibles.some((c) => c.code === destPays)) {
@@ -6872,6 +6917,14 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
             Seules les destinations ouvertes à ce partenaire sont proposées.
           </div>
         )}
+        {/* Dire à l'agent pourquoi la route est déjà celle-là vaut mieux que de le laisser deviner. */}
+        {maDestinationAffectee && (
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -8, marginBottom: 12, lineHeight: 1.5 }}>
+            Vous êtes l’agent responsable de ce partenaire
+            {" "}{FLAGS[maDestinationAffectee.pays] || ""} {COUNTRIES.find((c) => c.code === maDestinationAffectee.pays)?.name || maDestinationAffectee.pays} :
+            la route part de là par défaut. Changez-la si ce dépôt part de Conakry.
+          </div>
+        )}
         {/*
           L'acheminement à l'arrivée est annoncé dès la saisie : c'est là que se joue la différence
           entre un colis livré par l'entreprise, un colis récupéré par le correspondant du
@@ -6920,7 +6973,7 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
                 <select value={a.categoriePartenaire || ""} onChange={(e) => majArticle(a.id, { categoriePartenaire: e.target.value })} style={inputStyle}>
                   <option value="">Tarif général</option>
                   {contrat.categories.map((cat) => (
-                    <option key={cat.id} value={cat.id}>{cat.nom} — {fmt(cat.montant, contrat.devise)}/{cat.type === "unite" ? "unité" : "kg"}</option>
+                    <option key={cat.id} value={cat.id}>{libelleCategoriePartenaire(cat, contrat.devise)}</option>
                   ))}
                 </select>
               </Field>
@@ -6946,7 +6999,7 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
                       {(cat ? cat.type : a.tarification) === "unite"
                         ? `${Number(a.quantite) || 1} × ${fmt(cat ? cat.montant : contrat.parUnite, contrat.devise)}`
                         : `${Number(a.poids) || 0} kg × ${fmt(cat ? cat.montant : contrat.parKg, contrat.devise)}`}
-                      {cat ? ` (${cat.nom})` : ""}
+                      {cat ? ` (${cat.emoji || "📦"} ${cat.nom})` : ""}
                       {" = "}
                       <strong style={{ color: "var(--text)" }}>{fmt(prixArticlePartenaire(a, contrat), contrat.devise)}</strong>
                     </div>
@@ -13108,7 +13161,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
                         }} style={inputStyle}>
                           <option value="">Tarif général — {fmt(contratPartenaire.parKg, contratPartenaire.devise)}/kg · {fmt(contratPartenaire.parUnite, contratPartenaire.devise)}/unité</option>
                           {(contratPartenaire.categories || []).map((cat) => (
-                            <option key={cat.id} value={cat.id}>{cat.nom} — {fmt(cat.montant, contratPartenaire.devise)}/{cat.type === "unite" ? "unité" : "kg"}</option>
+                            <option key={cat.id} value={cat.id}>{libelleCategoriePartenaire(cat, contratPartenaire.devise)}</option>
                           ))}
                         </select>
                       </Field>
@@ -19370,6 +19423,12 @@ async function construireRelevePartenaireDoc(partenaire, mois, factures, colis) 
  */
 function PartenairesPage({ data, persist, notify, onBack, session }) {
   const partenaires = useMemo(() => partenairesPrincipaux(data.users), [data.users]);
+  /*
+   * Nos propres agents, ceux qu'on peut rendre responsables d'un partenaire sur place. Un employé
+   * de partenaire n'en fait pas partie : il travaille pour lui, pas pour nous.
+   */
+  const agentsBaDiaby = useMemo(() => (data.users || [])
+    .filter((u) => u.role !== "Partenaire" && !u.partenaireParent), [data.users]);
   const [selection, setSelection] = useState(() => partenaires[0]?.id || "");
   const [onglet, setOnglet] = useState("contrat");
   const partenaire = partenaires.find((p) => p.id === selection) || null;
@@ -19714,7 +19773,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
       </div>
 
       {onglet === "contrat" && partenaire && (
-        <ContratPartenaire key={partenaire.id} partenaire={partenaire} autres={partenaires.filter((p) => p.id !== partenaire.id)} onSave={enregistrerContrat} />
+        <ContratPartenaire key={partenaire.id} partenaire={partenaire} autres={partenaires.filter((p) => p.id !== partenaire.id)} agentsPossibles={agentsBaDiaby} onSave={enregistrerContrat} />
       )}
 
       {onglet === "verification" && partenaire && (
@@ -19749,7 +19808,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
 }
 
 /** Contrat d'un partenaire : ce qu'il paie, et sous quelle identité ses colis voyagent. */
-function ContratPartenaire({ partenaire, autres, onSave }) {
+function ContratPartenaire({ partenaire, autres, agentsPossibles, onSave }) {
   const r = reglagesPartenaire(partenaire);
   const [nomCommercial, setNomCommercial] = useState(r.nomCommercial);
   const [logo, setLogo] = useState(r.logo);
@@ -19798,7 +19857,7 @@ function ContratPartenaire({ partenaire, autres, onSave }) {
   function ajouterCategorie(pays) {
     setErr("");
     setDestinations((l) => l.map((d) => (d.pays === pays
-      ? { ...d, categories: [...d.categories, { id: `cp${Date.now()}${Math.random().toString(36).slice(2, 5)}`, nom: "", type: "unite", montant: 0 }] }
+      ? { ...d, categories: [...d.categories, { id: `cp${Date.now()}${Math.random().toString(36).slice(2, 5)}`, nom: "", type: "unite", montant: 0, emoji: "📦" }] }
       : d)));
   }
   function majCategorie(pays, id, patch) {
@@ -19924,11 +19983,39 @@ function ContratPartenaire({ partenaire, autres, onSave }) {
                 </div>
               )}
               {d.acheminement !== "correspondant" && (
-                <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 }}>
-                  {d.acheminement === "poste"
-                    ? "Nous postons le colis : l’identité et l’adresse du client sont nécessaires, et seront demandées à l’enregistrement."
-                    : "Nous livrons nous-mêmes : l’identité du client est nécessaire pour le joindre et le reconnaître à la remise."}
-                </div>
+                <>
+                  <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 }}>
+                    {d.acheminement === "poste"
+                      ? "Nous postons le colis : l’identité et l’adresse du client sont nécessaires, et seront demandées à l’enregistrement."
+                      : "Nous livrons nous-mêmes : l’identité du client est nécessaire pour le joindre et le reconnaître à la remise."}
+                  </div>
+                  {/*
+                    Qui, chez nous, s'en occupe là-bas. Le partenaire n'ayant personne sur place,
+                    c'est notre agent qui distribue — et qui enregistre les colis repartant de ce
+                    pays. Lui donner le partenaire au comptoir doit suffire : le reste est écrit ici.
+                  */}
+                  <div style={{ marginTop: 10 }}>
+                    <Field label={`Notre agent sur place (${COUNTRIES.find((c) => c.code === d.pays)?.name || d.pays})`}>
+                      <select
+                        value={d.agentResponsable?.id || ""}
+                        onChange={(e) => {
+                          const u = (agentsPossibles || []).find((x) => x.id === e.target.value);
+                          majDestination(d.pays, { agentResponsable: u ? { id: u.id, nom: `${u.prenom} ${u.nom}`.trim() } : null });
+                        }}
+                        style={{ ...inputStyle, marginBottom: 0 }}>
+                        <option value="">Aucun — le comptoir de Conakry s’en charge</option>
+                        {(agentsPossibles || []).map((u) => (
+                          <option key={u.id} value={u.id}>{`${u.prenom} ${u.nom}`.trim()} · {u.role}</option>
+                        ))}
+                      </select>
+                      <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 5, lineHeight: 1.5 }}>
+                        Responsable de la distribution de ce partenaire sur place, et de
+                        l’enregistrement des colis qui en repartent. À son écran, choisir le
+                        partenaire suffira : la route part de ce pays et l’expéditeur est déjà rempli.
+                      </div>
+                    </Field>
+                  </div>
+                </>
               )}
               {d.acheminement === "correspondant" && (
                 <div style={{ marginTop: 10 }}>
@@ -19964,7 +20051,9 @@ function ContratPartenaire({ partenaire, autres, onSave }) {
                   Facultatif. Un article sans catégorie est facturé au tarif général ci-dessus.
                 </div>
                 {d.categories.map((cat) => (
-                  <div key={cat.id} style={{ display: "grid", gridTemplateColumns: "minmax(90px,1.4fr) minmax(80px,1fr) minmax(70px,0.9fr) auto", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                  <div key={cat.id} style={{ display: "grid", gridTemplateColumns: "52px minmax(90px,1.4fr) minmax(80px,1fr) minmax(70px,0.9fr) auto", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                    <input value={cat.emoji} onChange={(e) => majCategorie(d.pays, cat.id, { emoji: e.target.value })} title="Icône de la catégorie"
+                      style={{ ...inputStyle, marginBottom: 0, textAlign: "center", fontSize: 16 }} />
                     <input value={cat.nom} onChange={(e) => majCategorie(d.pays, cat.id, { nom: e.target.value })} placeholder="ex : téléphone" style={{ ...inputStyle, marginBottom: 0 }} />
                     <select value={cat.type} onChange={(e) => majCategorie(d.pays, cat.id, { type: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }}>
                       <option value="unite">À l’unité</option>

@@ -6467,6 +6467,7 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
   const [clientNom, setClientNom] = useState("");
   const [clientTelephone, setClientTelephone] = useState("");
   const [destPays, setDestPays] = useState("FR");
+  const [sens, setSens] = useState("export");
   const [mode, setMode] = useState("air");
   const [articles, setArticles] = useState(() => [{ ...emptyProduit(), tarification: "kg", categoriePartenaire: "" }]);
   const [err, setErr] = useState("");
@@ -6491,19 +6492,6 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
       setClientPrenom(prenom); setClientNom(nom);
     }
     setClientTelephone(a.telephone || "");
-    /*
-     * L'expéditeur d'un colis annoncé, c'est le partenaire lui-même : c'est lui qui pose le
-     * paquet sur le comptoir. Le laisser vide obligeait l'agent à le retaper à chaque colis,
-     * pour une information que l'annonce contenait déjà implicitement.
-     */
-    const emetteur = (partenaires || []).find((x) => x.id === (a.partenaireId || partenaireId));
-    if (emetteur) {
-      const r = reglagesPartenaire(emetteur);
-      const identite = r.nomCommercial ? splitNom(r.nomCommercial) : { prenom: emetteur.prenom || "", nom: emetteur.nom || "" };
-      setExpPrenom(identite.prenom);
-      setExpNom(identite.nom || identite.prenom);
-      setExpTelephone(r.telephone || emetteur.telephone || "");
-    }
     setDestPays(a.pays || "FR");
     setArticles((a.articles || []).map((x, i) => ({
       ...emptyProduit(), id: `p${Date.now()}${i}`, tarification: "kg", categoriePartenaire: "",
@@ -6524,9 +6512,29 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
       setDestPays(paysDisponibles[0].code);
       setDestPaysAjuste(true);
     }
+    /*
+     * L'expéditeur d'un colis partenaire, c'est le partenaire — c'est lui qui pose le paquet sur
+     * le comptoir, sous son nom commercial. L'agent le retapait à chaque colis, et rien ne
+     * l'empêchait d'écrire autre chose : deux orthographes du même partenaire sur deux colis du
+     * même lot. Il reste modifiable, pour le cas où quelqu'un d'autre dépose pour lui.
+     */
+    if (!partenaire) return;
+    const r = reglagesPartenaire(partenaire);
+    const identite = r.nomCommercial ? splitNom(r.nomCommercial) : { prenom: partenaire.prenom || "", nom: partenaire.nom || "" };
+    setExpPrenom(identite.prenom);
+    setExpNom(identite.nom || identite.prenom);
+    setExpTelephone(r.telephone || partenaire.telephone || "");
   }, [partenaireId]);
-  const direction = destPays === "GN" ? "import" : "export";
-  const paysRoute = destPays === "GN" ? "GN" : destPays;
+  /*
+   * Le sens de l'envoi, choisi colis par colis.
+   *
+   * Une ligne de contrat désigne une route — « France » — et non un sens. Un partenaire expédie
+   * de Conakry vers Paris, et de Paris vers Conakry : le même correspondant, le même tarif, et
+   * souvent les mêmes personnes, tantôt expéditeur tantôt destinataire. La route sert au tarif ;
+   * le sens décide seulement qui est où.
+   */
+  const direction = sens;
+  const paysRoute = destPays;
   const poidsTotal = articles.reduce((s, a) => s + (Number(a.poids) || 0), 0);
   const contrat = tarifPartenairePourPays(partenaire, paysRoute);
   const identiteRequise = identiteClientRequise(contrat.acheminement);
@@ -6573,7 +6581,8 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
       // celui de l'entreprise — son client n'a jamais entendu parler de Ba-Diaby Express.
       tracking: genTracking((existingColis || []).map((c) => c.tracking), null, reglages.prefixeTracking || undefined),
       expediteur: `${expPrenom} ${expNom}`.trim(), expediteurTelephone: expTelephone, expediteurEmail: "", expediteurAdresse: "",
-      expediteurPays: partenaire?.paysOperation || "GN",
+      // À l'export le colis part de Guinée ; à l'import il part du pays de la route.
+      expediteurPays: sens === "export" ? "GN" : destPays,
       /*
        * Sous repère, le champ « destinataire » porte le repère et le téléphone reste vide : tous
        * les écrans, étiquettes et documents continuent d'afficher quelque chose d'utile, sans
@@ -6584,7 +6593,7 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
       telephone: identiteRequise ? clientTelephone : "",
       repereSeul: !identiteRequise,
       destinataireEmail: "", destinataireAdresse: "",
-      destinataireVille: "", destinataireCodePostal: "", destinatairePays: destPays,
+      destinataireVille: "", destinataireCodePostal: "", destinatairePays: sens === "export" ? destPays : "GN",
       pays: paysRoute, direction, mode,
       produits,
       poids: +poidsTotal.toFixed(2), volume: 0,
@@ -6719,14 +6728,29 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
           </>
         )}
 
-        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>Destination</div>
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>Route</div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
-          <Field label="Pays de destination *">
-            {/* Changer de destination remet les catégories à zéro : celles de la France n'existent
+          <Field label="Pays de la route *">
+            {/* Changer de route remet les catégories à zéro : celles de la France n'existent
                 pas pour la Belgique, et garder l'ancienne donnerait un prix pris ailleurs. */}
             <select value={destPays} onChange={(e) => { setDestPays(e.target.value); setArticles((l) => l.map((a) => ({ ...a, categoriePartenaire: "" }))); }} style={inputStyle}>
               {paysDisponibles.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code] || ""} {c.name}</option>)}
             </select>
+          </Field>
+          {/*
+            Le sens de l'envoi. La route et son tarif ne changent pas ; seul l'ordre des deux
+            bouts change. Sans ce choix, un partenaire établi à Paris ne pouvait pas expédier vers
+            Conakry sous son tarif et sa marque.
+          */}
+          <Field label="Sens de l’envoi">
+            <div style={{ display: "flex", gap: 8 }}>
+              <button type="button" onClick={() => setSens("export")} style={{ ...toggleBtn, ...(sens === "export" ? toggleActive : {}) }}>
+                Conakry → {COUNTRIES.find((c) => c.code === destPays)?.city || ""}
+              </button>
+              <button type="button" onClick={() => setSens("import")} style={{ ...toggleBtn, ...(sens === "import" ? toggleActive : {}) }}>
+                {COUNTRIES.find((c) => c.code === destPays)?.city || ""} → Conakry
+              </button>
+            </div>
           </Field>
           <Field label="Mode de transport">
             <select value={mode} onChange={(e) => setMode(e.target.value)} style={inputStyle}>
@@ -12681,7 +12705,19 @@ function EncaisserGroupeModal({ data, session, onEncaisser, onClose }) {
   );
 }
 
-function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeConfig, categories, session }) {
+function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeConfig, categories, session, partenaire }) {
+  /*
+   * Modifier un colis partenaire n'est pas modifier un colis ordinaire.
+   *
+   * Son prix ne vient pas du catalogue de l'entreprise mais des catégories du contrat de son
+   * partenaire, et il est enregistré à part, dans `prixPartenaire`. Cet écran proposait pourtant
+   * « Prix personnalisé » avec un montant en francs guinéens — parce que les articles partenaires
+   * portent techniquement `personnalise: true` — puis un rabais et un montant encaissé, alors que
+   * l'entreprise n'encaisse rien sur ces colis. Un agent qui corrigeait un poids y voyait trois
+   * champs sans objet et aucun moyen de reprendre la vraie catégorie.
+   */
+  const estPartenaire = estColisPartenaire(colis);
+  const contratPartenaire = estPartenaire ? tarifPartenairePourPays(partenaire, colis.pays) : null;
   const [expediteur, setExpediteur] = useState(colis.expediteur);
   // Le téléphone et l'adresse de l'expéditeur, ainsi que l'e-mail et l'adresse complète du
   // destinataire, n'étaient pas repris dans le formulaire de modification — seuls le nom, le
@@ -12834,7 +12870,9 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
     if (produits.some((p) => !p.nom || !(Number(p.poids) > 0) || !(Number(p.quantite) >= 1))) {
       setErr("Chaque article doit avoir un nom, une quantité et un poids supérieur à 0."); return;
     }
-    if (produits.some((p) => !p.personnalise && !p.categorie)) {
+    // Un article de colis partenaire relève des catégories du contrat, pas du catalogue : sans
+    // catégorie choisie il retombe sur le tarif général, ce qui est un cas normal.
+    if (!estPartenaire && produits.some((p) => !p.personnalise && !p.categorie)) {
       setErr("Choisissez une catégorie pour chaque article (ou cochez « Prix personnalisé »)."); return;
     }
     // Un colis de 0 kg n'existe pas : on refuse l'enregistrement plutôt que de créer une
@@ -12853,8 +12891,21 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
       destinatairePays: direction === "import" ? "GN" : pays, mode,
       poids: Number(poids) || 0, volume: Number(volume) || 0,
       produits, valeurDeclaree: produits.length ? valeurProduits : (colis.valeurDeclaree || 0),
-      prixBrut, discountLoyalty, rabaisMontant: Number(rabaisMontant) || 0, rabaisDevise, rabaisEUR, prix, paye: payeNum, reste,
-      ...(ajustement ? { paiements: [...paiementsExistants, ajustement] } : {}),
+      /*
+       * Sur un colis partenaire, les montants de l'entreprise restent tels quels — à zéro — et
+       * c'est `prixPartenaire` qu'on recalcule, au tarif du contrat pour cette route. Laisser
+       * passer le prix ordinaire ferait entrer le colis dans les recettes et la caisse, ce que
+       * tout le circuit partenaire s'attache justement à éviter.
+       */
+      ...(estPartenaire
+        ? {
+            prixPartenaire: detailPrixPartenaire({ produits, poids: Number(poids) || 0, pays }, partenaire).total,
+            devisePartenaire: contratPartenaire.devise,
+          }
+        : {
+            prixBrut, discountLoyalty, rabaisMontant: Number(rabaisMontant) || 0, rabaisDevise, rabaisEUR, prix, paye: payeNum, reste,
+            ...(ajustement ? { paiements: [...paiementsExistants, ajustement] } : {}),
+          }),
     });
   }
 
@@ -12919,6 +12970,34 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
                     <Field label="Quantité"><input type="number" min="1" step="1" inputMode="numeric" value={p.quantite} onChange={(e) => updateProduit(p.id, { quantite: e.target.value })} style={inputStyle} /></Field>
                     <Field label="Poids (kg)"><input type="number" min="0" step="0.1" inputMode="decimal" value={p.poids} onChange={(e) => updateProduit(p.id, { poids: e.target.value })} style={inputStyle} /></Field>
                   </div>
+                  {estPartenaire ? (
+                    <>
+                      <Field label="Catégorie du contrat">
+                        <select value={p.categoriePartenaire || ""} onChange={(e) => {
+                          const cat = (contratPartenaire.categories || []).find((c) => c.id === e.target.value);
+                          updateProduit(p.id, {
+                            categoriePartenaire: e.target.value,
+                            categorieNomPartenaire: cat ? cat.nom : "",
+                            tarification: cat ? cat.type : (p.tarification || "kg"),
+                          });
+                        }} style={inputStyle}>
+                          <option value="">Tarif général — {fmt(contratPartenaire.parKg, contratPartenaire.devise)}/kg · {fmt(contratPartenaire.parUnite, contratPartenaire.devise)}/unité</option>
+                          {(contratPartenaire.categories || []).map((cat) => (
+                            <option key={cat.id} value={cat.id}>{cat.nom} — {fmt(cat.montant, contratPartenaire.devise)}/{cat.type === "unite" ? "unité" : "kg"}</option>
+                          ))}
+                        </select>
+                      </Field>
+                      {!p.categoriePartenaire && (
+                        <Field label="Facturé">
+                          <select value={p.tarification || "kg"} onChange={(e) => updateProduit(p.id, { tarification: e.target.value })} style={inputStyle}>
+                            <option value="kg">Au kilo</option>
+                            <option value="unite">À l’unité</option>
+                          </select>
+                        </Field>
+                      )}
+                    </>
+                  ) : (
+                  <>
                   <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", marginBottom: 12 }}>
                     <input type="checkbox" checked={p.personnalise} onChange={(e) => {
                       const patch = { personnalise: e.target.checked };
@@ -12940,7 +13019,10 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
                       </select>
                     </Field>
                   )}
+                  </>
+                  )}
                   {(() => {
+                    if (estPartenaire) return null;
                     const val = produitValeurGNF(p, categories);
                     if (!val) return null;
                     return <div style={{ fontSize: 11.5, color: "var(--ok-fg)", marginTop: 8 }}>Valeur {p.personnalise ? "saisie" : "suggérée"} : {fmtGNF(val)}</div>;
@@ -12952,6 +13034,16 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
           </>
         )}
 
+        {estPartenaire && (
+          <div style={{ gridColumn: "1 / -1", background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 10, padding: "11px 13px", marginTop: 4 }}>
+            <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
+              Colis partenaire : son coût suit les catégories du contrat ci-dessus et sera revu à la
+              vérification. L’entreprise n’encaisse rien auprès du client final — ni rabais, ni
+              paiement à corriger ici.
+            </div>
+          </div>
+        )}
+        {!estPartenaire && <>
         <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)", marginTop: 4 }}>Frais</div>
         <Field label="Montant du rabais"><input value={rabaisMontant} onChange={(e) => setRabaisMontant(e.target.value)} style={inputStyle} /></Field>
         <Field label="Devise du rabais">
@@ -13031,6 +13123,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
           <div style={{ fontSize: 13, color: "var(--text)" }}>Total recalculé : <strong>{fmt(prix, "EUR")}</strong></div>
           <div style={{ fontSize: 13, color: reste > 0 ? "var(--danger-fg)" : "var(--ok-fg)" }}>Reste à payer : <strong>{fmt(reste, "EUR")}</strong></div>
         </div>
+        </>}
           </>
         )}
 
@@ -13965,7 +14058,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
           onAnnuler={() => setConfirmerSuppression(false)}
         />
       )}
-      {editing && <EditColisForm colis={colis} categories={data?.categories} remiseVolumeConfig={data?.remiseVolume} tarifsReception={data?.receptionTarifs} session={session} onClose={() => setEditing(false)} onSave={(patch) => { onUpdate(patch); setEditing(false); }} />}
+      {editing && <EditColisForm colis={colis} categories={data?.categories} remiseVolumeConfig={data?.remiseVolume} tarifsReception={data?.receptionTarifs} session={session} partenaire={partenaireDuColis(data, colis)} onClose={() => setEditing(false)} onSave={(patch) => { onUpdate(patch); setEditing(false); }} />}
       {showImpressionDirecte && <ImpressionDirecteModal colis={colis} data={data} onClose={() => setShowImpressionDirecte(false)} />}
       {bonSortieOuvert && (
         <Modal onClose={() => setBonSortieOuvert(false)} title="Enregistrer la remise du colis">
@@ -19544,6 +19637,12 @@ function ContratPartenaire({ partenaire, autres, onSave }) {
   const [err, setErr] = useState("");
 
   const prefixesPris = new Set(["BDE", ...autres.map((p) => reglagesPartenaire(p).prefixeTracking).filter(Boolean)]);
+  /*
+   * Une ligne de contrat désigne une route, pas un sens : « France » couvre Conakry → Paris et
+   * Paris → Conakry, au même tarif. Le sens se choisit colis par colis à l'enregistrement — un
+   * partenaire installé à Paris expédie dans les deux directions, et le même client y est tantôt
+   * destinataire, tantôt expéditeur.
+   */
   const paysDisponibles = COUNTRIES.filter((c) => c.code !== "GN" && !destinations.some((d) => d.pays === c.code));
 
   function majDestination(pays, patch) {

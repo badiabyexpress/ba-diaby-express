@@ -1731,11 +1731,21 @@ function defaultSeed() {
     commissionConfig: { parKg: 2, parUnite: 5 }, // EUR — modifiable par l’Administrateur uniquement
   };
 }
+/*
+ * Charge les données, et refuse de semer une base neuve par-dessus une base illisible.
+ *
+ * L'ancienne version répondait la même chose aux deux situations : « la base n'existe pas encore »
+ * et « je n'ai pas pu joindre le serveur ». Dans le second cas elle écrivait quand même une base
+ * de départ vide — dans le cache local, et dans la file d'attente, d'où elle serait partie écraser
+ * la vraie base de l'entreprise au retour du réseau. Un serveur injoignable fait donc désormais
+ * échouer le chargement, et c'est à l'application de le dire plutôt que de faire semblant.
+ */
 async function loadData() {
   try {
     const r = await storage.get("bde-data", true);
     return JSON.parse(r.value);
   } catch (e) {
+    if (e && e.serveurInjoignable) throw e;
     const seed = defaultSeed();
     try { await storage.set("bde-data", JSON.stringify(seed), true); }
     catch (e2) { console.error("Stockage indisponible, poursuite en mode local sans sauvegarde.", e2); }
@@ -1936,6 +1946,13 @@ function App() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [offline, setOffline] = useState(false);
+  /*
+   * Vrai quand l'application tourne sur une base de départ inventée, faute d'avoir pu lire la
+   * vraie. C'est le seul cas où enregistrer est interdit : écrire cette base-là écraserait celle
+   * de l'entreprise. Hors ligne avec les vraies données en main, au contraire, on enregistre
+   * normalement — en local et dans la file d'attente.
+   */
+  const [modeSecours, setModeSecours] = useState(false);
   const [isOnline, setIsOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine : true);
   const [pendingSync, setPendingSync] = useState(0);
   const [syncing, setSyncing] = useState(false);
@@ -2021,15 +2038,71 @@ function App() {
   // un bouton nommé « Nouveau Colis » doit créer un colis, pas seulement changer de page.
   const [ouvrirFormulaireColis, setOuvrirFormulaireColis] = useState(0);
 
+  /*
+   * Chargement des données, et sortie du mode local.
+   *
+   * Le mode local ne se refermait jamais. Sur une connexion lente, le délai d'attente expirait,
+   * l'application démarrait sur une base vide en se déclarant hors ligne — puis le vrai
+   * chargement aboutissait quelques secondes plus tard et remplissait l'écran. Tout paraissait
+   * normal : l'agent voyait ses colis, en créait un, et l'enregistrement était jeté en silence
+   * parce que le drapeau « hors ligne » était resté levé. C'est ainsi qu'un colis a disparu.
+   *
+   * Trois corrections : le chargement est retenté tant qu'il échoue, une réussite — même
+   * tardive — referme le mode local, et le délai passe à quinze secondes car sept ne suffisent
+   * pas sur une 4G d'agence.
+   */
   useEffect(() => {
-    let settled = false;
-    loadData()
-      .then((d) => { settled = true; setData(d); setLang(d.lang || "fr"); setTheme(d.theme || "dark"); if (d.exchangeRates) LIVE_RATES = { ...CURRENCIES, ...d.exchangeRates }; setLoading(false); autoBackupIfNeeded(d); setPendingSync(pendingSyncCount()); })
-      .catch((e) => { settled = true; console.error("Échec du chargement, démarrage en mode local.", e); setOffline(true); const seed = defaultSeed(); setData(seed); setLang(seed.lang); setTheme(seed.theme); setLoading(false); });
-    const timeout = setTimeout(() => {
-      if (!settled) { console.error("Délai de chargement dépassé, démarrage en mode local."); setOffline(true); const seed = defaultSeed(); setData(seed); setLang(seed.lang); setTheme(seed.theme); setLoading(false); }
-    }, 7000);
-    return () => clearTimeout(timeout);
+    let vivant = true;
+    let abouti = false;
+    let essais = 0;
+    let minuteur = null;
+
+    function reussite(d) {
+      abouti = true;
+      if (!vivant) return;
+      setData(d);
+      setLang(d.lang || "fr");
+      setTheme(d.theme || "dark");
+      if (d.exchangeRates) LIVE_RATES = { ...CURRENCIES, ...d.exchangeRates };
+      setOffline(false);
+      setModeSecours(false);
+      setLoading(false);
+      autoBackupIfNeeded(d);
+      setPendingSync(pendingSyncCount());
+    }
+
+    function echec(e) {
+      console.error("Échec du chargement, démarrage en mode local.", e);
+      if (!vivant) return;
+      setOffline(true);
+      /*
+       * La base de départ ne sert qu'à donner un écran à l'agent : elle n'est pas la vérité, et
+       * `modeSecours` interdit de l'enregistrer où que ce soit. Elle ne remplace jamais des
+       * données déjà chargées — un rechargement raté ne doit pas vider la journée de travail.
+       */
+      setModeSecours(true);
+      setData((prec) => prec || defaultSeed());
+      setLoading(false);
+      essais += 1;
+      minuteur = setTimeout(tenter, Math.min(30000, 4000 * essais));
+    }
+
+    function tenter() {
+      if (!vivant) return;
+      loadData().then(reussite).catch(echec);
+    }
+
+    tenter();
+    const attente = setTimeout(() => {
+      if (!abouti && vivant) {
+        console.error("Délai de chargement dépassé, démarrage en mode local.");
+        setOffline(true);
+        setModeSecours(true);
+        setData((prec) => prec || defaultSeed());
+        setLoading(false);
+      }
+    }, 15000);
+    return () => { vivant = false; clearTimeout(attente); if (minuteur) clearTimeout(minuteur); };
   }, []);
 
   /*
@@ -2135,7 +2208,26 @@ function App() {
   const persist = useCallback((next) => {
     setData(next);
     if (next.exchangeRates) LIVE_RATES = { ...CURRENCIES, ...next.exchangeRates };
-    if (offline) return Promise.resolve({ queued: false });
+    /*
+     * Cette ligne jetait le travail.
+     *
+     * Elle disait : « hors ligne, donc on n'enregistre rien » — pas même en local. Le colis
+     * n'existait plus que dans la mémoire de l'onglet, et disparaissait au premier
+     * rafraîchissement. Or hors ligne est justement le moment où il faut enregistrer le plus
+     * soigneusement : la couche de stockage écrit dans le cache de l'appareil et met l'écriture
+     * en file d'attente, qui repart d'elle-même dès le retour du réseau et devient alors visible
+     * de tous les employés. On ne court-circuite donc plus rien.
+     *
+     * Reste un seul cas où écrire serait pire que ne rien faire : le mode secours, où l'on tient
+     * une base de départ inventée à la place de la vraie. L'enregistrer écraserait la base de
+     * l'entreprise par une base vide. On refuse alors, et on le dit à l'agent au lieu de le
+     * laisser croire son colis enregistré.
+     */
+    if (modeSecours) {
+      setToast("Vos données n’ont pas pu être chargées — cet enregistrement n’est PAS sauvegardé. Attendez le retour du réseau.");
+      setTimeout(() => setToast(null), 8000);
+      return Promise.resolve({ queued: false, refuse: true });
+    }
     return saveData(next)
       .then((r) => {
         setPendingSync(pendingSyncCount());
@@ -2152,7 +2244,7 @@ function App() {
         setTimeout(() => setToast(null), 5000);
         return { queued: true, error: e };
       });
-  }, [offline]);
+  }, [modeSecours]);
   const notify = useCallback((msg) => { setToast(msg); setTimeout(() => setToast(null), 2800); }, []);
   function setLanguage(l) { setLang(l); persist({ ...data, lang: l }); }
   function toggleTheme() { const next = theme === "dark" ? "light" : "dark"; setTheme(next); persist({ ...data, theme: next }); }
@@ -2189,7 +2281,7 @@ function App() {
       setView("dashboard");
       try { persist({ ...data, users: (data.users || []).map((x) => (x.id === u.id ? normalized : x)) }); }
       catch (ex) { console.error("Migration du compte impossible :", ex); }
-    }} offline={offline} theme={theme} onToggleTheme={toggleTheme} onJeton={() => setVersionAcces((n) => n + 1)} onBackToHome={() => { setShowLogin(false); const url = new URL(window.location.href); url.searchParams.delete("connexion"); window.history.replaceState({}, "", url); }} /></Shell>;
+    }} offline={modeSecours} theme={theme} onToggleTheme={toggleTheme} onJeton={() => setVersionAcces((n) => n + 1)} onBackToHome={() => { setShowLogin(false); const url = new URL(window.location.href); url.searchParams.delete("connexion"); window.history.replaceState({}, "", url); }} /></Shell>;
   }
 
   const canAdmin = session.role === "Administrateur";
@@ -2428,7 +2520,21 @@ function App() {
         dure : inutile de signaler une seconde de latence.
         La perte de connexion, elle, reste bien visible : l'agent doit le savoir.
       */}
-      {(!isOnline || pendingSync > 0) && (
+      {/*
+        Le mode secours, lui, se dit en toutes lettres et ne se referme pas tant qu'il dure :
+        l'application est à l'écran, elle a l'air normale, et pourtant rien de ce qu'on y saisit
+        ne sera conservé. C'est exactement la situation où un colis a été perdu.
+      */}
+      {modeSecours && (
+        <div style={{ position: "fixed", bottom: 0, insetInlineStart: 0, insetInlineEnd: 0, zIndex: 70,
+                      background: "var(--danger-bg)", borderTop: "2px solid var(--danger-fg)",
+                      color: "var(--danger-fg)", padding: "10px 16px", fontSize: 12.5, fontWeight: 700,
+                      display: "flex", alignItems: "center", justifyContent: "center", gap: 8, textAlign: "center", lineHeight: 1.5 }}>
+          <AlertTriangle size={14} style={{ flexShrink: 0 }} />
+          Données non chargées — n’enregistrez rien, ce serait perdu. Nous réessayons automatiquement.
+        </div>
+      )}
+      {!modeSecours && (!isOnline || pendingSync > 0) && (
         <div style={{ position: "fixed", bottom: 18, insetInlineStart: "50%", transform: "translateX(-50%)", zIndex: 60,
                       background: isOnline ? "var(--surface2)" : "var(--danger-bg)",
                       border: "1px solid " + (isOnline ? "var(--border)" : "var(--danger-border)"),
@@ -4723,8 +4829,10 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
           <button type="button" onClick={submit} style={{ marginTop: 8, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "13px 0", fontWeight: 700, fontSize: 15, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}>Se connecter</button>
         </div>
         {offline && (
-          <div style={{ marginTop: 16, background: "var(--danger-bg)", color: "var(--danger-fg)", borderRadius: 9, padding: "10px 14px", fontSize: 12.5, textAlign: "center" }}>
-            Mode local : le stockage n’a pas répondu, vos données ne seront pas sauvegardées entre deux sessions.
+          <div style={{ marginTop: 16, background: "var(--danger-bg)", color: "var(--danger-fg)", borderRadius: 9, padding: "10px 14px", fontSize: 12.5, textAlign: "center", lineHeight: 1.55 }}>
+            Vos données n’ont pas pu être chargées. <strong>N’enregistrez rien</strong> tant que ce
+            message est affiché : ce serait perdu. Nous réessayons tout seuls — l’écran se remplira
+            dès que le réseau reviendra.
           </div>
         )}
       </div>

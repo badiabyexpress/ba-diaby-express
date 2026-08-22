@@ -85,16 +85,30 @@ function setQueue(q) {
 
 export const storage = {
   async get(key, shared) {
+    /*
+     * « La clé n'existe pas » et « je n'ai pas pu demander » sont deux réponses différentes, et
+     * les confondre coûte cher : croire la base vide alors qu'elle est seulement injoignable
+     * conduit à la remplacer par une base neuve. L'erreur porte donc la distinction, et
+     * l'appelant décide — semer une base de départ, oui ; l'écrire par-dessus des données qu'on
+     * n'a pas réussi à lire, jamais.
+     */
+    let serveurARepondu = false;
     try {
       const { data, error } = await client.from(TABLE).select("value").eq("key", key).maybeSingle();
       if (error) throw error;
-      if (!data) throw new Error(`Clé "${key}" introuvable`);
+      serveurARepondu = true;
+      if (!data) {
+        const absente = new Error(`Clé "${key}" introuvable`);
+        absente.cleAbsente = true;
+        throw absente;
+      }
       try { localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(data.value)); } catch (e) { /* pas grave */ }
       return { key, value: JSON.stringify(data.value), shared: !!shared };
     } catch (e) {
       // Supabase injoignable (hors ligne) : on se rabat sur la dernière version connue localement.
       const cached = localStorage.getItem(CACHE_PREFIX + key);
       if (cached !== null) return { key, value: cached, shared: !!shared };
+      if (!serveurARepondu) e.serveurInjoignable = true;
       throw e;
     }
   },
@@ -162,6 +176,53 @@ export function subscribeToChanges(key, callback) {
   return () => { client.removeChannel(channel); };
 }
 
+/*
+ * Fusionne la version du serveur et celle qui attend dans la file.
+ *
+ * Toutes les données de l'application tiennent dans un seul document. Rejouer bêtement celui qu'un
+ * agent a modifié hors ligne écraserait donc tout ce que ses collègues ont enregistré pendant sa
+ * coupure — leurs colis, leurs encaissements, disparus sans un mot. C'est le même accident que
+ * celui qu'on vient de corriger, à l'envers.
+ *
+ * On réunit donc les deux versions liste par liste, par identité : ce qui n'existe que chez l'un
+ * est conservé, ce qui existe des deux côtés prend la version de l'agent qui revient — c'est lui
+ * qui a travaillé dessus en dernier à sa connaissance. Aucune ligne ne disparaît. Une fusion
+ * parfaite serait impossible sans horodater chaque champ ; celle-ci garantit au moins qu'on ne
+ * perd rien, ce qui est le seul point qui compte.
+ */
+const CLES_IDENTITE = ["id", "tracking", "numero", "cle", "key"];
+function identiteDe(element) {
+  if (!element || typeof element !== "object" || Array.isArray(element)) return null;
+  const cle = CLES_IDENTITE.find((k) => typeof element[k] === "string" || typeof element[k] === "number");
+  return cle ? `${cle}:${element[cle]}` : null;
+}
+function listeIdentifiable(valeur) {
+  return Array.isArray(valeur) && valeur.length > 0 && valeur.every((x) => identiteDe(x) !== null);
+}
+export function fusionnerDocuments(serveur, local) {
+  if (!serveur || typeof serveur !== "object" || Array.isArray(serveur)) return local;
+  if (!local || typeof local !== "object" || Array.isArray(local)) return local;
+  const sortie = { ...serveur, ...local };
+  Object.keys(sortie).forEach((cle) => {
+    const cotéServeur = serveur[cle];
+    const cotéLocal = local[cle];
+    if (!listeIdentifiable(cotéServeur) || !listeIdentifiable(cotéLocal)) return;
+    const parIdentite = new Map();
+    cotéServeur.forEach((x) => parIdentite.set(identiteDe(x), x));
+    cotéLocal.forEach((x) => parIdentite.set(identiteDe(x), x));
+    /*
+     * L'ordre suit la version locale — c'est celle que l'agent a sous les yeux — et ce que le
+     * serveur avait en plus vient ensuite, sans quoi ces lignes se retrouveraient reléguées.
+     */
+    const vues = new Set();
+    const fusion = [];
+    cotéLocal.forEach((x) => { const i = identiteDe(x); if (!vues.has(i)) { vues.add(i); fusion.push(parIdentite.get(i)); } });
+    cotéServeur.forEach((x) => { const i = identiteDe(x); if (!vues.has(i)) { vues.add(i); fusion.push(parIdentite.get(i)); } });
+    sortie[cle] = fusion;
+  });
+  return sortie;
+}
+
 /**
  * Rejoue toutes les écritures mises en file d'attente pendant une coupure réseau.
  * Ne garde que la DERNIÈRE écriture par clé (inutile de rejouer des versions intermédiaires
@@ -177,8 +238,17 @@ export async function flushOutbox() {
   for (const key of Object.keys(latestByKey)) {
     const item = latestByKey[key];
     try {
-      const { error } = await client.from(TABLE).upsert({ key: item.key, value: item.value, updated_at: new Date().toISOString() });
+      /*
+       * On relit d'abord ce que le serveur porte : si des collègues ont travaillé pendant la
+       * coupure, leur travail est là, et l'écraser serait le perdre. Si la relecture échoue, on
+       * ne pousse rien — mieux vaut retenter plus tard que remplacer à l'aveugle.
+       */
+      const { data: actuel, error: erreurLecture } = await client.from(TABLE).select("value").eq("key", item.key).maybeSingle();
+      if (erreurLecture) throw erreurLecture;
+      const valeur = actuel && actuel.value ? fusionnerDocuments(actuel.value, item.value) : item.value;
+      const { error } = await client.from(TABLE).upsert({ key: item.key, value: valeur, updated_at: new Date().toISOString() });
       if (error) throw error;
+      try { localStorage.setItem(CACHE_PREFIX + item.key, JSON.stringify(valeur)); } catch (e2) { /* pas grave */ }
       flushed++;
     } catch (e) {
       stillFailed.push(item); // toujours hors ligne ou erreur ponctuelle : on retente au prochain retour de connexion

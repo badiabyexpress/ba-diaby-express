@@ -2058,6 +2058,22 @@ function App() {
     { key: "colis", label: t.colis, icon: Package, show: perm("colis.voir_propres") || perm("colis.voir_tous") },
     { key: "centreclients", label: "Centre clients", icon: MessageCircle, show: perm("espaceclient.gerer"), badge: centreClientsEnAttente },
     { key: "clients", label: t.clients, icon: Users, show: perm("clients.consulter") },
+    /*
+     * Les partenaires ont quitté la Configuration pour le menu principal.
+     *
+     * Cet écran n'est plus un réglage qu'on ouvre deux fois par an : on y vérifie des colis, on y
+     * répond à des messages, on y encaisse des factures — plusieurs fois par jour. L'enterrer
+     * derrière Configuration imposait trois clics à chaque fois, et surtout cachait ce qui
+     * attendait. La pastille compte ce qui appelle un geste : colis à vérifier, messages à lire,
+     * factures en retard.
+     */
+    {
+      key: "partenaires", label: "Partenaires", icon: Truck, show: perm("config.acceder"),
+      badge: (data.colis || []).filter((c) => estColisPartenaire(c)
+                && statutValidationPartenaire(c) === "En attente" && c.status !== "Annulé").length
+        + partenairesEnAttenteDeReponse(data.users).length
+        + toutesFacturesEnRetard(data).length,
+    },
     { key: "bordereaux", label: t.bordereaux, icon: FileStack, show: perm("bordereaux.consulter") },
     { key: "paiements", label: t.paiements, icon: Receipt, show: perm("factures.consulter"), badge: declarationsEnAttente },
     { key: "caisse", label: "Caisse", icon: Wallet, show: perm("paiements.voir_propres") || perm("factures.consulter") || perm("compta.consulter") },
@@ -2181,6 +2197,7 @@ function App() {
                   Vous n’êtes pas autorisé à traiter les demandes de l’Espace Client. Demandez l’accès à un administrateur.
                 </div>)}
             {view === "clients" && <Clients data={data} />}
+            {view === "partenaires" && perm("config.acceder") && <PartenairesPage data={data} persist={persist} notify={notify} session={session} />}
             {view === "bordereaux" && <BordereauxPage data={data} persist={persist} session={session} notify={notify} />}
             {view === "paiements" && <PaiementsPage data={data} notify={notify} />}
             {view === "caisse" && <CaissePage data={data} persist={persist} session={session} notify={notify} />}
@@ -6489,7 +6506,6 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
   if (sub === "departs") return <DepartsPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "paiement") return <PaiementConfigPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "users") return <UtilisateursPage data={data} persist={persist} notify={notify} onBack={back} session={session} />;
-  if (sub === "partenaires") return <PartenairesPage data={data} persist={persist} notify={notify} onBack={back} session={session} />;
   if (sub === "performance") return <PerformanceAgentsPage data={data} onBack={back} />;
   if (sub === "systeme") return <ParametresSystemePage data={data} persist={persist} notify={notify} onBack={back} offline={offline} />;
   if (sub === "journal") return <JournalActivitePage data={data} onBack={back} />;
@@ -6547,37 +6563,9 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
         <Card icon={Wallet} tint="#5B8DEF" title="Paiement" desc="Configurez vos numéros pour accepter les paiements de vos clients." onClick={() => setSub("paiement")} />
       </div>
 
-      <SectionLabel>ÉQUIPE &amp; PARTENAIRES</SectionLabel>
+      <SectionLabel>VOTRE ÉQUIPE</SectionLabel>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14, marginBottom: 26 }}>
         <Card icon={Users} tint="#6366F1" title="Gestion Utilisateurs" desc="Accès, rôles et permissions de l’équipe." onClick={() => setSub("users")} />
-        {(() => {
-          // Le nombre de colis partenaires en attente est porté sur la carte : c'est le seul
-          // endroit d'où l'on peut les vérifier, et rien d'autre ne signale qu'il y en a.
-          const aVerifier = (data.colis || []).filter((c) => estColisPartenaire(c)
-            && statutValidationPartenaire(c) === "En attente" && c.status !== "Annulé").length;
-          /*
-           * Les factures partenaires encore dues sont signalées ici pour la même raison que les
-           * colis à vérifier : rien d'autre dans l'application ne dit qu'un partenaire doit de
-           * l'argent. Le compte, et non la somme — chaque partenaire a sa propre devise, et les
-           * additionner ne voudrait rien dire.
-           */
-          const impayees = (data.facturesPartenaire || []).filter((f) => statutFacturePartenaire(f) !== "Réglée").length;
-          const retards = toutesFacturesEnRetard(data).length;
-          /*
-           * Un partenaire qui a écrit attend une réponse, et rien d'autre dans l'application ne
-           * le dit : sans ce signal, son message dormirait jusqu'à ce qu'il rappelle — c'est-à-dire
-           * jusqu'à ce que la messagerie n'ait servi à rien.
-           */
-          const enAttenteDeReponse = partenairesEnAttenteDeReponse(data.users).length;
-          const signaux = [
-            enAttenteDeReponse > 0 ? `${enAttenteDeReponse} message${enAttenteDeReponse > 1 ? "s" : ""} à lire` : "",
-            aVerifier > 0 ? `${aVerifier} colis à vérifier` : "",
-            impayees > 0 ? `${impayees} facture${impayees > 1 ? "s" : ""} à encaisser${retards > 0 ? `, dont ${retards} en retard` : ""}` : "",
-          ].filter(Boolean).join(" · ");
-          return <Card icon={Truck} tint="#0EA5E9" title="Partenaires"
-            desc={`Tarif de chaque partenaire, identité de ses étiquettes, vérification de ses colis et facturation.${signaux ? ` — ${signaux}` : ""}`}
-            onClick={() => setSub("partenaires")} />;
-        })()}
         <Card icon={LayoutDashboard} tint="#3D63FF" title="Performance des agents" desc="Colis enregistrés, chiffre d’affaires et paiements encaissés, par agent." onClick={() => setSub("performance")} />
       </div>
 
@@ -6608,9 +6596,12 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
 function ConfigPageHeader({ title, desc, onBack, retour = "Configuration" }) {
   return (
     <div style={{ display: "flex", alignItems: "flex-start", gap: 16, marginBottom: 24, flexWrap: "wrap", minWidth: 0, flex: "1 1 240px" }}>
-      <button onClick={onBack} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 14px", color: "var(--text)", fontSize: 13.5, fontWeight: 600, cursor: "pointer", flexShrink: 0, marginTop: 2 }}>
-        <ChevronLeft size={15} /> {retour}
-      </button>
+      {/* Une page atteinte depuis le menu principal n'a pas de « retour » : il n'y a rien derrière. */}
+      {onBack && (
+        <button onClick={onBack} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 14px", color: "var(--text)", fontSize: 13.5, fontWeight: 600, cursor: "pointer", flexShrink: 0, marginTop: 2 }}>
+          <ChevronLeft size={15} /> {retour}
+        </button>
+      )}
       <div style={{ minWidth: 0, flex: "1 1 200px" }}>
         <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, margin: 0 }}>{title}</h1>
         <p style={{ color: "var(--muted)", fontSize: 14, margin: "5px 0 0" }}>{desc}</p>

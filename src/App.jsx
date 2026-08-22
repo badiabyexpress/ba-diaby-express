@@ -5539,7 +5539,7 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
    * Cinq au maximum : un accès nominatif reste nominatif. Au-delà, c'est un compte partagé qui
    * circule, et plus personne ne sait qui a enregistré quoi.
    */
-  async function creerAcces({ prenom, nom, identifiant, motdepasse, voitLesMontants: voit, lieuOperation }) {
+  async function creerAcces({ prenom, nom, identifiant, motdepasse, voitLesMontants: voit, lieuOperation, telephone, email }) {
     const propre = String(identifiant || "").trim();
     if (!prenom.trim() || !nom.trim() || !propre) return { erreur: "Renseignez le prénom, le nom et l’identifiant." };
     if (!motdepasse || motdepasse.length < 8) return { erreur: "Choisissez un mot de passe d’au moins 8 caractères." };
@@ -5566,7 +5566,15 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
        * Guinée, et l'employé de Paris devait corriger le sens à chaque colis.
        */
       lieuOperation: lieuOperation || "GN",
-      email: "", telephone: "", twoFA: false, ...identifiants,
+      /*
+       * Les coordonnées de la personne, saisies par le partenaire lui-même.
+       *
+       * Un agent posté à Paris est celui qu'on appelle quand un lot arrive, quand un colis pose
+       * question, quand le correspondant ne répond pas. Son numéro n'était nulle part : il fallait
+       * passer par le partenaire à Conakry pour joindre quelqu'un qui se trouve à côté du colis.
+       */
+      telephone: (telephone || "").trim(), email: (email || "").trim(),
+      twoFA: false, ...identifiants,
     };
     await persist({
       ...data,
@@ -5584,6 +5592,34 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
       activityLog: pushActivity(data, session, "Accès employé supprimé", `${employe.prenom} ${employe.nom} (${employe.identifiant})`),
     });
     notify?.(`Accès de ${employe.prenom} ${employe.nom} supprimé`);
+  }
+
+  /*
+   * Corriger la fiche d'un agent sans lui refaire un accès.
+   *
+   * Un numéro change, quelqu'un change de dépôt, un nom a été mal orthographié : sans ce chemin,
+   * la seule issue était de supprimer l'accès et d'en recréer un — donc un nouvel identifiant, un
+   * nouveau mot de passe, et les colis déjà enregistrés sous l'ancien nom devenus orphelins.
+   * L'identifiant et le mot de passe, eux, ne se touchent pas ici : ils ont leurs propres gestes.
+   */
+  function modifierAcces(employe, patch) {
+    const prenom = String(patch.prenom ?? employe.prenom).trim();
+    const nom = String(patch.nom ?? employe.nom).trim();
+    if (!prenom || !nom) return { erreur: "Le prénom et le nom sont nécessaires." };
+    persist({
+      ...data,
+      users: (data.users || []).map((u) => (u.id === employe.id
+        ? {
+          ...u, prenom, nom,
+          telephone: String(patch.telephone ?? u.telephone ?? "").trim(),
+          email: String(patch.email ?? u.email ?? "").trim(),
+          lieuOperation: patch.lieuOperation ?? u.lieuOperation ?? "GN",
+        }
+        : u)),
+      activityLog: pushActivity(data, session, "Fiche employé modifiée", `${prenom} ${nom} (${employe.identifiant})`),
+    });
+    notify?.(`Fiche de ${prenom} ${nom} mise à jour`);
+    return { ok: true };
   }
 
   function basculerMontantsEmploye(employe) {
@@ -6074,7 +6110,7 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
             <AccesEmployes
               employes={mesEmployes} onCreer={creerAcces} onSupprimer={supprimerAcces}
               onBasculerMontants={basculerMontantsEmploye} onReinitialiser={reinitialiserAcces}
-              lieuxPossibles={lieuxOperationPossibles}
+              onModifier={modifierAcces} lieuxPossibles={lieuxOperationPossibles}
             />
           )}
           {montantsVisibles && (
@@ -6277,30 +6313,93 @@ function MonMotDePasse({ compte, onChanger }) {
  * est son prix de revient, donc sa marge. Le partenaire peut l'ouvrir accès par accès — à un
  * gérant de dépôt, oui ; à un manutentionnaire, sans doute pas.
  */
-function AccesEmployes({ employes, onCreer, onSupprimer, onBasculerMontants, onReinitialiser, lieuxPossibles }) {
+/*
+ * La fiche d'un agent, corrigée après coup.
+ *
+ * Un numéro change, quelqu'un passe du dépôt de Conakry à celui de Paris, un nom a été mal
+ * orthographié. Sans ce formulaire il fallait supprimer l'accès et le recréer — donc un nouvel
+ * identifiant, un nouveau mot de passe, et les colis déjà enregistrés sous l'ancien nom devenus
+ * orphelins. L'identifiant et le mot de passe ne se touchent pas ici : ils ont leurs propres gestes.
+ */
+function ModifierAccesEmploye({ employe, lieuxPossibles, onEnregistrer, onClose }) {
+  const [prenom, setPrenom] = useState(employe.prenom || "");
+  const [nom, setNom] = useState(employe.nom || "");
+  const [telephone, setTelephone] = useState(employe.telephone || "");
+  const [email, setEmail] = useState(employe.email || "");
+  const [lieuOperation, setLieuOperation] = useState(employe.lieuOperation || "GN");
+  const [err, setErr] = useState("");
+
+  function valider(e) {
+    e.preventDefault();
+    const r = onEnregistrer({ prenom, nom, telephone, email, lieuOperation });
+    if (r?.erreur) setErr(r.erreur);
+  }
+
+  return (
+    <Modal title={`Fiche de ${employe.prenom} ${employe.nom}`} onClose={onClose} niveau={1}
+      saisieEnCours={prenom !== (employe.prenom || "") || nom !== (employe.nom || "")
+        || telephone !== (employe.telephone || "") || email !== (employe.email || "")
+        || lieuOperation !== (employe.lieuOperation || "GN")}>
+      <form onSubmit={valider}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <Field label="Prénom"><input value={prenom} onChange={(e) => setPrenom(e.target.value)} autoFocus style={inputStyle} /></Field>
+          <Field label="Nom"><input value={nom} onChange={(e) => setNom(e.target.value)} style={inputStyle} /></Field>
+        </div>
+        <Field label="Téléphone">
+          <PhoneInput value={telephone} onChange={setTelephone} defaultDial={indicatifDuPays(lieuOperation)} />
+        </Field>
+        <Field label="E-mail"><input value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} placeholder="nom@exemple.com" /></Field>
+        <Field label="Lieu d’opération">
+          <select value={lieuOperation} onChange={(e) => setLieuOperation(e.target.value)} style={inputStyle}>
+            {lieuxPossibles.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code] || ""} {c.name}</option>)}
+          </select>
+        </Field>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -6, marginBottom: 14, lineHeight: 1.5 }}>
+          L’identifiant <strong>@{employe.identifiant}</strong> ne change pas. Pour un nouveau mot de
+          passe, utilisez « Nouveau mot de passe » sur sa ligne.
+        </div>
+        {err && <div style={{ color: "var(--warn-fg)", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
+        <div style={{ display: "flex", gap: 8 }}>
+          <button type="submit" style={{ flex: 1, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+            Enregistrer
+          </button>
+          <button type="button" onClick={onClose} style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "11px 18px", fontSize: 13, cursor: "pointer" }}>
+            Annuler
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function AccesEmployes({ employes, onCreer, onSupprimer, onBasculerMontants, onReinitialiser, onModifier, lieuxPossibles }) {
   const [ouvert, setOuvert] = useState(false);
   const [prenom, setPrenom] = useState("");
   const [nom, setNom] = useState("");
   const [identifiant, setIdentifiant] = useState("");
   const [motdepasse, setMotdepasse] = useState("");
+  const [telephone, setTelephone] = useState("");
+  const [email, setEmail] = useState("");
   const [voit, setVoit] = useState(false);
   const [lieuOperation, setLieuOperation] = useState("GN");
   const [err, setErr] = useState("");
   const [occupe, setOccupe] = useState(false);
   const [aSupprimer, setASupprimer] = useState(null);
   const [motDePasseAffiche, setMotDePasseAffiche] = useState(null);
+  const [enEdition, setEnEdition] = useState(null);
 
   const restants = MAX_EMPLOYES_PARTENAIRE - employes.length;
 
   function fermer() {
-    setOuvert(false); setPrenom(""); setNom(""); setIdentifiant(""); setMotdepasse(""); setVoit(false); setLieuOperation("GN"); setErr("");
+    setOuvert(false); setPrenom(""); setNom(""); setIdentifiant(""); setMotdepasse("");
+    setTelephone(""); setEmail(""); setVoit(false); setLieuOperation("GN"); setErr("");
   }
 
   async function valider(e) {
     e.preventDefault();
     setErr("");
     setOccupe(true);
-    const r = await onCreer({ prenom, nom, identifiant, motdepasse, voitLesMontants: voit, lieuOperation });
+    const r = await onCreer({ prenom, nom, identifiant, motdepasse, voitLesMontants: voit, lieuOperation, telephone, email });
     setOccupe(false);
     if (r?.erreur) { setErr(r.erreur); return; }
     setMotDePasseAffiche({ identifiant: identifiant.trim(), motdepasse });
@@ -6328,8 +6427,18 @@ function AccesEmployes({ employes, onCreer, onSupprimer, onBasculerMontants, onR
                     @{u.identifiant}
                     {u.lieuOperation && ` · ${FLAGS[u.lieuOperation] || ""} ${COUNTRIES.find((c) => c.code === u.lieuOperation)?.name || u.lieuOperation}`}
                   </div>
+                  {/* Ses coordonnées, pour l'appeler sans passer par le siège. */}
+                  {(u.telephone || u.email) && (
+                    <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                      {[u.telephone, u.email].filter(Boolean).join(" · ")}
+                    </div>
+                  )}
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <button onClick={() => setEnEdition(u)}
+                    style={{ background: "none", border: "none", color: "var(--info-fg)", fontSize: 11.5, fontWeight: 600, cursor: "pointer", padding: 0 }}>
+                    Modifier
+                  </button>
                   <button onClick={() => onBasculerMontants(u)}
                     title={u.voitLesMontants ? "Masquer les montants à cette personne" : "Montrer les montants à cette personne"}
                     style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "1.5px solid var(--border)", borderRadius: 20, padding: "5px 11px", fontSize: 11.5, fontWeight: 700, cursor: "pointer", color: u.voitLesMontants ? "var(--ok-fg)" : "var(--muted)" }}>
@@ -6362,6 +6471,17 @@ function AccesEmployes({ employes, onCreer, onSupprimer, onBasculerMontants, onR
             <Field label="Prénom"><input value={prenom} onChange={(e) => setPrenom(e.target.value)} autoFocus style={inputStyle} /></Field>
             <Field label="Nom"><input value={nom} onChange={(e) => setNom(e.target.value)} style={inputStyle} /></Field>
           </div>
+          {/*
+            Les coordonnées de la personne : c'est elle qu'on appelle quand un lot arrive là-bas,
+            et son numéro n'était nulle part — il fallait passer par le partenaire à Conakry pour
+            joindre quelqu'un qui se trouve à côté du colis. L'indicatif suit son lieu de travail.
+          */}
+          <Field label="Téléphone (facultatif)">
+            <PhoneInput value={telephone} onChange={setTelephone} defaultDial={indicatifDuPays(lieuOperation)} />
+          </Field>
+          <Field label="E-mail (facultatif)">
+            <input value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} placeholder="nom@exemple.com" />
+          </Field>
           <Field label="Identifiant de connexion">
             <input value={identifiant} onChange={(e) => setIdentifiant(e.target.value)} style={inputStyle} placeholder="ex : fatou.depot" />
           </Field>
@@ -6401,6 +6521,14 @@ function AccesEmployes({ employes, onCreer, onSupprimer, onBasculerMontants, onR
             </button>
           </div>
         </form>
+      )}
+
+      {enEdition && (
+        <ModifierAccesEmploye
+          employe={enEdition} lieuxPossibles={lieuxPossibles}
+          onEnregistrer={(patch) => { const r = onModifier(enEdition, patch); if (!r?.erreur) setEnEdition(null); return r; }}
+          onClose={() => setEnEdition(null)}
+        />
       )}
 
       {/*
@@ -20132,7 +20260,7 @@ async function construireRelevePartenaireDoc(partenaire, mois, factures, colis) 
     facturesDuMois.forEach((f) => ligneChiffre(
       `${f.numero} — ${new Date(f.creeeLe).toLocaleDateString("fr-FR")} · ${(f.trackings || []).length} colis`,
       fmt(Number(f.total) || 0, f.devise || devise)));
-    ligneChiffre("Total facturé", fmt(totalFacture, devise), true);
+    ligneChiffre("Total facturé", fmtDeuxDevises(totalFacture, devise), true);
   }
 
   titre("VERSEMENTS REÇUS DANS LE MOIS");
@@ -20142,7 +20270,7 @@ async function construireRelevePartenaireDoc(partenaire, mois, factures, colis) 
     versementsDuMois.forEach((v) => ligneChiffre(
       `${new Date(v.date).toLocaleDateString("fr-FR")} — ${v.mode || MODE_ESPECES}${v.reference ? ` (réf. ${v.reference})` : ""} · ${v.facture}`,
       fmt(Number(v.montant) || 0, devise)));
-    ligneChiffre("Total reçu", fmt(totalRecu, devise), true);
+    ligneChiffre("Total reçu", fmtDeuxDevises(totalRecu, devise), true);
   }
 
   /*
@@ -20158,8 +20286,17 @@ async function construireRelevePartenaireDoc(partenaire, mois, factures, colis) 
   doc.text("RESTE DÛ À CE JOUR", M, y);
   doc.setFontSize(15); doc.setTextColor(...(soldeGlobal > 0.005 ? RED : [22, 161, 99]));
   doc.text(fmt(soldeGlobal, devise), W - M, y, { align: "right" });
-  y += 7;
-  doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
+  /*
+   * Le chiffre qui sera réellement payé, dans les deux monnaies.
+   *
+   * Le partenaire règle à Conakry, la facture est libellée en euros : sans l'équivalent imprimé,
+   * chacun convertit avec son propre taux et le versement tombe toujours à côté.
+   */
+  y += 6;
+  doc.setFont(undefined, "normal"); doc.setFontSize(9.5); doc.setTextColor(...MUTED);
+  doc.text(`soit ${fmt(soldeGlobal, deviseCompagnon(devise))}`, W - M, y, { align: "right" });
+  y += 5;
+  doc.setFontSize(8.5);
   doc.text(`Toutes factures confondues, arrêté au ${new Date().toLocaleDateString("fr-FR")}.`, M, y);
 
   y += 12;
@@ -20576,7 +20713,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
       </div>
 
       {onglet === "contrat" && partenaire && (
-        <ContratPartenaire key={partenaire.id} partenaire={partenaire} autres={partenaires.filter((p) => p.id !== partenaire.id)} agentsPossibles={agentsBaDiaby} onSave={enregistrerContrat} />
+        <ContratPartenaire key={partenaire.id} partenaire={partenaire} autres={partenaires.filter((p) => p.id !== partenaire.id)} agentsPossibles={agentsBaDiaby} sesAgents={employesDuPartenaire(data.users, partenaire.id)} onSave={enregistrerContrat} />
       )}
 
       {onglet === "remise" && partenaire && (
@@ -20615,7 +20752,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
 }
 
 /** Contrat d'un partenaire : ce qu'il paie, et sous quelle identité ses colis voyagent. */
-function ContratPartenaire({ partenaire, autres, agentsPossibles, onSave }) {
+function ContratPartenaire({ partenaire, autres, agentsPossibles, sesAgents, onSave }) {
   const r = reglagesPartenaire(partenaire);
   const [nomCommercial, setNomCommercial] = useState(r.nomCommercial);
   const [logo, setLogo] = useState(r.logo);
@@ -20924,6 +21061,36 @@ function ContratPartenaire({ partenaire, autres, agentsPossibles, onSave }) {
           </div>
         )}
       </div>
+
+      {/*
+        Les agents du partenaire, en lecture seule.
+        Quand un lot arrive à Paris, c'est son agent sur place qu'on appelle — pas le siège à
+        Conakry. Le partenaire tient cette liste lui-même dans son espace ; nous la lisons.
+      */}
+      {(sesAgents || []).length > 0 && (
+        <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, border: "1px solid var(--border)" }}>
+          <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Ses agents</div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
+            Les personnes à qui ce partenaire a ouvert un accès, et d’où elles travaillent. C’est le
+            partenaire qui tient cette liste — appelez-les directement plutôt que de passer par lui.
+          </div>
+          <div style={{ display: "grid", gap: 8 }}>
+            {sesAgents.map((a) => (
+              <div key={a.id} style={{ background: "var(--surface2)", borderRadius: 10, padding: "10px 13px" }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>
+                  {a.prenom} {a.nom}
+                  <span style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginInlineStart: 8 }}>
+                    {FLAGS[a.lieuOperation || "GN"] || ""} {COUNTRIES.find((c) => c.code === (a.lieuOperation || "GN"))?.name || ""}
+                  </span>
+                </div>
+                <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                  {[a.telephone, a.email].filter(Boolean).join(" · ") || "coordonnées non renseignées"}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, border: "1px solid var(--border)" }}>
         <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Identité sur les étiquettes</div>

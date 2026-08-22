@@ -606,6 +606,31 @@ function fmtRaw(n, cur) {
   const decimals = cur === "GNF" || cur === "XOF" ? 0 : 2;
   return +v.toFixed(decimals);
 }
+/*
+ * L'inverse de fmtRaw() : un montant saisi dans une devise, ramené à la base interne.
+ *
+ * Tous les montants sont stockés dans une base commune et convertis à l'affichage. Sans cette
+ * fonction, un agent qui tape « 12 825 000 » sous une étiquette GNF ferait enregistrer douze
+ * millions de fois le taux — une facture réglée mille fois son montant.
+ */
+function versBase(valeur, cur) {
+  const v = Number(String(valeur).replace(",", ".")) || 0;
+  return +(v / (LIVE_RATES[cur] || CURRENCIES[cur] || 1)).toFixed(6);
+}
+/*
+ * La devise de l'autre bout de la route.
+ *
+ * Une facture partenaire se règle des deux côtés : le partenaire est à Conakry, ses colis partent
+ * pour Paris, et selon qui paie et où, on parle en francs guinéens ou en euros. Afficher les deux
+ * montants côte à côte évite la conversion de tête au comptoir — et la dispute qui suit.
+ */
+function deviseCompagnon(devise) {
+  return devise === "GNF" ? "EUR" : "GNF";
+}
+/** Un montant dans sa devise, suivi de son équivalent dans celle de l'autre pays. */
+function fmtDeuxDevises(montant, devise) {
+  return `${fmt(montant, devise)} ~ ${fmt(montant, deviseCompagnon(devise))}`;
+}
 /** Formate un montant déjà exprimé en GNF (ex: prix de catégorie, valeur déclarée saisie directement) sans reconversion. */
 function fmtGNF(n) {
   return `${Math.round(n || 0).toLocaleString("fr-FR")} GNF`;
@@ -725,8 +750,8 @@ function messageRelanceFacture(facture, partenaire, retardJours) {
   const reste = resteDuFacture(facture);
   const regle = totalRegleFacture(facture);
   const detail = regle > 0.005
-    ? `Sur un total de ${fmt(Number(facture.total) || 0, facture.devise)}, nous avons bien reçu ${fmt(regle, facture.devise)}. Il reste ${fmt(reste, facture.devise)}.`
-    : `Elle s'élève à ${fmt(reste, facture.devise)}.`;
+    ? `Sur un total de ${fmt(Number(facture.total) || 0, facture.devise)}, nous avons bien reçu ${fmt(regle, facture.devise)}. Il reste ${fmtDeuxDevises(reste, facture.devise)}.`
+    : `Elle s'élève à ${fmtDeuxDevises(reste, facture.devise)}.`;
   return `${salutation}\n\nVotre facture ${facture?.numero || ""} du ${emise} n'est pas encore soldée — son échéance est dépassée de ${retardJours} jour${retardJours > 1 ? "s" : ""}.\n\n${detail}\n\nMerci de nous dire quand vous pourrez la régler.\n\nBa-Diaby Express`;
 }
 
@@ -914,9 +939,17 @@ function identiteClientRequise(acheminement) {
 function colisSousRepere(colis) {
   return !!colis?.repereSeul;
 }
-/** Le repère d'un colis, quand il en porte un. */
+/*
+ * Le repère d'un colis, quand il en porte un.
+ *
+ * Les colis enregistrés avant que le repère ait son propre champ portent leur code dans le nom du
+ * destinataire — « Colis 1 » à la place de la personne qui réceptionne. On les lit donc ainsi
+ * plutôt que de les afficher sans repère : leur étiquette et leur fiche restent justes, et
+ * l'agent peut corriger le destinataire à tête reposée depuis « Modifier ».
+ */
 function repereColis(colis) {
-  return colisSousRepere(colis) ? (colis.repere || "") : "";
+  if (!colisSousRepere(colis)) return "";
+  return colis.repere || colis.destinataire || "";
 }
 /*
  * Sous quel nom une annonce de dépôt s'affiche.
@@ -5841,9 +5874,10 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
                 <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
                   <div style={{ textAlign: "right" }}>
                     <strong style={{ fontSize: 17, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif" }}>{fmt(Number(f.total) || 0, f.devise)}</strong>
+                    <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>soit {fmt(Number(f.total) || 0, deviseCompagnon(f.devise))}</div>
                     {statut !== "Impayée" && (
                       <div style={{ fontSize: 11.5, fontWeight: 700, marginTop: 2, color: reste > 0.005 ? "var(--warn-fg)" : "var(--ok-fg)" }}>
-                        {reste > 0.005 ? `reste ${fmt(reste, f.devise)}` : "réglée"}
+                        {reste > 0.005 ? `reste ${fmtDeuxDevises(reste, f.devise)}` : "réglée"}
                       </div>
                     )}
                   </div>
@@ -13226,6 +13260,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   const [expediteurEmail, setExpediteurEmail] = useState(colis.expediteurEmail || "");
   const [expediteurAdresse, setExpediteurAdresse] = useState(colis.expediteurAdresse || "");
   const [destinataire, setDestinataire] = useState(colis.destinataire);
+  const [repere, setRepere] = useState(repereColis(colis));
   const [telephone, setTelephone] = useState(colis.telephone);
   const [destinataireEmail, setDestinataireEmail] = useState(colis.destinataireEmail || "");
   const [destinataireAdresse, setDestinataireAdresse] = useState(colis.destinataireAdresse || "");
@@ -13365,7 +13400,18 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
 
   function submit(e) {
     e.preventDefault();
-    if (!expediteur || !destinataire || !telephone) return;
+    /*
+     * Ce contrôle repartait sans rien dire, et sans rien enregistrer.
+     *
+     * Un colis de partenaire remis à un correspondant n'a pas toujours de téléphone — c'est
+     * précisément ce que le partenaire ne nous donne pas. L'agent corrigeait le destinataire,
+     * cliquait « Enregistrer », et le formulaire se refermait sans avoir rien écrit : aucune
+     * erreur, aucune modification. Le téléphone n'est donc plus exigé sur ces colis-là, et un
+     * champ manquant se dit maintenant à voix haute.
+     */
+    if (!expediteur.trim()) { setErr("Indiquez l’expéditeur."); return; }
+    if (!destinataire.trim()) { setErr("Indiquez le destinataire — la personne qui réceptionne le colis."); return; }
+    if (!telephone.trim() && !estPartenaire) { setErr("Indiquez le téléphone du destinataire."); return; }
     if (produits.some((p) => !p.nom || !(Number(p.poids) > 0) || !(Number(p.quantite) >= 1))) {
       setErr("Chaque article doit avoir un nom, une quantité et un poids supérieur à 0."); return;
     }
@@ -13400,6 +13446,12 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
         ? {
             prixPartenaire: detailPrixPartenaire({ produits, poids: Number(poids) || 0, pays }, partenaire).total,
             devisePartenaire: contratPartenaire.devise,
+            /*
+             * Un repère saisi rend le colis « sous repère », et le vide : un colis dont on vient
+             * d'inscrire le vrai destinataire ne doit pas garder un drapeau qui masque son nom.
+             */
+            repere: repere.trim(),
+            repereSeul: !!repere.trim(),
           }
         : {
             prixBrut, discountLoyalty, rabaisMontant: Number(rabaisMontant) || 0, rabaisDevise, rabaisEUR, prix, paye: payeNum, reste,
@@ -13428,6 +13480,23 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
         <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)", marginTop: 4 }}>Destinataire</div>
         <Field label="Nom"><input value={destinataire} onChange={(e) => setDestinataire(e.target.value)} style={inputStyle} /></Field>
         <Field label="Téléphone (WhatsApp)"><PhoneInput value={telephone} onChange={setTelephone} /></Field>
+        {/*
+          Le repère se corrige ici, et c'est indispensable : les colis enregistrés avant que le
+          repère ait son propre champ portent leur code dans le nom du destinataire — « Colis 1 »
+          à la place de la personne qui réceptionne. Sans ce champ, ils resteraient faux à jamais.
+        */}
+        {estPartenaire && (
+          <div style={{ gridColumn: "1 / -1" }}>
+            <Field label="Repère du colis">
+              <input value={repere} onChange={(e) => setRepere(e.target.value)} style={inputStyle}
+                placeholder="le code du partenaire — ex : colis 1, SF124, SIRA BOUTIQUE" />
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -8, lineHeight: 1.5 }}>
+                Le nom ci-dessus est celui de la <strong>personne qui réceptionne</strong> — le
+                correspondant du partenaire. Le repère, lui, dit de quel colis il s’agit dans le lot.
+              </div>
+            </Field>
+          </div>
+        )}
         <Field label="E-mail (optionnel)"><input type="email" value={destinataireEmail} onChange={(e) => setDestinataireEmail(e.target.value)} style={inputStyle} /></Field>
         <Field label="Adresse (optionnel)"><input value={destinataireAdresse} onChange={(e) => setDestinataireAdresse(e.target.value)} style={inputStyle} /></Field>
         <Field label="Ville (optionnel)"><input value={destinataireVille} onChange={(e) => setDestinataireVille(e.target.value)} style={inputStyle} /></Field>
@@ -19547,11 +19616,24 @@ async function construireFacturePartenaireDoc(facture, partenaire, colisFactures
    */
   const versementsPdf = reglementsFacture(facture);
   const totalFacture = Number(facture.total) || 0;
+  /*
+   * Le montant, dans les deux devises.
+   *
+   * Le partenaire est à Conakry, ses colis partent pour Paris : selon qui règle et où, on parle
+   * en francs guinéens ou en euros. Imprimer les deux évite la conversion de tête au comptoir,
+   * et la contestation qui suit quand chacun a pris un taux différent.
+   */
+  const equivalent = (montant, yy) => {
+    doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(...MUTED);
+    doc.text(`soit ${fmt(montant, deviseCompagnon(facture.devise))}`, W - M, yy + 5.4, { align: "right" });
+  };
   if (versementsPdf.length === 0) {
     doc.setFont(undefined, "bold"); doc.setFontSize(12); doc.setTextColor(...INK);
     doc.text("TOTAL À RÉGLER", W / 2, y);
     doc.setFontSize(15); doc.setTextColor(...RED);
     doc.text(fmt(totalFacture, facture.devise), W - M, y, { align: "right" });
+    equivalent(totalFacture, y);
+    y += 6;
   } else {
     const reste = resteDuFacture(facture);
     doc.setFont(undefined, "bold"); doc.setFontSize(10.5); doc.setTextColor(...INK);
@@ -19609,6 +19691,8 @@ async function construireFacturePartenaireDoc(facture, partenaire, colisFactures
       doc.text("RESTE À RÉGLER", W / 2, y);
       doc.setFontSize(15); doc.setTextColor(...RED);
       doc.text(fmt(reste, facture.devise), W - M, y, { align: "right" });
+      equivalent(reste, y);
+      y += 6;
     }
   }
 
@@ -19922,15 +20006,24 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
     notify?.(`Colis ${tracking} vérifié`);
   }
 
-  function creerFacture() {
-    if (aFacturer.length === 0) return;
-    const devise = reglagesPartenaire(partenaire).tarif.devise;
+  /*
+   * La facture regroupe les colis que l'agent a choisis, dans la devise qu'il a choisie.
+   *
+   * Tout facturer d'un bloc ne convenait pas : un partenaire règle parfois une partie de ses
+   * colis pour un client, et le reste plus tard. Quant à la devise, elle dépend de qui paie et
+   * d'où — la même facture se règle en francs à Conakry et en euros à Paris. On l'inscrit sur la
+   * facture, et le montant s'affiche partout dans les deux devises.
+   */
+  function creerFacture(trackingsChoisis, deviseChoisie) {
+    const retenus = aFacturer.filter((c) => (trackingsChoisis || []).includes(c.tracking));
+    if (retenus.length === 0) return;
+    const devise = deviseChoisie || reglagesPartenaire(partenaire).tarif.devise;
     const facture = {
       id: `fp${Date.now()}`,
       numero: genNumeroFacturePartenaire(facturesPartenaire),
       partenaireId: partenaire.id,
-      trackings: aFacturer.map((c) => c.tracking),
-      total: +aFacturer.reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0).toFixed(2),
+      trackings: retenus.map((c) => c.tracking),
+      total: +retenus.reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0).toFixed(2),
       devise,
       creeeLe: new Date().toISOString(),
       creePar: monNom,
@@ -19940,7 +20033,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
       ...data,
       facturesPartenaire: [facture, ...facturesPartenaire],
       colis: (data.colis || []).map((c) => (aFacturerSet.has(c.tracking) ? { ...c, facturePartenaireId: facture.id } : c)),
-      activityLog: pushActivity(data, session, "Facture partenaire créée", `${facture.numero} — ${partenaire.prenom} ${partenaire.nom} · ${facture.trackings.length} colis · ${fmt(facture.total, devise)}`),
+      activityLog: pushActivity(data, session, "Facture partenaire créée", `${facture.numero} — ${partenaire.prenom} ${partenaire.nom} · ${facture.trackings.length} colis · ${fmtDeuxDevises(facture.total, devise)}`),
     });
     notify?.(`Facture ${facture.numero} créée — ${facture.trackings.length} colis`);
     setOnglet("facturation");
@@ -20929,7 +21022,27 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
   const devise = reglagesDuPartenaire.tarif.devise;
   const delaiReglement = reglagesDuPartenaire.delaiReglementJours;
   const enRetard = facturesEnRetard(factures, delaiReglement);
-  const total = aFacturer.reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0);
+  /*
+   * Les colis retenus pour la prochaine facture, et la devise dans laquelle elle sera émise.
+   *
+   * Tout est coché au départ — regrouper l'ensemble reste le cas courant — mais l'agent décoche
+   * ce qu'il veut garder pour plus tard. La sélection se réajuste quand un colis part sur une
+   * autre facture, sinon on facturerait un tracking qui n'est plus là.
+   */
+  const [selection, setSelection] = useState(() => aFacturer.map((c) => c.tracking));
+  const [deviseFacture, setDeviseFacture] = useState(devise);
+  useEffect(() => {
+    const dispo = new Set(aFacturer.map((c) => c.tracking));
+    setSelection((prev) => {
+      const gardes = prev.filter((t) => dispo.has(t));
+      // Un colis nouvellement vérifié entre coché : c'est ce que l'agent attend en revenant ici.
+      const nouveaux = aFacturer.map((c) => c.tracking).filter((t) => !prev.includes(t));
+      return gardes.length === prev.length && nouveaux.length === 0 ? prev : [...gardes, ...nouveaux];
+    });
+  }, [aFacturer.map((c) => c.tracking).join("|")]);
+  const retenus = aFacturer.filter((c) => selection.includes(c.tracking));
+  const total = retenus.reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0);
+  const totalTout = aFacturer.reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0);
   const [confirmation, setConfirmation] = useState(false);
   const [aRouvrir, setARouvrir] = useState(null);
   const [enCorrection, setEnCorrection] = useState(null);
@@ -20962,7 +21075,8 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
         <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)" }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>Colis vérifiés, pas encore facturés</div>
           <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
-            Ils seront regroupés sur une seule facture, que le partenaire retrouvera dans son espace.
+            Cochez ceux que vous facturez maintenant, choisissez la devise, et ils partiront sur une
+            seule facture que le partenaire retrouvera dans son espace.
           </div>
         </div>
         {aFacturer.length === 0 ? (
@@ -20973,12 +21087,26 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
           <>
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", minWidth: 620, borderCollapse: "collapse" }}>
-                <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Destinataire", "Poids", "Vérifié par", "Montant", ""].map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
+                <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>
+                  <th style={{ padding: "10px 14px" }}>
+                    <input type="checkbox" title="Tout cocher ou tout décocher"
+                      checked={selection.length === aFacturer.length && aFacturer.length > 0}
+                      onChange={(e) => setSelection(e.target.checked ? aFacturer.map((c) => c.tracking) : [])} />
+                  </th>
+                  {["N° de suivi", "Destinataire", "Poids", "Vérifié par", "Montant", ""].map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}
+                </tr></thead>
                 <tbody>
                   {aFacturer.map((c) => (
-                    <tr key={c.tracking} style={{ borderTop: "1px solid var(--border)" }}>
+                    <tr key={c.tracking} style={{ borderTop: "1px solid var(--border)", opacity: selection.includes(c.tracking) ? 1 : 0.5 }}>
+                      <td style={{ padding: "10px 14px" }}>
+                        <input type="checkbox" checked={selection.includes(c.tracking)}
+                          onChange={(e) => setSelection((l) => (e.target.checked ? [...l, c.tracking] : l.filter((t) => t !== c.tracking)))} />
+                      </td>
                       <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.tracking}</td>
-                      <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{c.destinataire}</td>
+                      <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>
+                        {c.destinataire}
+                        {repereColis(c) && <div style={{ fontSize: 10.5, color: "var(--muted)" }}>repère : {repereColis(c)}</div>}
+                      </td>
                       <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.poids} kg</td>
                       <td style={{ padding: "10px 14px", fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.validationPartenaire?.par || "—"}</td>
                       <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}>
@@ -21007,13 +21135,34 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
                 </tbody>
               </table>
             </div>
-            <div style={{ padding: "14px 16px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ padding: "14px 16px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 12, flexWrap: "wrap" }}>
               <div style={{ fontSize: 13, color: "var(--muted)" }}>
-                {aFacturer.length} colis · total <strong style={{ color: "var(--text)", fontSize: 16 }}>{fmt(total, devise)}</strong>
+                {retenus.length} colis retenu{retenus.length > 1 ? "s" : ""} sur {aFacturer.length}
+                {" · total "}
+                <strong style={{ color: "var(--text)", fontSize: 16 }}>{fmt(total, deviseFacture)}</strong>
+                <div style={{ fontSize: 12, marginTop: 2 }}>
+                  soit <strong style={{ color: "var(--text)" }}>{fmt(total, deviseCompagnon(deviseFacture))}</strong>
+                  {retenus.length < aFacturer.length && ` · ${fmt(totalTout - total, deviseFacture)} laissés pour une prochaine facture`}
+                </div>
               </div>
-              <button onClick={() => setConfirmation(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
-                <Receipt size={16} /> Créer la facture
-              </button>
+              <div style={{ display: "flex", alignItems: "flex-end", gap: 10, flexWrap: "wrap" }}>
+                {/*
+                  La devise de la facture se choisit ici, et non dans le contrat : elle dépend de
+                  qui règle et où, pas du partenaire. Le montant, lui, ne change pas — seule son
+                  expression change.
+                */}
+                <div>
+                  <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Devise de la facture</div>
+                  <select value={deviseFacture} onChange={(e) => setDeviseFacture(e.target.value)}
+                    style={{ ...inputStyle, marginBottom: 0, width: 110 }}>
+                    {[...new Set([devise, "GNF", "EUR", "USD"])].map((d) => <option key={d} value={d}>{d}</option>)}
+                  </select>
+                </div>
+                <button onClick={() => setConfirmation(true)} disabled={retenus.length === 0}
+                  style={{ display: "flex", alignItems: "center", gap: 7, background: retenus.length ? "var(--brand-solid)" : "var(--surface2)", color: retenus.length ? "#fff" : "var(--muted)", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: retenus.length ? "pointer" : "not-allowed" }}>
+                  <Receipt size={16} /> Créer la facture
+                </button>
+              </div>
             </div>
           </>
         )}
@@ -21156,10 +21305,10 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
       {confirmation && (
         <ConfirmerAction
           titre="Créer cette facture ?"
-          message={`${aFacturer.length} colis vérifiés, pour un total de ${fmt(total, devise)}.`}
-          consequence="Ces colis seront rattachés à la facture et n’apparaîtront plus ici. Le partenaire la verra aussitôt dans son espace."
+          message={`${retenus.length} colis retenus, pour un total de ${fmtDeuxDevises(total, deviseFacture)}.`}
+          consequence="Ces colis seront rattachés à la facture et n’apparaîtront plus ici. Le partenaire la verra aussitôt dans son espace, avec le montant dans les deux devises."
           libelleAction="Créer la facture"
-          onConfirmer={() => { setConfirmation(false); onCreerFacture(); }}
+          onConfirmer={() => { setConfirmation(false); onCreerFacture(selection, deviseFacture); }}
           onAnnuler={() => setConfirmation(false)}
         />
       )}
@@ -21221,11 +21370,27 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
  */
 function EncaisserFacturePartenaireModal({ facture, partenaire, onEncaisser, onClose }) {
   const reste = resteDuFacture(facture);
-  const [montant, setMontant] = useState(String(reste));
+  /*
+   * L'agent saisit dans la devise qu'il a en main, pas dans celle de la facture.
+   *
+   * Un partenaire de Conakry paie en francs une facture libellée en euros : lui faire convertir
+   * de tête, c'est une erreur par semaine. Le champ est donc pré-rempli avec le reste dû converti
+   * dans la devise choisie, et le montant est ramené à la base avant d'être enregistré — sans
+   * quoi « 12 825 000 » saisi sous une étiquette GNF solderait mille fois la facture.
+   */
+  const [deviseSaisie, setDeviseSaisie] = useState(facture.devise);
+  const [montant, setMontant] = useState(String(fmtRaw(reste, facture.devise)));
   const [mode, setMode] = useState(MODE_ESPECES);
   const [reference, setReference] = useState("");
-  const saisi = Number(String(montant).replace(",", ".")) || 0;
+  const saisi = versBase(montant, deviseSaisie);
   const applique = Math.min(Math.max(saisi, 0), reste);
+
+  function changerDevise(d) {
+    // Le montant suit la devise : ce qui était le reste dû le reste, exprimé autrement.
+    const base = versBase(montant, deviseSaisie);
+    setDeviseSaisie(d);
+    setMontant(String(fmtRaw(base, d)));
+  }
   const nomPartenaire = reglagesPartenaire(partenaire).nomCommercial
     || `${partenaire?.prenom || ""} ${partenaire?.nom || ""}`.trim();
 
@@ -21237,16 +21402,29 @@ function EncaisserFacturePartenaireModal({ facture, partenaire, onEncaisser, onC
           {nomPartenaire || "Partenaire"} · total {fmt(Number(facture.total) || 0, facture.devise)}
           {totalRegleFacture(facture) > 0.005 && <> · déjà reçu {fmt(totalRegleFacture(facture), facture.devise)}</>}
           <br />
-          Reste dû <strong style={{ color: "var(--text)" }}>{fmt(reste, facture.devise)}</strong>
+          Reste dû <strong style={{ color: "var(--text)" }}>{fmtDeuxDevises(reste, facture.devise)}</strong>
         </div>
       </div>
 
-      <Field label={`Montant versé (${facture.devise})`}>
-        <input value={montant} onChange={(e) => setMontant(e.target.value)} autoFocus inputMode="decimal" style={inputStyle} />
-      </Field>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 110px", gap: 10 }}>
+        <Field label="Montant versé">
+          <input value={montant} onChange={(e) => setMontant(e.target.value)} autoFocus inputMode="decimal" style={{ ...inputStyle, marginBottom: 0 }} />
+        </Field>
+        <Field label="Devise reçue">
+          <select value={deviseSaisie} onChange={(e) => changerDevise(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }}>
+            {[...new Set([facture.devise, deviseCompagnon(facture.devise), "EUR", "USD"])].map((d) => <option key={d} value={d}>{d}</option>)}
+          </select>
+        </Field>
+      </div>
+      {applique > 0 && deviseSaisie !== facture.devise && (
+        <div style={{ fontSize: 11.5, color: "var(--muted)", margin: "6px 0 14px", lineHeight: 1.5 }}>
+          Soit {fmt(applique, facture.devise)} portés sur la facture.
+        </div>
+      )}
+      {(applique <= 0 || deviseSaisie === facture.devise) && <div style={{ height: 14 }} />}
       {saisi > reste + 0.005 && (
         <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "10px 12px", marginBottom: 14, fontSize: 12.5, color: "var(--text)", lineHeight: 1.5 }}>
-          Le versement sera ramené à {fmt(reste, facture.devise)} — une facture ne peut pas être réglée
+          Le versement sera ramené à {fmt(reste, deviseSaisie)} — une facture ne peut pas être réglée
           au-delà de ce qu’elle porte. Pensez à rendre la différence.
         </div>
       )}
@@ -21265,9 +21443,9 @@ function EncaisserFacturePartenaireModal({ facture, partenaire, onEncaisser, onC
       <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
         <button
           disabled={applique <= 0}
-          onClick={() => onEncaisser(montant, mode, reference)}
+          onClick={() => onEncaisser(saisi, mode, reference)}
           style={{ flex: 1, background: applique > 0 ? "#16A163" : "var(--surface2)", color: applique > 0 ? "#fff" : "var(--muted)", border: "none", borderRadius: 8, padding: "12px 0", fontSize: 13.5, fontWeight: 700, cursor: applique > 0 ? "pointer" : "not-allowed" }}>
-          Encaisser {applique > 0 ? fmt(applique, facture.devise) : ""}
+          Encaisser {applique > 0 ? fmt(applique, deviseSaisie) : ""}
         </button>
         <button onClick={onClose} style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "12px 20px", fontSize: 13, cursor: "pointer" }}>
           Annuler

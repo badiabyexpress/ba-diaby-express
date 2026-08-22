@@ -110,14 +110,24 @@ export default async function handler(req, res) {
   const cleService = process.env.SUPABASE_SERVICE_ROLE_KEY;
   const secretJwt = process.env.SUPABASE_JWT_SECRET;
 
-  // Non configuré : on le dit clairement, et l'application reprend son ancien chemin.
-  if (!url || !cleService || !secretJwt) {
+  /*
+   * Le secret de signature est facultatif.
+   *
+   * Il ne sert qu'à fabriquer un jeton que la base acceptera le jour où elle sera fermée au
+   * public. Sans lui, la vérification du mot de passe se fait quand même ici, avec une clé qui ne
+   * quitte pas le serveur — et c'est déjà l'essentiel : le navigateur n'a plus besoin de
+   * télécharger la liste des comptes, empreintes comprises, pour vérifier une connexion.
+   *
+   * Les interfaces récentes de Supabase rangent ce secret à un endroit difficile à trouver, et
+   * parfois ne le montrent plus du tout. Exiger les trois variables revenait à tout bloquer pour
+   * une clé accessoire.
+   */
+  if (!url || !cleService) {
     return res.status(501).json({
       error: "Connexion serveur non configurée",
       manquantes: [
         !url && "SUPABASE_URL",
         !cleService && "SUPABASE_SERVICE_ROLE_KEY",
-        !secretJwt && "SUPABASE_JWT_SECRET",
       ].filter(Boolean),
     });
   }
@@ -159,14 +169,34 @@ export default async function handler(req, res) {
       return res.status(echec.status).json(echec.corps);
     }
 
-    const { token, expireA } = signerJeton({
-      secret: secretJwt,
-      refProjet: refDepuisUrl(url),
+    const jeton = secretJwt
+      ? signerJeton({
+        secret: secretJwt,
+        refProjet: refDepuisUrl(url),
+        userId: compte.id,
+        identifiant: compte.identifiant,
+      })
+      : {};
+
+    /*
+     * Le compte revient d'ici, débarrassé de tout ce qui touche au mot de passe.
+     *
+     * C'est ce qui permet à la page de connexion de ne plus avoir besoin de la liste des comptes :
+     * elle demandait jusqu'ici la base entière avant de pouvoir vérifier quoi que ce soit, et la
+     * livrait donc à quiconque ouvrait le site. Le sel, l'empreinte, le nombre d'itérations et
+     * l'algorithme restent au serveur — ils ne servent qu'ici.
+     */
+    const {
+      motdepasse, motdepasseSecure, motdepasseSalt, motdepasseIter, motdepasseAlgo, ...compteSur
+    } = compte;
+
+    return res.status(200).json({
+      ...jeton,
       userId: compte.id,
-      identifiant: compte.identifiant,
+      utilisateur: compteSur,
+      // Dit à l'application si la base acceptera ce jeton, ou s'il faut rester sur la clé publique.
+      jetonSigne: !!secretJwt,
     });
-    // Le jeton et l'identité, rien d'autre : ni empreinte, ni liste de comptes.
-    return res.status(200).json({ token, expireA, userId: compte.id });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: "Erreur serveur lors de la connexion." });

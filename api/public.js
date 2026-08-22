@@ -1,0 +1,150 @@
+/**
+ * Fonction serverless Vercel — ce que les pages publiques ont le droit de savoir.
+ *
+ * POURQUOI CE FICHIER
+ * -------------------
+ * Jusqu'ici, la page de suivi et la vitrine recevaient la base entière. Un visiteur qui suivait
+ * un colis repartait, sans le savoir, avec tous les colis de l'entreprise, tous ses clients et
+ * leurs numéros, tous les comptes utilisateurs — empreintes de mots de passe comprises — les
+ * contrats des partenaires, les factures et la caisse. Il suffisait d'ouvrir la console du
+ * navigateur pour les lire.
+ *
+ * La lecture se fait désormais ici, côté serveur, et cette fonction ne renvoie que le strict
+ * nécessaire à ce qui est affiché : un seul colis pour une recherche de suivi, l'identité de
+ * l'entreprise et les prochains départs pour la vitrine. Le reste ne quitte plus la base.
+ *
+ * VARIABLES D'ENVIRONNEMENT
+ * -------------------------
+ *   SUPABASE_URL                 adresse du projet
+ *   SUPABASE_SERVICE_ROLE_KEY    clé de service — SECRET (« Secret key » dans l'interface Supabase)
+ *
+ * À défaut, la fonction retombe sur VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY : elle fonctionne
+ * donc dès sa mise en ligne, avant même que la clé de service soit configurée. La clé de service
+ * deviendra indispensable le jour où la base sera fermée au public — c'est le but de la manœuvre.
+ */
+
+const CLE_DONNEES = "bde-data";
+
+/** Les étapes visibles d'un colis, sans les commentaires internes des agents. */
+function historiquePublic(historique) {
+  return (Array.isArray(historique) ? historique : []).map((h) => ({
+    statut: h.statut, date: h.date, lieu: h.lieu || "",
+  }));
+}
+
+/*
+ * Le colis, tel qu'un porteur du numéro de suivi peut le voir.
+ *
+ * On garde ce que la page affiche — et rien d'autre. Pas de téléphone, pas d'adresse, pas de
+ * détail du contenu, pas de prix d'achat : celui qui a le numéro n'est pas forcément le
+ * destinataire, et un numéro de suivi se devine.
+ */
+function colisPublic(c) {
+  return {
+    tracking: c.tracking,
+    status: c.status,
+    createdAt: c.createdAt,
+    expediteur: c.expediteur || "",
+    destinataire: c.destinataire || "",
+    expediteurPays: c.expediteurPays || "GN",
+    destinatairePays: c.destinatairePays || c.pays,
+    pays: c.pays,
+    direction: c.direction || "export",
+    mode: c.mode || "air",
+    poids: c.poids || 0,
+    paye: c.paye || 0,
+    reste: c.reste || 0,
+    clientAccountId: c.clientAccountId || null,
+    partenaireId: c.partenaireId || null,
+    historique: historiquePublic(c.historique),
+  };
+}
+
+/*
+ * Le partenaire réduit à sa devanture.
+ *
+ * Un colis de partenaire se suit sous SA marque : son client a acheté chez lui, pas chez nous.
+ * La page a donc besoin de son nom commercial et de son logo — et de rien d'autre. Ni ses tarifs,
+ * ni ses destinations, ni son correspondant, ni ses coordonnées privées ne sortent d'ici.
+ */
+function partenairePublic(u) {
+  const p = u?.partenaire || {};
+  if (!p.nomCommercial) return null;
+  return {
+    id: u.id,
+    role: "Partenaire",
+    partenaire: {
+      nomCommercial: p.nomCommercial,
+      logo: p.logo || null,
+      siteWeb: p.siteWeb || "",
+    },
+  };
+}
+
+async function lireBase() {
+  const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+  const cle = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY;
+  if (!url || !cle) return { erreur: "storage_non_configure" };
+  const reponse = await fetch(
+    `${url}/rest/v1/${encodeURIComponent("bde_data")}?key=eq.${CLE_DONNEES}&select=value`,
+    { headers: { apikey: cle, Authorization: `Bearer ${cle}` } },
+  );
+  if (!reponse.ok) return { erreur: `base_${reponse.status}` };
+  const lignes = await reponse.json();
+  const valeur = Array.isArray(lignes) && lignes[0] ? lignes[0].value : null;
+  if (!valeur) return { erreur: "base_vide" };
+  return { donnees: valeur };
+}
+
+export default async function handler(req, res) {
+  if (req.method !== "GET") return res.status(405).json({ error: "Méthode non autorisée" });
+
+  const { suivi, vitrine, cgu } = req.query || {};
+
+  try {
+    const { donnees, erreur } = await lireBase();
+    if (erreur) {
+      console.error("Lecture publique impossible", erreur);
+      return res.status(502).json({ error: "Données momentanément indisponibles." });
+    }
+
+    if (vitrine !== undefined) {
+      /*
+       * La vitrine n'a besoin que de ce qu'elle montre : l'identité de l'entreprise et les
+       * prochains départs. Les départs déjà passés ne sont d'aucune utilité et allongent la
+       * réponse — le tri final reste à la charge de la page, qui connaît le pays choisi.
+       */
+      const maintenant = Date.now();
+      return res.status(200).json({
+        branding: donnees.branding || {},
+        siteVitrine: donnees.siteVitrine || {},
+        departs: (donnees.departs || []).filter((d) => d.dateLimite && new Date(d.dateLimite).getTime() >= maintenant),
+      });
+    }
+
+    if (cgu !== undefined) {
+      return res.status(200).json({ entreprise: donnees.entreprise || {}, branding: donnees.branding || {} });
+    }
+
+    if (suivi !== undefined) {
+      const code = String(suivi || "").trim().toUpperCase();
+      // Une recherche vide ne renvoie pas « tous les colis » : elle ne renvoie rien.
+      if (!code) return res.status(200).json({ colis: [], users: [] });
+      const trouve = (donnees.colis || []).find((c) => String(c.tracking || "").toUpperCase() === code);
+      if (!trouve) return res.status(200).json({ colis: [], users: [] });
+      const partenaire = trouve.partenaireId
+        ? partenairePublic((donnees.users || []).find((u) => u.id === trouve.partenaireId))
+        : null;
+      return res.status(200).json({
+        colis: [colisPublic(trouve)],
+        users: partenaire ? [partenaire] : [],
+        branding: donnees.branding || {},
+      });
+    }
+
+    return res.status(400).json({ error: "Précisez ce que vous demandez : suivi, vitrine ou cgu." });
+  } catch (e) {
+    console.error("Échec de la lecture publique", e);
+    return res.status(502).json({ error: "Données momentanément indisponibles." });
+  }
+}

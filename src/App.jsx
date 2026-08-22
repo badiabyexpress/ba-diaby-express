@@ -2081,6 +2081,17 @@ function App() {
    * pas sur une 4G d'agence.
    */
   useEffect(() => {
+    /*
+     * Les pages publiques ne chargent plus la base.
+     *
+     * Le suivi et les mentions légales se servent désormais eux-mêmes auprès du serveur, qui ne
+     * leur donne que ce qu'ils affichent. Continuer à charger la base ici la remettrait dans le
+     * navigateur du visiteur, et tout ce travail n'aurait servi à rien.
+     */
+    if (typeof window !== "undefined") {
+      const p = new URLSearchParams(window.location.search);
+      if (p.has("suivi") || p.has("cgu")) { setLoading(false); return undefined; }
+    }
     let vivant = true;
     let abouti = false;
     let essais = 0;
@@ -2285,7 +2296,7 @@ function App() {
 
   const isPublicTracking = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("suivi");
   if (isPublicTracking) {
-    return <Shell rtl={false} theme={theme}><PublicTrackingPage data={data} loading={loading} /></Shell>;
+    return <Shell rtl={false} theme={theme}><PublicTrackingPage /></Shell>;
   }
   const isClientPortal = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("client");
   if (isClientPortal) {
@@ -2293,7 +2304,7 @@ function App() {
   }
   const isCguPage = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("cgu");
   if (isCguPage) {
-    return <Shell rtl={false} theme={theme}><CguPage data={data} /></Shell>;
+    return <Shell rtl={false} theme={theme}><CguPage /></Shell>;
   }
 
   if (loading) {
@@ -2906,11 +2917,24 @@ function BrandedLoader() {
  * accessible via "?cgu=1". Nécessaire dès lors que le site collecte des données de clients
  * (téléphone, adresse, e-mail) via l’inscription et les pré-alertes.
  */
-function CguPage({ data }) {
+/*
+ * Les conditions générales n'ont besoin que des coordonnées de l'entreprise. Elles recevaient
+ * pourtant la base entière — même page publique, même fuite que le suivi.
+ */
+function CguPage() {
   // Le hook fournit "lang" utilisé plus bas pour la direction du texte (arabe = RTL).
   // Son absence provoquait un ReferenceError qui plantait la page.
   const [lang] = useClientLang();
-  const entreprise = data?.entreprise || { adresseSiege: "Conakry, Guinée", telephone: "+224612479339", email: "badiabyexpress.bde@gmail.com", siteWeb: "www.ba-diaby-express.com" };
+  const [data, setData] = useState(null);
+  useEffect(() => {
+    fetch("/api/public?cgu=1")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => d && setData(d))
+      // Les mentions restent lisibles avec les coordonnées par défaut : mieux vaut une page
+      // complète avec un numéro générique qu'une page vide.
+      .catch(() => {});
+  }, []);
+  const entreprise = data?.entreprise?.adresseSiege ? data.entreprise : { adresseSiege: "Conakry, Guinée", telephone: "+224612479339", email: "badiabyexpress.bde@gmail.com", siteWeb: "www.ba-diaby-express.com" };
   const section = (titre, children) => (
     <div style={{ marginBottom: 26 }}>
       <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>{titre}</div>
@@ -3225,14 +3249,51 @@ function ClientLangSwitch({ lang, onChange }) {
   );
 }
 
-function PublicTrackingPage({ data, loading }) {
+/*
+ * Le suivi public interroge le serveur, colis par colis.
+ *
+ * Cette page recevait la base entière et y cherchait le bon colis. Le lien de suivi étant envoyé
+ * par message à chaque client, cela revenait à donner le fichier de l'entreprise — colis, clients,
+ * numéros, comptes, contrats — à tous ceux qui suivent un colis. Le serveur ne renvoie désormais
+ * que le colis demandé, et rien s'il n'existe pas.
+ */
+function PublicTrackingPage() {
   const [lang, setLang] = useClientLang();
   const T = (x) => tc(x, lang);
   const params = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
   const [code, setCode] = useState(params?.get("code") || "");
   const [searched, setSearched] = useState(!!params?.get("code"));
-  const colis = data && searched ? data.colis.find((c) => c.tracking.toUpperCase() === code.trim().toUpperCase()) : null;
-  const notFound = searched && !loading && data && !colis;
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(!!params?.get("code"));
+  const [panne, setPanne] = useState(false);
+
+  /*
+   * Une recherche par numéro exact, jamais une liste. Le serveur répond « ce colis » ou « rien » :
+   * il n'existe aucune requête qui rendrait plusieurs colis à un visiteur.
+   */
+  const chercher = useCallback(async (recherche) => {
+    const propre = String(recherche || "").trim();
+    if (!propre) return;
+    setLoading(true); setPanne(false);
+    try {
+      const reponse = await fetch(`/api/public?suivi=${encodeURIComponent(propre)}`);
+      if (!reponse.ok) throw new Error(`HTTP ${reponse.status}`);
+      setData(await reponse.json());
+    } catch (e) {
+      console.error("Suivi indisponible", e);
+      setData(null); setPanne(true);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (params?.get("code")) chercher(params.get("code"));
+    // Une seule fois, au chargement : les recherches suivantes passent par le formulaire.
+  }, []);
+
+  const colis = data && searched ? (data.colis || [])[0] : null;
+  const notFound = searched && !loading && !panne && data && !colis;
   /*
    * Un colis partenaire se suit sous la marque du partenaire, jamais sous la nôtre.
    *
@@ -3250,6 +3311,7 @@ function PublicTrackingPage({ data, loading }) {
     const url = new URL(window.location.href);
     url.searchParams.set("suivi", "1"); url.searchParams.set("code", code.trim());
     window.history.replaceState({}, "", url);
+    chercher(code);
   }
 
   // Le destinataire réel (colis.destinatairePays) prime sur le pays de route (colis.pays) : pour

@@ -125,6 +125,18 @@ function isPhoneValid(dial, rest) {
   return rest.length >= min && rest.length <= max;
 }
 
+/*
+ * L'indicatif d'un pays, pour pré-régler un champ téléphone.
+ *
+ * Un numéro sans indicatif ne sert à rien : ni WhatsApp ni un appel depuis la Guinée n'aboutissent
+ * sur « 575776868 ». Quand on connaît le pays — celui d'une destination, d'un correspondant — le
+ * champ doit s'ouvrir sur le bon indicatif, et le numéro être enregistré complet.
+ */
+function indicatifDuPays(code) {
+  const pays = COUNTRIES.find((c) => c.code === code);
+  return pays ? DIAL_CODES.find((d) => d.name === pays.name)?.dial : undefined;
+}
+
 function PhoneInput({ value, onChange, onBlur, placeholder, defaultDial }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -6540,7 +6552,9 @@ function AnnoncerDepotModal({ partenaire, onClose, onAnnoncer }) {
       {identiteRequise ? (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 10 }}>
           <Field label="Destinataire *"><input value={destinataire} onChange={(e) => setDestinataire(e.target.value)} autoFocus style={inputStyle} placeholder="Nom du client à qui le colis est destiné" /></Field>
-          <Field label="Téléphone du destinataire"><input value={telephone} onChange={(e) => setTelephone(e.target.value)} style={inputStyle} placeholder="+33 6 XX XX XX XX" /></Field>
+          <Field label="Téléphone du destinataire">
+            <PhoneInput value={telephone} onChange={setTelephone} defaultDial={indicatifDuPays(pays)} />
+          </Field>
         </div>
       ) : (
         <>
@@ -6741,7 +6755,7 @@ function IdentitePartenaire({ partenaire, session, onSave }) {
           <Field label="Nom commercial"><input value={nomCommercial} onChange={(e) => setNomCommercial(e.target.value)} style={inputStyle} placeholder="ex : Tombolia Cargo" /></Field>
           <Field label="Adresse"><input value={adresse} onChange={(e) => setAdresse(e.target.value)} style={inputStyle} /></Field>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 12 }}>
-            <Field label="Téléphone"><input value={telephone} onChange={(e) => setTelephone(e.target.value)} style={inputStyle} /></Field>
+            <Field label="Téléphone"><PhoneInput value={telephone} onChange={setTelephone} /></Field>
             <Field label="E-mail"><input value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} /></Field>
           </div>
           <Field label="Site web"><input value={siteWeb} onChange={(e) => setSiteWeb(e.target.value)} style={inputStyle} placeholder="www.exemple.com" /></Field>
@@ -20800,7 +20814,28 @@ function ContratPartenaire({ partenaire, autres, agentsPossibles, onSave }) {
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 10 }}>
                     <Field label="Nom du correspondant"><input value={d.correspondant.nom} onChange={(e) => majCorrespondant(d.pays, { nom: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
-                    <Field label="Téléphone"><input value={d.correspondant.telephone} onChange={(e) => majCorrespondant(d.pays, { telephone: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
+                    {/*
+                      Le correspondant est dans le pays de destination : le champ s'ouvre sur son
+                      indicatif. Saisi sans indicatif, son numéro repartait tel quel sur la fiche
+                      colis et dans WhatsApp, où il n'aboutissait nulle part.
+                    */}
+                    <Field label="Téléphone">
+                      <PhoneInput value={d.correspondant.telephone}
+                        onChange={(v) => majCorrespondant(d.pays, { telephone: v })}
+                        defaultDial={indicatifDuPays(d.pays)} />
+                      {/*
+                        Les numéros saisis avant ce champ n'ont pas d'indicatif : on ne les
+                        réécrit pas d'office — « 0575776868 » et « 575776868 » ne se complètent
+                        pas de la même façon — mais on demande à l'administrateur de trancher,
+                        sinon le numéro repart incomplet sur chaque colis.
+                      */}
+                      {!!d.correspondant.telephone && !String(d.correspondant.telephone).startsWith("+") && (
+                        <div style={{ fontSize: 11.5, color: "var(--warn-fg)", marginTop: 5, lineHeight: 1.5 }}>
+                          Ce numéro n’a pas d’indicatif : choisissez le pays dans la liste à gauche,
+                          sinon il ne sera joignable ni par appel ni par WhatsApp.
+                        </div>
+                      )}
+                    </Field>
                   </div>
                   <Field label="Adresse (facultatif)"><input value={d.correspondant.adresse} onChange={(e) => majCorrespondant(d.pays, { adresse: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
                 </div>
@@ -20901,7 +20936,7 @@ function ContratPartenaire({ partenaire, autres, agentsPossibles, onSave }) {
         </Field>
         <Field label="Adresse"><input value={adresse} onChange={(e) => setAdresse(e.target.value)} style={inputStyle} /></Field>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 12 }}>
-          <Field label="Téléphone"><input value={telephone} onChange={(e) => setTelephone(e.target.value)} style={inputStyle} /></Field>
+          <Field label="Téléphone"><PhoneInput value={telephone} onChange={setTelephone} /></Field>
           <Field label="E-mail"><input value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} /></Field>
         </div>
         <Field label="Site web"><input value={siteWeb} onChange={(e) => setSiteWeb(e.target.value)} style={inputStyle} placeholder="www.exemple.com" /></Field>

@@ -901,9 +901,33 @@ const ACHEMINEMENTS_PARTENAIRE = [
 function identiteClientRequise(acheminement) {
   return acheminement !== "correspondant";
 }
-/** Un colis qui ne voyage que sous un repère, sans identité de client. */
+/*
+ * Un colis remis au correspondant du partenaire.
+ *
+ * Deux choses distinctes, qu'on avait d'abord confondues : le **destinataire** est celui qui
+ * réceptionne — le correspondant du partenaire, une personne réelle, à qui l'agent remet le lot —
+ * et le **repère** est le code que le partenaire a choisi pour reconnaître ce colis-là dans le
+ * lot : « colis 1 », « SF124 », une enseigne. Le client final, lui, n'apparaît nulle part : c'est
+ * tout l'intérêt pour le partenaire, et nous n'en avons aucun besoin puisque nous ne le
+ * rencontrons jamais.
+ */
 function colisSousRepere(colis) {
   return !!colis?.repereSeul;
+}
+/** Le repère d'un colis, quand il en porte un. */
+function repereColis(colis) {
+  return colisSousRepere(colis) ? (colis.repere || "") : "";
+}
+/*
+ * Sous quel nom une annonce de dépôt s'affiche.
+ *
+ * Une annonce sous repère n'a pas de destinataire : c'est justement ce que le partenaire ne veut
+ * pas nous donner. Afficher le champ vide laisserait une carte sans titre — on montre le repère,
+ * qui est précisément ce qui permet de reconnaître le paquet des deux côtés du comptoir.
+ */
+function libelleAnnonce(annonce) {
+  if (annonce?.repereSeul) return annonce.repere || "Sans repère";
+  return annonce?.destinataire || "Sans destinataire";
 }
 
 /** Complète une destination partenaire pour qu'aucun écran n'ait à gérer un champ manquant. */
@@ -4980,6 +5004,15 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
   const moi = (data.users || []).find((u) => u.id === partenaireId) || session;
   const monCompte = (data.users || []).find((u) => u.id === session.id) || session;
   const mesEmployes = useMemo(() => employesDuPartenaire(data.users, partenaireId), [data.users, partenaireId]);
+  /*
+   * Où un employé peut être basé : la Guinée, et chacune des destinations ouvertes au partenaire.
+   * Ce sont les deux bouts de ses routes — il n'y a pas d'autre endroit où il puisse déposer.
+   */
+  const lieuxOperationPossibles = useMemo(() => {
+    const guinee = COUNTRIES.find((c) => c.code === "GN");
+    const autres = paysAutorisesPartenaire(moi).filter((c) => c.code !== "GN");
+    return [guinee, ...autres].filter(Boolean);
+  }, [moi]);
   const reglages = reglagesPartenaire(moi);
   const devise = reglages.tarif.devise;
   const mesFactures = montantsVisibles
@@ -5142,7 +5175,7 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
       ...annonce,
     };
     persist({ ...data, preAlertesPartenaire: [preAlerte, ...(data.preAlertesPartenaire || [])] });
-    notify?.(`Dépôt annoncé pour ${annonce.destinataire}`);
+    notify?.(`Dépôt annoncé — ${libelleAnnonce(annonce)}`);
     setShowAnnonce(false);
   }
 
@@ -5232,7 +5265,7 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
    * Cinq au maximum : un accès nominatif reste nominatif. Au-delà, c'est un compte partagé qui
    * circule, et plus personne ne sait qui a enregistré quoi.
    */
-  async function creerAcces({ prenom, nom, identifiant, motdepasse, voitLesMontants: voit }) {
+  async function creerAcces({ prenom, nom, identifiant, motdepasse, voitLesMontants: voit, lieuOperation }) {
     const propre = String(identifiant || "").trim();
     if (!prenom.trim() || !nom.trim() || !propre) return { erreur: "Renseignez le prénom, le nom et l’identifiant." };
     if (!motdepasse || motdepasse.length < 8) return { erreur: "Choisissez un mot de passe d’au moins 8 caractères." };
@@ -5252,6 +5285,13 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
       id: `pe${Date.now()}`,
       prenom: prenom.trim(), nom: nom.trim(), identifiant: propre,
       role: "Partenaire", partenaireParent: partenaireId, voitLesMontants: !!voit,
+      /*
+       * Le lieu d'où cette personne travaille. Un partenaire tient un dépôt à Conakry et un autre
+       * à Paris : celui de Paris enregistre des colis qui partent de France, celui de Conakry des
+       * colis qui en partent. Sans ce repère, l'application supposait toujours un départ de
+       * Guinée, et l'employé de Paris devait corriger le sens à chaque colis.
+       */
+      lieuOperation: lieuOperation || "GN",
       email: "", telephone: "", twoFA: false, ...identifiants,
     };
     await persist({
@@ -5399,7 +5439,7 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.expediteur || "—"}</td>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>
                     {c.destinataire}
-                    {colisSousRepere(c) && <div style={{ fontSize: 10.5, color: "var(--muted)" }}>repère</div>}
+                    {repereColis(c) && <div style={{ fontSize: 10.5, color: "var(--muted)" }}>repère : {repereColis(c)}</div>}
                   </td>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.poids} kg</td>
                   {montantsVisibles && <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 700, whiteSpace: "nowrap" }}>{fmt(Number(c.prixPartenaire) || 0, c.devisePartenaire || devise)}</td>}
@@ -5476,7 +5516,7 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
                   <div key={a.id} style={{ background: "var(--surface2)", borderRadius: 12, padding: "11px 13px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                     <div style={{ minWidth: 0 }}>
                       <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>
-                        {a.destinataire} · {FLAGS[a.pays] || ""} {pays?.name || a.pays}
+                        {libelleAnnonce(a)} · {FLAGS[a.pays] || ""} {pays?.name || a.pays}
                       </div>
                       <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2, lineHeight: 1.5 }}>
                         {(a.articles || []).map((x) => `${x.quantite}× ${x.nom}`).join(", ")}
@@ -5746,6 +5786,7 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
             <AccesEmployes
               employes={mesEmployes} onCreer={creerAcces} onSupprimer={supprimerAcces}
               onBasculerMontants={basculerMontantsEmploye} onReinitialiser={reinitialiserAcces}
+              lieuxPossibles={lieuxOperationPossibles}
             />
           )}
           {montantsVisibles && (
@@ -5804,7 +5845,7 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
       {annonceASupprimer && (
         <ConfirmerAction
           titre="Retirer cette annonce ?"
-          message={`${annonceASupprimer.destinataire} — ${(annonceASupprimer.articles || []).map((x) => `${x.quantite}× ${x.nom}`).join(", ")}.`}
+          message={`${libelleAnnonce(annonceASupprimer)} — ${(annonceASupprimer.articles || []).map((x) => `${x.quantite}× ${x.nom}`).join(", ")}.`}
           consequence="L’annonce disparaît de la liste de l’agence. Si vous apportez quand même le colis, il sera enregistré normalement au comptoir."
           libelleAction="Retirer"
           onConfirmer={() => { const a = annonceASupprimer; setAnnonceASupprimer(null); retirerAnnonce(a); }}
@@ -5926,13 +5967,14 @@ function MonMotDePasse({ compte, onChanger }) {
  * est son prix de revient, donc sa marge. Le partenaire peut l'ouvrir accès par accès — à un
  * gérant de dépôt, oui ; à un manutentionnaire, sans doute pas.
  */
-function AccesEmployes({ employes, onCreer, onSupprimer, onBasculerMontants, onReinitialiser }) {
+function AccesEmployes({ employes, onCreer, onSupprimer, onBasculerMontants, onReinitialiser, lieuxPossibles }) {
   const [ouvert, setOuvert] = useState(false);
   const [prenom, setPrenom] = useState("");
   const [nom, setNom] = useState("");
   const [identifiant, setIdentifiant] = useState("");
   const [motdepasse, setMotdepasse] = useState("");
   const [voit, setVoit] = useState(false);
+  const [lieuOperation, setLieuOperation] = useState("GN");
   const [err, setErr] = useState("");
   const [occupe, setOccupe] = useState(false);
   const [aSupprimer, setASupprimer] = useState(null);
@@ -5941,14 +5983,14 @@ function AccesEmployes({ employes, onCreer, onSupprimer, onBasculerMontants, onR
   const restants = MAX_EMPLOYES_PARTENAIRE - employes.length;
 
   function fermer() {
-    setOuvert(false); setPrenom(""); setNom(""); setIdentifiant(""); setMotdepasse(""); setVoit(false); setErr("");
+    setOuvert(false); setPrenom(""); setNom(""); setIdentifiant(""); setMotdepasse(""); setVoit(false); setLieuOperation("GN"); setErr("");
   }
 
   async function valider(e) {
     e.preventDefault();
     setErr("");
     setOccupe(true);
-    const r = await onCreer({ prenom, nom, identifiant, motdepasse, voitLesMontants: voit });
+    const r = await onCreer({ prenom, nom, identifiant, motdepasse, voitLesMontants: voit, lieuOperation });
     setOccupe(false);
     if (r?.erreur) { setErr(r.erreur); return; }
     setMotDePasseAffiche({ identifiant: identifiant.trim(), motdepasse });
@@ -5972,7 +6014,10 @@ function AccesEmployes({ employes, onCreer, onSupprimer, onBasculerMontants, onR
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{u.prenom} {u.nom}</div>
-                  <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>@{u.identifiant}</div>
+                  <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                    @{u.identifiant}
+                    {u.lieuOperation && ` · ${FLAGS[u.lieuOperation] || ""} ${COUNTRIES.find((c) => c.code === u.lieuOperation)?.name || u.lieuOperation}`}
+                  </div>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                   <button onClick={() => onBasculerMontants(u)}
@@ -6012,6 +6057,19 @@ function AccesEmployes({ employes, onCreer, onSupprimer, onBasculerMontants, onR
           </Field>
           <Field label="Mot de passe">
             <input value={motdepasse} onChange={(e) => setMotdepasse(e.target.value)} style={inputStyle} placeholder="8 caractères au minimum" />
+          </Field>
+          {/*
+            D'où cette personne travaille. C'est ce qui décide du sens par défaut de ses colis :
+            celui qui tient le dépôt de Paris enregistre des envois qui partent de France.
+          */}
+          <Field label="Lieu d’opération">
+            <select value={lieuOperation} onChange={(e) => setLieuOperation(e.target.value)} style={inputStyle}>
+              {lieuxPossibles.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code] || ""} {c.name}</option>)}
+            </select>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 5, lineHeight: 1.5 }}>
+              Ses colis partiront de là par défaut. Il pourra expédier vers toutes vos destinations
+              autorisées, dans les deux sens.
+            </div>
           </Field>
           <button type="button" onClick={() => setVoit((v) => !v)}
             style={{ display: "flex", alignItems: "center", gap: 8, background: "none", border: "none", padding: 0, marginBottom: 14, cursor: "pointer", textAlign: "left" }}>
@@ -6174,8 +6232,14 @@ function AnnoncerDepotModal({ partenaire, onClose, onAnnoncer }) {
       .filter((a) => a.nom);
     if (propres.length === 0) { setErr("Décrivez au moins un article."); return; }
     if (propres.some((a) => a.poids < 0)) { setErr("Les poids annoncés doivent être positifs."); return; }
+    /*
+     * Sous repère, ce que le partenaire saisit n'est pas un destinataire mais un code. Le
+     * destinataire, c'est son correspondant — nous le connaissons déjà par son contrat, il n'a
+     * pas à le retaper à chaque colis.
+     */
     onAnnoncer({
-      destinataire: destinataire.trim(),
+      destinataire: identiteRequise ? destinataire.trim() : "",
+      repere: identiteRequise ? "" : destinataire.trim(),
       telephone: identiteRequise ? telephone.trim() : "",
       repereSeul: !identiteRequise,
       pays, articles: propres, note: note.trim(),
@@ -6201,9 +6265,9 @@ function AnnoncerDepotModal({ partenaire, onClose, onAnnoncer }) {
         <>
           <div style={{ background: "var(--ok-bg-soft)", border: "1px solid var(--ok-border)", borderRadius: 10, padding: "11px 13px", marginBottom: 12 }}>
             <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
-              Sur cette destination, c’est <strong>votre correspondant</strong> qui récupère le lot.
+              Sur cette destination, le lot est remis à <strong>{contrat.correspondant?.nom || "votre correspondant"}</strong>.
               Nous ne vous demandons donc ni le nom ni le numéro de votre client : indiquez
-              simplement un repère pour reconnaître le paquet.
+              simplement le repère qui vous permettra de reconnaître ce colis dans le lot.
             </div>
           </div>
           <Field label="Repère du colis *">
@@ -6466,8 +6530,16 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
   const [clientPrenom, setClientPrenom] = useState("");
   const [clientNom, setClientNom] = useState("");
   const [clientTelephone, setClientTelephone] = useState("");
+  const [repere, setRepere] = useState("");
   const [destPays, setDestPays] = useState("FR");
-  const [sens, setSens] = useState("export");
+  /*
+   * Le sens part de là où travaille celui qui enregistre.
+   *
+   * Un employé basé à Paris dépose des colis qui quittent la France : lui présenter « Conakry →
+   * Paris » par défaut, c'est le faire corriger à chaque colis, et se tromper un jour sur deux.
+   * Un agent de l'entreprise ou le titulaire du compte partent de Guinée, comme avant.
+   */
+  const [sens, setSens] = useState(() => (session?.lieuOperation && session.lieuOperation !== "GN" ? "import" : "export"));
   const [mode, setMode] = useState("air");
   const [articles, setArticles] = useState(() => [{ ...emptyProduit(), tarification: "kg", categoriePartenaire: "" }]);
   const [err, setErr] = useState("");
@@ -6486,12 +6558,13 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
      * « SIRA » / « BOUTIQUE », et le colis partirait sous une identité inventée.
      */
     if (a.repereSeul) {
-      setClientPrenom(""); setClientNom(a.destinataire || "");
+      // Le destinataire vient du contrat ; l'annonce n'apporte que le repère.
+      setRepere(a.repere || "");
     } else {
       const { prenom, nom } = splitNom(a.destinataire);
       setClientPrenom(prenom); setClientNom(nom);
+      setClientTelephone(a.telephone || "");
     }
-    setClientTelephone(a.telephone || "");
     setDestPays(a.pays || "FR");
     setArticles((a.articles || []).map((x, i) => ({
       ...emptyProduit(), id: `p${Date.now()}${i}`, tarification: "kg", categoriePartenaire: "",
@@ -6506,6 +6579,11 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
    */
   const paysDisponibles = partenaire ? paysAutorisesPartenaire(partenaire) : allowedCountries(session);
   const [destPaysAjuste, setDestPaysAjuste] = useState(false);
+  useEffect(() => {
+    // La route par défaut est celle du lieu d'opération : on n'y revient pas si l'agent en change.
+    const lieu = session?.lieuOperation;
+    if (lieu && lieu !== "GN" && paysDisponibles.some((c) => c.code === lieu)) setDestPays(lieu);
+  }, []);
   useEffect(() => {
     // Le pays retenu doit rester dans les destinations du partenaire choisi.
     if (paysDisponibles.length && !paysDisponibles.some((c) => c.code === destPays)) {
@@ -6525,6 +6603,7 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
     setExpNom(identite.nom || identite.prenom);
     setExpTelephone(r.telephone || partenaire.telephone || "");
   }, [partenaireId]);
+
   /*
    * Le sens de l'envoi, choisi colis par colis.
    *
@@ -6538,6 +6617,23 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
   const poidsTotal = articles.reduce((s, a) => s + (Number(a.poids) || 0), 0);
   const contrat = tarifPartenairePourPays(partenaire, paysRoute);
   const identiteRequise = identiteClientRequise(contrat.acheminement);
+  /*
+   * Les deux bouts de la route se remplissent seuls.
+   *
+   * Le partenaire d'un côté, son correspondant de l'autre : nous les connaissons tous les deux
+   * par son contrat, et ils ne changent pas d'un colis à l'autre. L'agent n'a plus à saisir que
+   * ce qui varie — le poids, la quantité, la catégorie — c'est-à-dire ce qu'il constate lui-même
+   * au comptoir. Les champs restent modifiables : un dépôt exceptionnel se corrige à la main.
+   */
+  useEffect(() => {
+    if (!partenaire || identiteRequise) return;
+    const c = contrat.correspondant || {};
+    if (!c.nom) return;
+    const { prenom, nom } = splitNom(c.nom);
+    setClientPrenom(prenom); setClientNom(nom || prenom);
+    setClientTelephone(c.telephone || "");
+  }, [partenaireId, destPays, sens, identiteRequise]);
+
   const tarifDefini = contrat.parKg > 0 || contrat.parUnite > 0;
   const acheminement = ACHEMINEMENTS_PARTENAIRE.find((a) => a.cle === contrat.acheminement);
   // Coût du colis pour le partenaire, au tarif de son contrat pour CETTE destination. Reste une
@@ -6558,7 +6654,11 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
     if (!clientNom.trim()) {
       setErr(identiteRequise
         ? "Indiquez le nom du destinataire — c’est lui qui identifie le colis à l’arrivée."
-        : "Indiquez le repère du colis — c’est lui qui permettra au correspondant de le reconnaître.");
+        : "Indiquez qui réceptionne le lot — le correspondant du partenaire, repris de son contrat.");
+      return;
+    }
+    if (!identiteRequise && !repere.trim()) {
+      setErr("Indiquez le repère du colis — c’est lui qui dira au correspondant à qui ce colis revient.");
       return;
     }
     if (articles.some((a) => !a.nom.trim())) { setErr("Décrivez le contenu de chaque article."); return; }
@@ -6589,9 +6689,10 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
        * qu'aucun d'eux ait à connaître la règle. `repereSeul` dit à ceux qui doivent le savoir
        * qu'il ne s'agit pas d'un nom de personne.
        */
-      destinataire: identiteRequise ? `${clientPrenom} ${clientNom}`.trim() : clientNom.trim(),
-      telephone: identiteRequise ? clientTelephone : "",
+      destinataire: `${clientPrenom} ${clientNom}`.trim(),
+      telephone: clientTelephone,
       repereSeul: !identiteRequise,
+      repere: identiteRequise ? "" : repere.trim(),
       destinataireEmail: "", destinataireAdresse: "",
       destinataireVille: "", destinataireCodePostal: "", destinatairePays: sens === "export" ? destPays : "GN",
       pays: paysRoute, direction, mode,
@@ -6644,7 +6745,7 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
                 <option value="">Saisir sans reprendre une annonce</option>
                 {annoncesDuPartenaire.map((a) => (
                   <option key={a.id} value={a.id}>
-                    {a.destinataire} — {(a.articles || []).map((x) => `${x.quantite}× ${x.nom}`).join(", ")}
+                    {libelleAnnonce(a)} — {(a.articles || []).map((x) => `${x.quantite}× ${x.nom}`).join(", ")}
                     {poidsAnnonce(a) > 0 ? ` (~${poidsAnnonce(a).toFixed(1)} kg)` : ""}
                   </option>
                 ))}
@@ -6712,18 +6813,25 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
           </>
         ) : (
           <>
-            <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>Repère du colis</div>
+            <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>Remis à</div>
             <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 10, padding: "11px 13px", marginBottom: 12 }}>
               <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
-                Sur cette destination, le colis est récupéré par le correspondant du partenaire
-                {contrat.correspondant?.nom ? ` (${contrat.correspondant.nom})` : ""}. Nous n’avons
-                donc pas besoin de l’identité du client : un repère suffit à reconnaître le paquet
-                à la remise du lot.
+                Sur cette route, le lot est remis au correspondant du partenaire — repris de son
+                contrat, il n’y a rien à saisir. Le client final n’apparaît pas : c’est le repère,
+                ci-dessous, qui dira à qui ce colis revient.
               </div>
             </div>
-            <Field label="Repère *">
-              <input value={clientNom} onChange={(e) => { setErr(""); setClientNom(e.target.value); }} style={inputStyle}
-                placeholder="une enseigne, un mot, un code — ex : SIRA BOUTIQUE, ou AB-07" />
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
+              <Field label="Prénom"><input value={clientPrenom} onChange={(e) => setClientPrenom(e.target.value)} style={inputStyle} /></Field>
+              <Field label="Nom *"><input value={clientNom} onChange={(e) => { setErr(""); setClientNom(e.target.value); }} style={inputStyle} /></Field>
+            </div>
+            <Field label="Téléphone (facultatif)">
+              <PhoneInput value={clientTelephone} onChange={setClientTelephone}
+                defaultDial={DIAL_CODES.find((c) => c.name === COUNTRIES.find((p) => p.code === destPays)?.name)?.dial} />
+            </Field>
+            <Field label="Repère du colis *">
+              <input value={repere} onChange={(e) => { setErr(""); setRepere(e.target.value); }} style={inputStyle}
+                placeholder="le code du partenaire — ex : colis 1, SF124, SIRA BOUTIQUE" />
             </Field>
           </>
         )}
@@ -11244,15 +11352,32 @@ async function construireEtiquetteDoc(colis, data) {
    * tiret à la place du téléphone laisserait croire à une saisie oubliée.
    */
   const sousRepere = colisSousRepere(colis);
-  eyebrow(sousRepere ? "Repère / Reference" : "Livrer à / Deliver to", M, y);
+  const repere = repereColis(colis);
+  eyebrow("Livrer à / Deliver to", M, y);
   y += 5.5;
   doc.setTextColor(...INK); doc.setFont(undefined, "bold"); doc.setFontSize(13.5);
   const nomLines = ajuster(String(colis.destinataire || "").toUpperCase(), W - 2 * M, 2);
   doc.text(nomLines, M, y);
   y += nomLines.length * 5.2 + 0.5;
   doc.setFont(undefined, "bold"); doc.setFontSize(9.2); doc.setTextColor(35, 42, 55);
-  doc.text(sousRepere ? "Remis au correspondant" : (colis.telephone || "—"), M, y);
+  doc.text(colis.telephone || (sousRepere ? "Correspondant du partenaire" : "—"), M, y);
   y += 4.2;
+  /*
+   * Le repère, en évidence.
+   *
+   * C'est par lui que le correspondant retrouvera ce colis dans un lot de vingt paquets tous
+   * adressés à son nom : sans lui sur l'étiquette, il faudrait les ouvrir. Il est donc encadré,
+   * pas glissé en petit au milieu de l'adresse.
+   */
+  if (repere) {
+    doc.setFillColor(232, 240, 252);
+    doc.roundedRect(M, y - 0.5, W - 2 * M, 8.4, 1.4, 1.4, "F");
+    doc.setFont(undefined, "bold"); doc.setFontSize(7); doc.setTextColor(...MUTED);
+    doc.text("REPÈRE", M + 2, y + 2.6);
+    doc.setFontSize(10.5); doc.setTextColor(...INK);
+    doc.text(ajuster(String(repere).toUpperCase(), W - 2 * M - 22, 1), M + 18, y + 2.9);
+    y += 10.4;
+  }
   if (colis.destinataireEmail) {
     doc.setFont(undefined, "normal"); doc.setFontSize(7.4); doc.setTextColor(...MUTED);
     doc.text(ajuster(colis.destinataireEmail, W - 2 * M, 1), M, y);
@@ -13557,6 +13682,16 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
               {colis.mode === "air" ? <Plane size={12} color="var(--muted)" /> : <Ship size={12} color="var(--muted)" />}
             </span>
             {colis.provenance && <span style={{ background: "var(--surface2)", borderRadius: 6, padding: "2px 8px", fontSize: 10.5, fontWeight: 600, color: "var(--muted)" }}>{colis.provenance}</span>}
+            {/*
+              Le repère à l'écran, pas seulement sur l'étiquette : c'est par lui que l'agent
+              retrouve le bon paquet quand le correspondant vient chercher son lot, et le
+              destinataire affiché est le même pour tous les colis de ce partenaire.
+            */}
+            {repereColis(colis) && (
+              <span style={{ background: "var(--ok-bg-soft)", color: "var(--ok-fg)", borderRadius: 6, padding: "2px 8px", fontSize: 10.5, fontWeight: 700, letterSpacing: 0.3 }}>
+                repère · {repereColis(colis)}
+              </span>
+            )}
           </div>
           <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 4 }}>
             {FLAGS[colis.expediteurPays || "GN"] || ""} → {FLAGS[colis.destinatairePays || colis.pays] || ""} · {routeLabel(colis.pays, colis.direction)} · {colis.destinataire}
@@ -20054,7 +20189,13 @@ function DepotsAnnoncesPartenaire({ annonces, onAnnuler }) {
             <div key={a.id} style={{ background: "var(--surface)", borderRadius: 12, border: "1px solid var(--border)", padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
               <div style={{ minWidth: 0, flex: "1 1 260px" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <span style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{a.destinataire}</span>
+                  <span style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{libelleAnnonce(a)}</span>
+                  {/* Un repère se lit comme un code, pas comme un nom : le dire évite qu'un agent cherche un client de ce nom. */}
+                  {a.repereSeul && (
+                    <span style={{ background: "var(--ok-bg-soft)", color: "var(--ok-fg)", padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>
+                      repère · remis au correspondant
+                    </span>
+                  )}
                   <span style={{ background: "var(--surface2)", color: "var(--muted)", padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>
                     {FLAGS[a.pays] || ""} {pays?.name || a.pays}
                   </span>

@@ -606,6 +606,31 @@ function fmtRaw(n, cur) {
   const decimals = cur === "GNF" || cur === "XOF" ? 0 : 2;
   return +v.toFixed(decimals);
 }
+/*
+ * L'inverse de fmtRaw() : un montant saisi dans une devise, ramené à la base interne.
+ *
+ * Tous les montants sont stockés dans une base commune et convertis à l'affichage. Sans cette
+ * fonction, un agent qui tape « 12 825 000 » sous une étiquette GNF ferait enregistrer douze
+ * millions de fois le taux — une facture réglée mille fois son montant.
+ */
+function versBase(valeur, cur) {
+  const v = Number(String(valeur).replace(",", ".")) || 0;
+  return +(v / (LIVE_RATES[cur] || CURRENCIES[cur] || 1)).toFixed(6);
+}
+/*
+ * La devise de l'autre bout de la route.
+ *
+ * Une facture partenaire se règle des deux côtés : le partenaire est à Conakry, ses colis partent
+ * pour Paris, et selon qui paie et où, on parle en francs guinéens ou en euros. Afficher les deux
+ * montants côte à côte évite la conversion de tête au comptoir — et la dispute qui suit.
+ */
+function deviseCompagnon(devise) {
+  return devise === "GNF" ? "EUR" : "GNF";
+}
+/** Un montant dans sa devise, suivi de son équivalent dans celle de l'autre pays. */
+function fmtDeuxDevises(montant, devise) {
+  return `${fmt(montant, devise)} ~ ${fmt(montant, deviseCompagnon(devise))}`;
+}
 /** Formate un montant déjà exprimé en GNF (ex: prix de catégorie, valeur déclarée saisie directement) sans reconversion. */
 function fmtGNF(n) {
   return `${Math.round(n || 0).toLocaleString("fr-FR")} GNF`;
@@ -725,8 +750,8 @@ function messageRelanceFacture(facture, partenaire, retardJours) {
   const reste = resteDuFacture(facture);
   const regle = totalRegleFacture(facture);
   const detail = regle > 0.005
-    ? `Sur un total de ${fmt(Number(facture.total) || 0, facture.devise)}, nous avons bien reçu ${fmt(regle, facture.devise)}. Il reste ${fmt(reste, facture.devise)}.`
-    : `Elle s'élève à ${fmt(reste, facture.devise)}.`;
+    ? `Sur un total de ${fmt(Number(facture.total) || 0, facture.devise)}, nous avons bien reçu ${fmt(regle, facture.devise)}. Il reste ${fmtDeuxDevises(reste, facture.devise)}.`
+    : `Elle s'élève à ${fmtDeuxDevises(reste, facture.devise)}.`;
   return `${salutation}\n\nVotre facture ${facture?.numero || ""} du ${emise} n'est pas encore soldée — son échéance est dépassée de ${retardJours} jour${retardJours > 1 ? "s" : ""}.\n\n${detail}\n\nMerci de nous dire quand vous pourrez la régler.\n\nBa-Diaby Express`;
 }
 
@@ -901,9 +926,41 @@ const ACHEMINEMENTS_PARTENAIRE = [
 function identiteClientRequise(acheminement) {
   return acheminement !== "correspondant";
 }
-/** Un colis qui ne voyage que sous un repère, sans identité de client. */
+/*
+ * Un colis remis au correspondant du partenaire.
+ *
+ * Deux choses distinctes, qu'on avait d'abord confondues : le **destinataire** est celui qui
+ * réceptionne — le correspondant du partenaire, une personne réelle, à qui l'agent remet le lot —
+ * et le **repère** est le code que le partenaire a choisi pour reconnaître ce colis-là dans le
+ * lot : « colis 1 », « SF124 », une enseigne. Le client final, lui, n'apparaît nulle part : c'est
+ * tout l'intérêt pour le partenaire, et nous n'en avons aucun besoin puisque nous ne le
+ * rencontrons jamais.
+ */
 function colisSousRepere(colis) {
   return !!colis?.repereSeul;
+}
+/*
+ * Le repère d'un colis, quand il en porte un.
+ *
+ * Les colis enregistrés avant que le repère ait son propre champ portent leur code dans le nom du
+ * destinataire — « Colis 1 » à la place de la personne qui réceptionne. On les lit donc ainsi
+ * plutôt que de les afficher sans repère : leur étiquette et leur fiche restent justes, et
+ * l'agent peut corriger le destinataire à tête reposée depuis « Modifier ».
+ */
+function repereColis(colis) {
+  if (!colisSousRepere(colis)) return "";
+  return colis.repere || colis.destinataire || "";
+}
+/*
+ * Sous quel nom une annonce de dépôt s'affiche.
+ *
+ * Une annonce sous repère n'a pas de destinataire : c'est justement ce que le partenaire ne veut
+ * pas nous donner. Afficher le champ vide laisserait une carte sans titre — on montre le repère,
+ * qui est précisément ce qui permet de reconnaître le paquet des deux côtés du comptoir.
+ */
+function libelleAnnonce(annonce) {
+  if (annonce?.repereSeul) return annonce.repere || "Sans repère";
+  return annonce?.destinataire || "Sans destinataire";
 }
 
 /** Complète une destination partenaire pour qu'aucun écran n'ait à gérer un champ manquant. */
@@ -915,6 +972,17 @@ function normaliserDestinationPartenaire(d) {
     parUnite: Number(d?.parUnite) || 0,
     acheminement: ACHEMINEMENTS_PARTENAIRE.some((a) => a.cle === d?.acheminement) ? d.acheminement : "direct",
     correspondant: { nom: c.nom || "", telephone: c.telephone || "", adresse: c.adresse || "" },
+    /*
+     * Notre agent sur place, quand c'est nous qui distribuons.
+     *
+     * Un partenaire qui n'a personne à l'arrivée nous confie tout : la distribution, mais aussi
+     * l'enregistrement des colis qui repartent de là-bas. On désigne alors l'un de nos agents,
+     * basé dans ce pays. Il n'a plus qu'à choisir le partenaire au comptoir : la route part de
+     * chez lui, l'expéditeur est déjà rempli, et il ne saisit que ce qu'il pèse.
+     */
+    agentResponsable: d?.agentResponsable
+      ? { id: d.agentResponsable.id || "", nom: d.agentResponsable.nom || "" }
+      : null,
     fraisPoste: Number(d?.fraisPoste) || 0,
     /*
      * Catégories tarifaires propres à ce partenaire, sur cette destination.
@@ -928,10 +996,20 @@ function normaliserDestinationPartenaire(d) {
       nom: cat?.nom || "",
       type: cat?.type === "kg" ? "kg" : "unite",
       montant: Number(cat?.montant) || 0,
+      /*
+       * L'icône, comme sur les catégories de nos propres colis. Une liste de dix lignes de texte
+       * se lit mal au comptoir ; l'agent reconnaît « 👕 » avant d'avoir lu « vêtements », et il
+       * choisit alors la bonne ligne du premier coup. Le carton par défaut vaut mieux qu'un vide.
+       */
+      emoji: cat?.emoji || "📦",
     })),
   };
 }
 
+/** Libellé d'une catégorie du contrat, icône comprise, tel qu'il s'affiche dans les listes. */
+function libelleCategoriePartenaire(cat, devise) {
+  return `${cat.emoji || "📦"} ${cat.nom} — ${fmt(cat.montant, devise)}/${cat.type === "unite" ? "unité" : "kg"}`;
+}
 /** Prix d'un article : celui de sa catégorie si elle est choisie, sinon le tarif général du pays. */
 function prixArticlePartenaire(article, tarif) {
   const quantite = Number(article?.quantite) || 1;
@@ -1066,6 +1144,83 @@ function estColisExpediable(colis) {
     && statutValidationPartenaire(colis) === "Validé"
     && colis.status === "Enregistré";
 }
+/*
+ * Le contact du client d'un partenaire ne s'affiche pas tout seul.
+ *
+ * Quand le partenaire nous confie la distribution, il n'a pas le choix : il doit nous donner le
+ * nom et le numéro de son client, sans quoi nous ne pouvons ni le joindre ni le reconnaître à la
+ * remise. Sa crainte est alors légitime — le système appartient à son transporteur, et rien ne
+ * lui prouve ce que nous en faisons.
+ *
+ * Le numéro est donc masqué par défaut, et chaque fois qu'un des nôtres le découvre ou s'en sert,
+ * l'accès est inscrit sur le colis. Le partenaire lit ce registre dans son espace : qui, quand,
+ * pourquoi. Une promesse écrite ne rassure personne ; un registre qu'on peut relire, oui.
+ *
+ * Le registre ne contient ni le nom ni le numéro : le colis suffit à savoir de qui il s'agit, et
+ * recopier le contact dans un journal reviendrait à le dupliquer là où il n'a rien à faire.
+ */
+function masquerTelephone(tel) {
+  const s = String(tel || "").trim();
+  if (!s) return "—";
+  if (s.length <= 4) return `${s[0] || ""}${"•".repeat(Math.max(1, s.length - 1))}`;
+  const debut = s.slice(0, 4);
+  const fin = s.slice(-2);
+  return `${debut} ${"•".repeat(Math.max(2, s.length - 6))} ${fin}`;
+}
+/** Les accès déjà inscrits sur un colis. */
+function accesContacts(colis) {
+  return Array.isArray(colis?.accesContacts) ? colis.accesContacts : [];
+}
+/** Une nouvelle ligne de registre. Les cinquante dernières suffisent : au-delà, c'est de l'archive. */
+function inscrireAccesContact(colis, session, motif) {
+  const entree = {
+    id: `ac${Date.now()}${Math.random().toString(36).slice(2, 5)}`,
+    le: new Date().toISOString(),
+    par: `${session?.prenom || ""} ${session?.nom || ""}`.trim() || session?.identifiant || "—",
+    motif,
+  };
+  return [entree, ...accesContacts(colis)].slice(0, 50);
+}
+/** Tous les accès aux contacts des clients d'un partenaire, du plus récent au plus ancien. */
+function accesContactsDuPartenaire(colisListe, partenaireId) {
+  return (colisListe || [])
+    .filter((c) => c.partenaireId === partenaireId)
+    .flatMap((c) => accesContacts(c).map((a) => ({ ...a, tracking: c.tracking, destinataire: c.destinataire })))
+    .sort((a, b) => new Date(b.le) - new Date(a.le));
+}
+
+/*
+ * Les colis d'un partenaire qu'un correspondant doit encore venir chercher.
+ *
+ * C'est le point exact où notre responsabilité s'arrête : le lot quitte notre entrepôt dans les
+ * mains de quelqu'un que nous ne connaissons pas, et jusqu'ici rien ne l'écrivait. Un colis déjà
+ * remis sort de la liste — sinon le même lot se remettrait deux fois.
+ */
+function colisARemettre(colisListe, partenaireId, pays) {
+  return (colisListe || []).filter((c) => c.partenaireId === partenaireId
+    && (c.acheminementFinal || "direct") === "correspondant"
+    && (!pays || (c.destinatairePays || c.pays) === pays)
+    && !c.remiseCorrespondant
+    && c.status !== "Annulé"
+    && ["Arrivé", "Disponible au retrait", "Livré"].includes(c.status));
+}
+/** Les destinations où un lot attend son correspondant, avec ce qu'il contient. */
+function lotsARemettre(colisListe, partenaire) {
+  const attente = colisARemettre(colisListe, partenaire?.id);
+  const parPays = new Map();
+  attente.forEach((c) => {
+    const pays = c.destinatairePays || c.pays;
+    if (!parPays.has(pays)) parPays.set(pays, []);
+    parPays.get(pays).push(c);
+  });
+  return [...parPays.entries()].map(([pays, colis]) => ({
+    pays,
+    colis,
+    poids: +colis.reduce((somme, c) => somme + (Number(c.poids) || 0), 0).toFixed(1),
+    correspondant: tarifPartenairePourPays(partenaire, pays).correspondant || {},
+  }));
+}
+
 /** Colis partenaires validés qui n'ont pas encore été portés sur une facture. */
 function colisPartenaireAFacturer(colis, partenaireId) {
   return (colis || []).filter((c) => c.partenaireId === partenaireId
@@ -4980,6 +5135,15 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
   const moi = (data.users || []).find((u) => u.id === partenaireId) || session;
   const monCompte = (data.users || []).find((u) => u.id === session.id) || session;
   const mesEmployes = useMemo(() => employesDuPartenaire(data.users, partenaireId), [data.users, partenaireId]);
+  /*
+   * Où un employé peut être basé : la Guinée, et chacune des destinations ouvertes au partenaire.
+   * Ce sont les deux bouts de ses routes — il n'y a pas d'autre endroit où il puisse déposer.
+   */
+  const lieuxOperationPossibles = useMemo(() => {
+    const guinee = COUNTRIES.find((c) => c.code === "GN");
+    const autres = paysAutorisesPartenaire(moi).filter((c) => c.code !== "GN");
+    return [guinee, ...autres].filter(Boolean);
+  }, [moi]);
   const reglages = reglagesPartenaire(moi);
   const devise = reglages.tarif.devise;
   const mesFactures = montantsVisibles
@@ -5033,6 +5197,12 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
    * et le dire évite l'appel téléphonique qui suit toujours.
    */
   const mesAnnonces = useMemo(() => depotsAnnonces(data, partenaireId), [data.preAlertesPartenaire, partenaireId]);
+  /*
+   * Ce que nous avons fait de ses contacts. Sur les destinations où il nous confie la
+   * distribution, il doit nous donner l'identité de son client : ce registre est la contrepartie.
+   */
+  const mesAccesContacts = useMemo(() => accesContactsDuPartenaire(data.colis, partenaireId), [data.colis, partenaireId]);
+  const [photoOuverte, setPhotoOuverte] = useState(null);
   const prets = colisPartenaire.filter(estColisExpediable);
   const bloques = colisPartenaire.filter((c) => statutValidationPartenaire(c) === "En attente"
     && c.status === "Enregistré");
@@ -5142,7 +5312,7 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
       ...annonce,
     };
     persist({ ...data, preAlertesPartenaire: [preAlerte, ...(data.preAlertesPartenaire || [])] });
-    notify?.(`Dépôt annoncé pour ${annonce.destinataire}`);
+    notify?.(`Dépôt annoncé — ${libelleAnnonce(annonce)}`);
     setShowAnnonce(false);
   }
 
@@ -5232,7 +5402,7 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
    * Cinq au maximum : un accès nominatif reste nominatif. Au-delà, c'est un compte partagé qui
    * circule, et plus personne ne sait qui a enregistré quoi.
    */
-  async function creerAcces({ prenom, nom, identifiant, motdepasse, voitLesMontants: voit }) {
+  async function creerAcces({ prenom, nom, identifiant, motdepasse, voitLesMontants: voit, lieuOperation }) {
     const propre = String(identifiant || "").trim();
     if (!prenom.trim() || !nom.trim() || !propre) return { erreur: "Renseignez le prénom, le nom et l’identifiant." };
     if (!motdepasse || motdepasse.length < 8) return { erreur: "Choisissez un mot de passe d’au moins 8 caractères." };
@@ -5252,6 +5422,13 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
       id: `pe${Date.now()}`,
       prenom: prenom.trim(), nom: nom.trim(), identifiant: propre,
       role: "Partenaire", partenaireParent: partenaireId, voitLesMontants: !!voit,
+      /*
+       * Le lieu d'où cette personne travaille. Un partenaire tient un dépôt à Conakry et un autre
+       * à Paris : celui de Paris enregistre des colis qui partent de France, celui de Conakry des
+       * colis qui en partent. Sans ce repère, l'application supposait toujours un départ de
+       * Guinée, et l'employé de Paris devait corriger le sens à chaque colis.
+       */
+      lieuOperation: lieuOperation || "GN",
       email: "", telephone: "", twoFA: false, ...identifiants,
     };
     await persist({
@@ -5399,7 +5576,7 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.expediteur || "—"}</td>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>
                     {c.destinataire}
-                    {colisSousRepere(c) && <div style={{ fontSize: 10.5, color: "var(--muted)" }}>repère</div>}
+                    {repereColis(c) && <div style={{ fontSize: 10.5, color: "var(--muted)" }}>repère : {repereColis(c)}</div>}
                   </td>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.poids} kg</td>
                   {montantsVisibles && <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 700, whiteSpace: "nowrap" }}>{fmt(Number(c.prixPartenaire) || 0, c.devisePartenaire || devise)}</td>}
@@ -5407,6 +5584,18 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
                     <span style={{ background: valide ? "var(--ok-bg-soft)" : "var(--warn-bg)", color: valide ? "var(--ok-fg)" : "var(--warn-fg)", padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>
                       {valide ? "Vérifié" : "En attente"}
                     </span>
+                    {/*
+                      La photo prise à l'ouverture du colis. Le partenaire n'était pas là : c'est
+                      la seule chose qui lui dise ce que nous avons constaté, et ce sur quoi il
+                      s'appuiera le jour où son client conteste le contenu.
+                    */}
+                    {c.photoVerification && (
+                      <button type="button" onClick={() => setPhotoOuverte(c)}
+                        style={{ display: "block", background: "none", border: "none", padding: "4px 0 0", cursor: "pointer" }}>
+                        <img src={c.photoVerification} alt={`Contenu du colis ${c.tracking} à la vérification`}
+                          style={{ width: 38, height: 38, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border)" }} />
+                      </button>
+                    )}
                     {montantsVisibles && facture && <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 3 }}>{facture.numero}</div>}
                   </td>
                   <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}><span style={{ background: st?.bg, color: st?.fg, padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>{c.status}</span></td>
@@ -5476,7 +5665,7 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
                   <div key={a.id} style={{ background: "var(--surface2)", borderRadius: 12, padding: "11px 13px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                     <div style={{ minWidth: 0 }}>
                       <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>
-                        {a.destinataire} · {FLAGS[a.pays] || ""} {pays?.name || a.pays}
+                        {libelleAnnonce(a)} · {FLAGS[a.pays] || ""} {pays?.name || a.pays}
                       </div>
                       <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2, lineHeight: 1.5 }}>
                         {(a.articles || []).map((x) => `${x.quantite}× ${x.nom}`).join(", ")}
@@ -5608,6 +5797,7 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
         </div>
       )}
 
+      {onglet === "clients" && <RegistreAccesContacts acces={mesAccesContacts} />}
       {onglet === "clients" && (
         <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", marginBottom: 20 }}>
           <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)" }}>
@@ -5684,9 +5874,10 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
                 <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
                   <div style={{ textAlign: "right" }}>
                     <strong style={{ fontSize: 17, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif" }}>{fmt(Number(f.total) || 0, f.devise)}</strong>
+                    <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>soit {fmt(Number(f.total) || 0, deviseCompagnon(f.devise))}</div>
                     {statut !== "Impayée" && (
                       <div style={{ fontSize: 11.5, fontWeight: 700, marginTop: 2, color: reste > 0.005 ? "var(--warn-fg)" : "var(--ok-fg)" }}>
-                        {reste > 0.005 ? `reste ${fmt(reste, f.devise)}` : "réglée"}
+                        {reste > 0.005 ? `reste ${fmtDeuxDevises(reste, f.devise)}` : "réglée"}
                       </div>
                     )}
                   </div>
@@ -5746,6 +5937,7 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
             <AccesEmployes
               employes={mesEmployes} onCreer={creerAcces} onSupprimer={supprimerAcces}
               onBasculerMontants={basculerMontantsEmploye} onReinitialiser={reinitialiserAcces}
+              lieuxPossibles={lieuxOperationPossibles}
             />
           )}
           {montantsVisibles && (
@@ -5772,7 +5964,7 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
                   {d.categories.length > 0 && (
                     <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 6, lineHeight: 1.6 }}>
                       {d.categories.map((cat) => (
-                        <div key={cat.id}>{cat.nom} : <strong style={{ color: "var(--text)" }}>{fmt(cat.montant, devise)}</strong> / {cat.type === "unite" ? "unité" : "kg"}</div>
+                        <div key={cat.id}>{cat.emoji || "📦"} {cat.nom} : <strong style={{ color: "var(--text)" }}>{fmt(cat.montant, devise)}</strong> / {cat.type === "unite" ? "unité" : "kg"}</div>
                       ))}
                     </div>
                   )}
@@ -5785,6 +5977,13 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
                       <> — {fmt(d.fraisPoste, devise)} de frais de poste par colis, à votre charge</>
                     )}
                   </div>
+                  {/* Savoir qui, chez nous, s'occupe de ses colis sur place évite l'appel au standard. */}
+                  {d.agentResponsable?.nom && (
+                    <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 5, lineHeight: 1.5 }}>
+                      Votre interlocuteur sur place : <strong style={{ color: "var(--text)" }}>{d.agentResponsable.nom}</strong> —
+                      il distribue vos colis et enregistre ceux que vous déposez là-bas.
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -5794,6 +5993,7 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
             </div>
           </div>
           )}
+          {montantsVisibles && <SimulateurCoutPartenaire reglages={reglages} />}
         </div>
       )}
 
@@ -5801,10 +6001,24 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
         <AnnoncerDepotModal partenaire={moi} onClose={() => setShowAnnonce(false)} onAnnoncer={annoncerDepot} />
       )}
 
+      {photoOuverte && (
+        <Modal title={`Contenu constaté — ${photoOuverte.tracking}`} onClose={() => setPhotoOuverte(null)}>
+          <img src={photoOuverte.photoVerification} alt={`Contenu du colis ${photoOuverte.tracking}`}
+            style={{ width: "100%", borderRadius: 10, border: "1px solid var(--border)" }} />
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 12, lineHeight: 1.55 }}>
+            Photographié à l’ouverture du colis par notre agent, au moment de la pesée
+            {photoOuverte.validationPartenaire?.le
+              ? `, le ${new Date(photoOuverte.validationPartenaire.le).toLocaleDateString("fr-FR")}`
+              : ""}
+            {photoOuverte.validationPartenaire?.par ? ` (${photoOuverte.validationPartenaire.par})` : ""}.
+          </div>
+        </Modal>
+      )}
+
       {annonceASupprimer && (
         <ConfirmerAction
           titre="Retirer cette annonce ?"
-          message={`${annonceASupprimer.destinataire} — ${(annonceASupprimer.articles || []).map((x) => `${x.quantite}× ${x.nom}`).join(", ")}.`}
+          message={`${libelleAnnonce(annonceASupprimer)} — ${(annonceASupprimer.articles || []).map((x) => `${x.quantite}× ${x.nom}`).join(", ")}.`}
           consequence="L’annonce disparaît de la liste de l’agence. Si vous apportez quand même le colis, il sera enregistré normalement au comptoir."
           libelleAction="Retirer"
           onConfirmer={() => { const a = annonceASupprimer; setAnnonceASupprimer(null); retirerAnnonce(a); }}
@@ -5926,13 +6140,14 @@ function MonMotDePasse({ compte, onChanger }) {
  * est son prix de revient, donc sa marge. Le partenaire peut l'ouvrir accès par accès — à un
  * gérant de dépôt, oui ; à un manutentionnaire, sans doute pas.
  */
-function AccesEmployes({ employes, onCreer, onSupprimer, onBasculerMontants, onReinitialiser }) {
+function AccesEmployes({ employes, onCreer, onSupprimer, onBasculerMontants, onReinitialiser, lieuxPossibles }) {
   const [ouvert, setOuvert] = useState(false);
   const [prenom, setPrenom] = useState("");
   const [nom, setNom] = useState("");
   const [identifiant, setIdentifiant] = useState("");
   const [motdepasse, setMotdepasse] = useState("");
   const [voit, setVoit] = useState(false);
+  const [lieuOperation, setLieuOperation] = useState("GN");
   const [err, setErr] = useState("");
   const [occupe, setOccupe] = useState(false);
   const [aSupprimer, setASupprimer] = useState(null);
@@ -5941,14 +6156,14 @@ function AccesEmployes({ employes, onCreer, onSupprimer, onBasculerMontants, onR
   const restants = MAX_EMPLOYES_PARTENAIRE - employes.length;
 
   function fermer() {
-    setOuvert(false); setPrenom(""); setNom(""); setIdentifiant(""); setMotdepasse(""); setVoit(false); setErr("");
+    setOuvert(false); setPrenom(""); setNom(""); setIdentifiant(""); setMotdepasse(""); setVoit(false); setLieuOperation("GN"); setErr("");
   }
 
   async function valider(e) {
     e.preventDefault();
     setErr("");
     setOccupe(true);
-    const r = await onCreer({ prenom, nom, identifiant, motdepasse, voitLesMontants: voit });
+    const r = await onCreer({ prenom, nom, identifiant, motdepasse, voitLesMontants: voit, lieuOperation });
     setOccupe(false);
     if (r?.erreur) { setErr(r.erreur); return; }
     setMotDePasseAffiche({ identifiant: identifiant.trim(), motdepasse });
@@ -5972,7 +6187,10 @@ function AccesEmployes({ employes, onCreer, onSupprimer, onBasculerMontants, onR
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                 <div style={{ minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{u.prenom} {u.nom}</div>
-                  <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>@{u.identifiant}</div>
+                  <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                    @{u.identifiant}
+                    {u.lieuOperation && ` · ${FLAGS[u.lieuOperation] || ""} ${COUNTRIES.find((c) => c.code === u.lieuOperation)?.name || u.lieuOperation}`}
+                  </div>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
                   <button onClick={() => onBasculerMontants(u)}
@@ -6012,6 +6230,19 @@ function AccesEmployes({ employes, onCreer, onSupprimer, onBasculerMontants, onR
           </Field>
           <Field label="Mot de passe">
             <input value={motdepasse} onChange={(e) => setMotdepasse(e.target.value)} style={inputStyle} placeholder="8 caractères au minimum" />
+          </Field>
+          {/*
+            D'où cette personne travaille. C'est ce qui décide du sens par défaut de ses colis :
+            celui qui tient le dépôt de Paris enregistre des envois qui partent de France.
+          */}
+          <Field label="Lieu d’opération">
+            <select value={lieuOperation} onChange={(e) => setLieuOperation(e.target.value)} style={inputStyle}>
+              {lieuxPossibles.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code] || ""} {c.name}</option>)}
+            </select>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 5, lineHeight: 1.5 }}>
+              Ses colis partiront de là par défaut. Il pourra expédier vers toutes vos destinations
+              autorisées, dans les deux sens.
+            </div>
           </Field>
           <button type="button" onClick={() => setVoit((v) => !v)}
             style={{ display: "flex", alignItems: "center", gap: 8, background: "none", border: "none", padding: 0, marginBottom: 14, cursor: "pointer", textAlign: "left" }}>
@@ -6174,8 +6405,14 @@ function AnnoncerDepotModal({ partenaire, onClose, onAnnoncer }) {
       .filter((a) => a.nom);
     if (propres.length === 0) { setErr("Décrivez au moins un article."); return; }
     if (propres.some((a) => a.poids < 0)) { setErr("Les poids annoncés doivent être positifs."); return; }
+    /*
+     * Sous repère, ce que le partenaire saisit n'est pas un destinataire mais un code. Le
+     * destinataire, c'est son correspondant — nous le connaissons déjà par son contrat, il n'a
+     * pas à le retaper à chaque colis.
+     */
     onAnnoncer({
-      destinataire: destinataire.trim(),
+      destinataire: identiteRequise ? destinataire.trim() : "",
+      repere: identiteRequise ? "" : destinataire.trim(),
       telephone: identiteRequise ? telephone.trim() : "",
       repereSeul: !identiteRequise,
       pays, articles: propres, note: note.trim(),
@@ -6201,9 +6438,9 @@ function AnnoncerDepotModal({ partenaire, onClose, onAnnoncer }) {
         <>
           <div style={{ background: "var(--ok-bg-soft)", border: "1px solid var(--ok-border)", borderRadius: 10, padding: "11px 13px", marginBottom: 12 }}>
             <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
-              Sur cette destination, c’est <strong>votre correspondant</strong> qui récupère le lot.
+              Sur cette destination, le lot est remis à <strong>{contrat.correspondant?.nom || "votre correspondant"}</strong>.
               Nous ne vous demandons donc ni le nom ni le numéro de votre client : indiquez
-              simplement un repère pour reconnaître le paquet.
+              simplement le repère qui vous permettra de reconnaître ce colis dans le lot.
             </div>
           </div>
           <Field label="Repère du colis *">
@@ -6447,7 +6684,7 @@ function IdentitePartenaire({ partenaire, session, onSave }) {
  * Le même formulaire sert au partenaire (son compte est alors imposé) et à l'agent du comptoir
  * qui enregistre à sa place (il choisit le partenaire dans la liste).
  */
-function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenaires, partenaireImpose, annonces }) {
+function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenaires, partenaireImpose, annonces, factures }) {
   const [partenaireId, setPartenaireId] = useState(partenaireImpose || "");
   /*
    * Reprendre un dépôt annoncé.
@@ -6466,8 +6703,16 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
   const [clientPrenom, setClientPrenom] = useState("");
   const [clientNom, setClientNom] = useState("");
   const [clientTelephone, setClientTelephone] = useState("");
+  const [repere, setRepere] = useState("");
   const [destPays, setDestPays] = useState("FR");
-  const [sens, setSens] = useState("export");
+  /*
+   * Le sens part de là où travaille celui qui enregistre.
+   *
+   * Un employé basé à Paris dépose des colis qui quittent la France : lui présenter « Conakry →
+   * Paris » par défaut, c'est le faire corriger à chaque colis, et se tromper un jour sur deux.
+   * Un agent de l'entreprise ou le titulaire du compte partent de Guinée, comme avant.
+   */
+  const [sens, setSens] = useState(() => (session?.lieuOperation && session.lieuOperation !== "GN" ? "import" : "export"));
   const [mode, setMode] = useState("air");
   const [articles, setArticles] = useState(() => [{ ...emptyProduit(), tarification: "kg", categoriePartenaire: "" }]);
   const [err, setErr] = useState("");
@@ -6486,12 +6731,13 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
      * « SIRA » / « BOUTIQUE », et le colis partirait sous une identité inventée.
      */
     if (a.repereSeul) {
-      setClientPrenom(""); setClientNom(a.destinataire || "");
+      // Le destinataire vient du contrat ; l'annonce n'apporte que le repère.
+      setRepere(a.repere || "");
     } else {
       const { prenom, nom } = splitNom(a.destinataire);
       setClientPrenom(prenom); setClientNom(nom);
+      setClientTelephone(a.telephone || "");
     }
-    setClientTelephone(a.telephone || "");
     setDestPays(a.pays || "FR");
     setArticles((a.articles || []).map((x, i) => ({
       ...emptyProduit(), id: `p${Date.now()}${i}`, tarification: "kg", categoriePartenaire: "",
@@ -6506,6 +6752,28 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
    */
   const paysDisponibles = partenaire ? paysAutorisesPartenaire(partenaire) : allowedCountries(session);
   const [destPaysAjuste, setDestPaysAjuste] = useState(false);
+  useEffect(() => {
+    // La route par défaut est celle du lieu d'opération : on n'y revient pas si l'agent en change.
+    const lieu = session?.lieuOperation;
+    if (lieu && lieu !== "GN" && paysDisponibles.some((c) => c.code === lieu)) setDestPays(lieu);
+  }, []);
+  /*
+   * L'agent que nous avons placé chez ce partenaire.
+   *
+   * Quand le partenaire n'a personne à l'arrivée, l'un de nos agents en est responsable sur place :
+   * il distribue, et il enregistre les colis qui repartent de ce pays. Pour lui, la route va de
+   * là où il est vers Conakry — la lui présenter à l'envers, c'est le faire corriger vingt fois
+   * par jour. Un autre agent peut toujours choisir une autre route : ce n'est qu'un défaut.
+   */
+  const maDestinationAffectee = useMemo(() => {
+    if (!partenaire || !session?.id) return null;
+    return reglagesPartenaire(partenaire).destinations.find((d) => d.agentResponsable?.id === session.id) || null;
+  }, [partenaire, session?.id]);
+  useEffect(() => {
+    if (!maDestinationAffectee) return;
+    setDestPays(maDestinationAffectee.pays);
+    setSens("import");
+  }, [maDestinationAffectee]);
   useEffect(() => {
     // Le pays retenu doit rester dans les destinations du partenaire choisi.
     if (paysDisponibles.length && !paysDisponibles.some((c) => c.code === destPays)) {
@@ -6525,6 +6793,7 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
     setExpNom(identite.nom || identite.prenom);
     setExpTelephone(r.telephone || partenaire.telephone || "");
   }, [partenaireId]);
+
   /*
    * Le sens de l'envoi, choisi colis par colis.
    *
@@ -6538,6 +6807,44 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
   const poidsTotal = articles.reduce((s, a) => s + (Number(a.poids) || 0), 0);
   const contrat = tarifPartenairePourPays(partenaire, paysRoute);
   const identiteRequise = identiteClientRequise(contrat.acheminement);
+  /*
+   * Les deux bouts de la route se remplissent seuls.
+   *
+   * Le partenaire d'un côté, son correspondant de l'autre : nous les connaissons tous les deux
+   * par son contrat, et ils ne changent pas d'un colis à l'autre. L'agent n'a plus à saisir que
+   * ce qui varie — le poids, la quantité, la catégorie — c'est-à-dire ce qu'il constate lui-même
+   * au comptoir. Les champs restent modifiables : un dépôt exceptionnel se corrige à la main.
+   */
+  useEffect(() => {
+    if (!partenaire || identiteRequise) return;
+    const c = contrat.correspondant || {};
+    if (!c.nom) return;
+    const { prenom, nom } = splitNom(c.nom);
+    setClientPrenom(prenom); setClientNom(nom || prenom);
+    setClientTelephone(c.telephone || "");
+  }, [partenaireId, destPays, sens, identiteRequise]);
+
+  /*
+   * Ce que ce partenaire doit encore, calculé au moment du dépôt.
+   *
+   * Le montant n'est donné que si le formulaire a reçu les factures : le partenaire qui dépose
+   * depuis son propre espace n'a pas à voir ce rappel, il a déjà l'onglet Factures pour cela, et
+   * son employé n'a pas forcément le droit de voir les montants.
+   */
+  const encours = useMemo(() => {
+    if (!factures || !partenaire) return null;
+    const r = reglagesPartenaire(partenaire);
+    const siennes = factures.filter((f) => f.partenaireId === partenaire.id);
+    const retard = facturesEnRetard(siennes, r.delaiReglementJours);
+    if (retard.length === 0) return null;
+    return {
+      retard,
+      libelle: r.nomCommercial || `${partenaire.prenom} ${partenaire.nom}`.trim(),
+      montant: +retard.reduce((somme, f) => somme + resteDuFacture(f), 0).toFixed(2),
+      devise: retard[0].devise || r.tarif.devise,
+      jours: retardFacture(retard[0], r.delaiReglementJours),
+    };
+  }, [factures, partenaire]);
   const tarifDefini = contrat.parKg > 0 || contrat.parUnite > 0;
   const acheminement = ACHEMINEMENTS_PARTENAIRE.find((a) => a.cle === contrat.acheminement);
   // Coût du colis pour le partenaire, au tarif de son contrat pour CETTE destination. Reste une
@@ -6558,7 +6865,11 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
     if (!clientNom.trim()) {
       setErr(identiteRequise
         ? "Indiquez le nom du destinataire — c’est lui qui identifie le colis à l’arrivée."
-        : "Indiquez le repère du colis — c’est lui qui permettra au correspondant de le reconnaître.");
+        : "Indiquez qui réceptionne le lot — le correspondant du partenaire, repris de son contrat.");
+      return;
+    }
+    if (!identiteRequise && !repere.trim()) {
+      setErr("Indiquez le repère du colis — c’est lui qui dira au correspondant à qui ce colis revient.");
       return;
     }
     if (articles.some((a) => !a.nom.trim())) { setErr("Décrivez le contenu de chaque article."); return; }
@@ -6589,9 +6900,10 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
        * qu'aucun d'eux ait à connaître la règle. `repereSeul` dit à ceux qui doivent le savoir
        * qu'il ne s'agit pas d'un nom de personne.
        */
-      destinataire: identiteRequise ? `${clientPrenom} ${clientNom}`.trim() : clientNom.trim(),
-      telephone: identiteRequise ? clientTelephone : "",
+      destinataire: `${clientPrenom} ${clientNom}`.trim(),
+      telephone: clientTelephone,
       repereSeul: !identiteRequise,
+      repere: identiteRequise ? "" : repere.trim(),
       destinataireEmail: "", destinataireAdresse: "",
       destinataireVille: "", destinataireCodePostal: "", destinatairePays: sens === "export" ? destPays : "GN",
       pays: paysRoute, direction, mode,
@@ -6644,7 +6956,7 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
                 <option value="">Saisir sans reprendre une annonce</option>
                 {annoncesDuPartenaire.map((a) => (
                   <option key={a.id} value={a.id}>
-                    {a.destinataire} — {(a.articles || []).map((x) => `${x.quantite}× ${x.nom}`).join(", ")}
+                    {libelleAnnonce(a)} — {(a.articles || []).map((x) => `${x.quantite}× ${x.nom}`).join(", ")}
                     {poidsAnnonce(a) > 0 ? ` (~${poidsAnnonce(a).toFixed(1)} kg)` : ""}
                   </option>
                 ))}
@@ -6670,6 +6982,22 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
               </div>
             )}
           </Field>
+        )}
+        {/*
+          Ce que ce partenaire doit déjà, dit à l'agent au moment où il accepte le dépôt.
+          L'information existait, mais dans un autre écran : celui qui tient le comptoir prenait
+          les colis sans la connaître. On avertit, on ne bloque pas — c'est à l'entreprise de
+          décider si elle continue à charger un partenaire en retard, pas à l'application.
+        */}
+        {encours && (
+          <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-fg)", borderRadius: 10, padding: "11px 13px", marginBottom: 14 }}>
+            <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
+              <strong>{encours.libelle}</strong> — {encours.retard.length} facture{encours.retard.length > 1 ? "s" : ""} en
+              retard, {fmt(encours.montant, encours.devise)} restant dû
+              {encours.jours > 0 ? `, la plus ancienne depuis ${encours.jours} jour${encours.jours > 1 ? "s" : ""}` : ""}.
+              Vous pouvez enregistrer ce dépôt : c’est un rappel, pas un blocage.
+            </div>
+          </div>
         )}
 
         {partenaire && !tarifDefini && (
@@ -6712,18 +7040,25 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
           </>
         ) : (
           <>
-            <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>Repère du colis</div>
+            <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>Remis à</div>
             <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 10, padding: "11px 13px", marginBottom: 12 }}>
               <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
-                Sur cette destination, le colis est récupéré par le correspondant du partenaire
-                {contrat.correspondant?.nom ? ` (${contrat.correspondant.nom})` : ""}. Nous n’avons
-                donc pas besoin de l’identité du client : un repère suffit à reconnaître le paquet
-                à la remise du lot.
+                Sur cette route, le lot est remis au correspondant du partenaire — repris de son
+                contrat, il n’y a rien à saisir. Le client final n’apparaît pas : c’est le repère,
+                ci-dessous, qui dira à qui ce colis revient.
               </div>
             </div>
-            <Field label="Repère *">
-              <input value={clientNom} onChange={(e) => { setErr(""); setClientNom(e.target.value); }} style={inputStyle}
-                placeholder="une enseigne, un mot, un code — ex : SIRA BOUTIQUE, ou AB-07" />
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
+              <Field label="Prénom"><input value={clientPrenom} onChange={(e) => setClientPrenom(e.target.value)} style={inputStyle} /></Field>
+              <Field label="Nom *"><input value={clientNom} onChange={(e) => { setErr(""); setClientNom(e.target.value); }} style={inputStyle} /></Field>
+            </div>
+            <Field label="Téléphone (facultatif)">
+              <PhoneInput value={clientTelephone} onChange={setClientTelephone}
+                defaultDial={DIAL_CODES.find((c) => c.name === COUNTRIES.find((p) => p.code === destPays)?.name)?.dial} />
+            </Field>
+            <Field label="Repère du colis *">
+              <input value={repere} onChange={(e) => { setErr(""); setRepere(e.target.value); }} style={inputStyle}
+                placeholder="le code du partenaire — ex : colis 1, SF124, SIRA BOUTIQUE" />
             </Field>
           </>
         )}
@@ -6762,6 +7097,14 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
         {destPaysAjuste && (
           <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -8, marginBottom: 12 }}>
             Seules les destinations ouvertes à ce partenaire sont proposées.
+          </div>
+        )}
+        {/* Dire à l'agent pourquoi la route est déjà celle-là vaut mieux que de le laisser deviner. */}
+        {maDestinationAffectee && (
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -8, marginBottom: 12, lineHeight: 1.5 }}>
+            Vous êtes l’agent responsable de ce partenaire
+            {" "}{FLAGS[maDestinationAffectee.pays] || ""} {COUNTRIES.find((c) => c.code === maDestinationAffectee.pays)?.name || maDestinationAffectee.pays} :
+            la route part de là par défaut. Changez-la si ce dépôt part de Conakry.
           </div>
         )}
         {/*
@@ -6812,7 +7155,7 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
                 <select value={a.categoriePartenaire || ""} onChange={(e) => majArticle(a.id, { categoriePartenaire: e.target.value })} style={inputStyle}>
                   <option value="">Tarif général</option>
                   {contrat.categories.map((cat) => (
-                    <option key={cat.id} value={cat.id}>{cat.nom} — {fmt(cat.montant, contrat.devise)}/{cat.type === "unite" ? "unité" : "kg"}</option>
+                    <option key={cat.id} value={cat.id}>{libelleCategoriePartenaire(cat, contrat.devise)}</option>
                   ))}
                 </select>
               </Field>
@@ -6838,7 +7181,7 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
                       {(cat ? cat.type : a.tarification) === "unite"
                         ? `${Number(a.quantite) || 1} × ${fmt(cat ? cat.montant : contrat.parUnite, contrat.devise)}`
                         : `${Number(a.poids) || 0} kg × ${fmt(cat ? cat.montant : contrat.parKg, contrat.devise)}`}
-                      {cat ? ` (${cat.nom})` : ""}
+                      {cat ? ` (${cat.emoji || "📦"} ${cat.nom})` : ""}
                       {" = "}
                       <strong style={{ color: "var(--text)" }}>{fmt(prixArticlePartenaire(a, contrat), contrat.devise)}</strong>
                     </div>
@@ -7762,6 +8105,179 @@ function CategoriesProduitsPage({ data, persist, session, notify, onBack }) {
 const inputStyle = { width: "100%", border: `1.5px solid ${BORDER}`, borderRadius: 8, padding: "9px 11px", fontSize: 13.5, outline: "none", color: TEXT, background: SURFACE2 };
 const toggleBtn = { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, border: `1.5px solid ${BORDER}`, background: SURFACE2, borderRadius: 8, padding: "9px 0", fontSize: 13, cursor: "pointer", color: MUTED };
 const toggleActive = { background: BLUE, color: "#fff", borderColor: BLUE };
+
+/*
+ * Ce qu'un colis lui coûtera, avant qu'il ne le dépose.
+ *
+ * Le partenaire annonce un prix à son client avant de venir : aujourd'hui il appelle l'agence
+ * pour savoir ce que le transport lui coûtera, ou il devine. Un poids, une catégorie, et il a le
+ * chiffre — le nôtre, celui de son contrat.
+ *
+ * On ne lui demande jamais ce qu'il revendra. Ce prix-là lui appartient, et le système appartient
+ * à son transporteur : lui demander de l'écrire ici serait le meilleur moyen qu'il n'utilise
+ * jamais cet écran.
+ */
+function SimulateurCoutPartenaire({ reglages }) {
+  const destinations = reglages.destinations;
+  const [pays, setPays] = useState(() => destinations[0]?.pays || "");
+  const [poids, setPoids] = useState("");
+  const [quantite, setQuantite] = useState("1");
+  const [categorieId, setCategorieId] = useState("");
+  const devise = reglages.tarif.devise;
+  const dest = destinations.find((d) => d.pays === pays);
+
+  if (destinations.length === 0) return null;
+
+  const categorie = (dest?.categories || []).find((c) => c.id === categorieId) || null;
+  const article = {
+    poids: Number(String(poids).replace(",", ".")) || 0,
+    quantite: Number(quantite) || 1,
+    categoriePartenaire: categorieId,
+    tarification: "kg",
+  };
+  const transport = dest ? prixArticlePartenaire(article, dest) : 0;
+  // Le timbre s'ajoute au transport quand c'est nous qui postons : le taire fausserait le calcul.
+  const poste = dest?.acheminement === "poste" ? (Number(dest.fraisPoste) || 0) : 0;
+  const total = +(transport + poste).toFixed(2);
+  const saisi = article.poids > 0 || categorie;
+
+  return (
+    <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", padding: 20, marginBottom: 16 }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>Combien va me coûter ce colis ?</div>
+      <div style={{ fontSize: 12, color: "var(--muted)", margin: "4px 0 14px", lineHeight: 1.55 }}>
+        Le coût du transport à votre tarif, avant de venir déposer. Ce que vous facturez à votre
+        client ne nous regarde pas et n’est écrit nulle part ici.
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 10 }}>
+        <Field label="Destination">
+          <select value={pays} onChange={(e) => { setPays(e.target.value); setCategorieId(""); }} style={{ ...inputStyle, marginBottom: 0 }}>
+            {destinations.map((d) => (
+              <option key={d.pays} value={d.pays}>{FLAGS[d.pays] || ""} {COUNTRIES.find((c) => c.code === d.pays)?.name || d.pays}</option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Poids (kg)">
+          <input value={poids} onChange={(e) => setPoids(e.target.value)} inputMode="decimal" placeholder="0" style={{ ...inputStyle, marginBottom: 0 }} />
+        </Field>
+        <Field label="Quantité">
+          <input value={quantite} onChange={(e) => setQuantite(e.target.value)} inputMode="numeric" style={{ ...inputStyle, marginBottom: 0 }} />
+        </Field>
+      </div>
+      {(dest?.categories || []).length > 0 && (
+        <Field label="Catégorie">
+          <select value={categorieId} onChange={(e) => setCategorieId(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }}>
+            <option value="">Tarif général — {fmt(dest.parKg, devise)}/kg</option>
+            {dest.categories.map((c) => <option key={c.id} value={c.id}>{libelleCategoriePartenaire(c, devise)}</option>)}
+          </select>
+        </Field>
+      )}
+      <div style={{ background: "var(--surface2)", borderRadius: 10, padding: "13px 15px", marginTop: 14 }}>
+        {saisi ? (
+          <>
+            <div style={{ fontSize: 12, color: "var(--muted)" }}>
+              {categorie
+                ? `${categorie.emoji || "📦"} ${categorie.nom} · ${categorie.type === "unite" ? `${article.quantite} × ${fmt(categorie.montant, devise)}` : `${article.poids} kg × ${fmt(categorie.montant, devise)}`}`
+                : `${article.poids} kg × ${fmt(dest?.parKg || 0, devise)}`}
+              {poste > 0 ? ` · frais de poste ${fmt(poste, devise)}` : ""}
+            </div>
+            <div style={{ fontSize: 20, fontWeight: 800, color: "var(--text)", marginTop: 4 }}>{fmt(total, devise)}</div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 4, lineHeight: 1.5 }}>
+              Estimation à votre tarif. C’est la balance du comptoir qui fera le chiffre définitif.
+            </div>
+          </>
+        ) : (
+          <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Indiquez un poids, ou choisissez une catégorie à l’unité.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/*
+ * Le registre des accès, tel que le partenaire le lit.
+ *
+ * Il ne lui dit pas seulement ce qui s'est passé, il lui dit ce qui ne se passe pas : sur les
+ * destinations où son correspondant récupère le lot, nous n'avons jamais eu ses contacts, donc
+ * le registre y est vide — et c'est la meilleure nouvelle qu'il puisse y lire.
+ */
+function RegistreAccesContacts({ acces }) {
+  const [tout, setTout] = useState(false);
+  const visibles = tout ? acces : acces.slice(0, 8);
+  return (
+    <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", padding: 18, marginBottom: 16 }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>Qui a consulté vos contacts</div>
+      <div style={{ fontSize: 12, color: "var(--muted)", margin: "4px 0 14px", lineHeight: 1.55 }}>
+        Sur les destinations où nous livrons nous-mêmes, vous devez nous confier le nom et le
+        numéro de votre client — sans quoi nous ne pouvons pas le joindre. Chaque fois qu’un des
+        nôtres s’en sert, c’est inscrit ici, avec son nom et la raison. Rien d’autre n’est fait de
+        ces contacts : ils n’entrent dans aucune de nos listes commerciales.
+      </div>
+      {acces.length === 0 ? (
+        <div style={{ background: "var(--ok-bg-soft)", border: "1px solid var(--ok-border)", borderRadius: 10, padding: "12px 14px", fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
+          Aucun accès à ce jour. Sur vos destinations à correspondant, nous n’avons même pas ces
+          contacts : vos colis y voyagent sous un simple repère.
+        </div>
+      ) : (
+        <>
+          <div style={{ display: "grid", gap: 8 }}>
+            {visibles.map((a) => (
+              <div key={a.id} style={{ background: "var(--surface2)", borderRadius: 10, padding: "10px 13px", display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text)" }}>{a.motif}</div>
+                  <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                    colis {a.tracking}{a.destinataire ? ` · ${a.destinataire}` : ""}
+                  </div>
+                </div>
+                <div style={{ fontSize: 11.5, color: "var(--muted)", textAlign: "right", flexShrink: 0 }}>
+                  {a.par}<br />{new Date(a.le).toLocaleString("fr-FR", { dateStyle: "short", timeStyle: "short" })}
+                </div>
+              </div>
+            ))}
+          </div>
+          {acces.length > 8 && (
+            <button type="button" onClick={() => setTout((v) => !v)}
+              style={{ background: "none", border: "none", color: "var(--brand-solid)", fontSize: 12, fontWeight: 700, cursor: "pointer", padding: "10px 0 0" }}>
+              {tout ? "Réduire" : `Voir les ${acces.length} accès`}
+            </button>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/*
+ * Le numéro du client d'un partenaire, masqué jusqu'à ce qu'on en ait besoin.
+ *
+ * Le révéler est un geste, pas un affichage : l'agent qui doit appeler clique, et son nom entre
+ * au registre que le partenaire consulte. Celui qui ne fait que parcourir la fiche ne déclenche
+ * rien — un registre qui s'écrit tout seul à chaque coup d'œil ne se lit plus.
+ */
+function ContactClientPartenaire({ telephone, acces, onReveler }) {
+  const [revele, setRevele] = useState(false);
+  if (!telephone) return <div style={{ fontSize: 12.5, color: "var(--muted)" }}>—</div>;
+  if (revele) {
+    return (
+      <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
+        {telephone}
+        <span style={{ fontSize: 11, color: "var(--muted)", marginLeft: 8 }}>· accès inscrit au registre du partenaire</span>
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      <span style={{ fontSize: 12.5, color: "var(--muted)", letterSpacing: 0.5 }}>{masquerTelephone(telephone)}</span>
+      <button type="button"
+        onClick={() => { setRevele(true); onReveler?.(); }}
+        style={{ background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 7, padding: "3px 9px", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>
+        Révéler
+      </button>
+      {acces.length > 0 && (
+        <span style={{ fontSize: 11, color: "var(--muted)" }}>{acces.length} accès déjà inscrit{acces.length > 1 ? "s" : ""}</span>
+      )}
+    </div>
+  );
+}
 
 const Field = memo(function Field({ label, children }) {
   return <div style={{ marginBottom: 14 }}><div style={{ fontSize: 12, fontWeight: 600, color: MUTED, marginBottom: 6 }}>{label}</div>{children}</div>;
@@ -9223,7 +9739,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
         </div>
       )}
       {showForm && <ColisForm remiseVolumeConfig={data.remiseVolume} repertoire={data.repertoire} paymentConfig={data.paymentConfig} onClose={() => setShowForm(false)} onSave={addColis} existingColis={data.colis} categories={data.categories || []} session={session} sites={data.sites} partenaires={partenairesPrincipaux(data.users)} clientAccounts={data.clientAccounts || []} preAlertes={data.preAlertes || []} notify={notify} />}
-      {showFormPartenaire && <ColisPartenaireForm onClose={() => setShowFormPartenaire(false)} onSave={async (c) => { await addColis(c); setShowFormPartenaire(false); }} existingColis={data.colis} session={session} partenaires={partenairesPrincipaux(data.users)} annonces={depotsAnnonces(data)} />}
+      {showFormPartenaire && <ColisPartenaireForm onClose={() => setShowFormPartenaire(false)} onSave={async (c) => { await addColis(c); setShowFormPartenaire(false); }} existingColis={data.colis} session={session} partenaires={partenairesPrincipaux(data.users)} annonces={depotsAnnonces(data)} factures={data.facturesPartenaire || []} />}
       {showAi && <AiColisModal onClose={() => setShowAi(false)} onCreate={addColis} data={data} session={session} />}
       {showImport && <ImportExcelModal onClose={() => setShowImport(false)} onImportMany={importerColisMany} data={data} session={session} />}
       {remiseEnCours && <RemiseColisModal colis={remiseEnCours} session={session}
@@ -11244,15 +11760,32 @@ async function construireEtiquetteDoc(colis, data) {
    * tiret à la place du téléphone laisserait croire à une saisie oubliée.
    */
   const sousRepere = colisSousRepere(colis);
-  eyebrow(sousRepere ? "Repère / Reference" : "Livrer à / Deliver to", M, y);
+  const repere = repereColis(colis);
+  eyebrow("Livrer à / Deliver to", M, y);
   y += 5.5;
   doc.setTextColor(...INK); doc.setFont(undefined, "bold"); doc.setFontSize(13.5);
   const nomLines = ajuster(String(colis.destinataire || "").toUpperCase(), W - 2 * M, 2);
   doc.text(nomLines, M, y);
   y += nomLines.length * 5.2 + 0.5;
   doc.setFont(undefined, "bold"); doc.setFontSize(9.2); doc.setTextColor(35, 42, 55);
-  doc.text(sousRepere ? "Remis au correspondant" : (colis.telephone || "—"), M, y);
+  doc.text(colis.telephone || (sousRepere ? "Correspondant du partenaire" : "—"), M, y);
   y += 4.2;
+  /*
+   * Le repère, en évidence.
+   *
+   * C'est par lui que le correspondant retrouvera ce colis dans un lot de vingt paquets tous
+   * adressés à son nom : sans lui sur l'étiquette, il faudrait les ouvrir. Il est donc encadré,
+   * pas glissé en petit au milieu de l'adresse.
+   */
+  if (repere) {
+    doc.setFillColor(232, 240, 252);
+    doc.roundedRect(M, y - 0.5, W - 2 * M, 8.4, 1.4, 1.4, "F");
+    doc.setFont(undefined, "bold"); doc.setFontSize(7); doc.setTextColor(...MUTED);
+    doc.text("REPÈRE", M + 2, y + 2.6);
+    doc.setFontSize(10.5); doc.setTextColor(...INK);
+    doc.text(ajuster(String(repere).toUpperCase(), W - 2 * M - 22, 1), M + 18, y + 2.9);
+    y += 10.4;
+  }
   if (colis.destinataireEmail) {
     doc.setFont(undefined, "normal"); doc.setFontSize(7.4); doc.setTextColor(...MUTED);
     doc.text(ajuster(colis.destinataireEmail, W - 2 * M, 1), M, y);
@@ -12727,6 +13260,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   const [expediteurEmail, setExpediteurEmail] = useState(colis.expediteurEmail || "");
   const [expediteurAdresse, setExpediteurAdresse] = useState(colis.expediteurAdresse || "");
   const [destinataire, setDestinataire] = useState(colis.destinataire);
+  const [repere, setRepere] = useState(repereColis(colis));
   const [telephone, setTelephone] = useState(colis.telephone);
   const [destinataireEmail, setDestinataireEmail] = useState(colis.destinataireEmail || "");
   const [destinataireAdresse, setDestinataireAdresse] = useState(colis.destinataireAdresse || "");
@@ -12866,7 +13400,18 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
 
   function submit(e) {
     e.preventDefault();
-    if (!expediteur || !destinataire || !telephone) return;
+    /*
+     * Ce contrôle repartait sans rien dire, et sans rien enregistrer.
+     *
+     * Un colis de partenaire remis à un correspondant n'a pas toujours de téléphone — c'est
+     * précisément ce que le partenaire ne nous donne pas. L'agent corrigeait le destinataire,
+     * cliquait « Enregistrer », et le formulaire se refermait sans avoir rien écrit : aucune
+     * erreur, aucune modification. Le téléphone n'est donc plus exigé sur ces colis-là, et un
+     * champ manquant se dit maintenant à voix haute.
+     */
+    if (!expediteur.trim()) { setErr("Indiquez l’expéditeur."); return; }
+    if (!destinataire.trim()) { setErr("Indiquez le destinataire — la personne qui réceptionne le colis."); return; }
+    if (!telephone.trim() && !estPartenaire) { setErr("Indiquez le téléphone du destinataire."); return; }
     if (produits.some((p) => !p.nom || !(Number(p.poids) > 0) || !(Number(p.quantite) >= 1))) {
       setErr("Chaque article doit avoir un nom, une quantité et un poids supérieur à 0."); return;
     }
@@ -12901,6 +13446,12 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
         ? {
             prixPartenaire: detailPrixPartenaire({ produits, poids: Number(poids) || 0, pays }, partenaire).total,
             devisePartenaire: contratPartenaire.devise,
+            /*
+             * Un repère saisi rend le colis « sous repère », et le vide : un colis dont on vient
+             * d'inscrire le vrai destinataire ne doit pas garder un drapeau qui masque son nom.
+             */
+            repere: repere.trim(),
+            repereSeul: !!repere.trim(),
           }
         : {
             prixBrut, discountLoyalty, rabaisMontant: Number(rabaisMontant) || 0, rabaisDevise, rabaisEUR, prix, paye: payeNum, reste,
@@ -12929,6 +13480,23 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
         <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)", marginTop: 4 }}>Destinataire</div>
         <Field label="Nom"><input value={destinataire} onChange={(e) => setDestinataire(e.target.value)} style={inputStyle} /></Field>
         <Field label="Téléphone (WhatsApp)"><PhoneInput value={telephone} onChange={setTelephone} /></Field>
+        {/*
+          Le repère se corrige ici, et c'est indispensable : les colis enregistrés avant que le
+          repère ait son propre champ portent leur code dans le nom du destinataire — « Colis 1 »
+          à la place de la personne qui réceptionne. Sans ce champ, ils resteraient faux à jamais.
+        */}
+        {estPartenaire && (
+          <div style={{ gridColumn: "1 / -1" }}>
+            <Field label="Repère du colis">
+              <input value={repere} onChange={(e) => setRepere(e.target.value)} style={inputStyle}
+                placeholder="le code du partenaire — ex : colis 1, SF124, SIRA BOUTIQUE" />
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -8, lineHeight: 1.5 }}>
+                Le nom ci-dessus est celui de la <strong>personne qui réceptionne</strong> — le
+                correspondant du partenaire. Le repère, lui, dit de quel colis il s’agit dans le lot.
+              </div>
+            </Field>
+          </div>
+        )}
         <Field label="E-mail (optionnel)"><input type="email" value={destinataireEmail} onChange={(e) => setDestinataireEmail(e.target.value)} style={inputStyle} /></Field>
         <Field label="Adresse (optionnel)"><input value={destinataireAdresse} onChange={(e) => setDestinataireAdresse(e.target.value)} style={inputStyle} /></Field>
         <Field label="Ville (optionnel)"><input value={destinataireVille} onChange={(e) => setDestinataireVille(e.target.value)} style={inputStyle} /></Field>
@@ -12983,7 +13551,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
                         }} style={inputStyle}>
                           <option value="">Tarif général — {fmt(contratPartenaire.parKg, contratPartenaire.devise)}/kg · {fmt(contratPartenaire.parUnite, contratPartenaire.devise)}/unité</option>
                           {(contratPartenaire.categories || []).map((cat) => (
-                            <option key={cat.id} value={cat.id}>{cat.nom} — {fmt(cat.montant, contratPartenaire.devise)}/{cat.type === "unite" ? "unité" : "kg"}</option>
+                            <option key={cat.id} value={cat.id}>{libelleCategoriePartenaire(cat, contratPartenaire.devise)}</option>
                           ))}
                         </select>
                       </Field>
@@ -13318,6 +13886,8 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
    */
   async function notifierWhatsApp() {
     const message = `Bonjour ${colis.destinataire}, votre colis ${nomExpediteurPourClient(data, colis)} (${colis.tracking}) est actuellement : ${clientStatusLabel(colis.status)}. Suivez-le à tout moment sur notre plateforme.`;
+    // Écrire au client d'un partenaire, c'est se servir de son contact : le registre le dit.
+    if (colisPartenaire) onUpdate({ accesContacts: inscrireAccesContact(colis, session, "Message de suivi envoyé au client") });
     setWaErreur(""); setWaState("envoi");
     const { envoye, raison } = await envoyerWhatsApp(colis.telephone, message);
     if (envoye) { setWaState("envoye"); return; }
@@ -13328,6 +13898,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
   const [etiquetteWaState, setEtiquetteWaState] = useState("idle");
   const [etiquetteWaErreur, setEtiquetteWaErreur] = useState("");
   async function handleEnvoyerEtiquetteWhatsApp() {
+    if (colisPartenaire) onUpdate({ accesContacts: inscrireAccesContact(colis, session, "Étiquette envoyée au client par WhatsApp") });
     setEtiquetteWaErreur(""); setEtiquetteWaState("envoi");
     try {
       const { envoye, raison } = await envoyerEtiquetteWhatsApp(colis, data);
@@ -13557,6 +14128,16 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
               {colis.mode === "air" ? <Plane size={12} color="var(--muted)" /> : <Ship size={12} color="var(--muted)" />}
             </span>
             {colis.provenance && <span style={{ background: "var(--surface2)", borderRadius: 6, padding: "2px 8px", fontSize: 10.5, fontWeight: 600, color: "var(--muted)" }}>{colis.provenance}</span>}
+            {/*
+              Le repère à l'écran, pas seulement sur l'étiquette : c'est par lui que l'agent
+              retrouve le bon paquet quand le correspondant vient chercher son lot, et le
+              destinataire affiché est le même pour tous les colis de ce partenaire.
+            */}
+            {repereColis(colis) && (
+              <span style={{ background: "var(--ok-bg-soft)", color: "var(--ok-fg)", borderRadius: 6, padding: "2px 8px", fontSize: 10.5, fontWeight: 700, letterSpacing: 0.3 }}>
+                repère · {repereColis(colis)}
+              </span>
+            )}
           </div>
           <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 4 }}>
             {FLAGS[colis.expediteurPays || "GN"] || ""} → {FLAGS[colis.destinatairePays || colis.pays] || ""} · {routeLabel(colis.pays, colis.direction)} · {colis.destinataire}
@@ -13698,7 +14279,17 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
           <div>
             <div style={{ fontSize: 10.5, color: "var(--ok-fg)", fontWeight: 700, textTransform: "uppercase" }}>Destinataire · {COUNTRIES.find((c) => c.code === (colis.destinatairePays || colis.pays))?.name || destCurrency}</div>
             <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)", marginTop: 2 }}>{colis.destinataire}</div>
-            <div style={{ fontSize: 12.5, color: "var(--muted)" }}>{colis.telephone || "—"}</div>
+            {/*
+              Sur un colis partenaire, le destinataire est SON client : le numéro reste masqué
+              jusqu'à ce qu'un agent en ait vraiment besoin, et ce geste s'inscrit au registre.
+              Sur nos propres colis, le client est le nôtre — rien ne change.
+            */}
+            {colisPartenaire ? (
+              <ContactClientPartenaire telephone={colis.telephone} acces={accesContacts(colis)}
+                onReveler={() => onUpdate({ accesContacts: inscrireAccesContact(colis, session, "Numéro révélé sur la fiche colis") })} />
+            ) : (
+              <div style={{ fontSize: 12.5, color: "var(--muted)" }}>{colis.telephone || "—"}</div>
+            )}
             {colis.destinataireAdresse && <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>{colis.destinataireAdresse}{colis.destinataireVille ? `, ${colis.destinataireVille}` : ""}{colis.destinataireCodePostal ? ` ${colis.destinataireCodePostal}` : ""}</div>}
           </div>
         </div>
@@ -19025,11 +19616,24 @@ async function construireFacturePartenaireDoc(facture, partenaire, colisFactures
    */
   const versementsPdf = reglementsFacture(facture);
   const totalFacture = Number(facture.total) || 0;
+  /*
+   * Le montant, dans les deux devises.
+   *
+   * Le partenaire est à Conakry, ses colis partent pour Paris : selon qui règle et où, on parle
+   * en francs guinéens ou en euros. Imprimer les deux évite la conversion de tête au comptoir,
+   * et la contestation qui suit quand chacun a pris un taux différent.
+   */
+  const equivalent = (montant, yy) => {
+    doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(...MUTED);
+    doc.text(`soit ${fmt(montant, deviseCompagnon(facture.devise))}`, W - M, yy + 5.4, { align: "right" });
+  };
   if (versementsPdf.length === 0) {
     doc.setFont(undefined, "bold"); doc.setFontSize(12); doc.setTextColor(...INK);
     doc.text("TOTAL À RÉGLER", W / 2, y);
     doc.setFontSize(15); doc.setTextColor(...RED);
     doc.text(fmt(totalFacture, facture.devise), W - M, y, { align: "right" });
+    equivalent(totalFacture, y);
+    y += 6;
   } else {
     const reste = resteDuFacture(facture);
     doc.setFont(undefined, "bold"); doc.setFontSize(10.5); doc.setTextColor(...INK);
@@ -19087,6 +19691,8 @@ async function construireFacturePartenaireDoc(facture, partenaire, colisFactures
       doc.text("RESTE À RÉGLER", W / 2, y);
       doc.setFontSize(15); doc.setTextColor(...RED);
       doc.text(fmt(reste, facture.devise), W - M, y, { align: "right" });
+      equivalent(reste, y);
+      y += 6;
     }
   }
 
@@ -19110,6 +19716,105 @@ async function construireFacturePartenaireDoc(facture, partenaire, colisFactures
  *
  * Il porte notre identité : c'est l'entreprise qui rend ses comptes au partenaire.
  */
+/*
+ * Le bordereau de remise au correspondant.
+ *
+ * Le correspondant repart avec quinze paquets, et jusqu'ici rien ne disait qu'il les avait pris.
+ * Ce document est la preuve de ce moment : ce qu'il emporte, colis par colis avec son repère,
+ * qui le lui a remis, et sa signature. C'est aussi la seule pièce qui existera si un colis
+ * manque — sans elle, la discussion est parole contre parole.
+ *
+ * Aucun montant n'y figure : ce que le partenaire nous doit ne regarde pas son correspondant, et
+ * ce qu'il facture à ses clients ne nous regarde pas.
+ */
+async function construireBordereauRemiseDoc(partenaire, lot, agent) {
+  const jspdf = await loadJsPDF();
+  const doc = preparerDocPdf(new jspdf.jsPDF());
+  const W = 210, M = 16;
+  const NAVY = [10, 38, 71], RED = [214, 39, 63], INK = [17, 20, 26], MUTED = [122, 130, 142], LINE = [225, 228, 234];
+  const r = reglagesPartenaire(partenaire);
+  const pays = COUNTRIES.find((c) => c.code === lot.pays);
+
+  doc.addImage(DEFAULT_LOGO, "PNG", M, 14, 18, 18);
+  doc.setFont(undefined, "bold"); doc.setFontSize(15); doc.setTextColor(...NAVY);
+  doc.text("BA-DIABY", M + 22, 22);
+  doc.setTextColor(...RED); doc.text("EXPRESS", M + 22, 29);
+  doc.setFont(undefined, "bold"); doc.setFontSize(17); doc.setTextColor(...INK);
+  doc.text("BORDEREAU DE REMISE", W - M, 22, { align: "right" });
+  doc.setFont(undefined, "normal"); doc.setFontSize(10); doc.setTextColor(...MUTED);
+  doc.text(new Date().toLocaleDateString("fr-FR"), W - M, 29, { align: "right" });
+  doc.setDrawColor(...LINE); doc.setLineWidth(0.4); doc.line(M, 38, W - M, 38);
+
+  doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...MUTED);
+  doc.text("LOT DU PARTENAIRE", M, 47);
+  doc.text("REMIS À", W / 2 + 4, 47);
+  doc.setFont(undefined, "bold"); doc.setFontSize(12); doc.setTextColor(...INK);
+  doc.text(r.nomCommercial || `${partenaire?.prenom || ""} ${partenaire?.nom || ""}`.trim() || "Partenaire", M, 54);
+  doc.text(lot.correspondant?.nom || "Correspondant", W / 2 + 4, 54);
+  doc.setFont(undefined, "normal"); doc.setFontSize(9.5); doc.setTextColor(...MUTED);
+  doc.text([r.telephone].filter(Boolean).join(" · ") || "—", M, 60);
+  doc.text([lot.correspondant?.telephone, lot.correspondant?.adresse].filter(Boolean).join(" · ") || "—", W / 2 + 4, 60, { maxWidth: W / 2 - M - 4 });
+  doc.setFontSize(9.5); doc.setTextColor(...INK);
+  doc.text(`Destination : ${pays?.name || lot.pays}`, M, 70);
+
+  const lignes = lot.colis.map((c) => [
+    c.tracking,
+    repereColis(c) || c.destinataire || "—",
+    `${c.poids || 0} kg`,
+    String((c.produits || []).reduce((somme, x) => somme + (Number(x.quantite) || 1), 0) || 1),
+  ]);
+  let y = 78;
+  if (await ensureAutoTable()) {
+    doc.autoTable({
+      startY: y,
+      head: [["N° de suivi", "Repère", "Poids", "Articles"]],
+      body: lignes,
+      theme: "grid",
+      styles: { fontSize: 9, cellPadding: 2.6, textColor: INK, lineColor: LINE },
+      headStyles: { fillColor: NAVY, textColor: [255, 255, 255], fontSize: 8.5 },
+      margin: { left: M, right: M },
+    });
+    y = doc.lastAutoTable.finalY + 8;
+  } else {
+    // Repli sans autoTable : la même information, tracée à la main.
+    const colX = [M, M + 42, M + 118, M + 152];
+    doc.setFillColor(...NAVY); doc.rect(M, y, W - 2 * M, 8, "F");
+    doc.setFont(undefined, "bold"); doc.setFontSize(8.5); doc.setTextColor(255, 255, 255);
+    ["N° de suivi", "Repère", "Poids", "Articles"].forEach((h, i) => doc.text(h, colX[i] + 1, y + 5.5));
+    y += 12;
+    doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(...INK);
+    lignes.forEach((ligne) => {
+      if (y > 250) { doc.addPage(); y = 24; }
+      ligne.forEach((valeur, i) => doc.text(String(valeur), colX[i] + 1, y));
+      y += 6;
+    });
+    y += 4;
+  }
+
+  if (y > 232) { doc.addPage(); y = 24; }
+  doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(...INK);
+  doc.text(`${lot.colis.length} colis · ${lot.poids} kg au total`, M, y);
+  y += 14;
+
+  /*
+   * Le bloc des signatures a besoin d'environ 40 mm : le placer sans vérifier ce qui reste ferait
+   * sortir la ligne du correspondant hors de la page sur un lot d'une vingtaine de colis — la
+   * seule ligne dont ce document a vraiment besoin.
+   */
+  if (y > 236) { doc.addPage(); y = 30; }
+  doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(...MUTED);
+  doc.text("Le correspondant reconnaît avoir reçu les colis listés ci-dessus, en bon état apparent.", M, y, { maxWidth: W - 2 * M });
+  y += 12;
+  doc.setDrawColor(...LINE);
+  doc.line(M, y + 18, M + 70, y + 18);
+  doc.line(W / 2 + 4, y + 18, W / 2 + 74, y + 18);
+  doc.setFontSize(8.5); doc.setTextColor(...MUTED);
+  doc.text("Signature du correspondant", M, y + 23);
+  doc.text(`Notre agent — ${agent || "—"}`, W / 2 + 4, y + 23);
+
+  return doc;
+}
+
 async function construireRelevePartenaireDoc(partenaire, mois, factures, colis) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF());
@@ -19235,6 +19940,12 @@ async function construireRelevePartenaireDoc(partenaire, mois, factures, colis) 
  */
 function PartenairesPage({ data, persist, notify, onBack, session }) {
   const partenaires = useMemo(() => partenairesPrincipaux(data.users), [data.users]);
+  /*
+   * Nos propres agents, ceux qu'on peut rendre responsables d'un partenaire sur place. Un employé
+   * de partenaire n'en fait pas partie : il travaille pour lui, pas pour nous.
+   */
+  const agentsBaDiaby = useMemo(() => (data.users || [])
+    .filter((u) => u.role !== "Partenaire" && !u.partenaireParent), [data.users]);
   const [selection, setSelection] = useState(() => partenaires[0]?.id || "");
   const [onglet, setOnglet] = useState("contrat");
   const partenaire = partenaires.find((p) => p.id === selection) || null;
@@ -19266,9 +19977,15 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
     notify?.(`Contrat de ${partenaire.prenom} ${partenaire.nom} enregistré`);
   }
 
-  function validerColis(tracking, montant) {
+  function validerColis(tracking, montant, photo) {
     const colisMaj = (data.colis || []).map((c) => (c.tracking === tracking
-      ? { ...c, prixPartenaire: +(Number(montant) || 0).toFixed(2), validationPartenaire: { statut: "Validé", par: monNom, le: new Date().toISOString() } }
+      ? {
+        ...c,
+        prixPartenaire: +(Number(montant) || 0).toFixed(2),
+        // Une vérification sans photo n'efface pas celle d'une vérification précédente.
+        photoVerification: photo || c.photoVerification || null,
+        validationPartenaire: { statut: "Validé", par: monNom, le: new Date().toISOString() },
+      }
       : c));
     persist({
       ...data,
@@ -19289,15 +20006,24 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
     notify?.(`Colis ${tracking} vérifié`);
   }
 
-  function creerFacture() {
-    if (aFacturer.length === 0) return;
-    const devise = reglagesPartenaire(partenaire).tarif.devise;
+  /*
+   * La facture regroupe les colis que l'agent a choisis, dans la devise qu'il a choisie.
+   *
+   * Tout facturer d'un bloc ne convenait pas : un partenaire règle parfois une partie de ses
+   * colis pour un client, et le reste plus tard. Quant à la devise, elle dépend de qui paie et
+   * d'où — la même facture se règle en francs à Conakry et en euros à Paris. On l'inscrit sur la
+   * facture, et le montant s'affiche partout dans les deux devises.
+   */
+  function creerFacture(trackingsChoisis, deviseChoisie) {
+    const retenus = aFacturer.filter((c) => (trackingsChoisis || []).includes(c.tracking));
+    if (retenus.length === 0) return;
+    const devise = deviseChoisie || reglagesPartenaire(partenaire).tarif.devise;
     const facture = {
       id: `fp${Date.now()}`,
       numero: genNumeroFacturePartenaire(facturesPartenaire),
       partenaireId: partenaire.id,
-      trackings: aFacturer.map((c) => c.tracking),
-      total: +aFacturer.reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0).toFixed(2),
+      trackings: retenus.map((c) => c.tracking),
+      total: +retenus.reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0).toFixed(2),
       devise,
       creeeLe: new Date().toISOString(),
       creePar: monNom,
@@ -19307,7 +20033,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
       ...data,
       facturesPartenaire: [facture, ...facturesPartenaire],
       colis: (data.colis || []).map((c) => (aFacturerSet.has(c.tracking) ? { ...c, facturePartenaireId: facture.id } : c)),
-      activityLog: pushActivity(data, session, "Facture partenaire créée", `${facture.numero} — ${partenaire.prenom} ${partenaire.nom} · ${facture.trackings.length} colis · ${fmt(facture.total, devise)}`),
+      activityLog: pushActivity(data, session, "Facture partenaire créée", `${facture.numero} — ${partenaire.prenom} ${partenaire.nom} · ${facture.trackings.length} colis · ${fmtDeuxDevises(facture.total, devise)}`),
     });
     notify?.(`Facture ${facture.numero} créée — ${facture.trackings.length} colis`);
     setOnglet("facturation");
@@ -19531,12 +20257,41 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
     );
   }
 
+  /*
+   * La remise d'un lot à son correspondant.
+   *
+   * Deux choses en un geste, parce qu'elles sont indissociables : le bordereau qu'il signe, et la
+   * trace que le lot est sorti. Écrire l'une sans l'autre laisserait soit un papier sans effet,
+   * soit des colis marqués remis sans preuve — et le même lot ressortirait dans la liste demain.
+   */
+  async function remettreLot(lot) {
+    const trackings = new Set(lot.colis.map((c) => c.tracking));
+    const marque = { le: new Date().toISOString(), par: monNom, correspondant: lot.correspondant?.nom || "" };
+    try {
+      const doc = await construireBordereauRemiseDoc(partenaire, lot, monNom);
+      openPdf(doc, `remise-${(reglagesPartenaire(partenaire).nomCommercial || partenaire.nom || "partenaire").replace(/\s+/g, "-").toLowerCase()}-${lot.pays}.pdf`);
+    } catch (e) {
+      console.error(e);
+      notify?.("Le bordereau n’a pas pu être généré — la remise n’a pas été enregistrée.");
+      return;
+    }
+    persist({
+      ...data,
+      colis: (data.colis || []).map((c) => (trackings.has(c.tracking) ? { ...c, remiseCorrespondant: marque } : c)),
+      activityLog: pushActivity(data, session, "Lot remis au correspondant",
+        `${reglagesPartenaire(partenaire).nomCommercial || partenaire.nom} — ${lot.colis.length} colis vers ${lot.pays}`),
+    });
+    notify?.(`${lot.colis.length} colis remis à ${lot.correspondant?.nom || "son correspondant"}`);
+  }
+
   const messagesNonLus = partenaire ? messagesNonLusPour(partenaire, "entreprise") : 0;
   const annonces = useMemo(() => depotsAnnonces(data, selection), [data.preAlertesPartenaire, selection]);
+  const lots = useMemo(() => (partenaire ? lotsARemettre(data.colis, partenaire) : []), [data.colis, partenaire]);
   const onglets = [
     ["contrat", "Contrat & identité", 0],
     ["depots", "Dépôts annoncés", annonces.length],
     ["verification", "Colis à vérifier", enAttente.length],
+    ["remise", "Remise au correspondant", lots.reduce((somme, l) => somme + l.colis.length, 0)],
     ["facturation", "Facturation", aFacturer.length],
     ["messages", "Messages", messagesNonLus],
   ];
@@ -19579,7 +20334,11 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
       </div>
 
       {onglet === "contrat" && partenaire && (
-        <ContratPartenaire key={partenaire.id} partenaire={partenaire} autres={partenaires.filter((p) => p.id !== partenaire.id)} onSave={enregistrerContrat} />
+        <ContratPartenaire key={partenaire.id} partenaire={partenaire} autres={partenaires.filter((p) => p.id !== partenaire.id)} agentsPossibles={agentsBaDiaby} onSave={enregistrerContrat} />
+      )}
+
+      {onglet === "remise" && partenaire && (
+        <RemiseAuCorrespondant lots={lots} partenaire={partenaire} onRemettre={remettreLot} />
       )}
 
       {onglet === "verification" && partenaire && (
@@ -19614,7 +20373,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
 }
 
 /** Contrat d'un partenaire : ce qu'il paie, et sous quelle identité ses colis voyagent. */
-function ContratPartenaire({ partenaire, autres, onSave }) {
+function ContratPartenaire({ partenaire, autres, agentsPossibles, onSave }) {
   const r = reglagesPartenaire(partenaire);
   const [nomCommercial, setNomCommercial] = useState(r.nomCommercial);
   const [logo, setLogo] = useState(r.logo);
@@ -19663,7 +20422,7 @@ function ContratPartenaire({ partenaire, autres, onSave }) {
   function ajouterCategorie(pays) {
     setErr("");
     setDestinations((l) => l.map((d) => (d.pays === pays
-      ? { ...d, categories: [...d.categories, { id: `cp${Date.now()}${Math.random().toString(36).slice(2, 5)}`, nom: "", type: "unite", montant: 0 }] }
+      ? { ...d, categories: [...d.categories, { id: `cp${Date.now()}${Math.random().toString(36).slice(2, 5)}`, nom: "", type: "unite", montant: 0, emoji: "📦" }] }
       : d)));
   }
   function majCategorie(pays, id, patch) {
@@ -19789,11 +20548,39 @@ function ContratPartenaire({ partenaire, autres, onSave }) {
                 </div>
               )}
               {d.acheminement !== "correspondant" && (
-                <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 }}>
-                  {d.acheminement === "poste"
-                    ? "Nous postons le colis : l’identité et l’adresse du client sont nécessaires, et seront demandées à l’enregistrement."
-                    : "Nous livrons nous-mêmes : l’identité du client est nécessaire pour le joindre et le reconnaître à la remise."}
-                </div>
+                <>
+                  <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 }}>
+                    {d.acheminement === "poste"
+                      ? "Nous postons le colis : l’identité et l’adresse du client sont nécessaires, et seront demandées à l’enregistrement."
+                      : "Nous livrons nous-mêmes : l’identité du client est nécessaire pour le joindre et le reconnaître à la remise."}
+                  </div>
+                  {/*
+                    Qui, chez nous, s'en occupe là-bas. Le partenaire n'ayant personne sur place,
+                    c'est notre agent qui distribue — et qui enregistre les colis repartant de ce
+                    pays. Lui donner le partenaire au comptoir doit suffire : le reste est écrit ici.
+                  */}
+                  <div style={{ marginTop: 10 }}>
+                    <Field label={`Notre agent sur place (${COUNTRIES.find((c) => c.code === d.pays)?.name || d.pays})`}>
+                      <select
+                        value={d.agentResponsable?.id || ""}
+                        onChange={(e) => {
+                          const u = (agentsPossibles || []).find((x) => x.id === e.target.value);
+                          majDestination(d.pays, { agentResponsable: u ? { id: u.id, nom: `${u.prenom} ${u.nom}`.trim() } : null });
+                        }}
+                        style={{ ...inputStyle, marginBottom: 0 }}>
+                        <option value="">Aucun — le comptoir de Conakry s’en charge</option>
+                        {(agentsPossibles || []).map((u) => (
+                          <option key={u.id} value={u.id}>{`${u.prenom} ${u.nom}`.trim()} · {u.role}</option>
+                        ))}
+                      </select>
+                      <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 5, lineHeight: 1.5 }}>
+                        Responsable de la distribution de ce partenaire sur place, et de
+                        l’enregistrement des colis qui en repartent. À son écran, choisir le
+                        partenaire suffira : la route part de ce pays et l’expéditeur est déjà rempli.
+                      </div>
+                    </Field>
+                  </div>
+                </>
               )}
               {d.acheminement === "correspondant" && (
                 <div style={{ marginTop: 10 }}>
@@ -19829,7 +20616,9 @@ function ContratPartenaire({ partenaire, autres, onSave }) {
                   Facultatif. Un article sans catégorie est facturé au tarif général ci-dessus.
                 </div>
                 {d.categories.map((cat) => (
-                  <div key={cat.id} style={{ display: "grid", gridTemplateColumns: "minmax(90px,1.4fr) minmax(80px,1fr) minmax(70px,0.9fr) auto", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                  <div key={cat.id} style={{ display: "grid", gridTemplateColumns: "52px minmax(90px,1.4fr) minmax(80px,1fr) minmax(70px,0.9fr) auto", gap: 8, alignItems: "center", marginBottom: 8 }}>
+                    <input value={cat.emoji} onChange={(e) => majCategorie(d.pays, cat.id, { emoji: e.target.value })} title="Icône de la catégorie"
+                      style={{ ...inputStyle, marginBottom: 0, textAlign: "center", fontSize: 16 }} />
                     <input value={cat.nom} onChange={(e) => majCategorie(d.pays, cat.id, { nom: e.target.value })} placeholder="ex : téléphone" style={{ ...inputStyle, marginBottom: 0 }} />
                     <select value={cat.type} onChange={(e) => majCategorie(d.pays, cat.id, { type: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }}>
                       <option value="unite">À l’unité</option>
@@ -19927,6 +20716,26 @@ function ContratPartenaire({ partenaire, autres, onSave }) {
 function VerificationColisPartenaire({ partenaire, colis, onValider }) {
   const devise = reglagesPartenaire(partenaire).tarif.devise;
   const [montants, setMontants] = useState({});
+  /*
+   * La photo du contenu, prise au moment où l'agent ouvre le colis.
+   *
+   * C'est le seul moment où quelqu'un voit vraiment ce qu'il y a dedans, et c'est exactement ce
+   * dont on discute trois semaines plus tard : « ce n'était pas ça », « ce n'était pas ce
+   * poids-là ». Une photo prise là, que le partenaire retrouve sur son colis, clôt la discussion
+   * avant qu'elle ne commence. Elle reste facultative : un colis se valide sans.
+   */
+  const [photos, setPhotos] = useState({});
+  const [chargement, setChargement] = useState("");
+
+  async function choisirPhoto(tracking, fichier) {
+    if (!fichier) return;
+    setChargement(tracking);
+    try {
+      const url = await resizeImageToDataUrl(fichier);
+      setPhotos((p) => ({ ...p, [tracking]: url }));
+    } catch (e) { /* une photo illisible ne doit pas empêcher de valider le colis */ }
+    setChargement("");
+  }
 
   if (colis.length === 0) {
     return (
@@ -19997,17 +20806,120 @@ function VerificationColisPartenaire({ partenaire, colis, onValider }) {
                     <input value={propose} onChange={(e) => setMontants((m) => ({ ...m, [c.tracking]: e.target.value }))} style={{ ...inputStyle, marginBottom: 0 }} />
                   </Field>
                 </div>
-                <button onClick={() => onValider(c.tracking, String(propose).replace(",", "."))} style={{
+                <button onClick={() => onValider(c.tracking, String(propose).replace(",", "."), photos[c.tracking] || null)} style={{
                   display: "flex", alignItems: "center", gap: 7, background: "#16A163", color: "#fff", border: "none",
                   borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0,
                 }}>
                   <CheckCircle2 size={16} /> Vérifier et valider
                 </button>
               </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                {photos[c.tracking] && (
+                  <img src={photos[c.tracking]} alt="Contenu du colis à la vérification"
+                    style={{ width: 74, height: 74, objectFit: "cover", borderRadius: 8, border: "1px solid var(--border)" }} />
+                )}
+                <label style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "8px 13px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                  <Upload size={13} />
+                  {chargement === c.tracking ? "Chargement…" : photos[c.tracking] ? "Reprendre la photo" : "Photographier le contenu"}
+                  <input type="file" accept="image/*" capture="environment" style={{ display: "none" }}
+                    onChange={(e) => choisirPhoto(c.tracking, e.target.files?.[0])} />
+                </label>
+                <div style={{ fontSize: 11.5, color: "var(--muted)", flex: "1 1 200px", lineHeight: 1.5 }}>
+                  Facultatif, mais c’est la pièce qui règle les contestations : le partenaire la
+                  retrouvera sur son colis, dans son espace.
+                </div>
+              </div>
             </div>
           );
         })}
       </div>
+    </div>
+  );
+}
+
+/*
+ * Les lots qui attendent leur correspondant, et le geste qui les fait sortir.
+ *
+ * Un lot par destination : c'est ainsi qu'ils partent, une personne venant chercher tout ce qui
+ * est arrivé pour elle. Les repères sont montrés en clair — c'est précisément ce que le
+ * correspondant va lire pour vérifier qu'il ne manque rien.
+ */
+function RemiseAuCorrespondant({ lots, partenaire, onRemettre }) {
+  const [aRemettre, setARemettre] = useState(null);
+  const [occupe, setOccupe] = useState(false);
+
+  if (lots.length === 0) {
+    return (
+      <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center" }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>Aucun lot à remettre</div>
+        <div style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.55, maxWidth: 480, margin: "0 auto" }}>
+          Les colis de ce partenaire dont le correspondant vient prendre livraison apparaîtront ici
+          dès leur arrivée, groupés par destination.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 16px", marginBottom: 16 }}>
+        <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
+          C’est ici que notre responsabilité s’arrête. Quand le correspondant se présente,
+          <strong> imprimez le bordereau et faites-le signer</strong> : il liste les repères un par un,
+          et il est la seule pièce qui existera si un colis manque plus tard.
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gap: 12 }}>
+        {lots.map((lot) => {
+          const pays = COUNTRIES.find((c) => c.code === lot.pays);
+          return (
+            <div key={lot.pays} style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", padding: 16 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>
+                    {FLAGS[lot.pays] || ""} {pays?.name || lot.pays} · {lot.colis.length} colis · {lot.poids} kg
+                  </div>
+                  <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 3 }}>
+                    À remettre à <strong style={{ color: "var(--text)" }}>{lot.correspondant?.nom || "correspondant non renseigné"}</strong>
+                    {lot.correspondant?.telephone ? ` · ${lot.correspondant.telephone}` : ""}
+                  </div>
+                </div>
+                <button onClick={() => setARemettre(lot)} disabled={occupe} style={{
+                  display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none",
+                  borderRadius: 9, padding: "11px 18px", fontSize: 13, fontWeight: 700, cursor: occupe ? "not-allowed" : "pointer", flexShrink: 0,
+                }}>
+                  <CheckCircle2 size={15} /> Remettre ce lot
+                </button>
+              </div>
+              <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "10px 12px", fontSize: 12, color: "var(--muted)", lineHeight: 1.7 }}>
+                {lot.colis.map((c) => (
+                  <div key={c.tracking}>
+                    <strong style={{ color: "var(--text)" }}>{c.tracking}</strong>
+                    {" — "}{repereColis(c) || c.destinataire || "sans repère"} · {c.poids || 0} kg
+                  </div>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {aRemettre && (
+        <ConfirmerAction
+          titre="Remettre ce lot au correspondant ?"
+          message={`${aRemettre.colis.length} colis (${aRemettre.poids} kg) à ${aRemettre.correspondant?.nom || "son correspondant"}, pour ${reglagesPartenaire(partenaire).nomCommercial || partenaire.nom}.`}
+          consequence="Le bordereau s’ouvre pour impression et signature. Les colis sortent de cette liste : ils ne pourront plus être remis une seconde fois."
+          libelleAction="Remettre et imprimer"
+          onConfirmer={async () => {
+            const lot = aRemettre;
+            setARemettre(null); setOccupe(true);
+            await onRemettre(lot);
+            setOccupe(false);
+          }}
+          onAnnuler={() => setARemettre(null)}
+        />
+      )}
     </div>
   );
 }
@@ -20054,7 +20966,13 @@ function DepotsAnnoncesPartenaire({ annonces, onAnnuler }) {
             <div key={a.id} style={{ background: "var(--surface)", borderRadius: 12, border: "1px solid var(--border)", padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
               <div style={{ minWidth: 0, flex: "1 1 260px" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  <span style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{a.destinataire}</span>
+                  <span style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{libelleAnnonce(a)}</span>
+                  {/* Un repère se lit comme un code, pas comme un nom : le dire évite qu'un agent cherche un client de ce nom. */}
+                  {a.repereSeul && (
+                    <span style={{ background: "var(--ok-bg-soft)", color: "var(--ok-fg)", padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>
+                      repère · remis au correspondant
+                    </span>
+                  )}
                   <span style={{ background: "var(--surface2)", color: "var(--muted)", padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>
                     {FLAGS[a.pays] || ""} {pays?.name || a.pays}
                   </span>
@@ -20104,7 +21022,27 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
   const devise = reglagesDuPartenaire.tarif.devise;
   const delaiReglement = reglagesDuPartenaire.delaiReglementJours;
   const enRetard = facturesEnRetard(factures, delaiReglement);
-  const total = aFacturer.reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0);
+  /*
+   * Les colis retenus pour la prochaine facture, et la devise dans laquelle elle sera émise.
+   *
+   * Tout est coché au départ — regrouper l'ensemble reste le cas courant — mais l'agent décoche
+   * ce qu'il veut garder pour plus tard. La sélection se réajuste quand un colis part sur une
+   * autre facture, sinon on facturerait un tracking qui n'est plus là.
+   */
+  const [selection, setSelection] = useState(() => aFacturer.map((c) => c.tracking));
+  const [deviseFacture, setDeviseFacture] = useState(devise);
+  useEffect(() => {
+    const dispo = new Set(aFacturer.map((c) => c.tracking));
+    setSelection((prev) => {
+      const gardes = prev.filter((t) => dispo.has(t));
+      // Un colis nouvellement vérifié entre coché : c'est ce que l'agent attend en revenant ici.
+      const nouveaux = aFacturer.map((c) => c.tracking).filter((t) => !prev.includes(t));
+      return gardes.length === prev.length && nouveaux.length === 0 ? prev : [...gardes, ...nouveaux];
+    });
+  }, [aFacturer.map((c) => c.tracking).join("|")]);
+  const retenus = aFacturer.filter((c) => selection.includes(c.tracking));
+  const total = retenus.reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0);
+  const totalTout = aFacturer.reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0);
   const [confirmation, setConfirmation] = useState(false);
   const [aRouvrir, setARouvrir] = useState(null);
   const [enCorrection, setEnCorrection] = useState(null);
@@ -20137,7 +21075,8 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
         <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)" }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>Colis vérifiés, pas encore facturés</div>
           <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
-            Ils seront regroupés sur une seule facture, que le partenaire retrouvera dans son espace.
+            Cochez ceux que vous facturez maintenant, choisissez la devise, et ils partiront sur une
+            seule facture que le partenaire retrouvera dans son espace.
           </div>
         </div>
         {aFacturer.length === 0 ? (
@@ -20148,12 +21087,26 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
           <>
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", minWidth: 620, borderCollapse: "collapse" }}>
-                <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Destinataire", "Poids", "Vérifié par", "Montant", ""].map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
+                <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>
+                  <th style={{ padding: "10px 14px" }}>
+                    <input type="checkbox" title="Tout cocher ou tout décocher"
+                      checked={selection.length === aFacturer.length && aFacturer.length > 0}
+                      onChange={(e) => setSelection(e.target.checked ? aFacturer.map((c) => c.tracking) : [])} />
+                  </th>
+                  {["N° de suivi", "Destinataire", "Poids", "Vérifié par", "Montant", ""].map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}
+                </tr></thead>
                 <tbody>
                   {aFacturer.map((c) => (
-                    <tr key={c.tracking} style={{ borderTop: "1px solid var(--border)" }}>
+                    <tr key={c.tracking} style={{ borderTop: "1px solid var(--border)", opacity: selection.includes(c.tracking) ? 1 : 0.5 }}>
+                      <td style={{ padding: "10px 14px" }}>
+                        <input type="checkbox" checked={selection.includes(c.tracking)}
+                          onChange={(e) => setSelection((l) => (e.target.checked ? [...l, c.tracking] : l.filter((t) => t !== c.tracking)))} />
+                      </td>
                       <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.tracking}</td>
-                      <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{c.destinataire}</td>
+                      <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>
+                        {c.destinataire}
+                        {repereColis(c) && <div style={{ fontSize: 10.5, color: "var(--muted)" }}>repère : {repereColis(c)}</div>}
+                      </td>
                       <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.poids} kg</td>
                       <td style={{ padding: "10px 14px", fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.validationPartenaire?.par || "—"}</td>
                       <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}>
@@ -20182,13 +21135,34 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
                 </tbody>
               </table>
             </div>
-            <div style={{ padding: "14px 16px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ padding: "14px 16px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: 12, flexWrap: "wrap" }}>
               <div style={{ fontSize: 13, color: "var(--muted)" }}>
-                {aFacturer.length} colis · total <strong style={{ color: "var(--text)", fontSize: 16 }}>{fmt(total, devise)}</strong>
+                {retenus.length} colis retenu{retenus.length > 1 ? "s" : ""} sur {aFacturer.length}
+                {" · total "}
+                <strong style={{ color: "var(--text)", fontSize: 16 }}>{fmt(total, deviseFacture)}</strong>
+                <div style={{ fontSize: 12, marginTop: 2 }}>
+                  soit <strong style={{ color: "var(--text)" }}>{fmt(total, deviseCompagnon(deviseFacture))}</strong>
+                  {retenus.length < aFacturer.length && ` · ${fmt(totalTout - total, deviseFacture)} laissés pour une prochaine facture`}
+                </div>
               </div>
-              <button onClick={() => setConfirmation(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
-                <Receipt size={16} /> Créer la facture
-              </button>
+              <div style={{ display: "flex", alignItems: "flex-end", gap: 10, flexWrap: "wrap" }}>
+                {/*
+                  La devise de la facture se choisit ici, et non dans le contrat : elle dépend de
+                  qui règle et où, pas du partenaire. Le montant, lui, ne change pas — seule son
+                  expression change.
+                */}
+                <div>
+                  <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Devise de la facture</div>
+                  <select value={deviseFacture} onChange={(e) => setDeviseFacture(e.target.value)}
+                    style={{ ...inputStyle, marginBottom: 0, width: 110 }}>
+                    {[...new Set([devise, "GNF", "EUR", "USD"])].map((d) => <option key={d} value={d}>{d}</option>)}
+                  </select>
+                </div>
+                <button onClick={() => setConfirmation(true)} disabled={retenus.length === 0}
+                  style={{ display: "flex", alignItems: "center", gap: 7, background: retenus.length ? "var(--brand-solid)" : "var(--surface2)", color: retenus.length ? "#fff" : "var(--muted)", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: retenus.length ? "pointer" : "not-allowed" }}>
+                  <Receipt size={16} /> Créer la facture
+                </button>
+              </div>
             </div>
           </>
         )}
@@ -20331,10 +21305,10 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
       {confirmation && (
         <ConfirmerAction
           titre="Créer cette facture ?"
-          message={`${aFacturer.length} colis vérifiés, pour un total de ${fmt(total, devise)}.`}
-          consequence="Ces colis seront rattachés à la facture et n’apparaîtront plus ici. Le partenaire la verra aussitôt dans son espace."
+          message={`${retenus.length} colis retenus, pour un total de ${fmtDeuxDevises(total, deviseFacture)}.`}
+          consequence="Ces colis seront rattachés à la facture et n’apparaîtront plus ici. Le partenaire la verra aussitôt dans son espace, avec le montant dans les deux devises."
           libelleAction="Créer la facture"
-          onConfirmer={() => { setConfirmation(false); onCreerFacture(); }}
+          onConfirmer={() => { setConfirmation(false); onCreerFacture(selection, deviseFacture); }}
           onAnnuler={() => setConfirmation(false)}
         />
       )}
@@ -20396,11 +21370,27 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
  */
 function EncaisserFacturePartenaireModal({ facture, partenaire, onEncaisser, onClose }) {
   const reste = resteDuFacture(facture);
-  const [montant, setMontant] = useState(String(reste));
+  /*
+   * L'agent saisit dans la devise qu'il a en main, pas dans celle de la facture.
+   *
+   * Un partenaire de Conakry paie en francs une facture libellée en euros : lui faire convertir
+   * de tête, c'est une erreur par semaine. Le champ est donc pré-rempli avec le reste dû converti
+   * dans la devise choisie, et le montant est ramené à la base avant d'être enregistré — sans
+   * quoi « 12 825 000 » saisi sous une étiquette GNF solderait mille fois la facture.
+   */
+  const [deviseSaisie, setDeviseSaisie] = useState(facture.devise);
+  const [montant, setMontant] = useState(String(fmtRaw(reste, facture.devise)));
   const [mode, setMode] = useState(MODE_ESPECES);
   const [reference, setReference] = useState("");
-  const saisi = Number(String(montant).replace(",", ".")) || 0;
+  const saisi = versBase(montant, deviseSaisie);
   const applique = Math.min(Math.max(saisi, 0), reste);
+
+  function changerDevise(d) {
+    // Le montant suit la devise : ce qui était le reste dû le reste, exprimé autrement.
+    const base = versBase(montant, deviseSaisie);
+    setDeviseSaisie(d);
+    setMontant(String(fmtRaw(base, d)));
+  }
   const nomPartenaire = reglagesPartenaire(partenaire).nomCommercial
     || `${partenaire?.prenom || ""} ${partenaire?.nom || ""}`.trim();
 
@@ -20412,16 +21402,29 @@ function EncaisserFacturePartenaireModal({ facture, partenaire, onEncaisser, onC
           {nomPartenaire || "Partenaire"} · total {fmt(Number(facture.total) || 0, facture.devise)}
           {totalRegleFacture(facture) > 0.005 && <> · déjà reçu {fmt(totalRegleFacture(facture), facture.devise)}</>}
           <br />
-          Reste dû <strong style={{ color: "var(--text)" }}>{fmt(reste, facture.devise)}</strong>
+          Reste dû <strong style={{ color: "var(--text)" }}>{fmtDeuxDevises(reste, facture.devise)}</strong>
         </div>
       </div>
 
-      <Field label={`Montant versé (${facture.devise})`}>
-        <input value={montant} onChange={(e) => setMontant(e.target.value)} autoFocus inputMode="decimal" style={inputStyle} />
-      </Field>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 110px", gap: 10 }}>
+        <Field label="Montant versé">
+          <input value={montant} onChange={(e) => setMontant(e.target.value)} autoFocus inputMode="decimal" style={{ ...inputStyle, marginBottom: 0 }} />
+        </Field>
+        <Field label="Devise reçue">
+          <select value={deviseSaisie} onChange={(e) => changerDevise(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }}>
+            {[...new Set([facture.devise, deviseCompagnon(facture.devise), "EUR", "USD"])].map((d) => <option key={d} value={d}>{d}</option>)}
+          </select>
+        </Field>
+      </div>
+      {applique > 0 && deviseSaisie !== facture.devise && (
+        <div style={{ fontSize: 11.5, color: "var(--muted)", margin: "6px 0 14px", lineHeight: 1.5 }}>
+          Soit {fmt(applique, facture.devise)} portés sur la facture.
+        </div>
+      )}
+      {(applique <= 0 || deviseSaisie === facture.devise) && <div style={{ height: 14 }} />}
       {saisi > reste + 0.005 && (
         <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "10px 12px", marginBottom: 14, fontSize: 12.5, color: "var(--text)", lineHeight: 1.5 }}>
-          Le versement sera ramené à {fmt(reste, facture.devise)} — une facture ne peut pas être réglée
+          Le versement sera ramené à {fmt(reste, deviseSaisie)} — une facture ne peut pas être réglée
           au-delà de ce qu’elle porte. Pensez à rendre la différence.
         </div>
       )}
@@ -20440,9 +21443,9 @@ function EncaisserFacturePartenaireModal({ facture, partenaire, onEncaisser, onC
       <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
         <button
           disabled={applique <= 0}
-          onClick={() => onEncaisser(montant, mode, reference)}
+          onClick={() => onEncaisser(saisi, mode, reference)}
           style={{ flex: 1, background: applique > 0 ? "#16A163" : "var(--surface2)", color: applique > 0 ? "#fff" : "var(--muted)", border: "none", borderRadius: 8, padding: "12px 0", fontSize: 13.5, fontWeight: 700, cursor: applique > 0 ? "pointer" : "not-allowed" }}>
-          Encaisser {applique > 0 ? fmt(applique, facture.devise) : ""}
+          Encaisser {applique > 0 ? fmt(applique, deviseSaisie) : ""}
         </button>
         <button onClick={onClose} style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "12px 20px", fontSize: 13, cursor: "pointer" }}>
           Annuler

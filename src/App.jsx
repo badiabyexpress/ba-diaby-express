@@ -796,6 +796,32 @@ function voitLesMontants(session) {
 }
 
 /*
+ * Le fil de discussion entre l'entreprise et un partenaire.
+ *
+ * Il remplace le téléphone. Presque tous les commentaires de ce fichier finissent par la même
+ * phrase — « ce qui évite l'appel qui suit toujours » — et pourtant rien ne permettait d'écrire :
+ * une question sur un colis, un poids contesté, un départ décalé se réglaient par appel, sans
+ * trace, et se reposaient la semaine suivante.
+ *
+ * Le fil appartient au partenaire titulaire, pas à la personne connectée : ses employés lisent et
+ * écrivent dans le même fil, sous leur propre nom. C'est une conversation entre deux maisons, pas
+ * entre deux individus — celui qui reprend le dossier trois jours plus tard doit trouver ce qui
+ * s'est dit.
+ */
+function messagesPartenaire(user) {
+  return Array.isArray(user?.partenaireMessages) ? user.partenaireMessages : [];
+}
+/** Messages non lus adressés à un côté — « partenaire » lit ceux de l'entreprise, et l'inverse. */
+function messagesNonLusPour(user, cote) {
+  const autre = cote === "partenaire" ? "entreprise" : "partenaire";
+  return messagesPartenaire(user).filter((m) => m.expediteur === autre && !m.lu).length;
+}
+/** Tous les partenaires qui attendent une réponse de l'entreprise. */
+function partenairesEnAttenteDeReponse(users) {
+  return partenairesPrincipaux(users).filter((p) => messagesNonLusPour(p, "entreprise") > 0);
+}
+
+/*
  * Le message de suivi qu'un partenaire envoie à son propre client.
  *
  * Il est écrit à la première personne du partenaire et signé de son nom commercial : c'est lui
@@ -2020,6 +2046,10 @@ function App() {
         && statutFacturePartenaire(f) !== "Réglée").length,
     }] : []),
     { key: "clients", label: "Clients", icon: Users },
+    {
+      key: "messages", label: "Messages", icon: MessageCircle,
+      badge: messagesNonLusPour((data.users || []).find((u) => u.id === partenaireIdSession), "partenaire"),
+    },
     { key: "compte", label: "Compte", icon: User },
   ].map((n) => ({ ...n, show: true, actif: ongletPartenaire === n.key, onSelect: () => setOngletPartenaire(n.key) }));
 
@@ -2123,7 +2153,7 @@ function App() {
                 <div style={{ fontSize: 11.5, color: "var(--nav-muted)", marginBottom: 10 }}>{session.role}</div>
               </>
             )}
-            <button onClick={() => { ecrireSessionEnregistree(null); ecrireJeton(null); setVersionAcces((n) => n + 1); setSession(null); setView("dashboard"); setShowLogin(false); const url = new URL(window.location.href); url.searchParams.delete("connexion"); window.history.replaceState({}, "", url); }} title={(collapsed && !isMobile) ? t.logout : undefined} style={{ display: "flex", alignItems: "center", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", gap: 8, width: "100%", fontSize: 13, color: "var(--brand-on-dark)", background: "none", border: "none", cursor: "pointer" }}>
+            <button onClick={() => { ecrireSessionEnregistree(null); ecrireJeton(null); setVersionAcces((n) => n + 1); setSession(null); setView("dashboard"); setOngletPartenaire("accueil"); setShowLogin(false); const url = new URL(window.location.href); url.searchParams.delete("connexion"); window.history.replaceState({}, "", url); }} title={(collapsed && !isMobile) ? t.logout : undefined} style={{ display: "flex", alignItems: "center", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", gap: 8, width: "100%", fontSize: 13, color: "var(--brand-on-dark)", background: "none", border: "none", cursor: "pointer" }}>
               <LogOut size={15} /> {!(collapsed && !isMobile) && t.logout}
             </button>
           </div>
@@ -4987,6 +5017,40 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
    * pouvoir contourner la règle en exportant.
    */
   const [exportEnCours, setExportEnCours] = useState(false);
+  /*
+   * Écrire à l'entreprise. Le message part sous le nom de la personne connectée — un employé
+   * signe de son nom — mais il est rangé dans le fil du partenaire titulaire : c'est une
+   * conversation entre deux maisons, et tout le monde chez lui doit pouvoir la relire.
+   */
+  function envoyerALEntreprise(texte) {
+    const message = {
+      id: `mp${Date.now()}`, expediteur: "partenaire",
+      nom: `${session.prenom} ${session.nom}`.trim() || session.identifiant,
+      texte, date: new Date().toISOString(), lu: false,
+    };
+    persist({
+      ...data,
+      users: (data.users || []).map((u) => (u.id === partenaireId
+        ? { ...u, partenaireMessages: [...messagesPartenaire(u), message] }
+        : u)),
+    });
+  }
+
+  /*
+   * Les messages de l'entreprise sont marqués lus dès que la section s'ouvre : la pastille dit
+   * « on vous a écrit », pas « vous n'avez pas répondu ».
+   */
+  useEffect(() => {
+    if (onglet !== "messages") return;
+    if (messagesNonLusPour(moi, "partenaire") === 0) return;
+    persist({
+      ...data,
+      users: (data.users || []).map((u) => (u.id === partenaireId
+        ? { ...u, partenaireMessages: messagesPartenaire(u).map((m) => (m.expediteur === "entreprise" ? { ...m, lu: true } : m)) }
+        : u)),
+    });
+  }, [onglet, moi]);
+
   async function exporterMesColis() {
     setExportEnCours(true);
     try {
@@ -5514,6 +5578,17 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
         </div>
       ))}
 
+      {onglet === "messages" && (
+        <div style={{ marginBottom: 20 }}>
+          <FilMessagesPartenaire
+            messages={messagesPartenaire(moi)}
+            cote="partenaire"
+            nomEnFace="Ba-Diaby Express"
+            onEnvoyer={envoyerALEntreprise}
+          />
+        </div>
+      )}
+
       {onglet === "compte" && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(300px,1fr))", gap: 16, marginBottom: 20, alignItems: "start" }}>
           {!estEmploye && <IdentitePartenaire key={moi.id} partenaire={moi} session={session} onSave={enregistrerIdentite} />}
@@ -5892,6 +5967,84 @@ function PromesseConfidentialite() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Le fil de discussion entre l'entreprise et un partenaire, vu d'un côté ou de l'autre.
+ *
+ * Le même composant sert aux deux : ce qui change est le côté d'où l'on écrit. Deux écrans
+ * distincts auraient divergé au premier ajout, et une conversation dont les deux moitiés ne
+ * s'affichent pas pareil est une conversation qu'on relit mal.
+ *
+ * Chaque message porte le nom de son auteur, pas seulement son camp : côté partenaire, il peut
+ * venir d'un employé ; côté entreprise, de n'importe quel agent. Savoir qui a promis quoi est
+ * la moitié de l'intérêt d'écrire plutôt que d'appeler.
+ */
+function FilMessagesPartenaire({ messages, cote, nomEnFace, onEnvoyer }) {
+  const [texte, setTexte] = useState("");
+  const finDuFil = useRef(null);
+
+  useEffect(() => {
+    // On ouvre sur le dernier message : c'est celui qu'on vient lire.
+    finDuFil.current?.scrollIntoView({ block: "nearest" });
+  }, [messages.length]);
+
+  function envoyer(e) {
+    e.preventDefault();
+    const propre = texte.trim();
+    if (!propre) return;
+    onEnvoyer(propre);
+    setTexte("");
+  }
+
+  return (
+    <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden" }}>
+      <div style={{ padding: "14px 16px", borderBottom: "1px solid var(--border)" }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>
+          {cote === "entreprise" ? `Messages avec ${nomEnFace}` : "Messages avec Ba-Diaby Express"}
+        </div>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 }}>
+          {cote === "entreprise"
+            ? "Une question sur un colis, un poids contesté, un départ décalé — écrit ici, cela reste consultable par toute votre équipe."
+            : "Une question, un colis à signaler, un délai à demander. Vos échanges restent ici, vous n’avez plus à rappeler pour retrouver ce qui a été dit."}
+        </div>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, maxHeight: 420, overflowY: "auto", padding: 16 }}>
+        {messages.length === 0 ? (
+          <div style={{ fontSize: 12.5, color: "var(--muted)", textAlign: "center", padding: "24px 0" }}>
+            Aucun message pour l’instant. Écrivez le premier ci-dessous.
+          </div>
+        ) : messages.map((m) => {
+          const aMoi = m.expediteur === cote;
+          return (
+            <div key={m.id} style={{ display: "flex", justifyContent: aMoi ? "flex-end" : "flex-start" }}>
+              <div style={{ maxWidth: "78%", background: aMoi ? "var(--brand-solid)" : "var(--surface2)", color: aMoi ? "#fff" : "var(--text)", borderRadius: 12, padding: "9px 13px" }}>
+                <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{m.texte}</div>
+                <div style={{ fontSize: 10.5, marginTop: 5, opacity: 0.75 }}>
+                  {m.nom || (m.expediteur === "entreprise" ? "Ba-Diaby Express" : "Partenaire")}
+                  {" · "}
+                  {new Date(m.date).toLocaleString("fr-FR", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        <div ref={finDuFil} />
+      </div>
+
+      <form onSubmit={envoyer} style={{ display: "flex", gap: 8, padding: 14, borderTop: "1px solid var(--border)", alignItems: "flex-end" }}>
+        <textarea value={texte} onChange={(e) => setTexte(e.target.value)} rows={2}
+          onKeyDown={(e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) envoyer(e); }}
+          placeholder="Écrivez votre message…"
+          style={{ ...inputStyle, marginBottom: 0, flex: 1, resize: "vertical", minHeight: 42, fontFamily: "inherit" }} />
+        <button type="submit" disabled={!texte.trim()}
+          style={{ background: texte.trim() ? "var(--brand-solid)" : "var(--surface2)", color: texte.trim() ? "#fff" : "var(--muted)", border: "none", borderRadius: 8, padding: "11px 18px", fontSize: 13, fontWeight: 700, cursor: texte.trim() ? "pointer" : "not-allowed", flexShrink: 0 }}>
+          Envoyer
+        </button>
+      </form>
     </div>
   );
 }
@@ -6410,7 +6563,14 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
            */
           const impayees = (data.facturesPartenaire || []).filter((f) => statutFacturePartenaire(f) !== "Réglée").length;
           const retards = toutesFacturesEnRetard(data).length;
+          /*
+           * Un partenaire qui a écrit attend une réponse, et rien d'autre dans l'application ne
+           * le dit : sans ce signal, son message dormirait jusqu'à ce qu'il rappelle — c'est-à-dire
+           * jusqu'à ce que la messagerie n'ait servi à rien.
+           */
+          const enAttenteDeReponse = partenairesEnAttenteDeReponse(data.users).length;
           const signaux = [
+            enAttenteDeReponse > 0 ? `${enAttenteDeReponse} message${enAttenteDeReponse > 1 ? "s" : ""} à lire` : "",
             aVerifier > 0 ? `${aVerifier} colis à vérifier` : "",
             impayees > 0 ? `${impayees} facture${impayees > 1 ? "s" : ""} à encaisser${retards > 0 ? `, dont ${retards} en retard` : ""}` : "",
           ].filter(Boolean).join(" · ");
@@ -18789,6 +18949,34 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
     notify?.(`Relance de ${facture.numero} notée`);
   }
 
+  /*
+   * Écrire au partenaire, et marquer comme lus les messages qu'il nous a envoyés.
+   *
+   * La lecture est enregistrée au moment où l'onglet s'ouvre, pas à l'envoi d'une réponse : un
+   * agent qui lit sans répondre a quand même pris connaissance, et laisser la pastille allumée
+   * ferait relire dix fois la même chose à toute l'équipe.
+   */
+  function envoyerAuPartenaire(texte) {
+    const message = { id: `mp${Date.now()}`, expediteur: "entreprise", nom: monNom, texte, date: new Date().toISOString(), lu: false };
+    persist({
+      ...data,
+      users: (data.users || []).map((u) => (u.id === partenaire.id
+        ? { ...u, partenaireMessages: [...messagesPartenaire(u), message] }
+        : u)),
+      activityLog: pushActivity(data, session, "Message envoyé à un partenaire", `${partenaire.prenom} ${partenaire.nom}`),
+    });
+  }
+
+  function marquerMessagesLus() {
+    if (!partenaire || messagesNonLusPour(partenaire, "entreprise") === 0) return;
+    persist({
+      ...data,
+      users: (data.users || []).map((u) => (u.id === partenaire.id
+        ? { ...u, partenaireMessages: messagesPartenaire(u).map((m) => (m.expediteur === "partenaire" ? { ...m, lu: true } : m)) }
+        : u)),
+    });
+  }
+
   async function imprimerReleve(mois) {
     const sesColis = (data.colis || []).filter((c) => c.partenaireId === partenaire.id);
     try {
@@ -18827,10 +19015,12 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
     );
   }
 
+  const messagesNonLus = partenaire ? messagesNonLusPour(partenaire, "entreprise") : 0;
   const onglets = [
     ["contrat", "Contrat & identité", 0],
     ["verification", "Colis à vérifier", enAttente.length],
     ["facturation", "Facturation", aFacturer.length],
+    ["messages", "Messages", messagesNonLus],
   ];
 
   return (
@@ -18840,7 +19030,9 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
         {partenaires.map((p) => {
           const actif = p.id === selection;
-          const attente = (data.colis || []).filter((c) => c.partenaireId === p.id && statutValidationPartenaire(c) === "En attente" && c.status !== "Annulé").length;
+          // La pastille du sélecteur réunit tout ce qui attend un geste sur ce partenaire.
+          const attente = (data.colis || []).filter((c) => c.partenaireId === p.id && statutValidationPartenaire(c) === "En attente" && c.status !== "Annulé").length
+            + messagesNonLusPour(p, "entreprise");
           return (
             <button key={p.id} onClick={() => setSelection(p.id)} style={{
               display: "flex", alignItems: "center", gap: 8, padding: "9px 15px", borderRadius: 22,
@@ -18857,7 +19049,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
 
       <div style={{ display: "flex", gap: 22, borderBottom: "1px solid var(--border)", marginBottom: 20, flexWrap: "wrap" }}>
         {onglets.map(([cle, libelle, badge]) => (
-          <button key={cle} onClick={() => setOnglet(cle)} style={{
+          <button key={cle} onClick={() => { setOnglet(cle); if (cle === "messages") marquerMessagesLus(); }} style={{
             background: "none", border: "none", padding: "0 0 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 7,
             color: onglet === cle ? "var(--info-fg)" : "var(--muted)",
             borderBottom: onglet === cle ? "2px solid #5B8DEF" : "2px solid transparent", fontSize: 13.5, fontWeight: 600,
@@ -18874,6 +19066,16 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
 
       {onglet === "verification" && partenaire && (
         <VerificationColisPartenaire partenaire={partenaire} colis={enAttente} onValider={validerColis} />
+      )}
+
+      {onglet === "messages" && partenaire && (
+        <FilMessagesPartenaire
+          key={partenaire.id}
+          messages={messagesPartenaire(partenaire)}
+          cote="entreprise"
+          nomEnFace={reglagesPartenaire(partenaire).nomCommercial || `${partenaire.prenom} ${partenaire.nom}`.trim()}
+          onEnvoyer={envoyerAuPartenaire}
+        />
       )}
 
       {onglet === "facturation" && partenaire && (

@@ -4245,7 +4245,14 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
 
   const destinations = COUNTRIES.filter((c) => c.code !== "GN");
   const selectedCountry = selectedPays ? destinations.find((c) => c.code === selectedPays) : null;
-  const selectedDep = selectedPays ? (data.departures || {})[selectedPays] || {} : null;
+  /*
+   * Le prochain départ vient du calendrier que l'application utilise partout ailleurs — celui du
+   * tableau de bord et de l'espace partenaire. Cette page lisait jusqu'ici un second magasin,
+   * alimenté par un autre écran de la Configuration : un administrateur qui annonçait un départ
+   * dans « Calendrier des départs » ne changeait rien à ce que voyait le public, et l'inverse
+   * était vrai aussi. Deux réponses à la même question, dont aucune n'était sûre.
+   */
+  const prochainDepart = selectedPays ? departsAVenir(data.departs, selectedPays)[0] : null;
 
   return (
     <div dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "var(--bg)" }}>
@@ -4319,14 +4326,27 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
         <Modal onClose={() => setSelectedPays(null)} title={`${FLAGS[selectedCountry.code]} ${selectedCountry.name}`}>
           <div style={{ textAlign: "center", padding: "6px 0 4px" }}>
             <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", letterSpacing: 0.5, marginBottom: 6 }}>PROCHAIN DÉPART</div>
-            {selectedDep.prochaine ? (
-              <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 22, fontWeight: 700, color: "var(--text)", marginBottom: 4, textTransform: "capitalize" }}>
-                {new Date(selectedDep.prochaine).toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" })}
-              </div>
+            {prochainDepart ? (
+              <>
+                <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 22, fontWeight: 700, color: "var(--text)", marginBottom: 4, textTransform: "capitalize" }}>
+                  {new Date(prochainDepart.dateDepart).toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" })}
+                </div>
+                {/*
+                  La date limite de dépôt décide le client : un départ annoncé sans elle ne lui dit
+                  pas jusqu'à quand il peut apporter son colis, et c'est pourtant la seule chose
+                  qu'il ait besoin de savoir pour se mettre en route.
+                */}
+                {prochainDepart.dateLimite && (
+                  <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 4 }}>
+                    Dépôt jusqu’au {new Date(prochainDepart.dateLimite).toLocaleDateString("fr-FR", { day: "numeric", month: "long" })}
+                    {prochainDepart.mode === "sea" ? " · par bateau" : " · par avion"}
+                  </div>
+                )}
+                {prochainDepart.note && <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>{prochainDepart.note}</div>}
+              </>
             ) : (
               <div style={{ fontSize: 14, color: "var(--muted)", marginBottom: 4 }}>À confirmer — contactez-nous</div>
             )}
-            {selectedDep.frequence && <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>{selectedDep.frequence}</div>}
             <div style={{ background: "var(--surface2)", borderRadius: 12, padding: 14, marginTop: 10 }}>
               <div style={{ fontSize: 12, color: "var(--muted)" }}>Délai estimé (aérien)</div>
               <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{selectedCountry.delayAir} jours</div>
@@ -6304,19 +6324,17 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
   const [sub, setSub] = useState(null);
   const back = () => setSub(null);
 
-  if (sub === "site") return <SiteVitrinePage data={data} persist={persist} notify={notify} onBack={back} />;
+  if (sub === "identite") return <IdentitePubliquePage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "devises") return <GestionDevisesPage data={data} persist={persist} session={session} notify={notify} onBack={back} />;
   if (sub === "commissions") return <CommissionsPage data={data} persist={persist} session={session} notify={notify} onBack={back} />;
   if (sub === "reception") return <ReceptionTarifsPage data={data} persist={persist} notify={notify} onBack={back} />;
-  if (sub === "agences") return <AgencesConfigPage data={data} persist={persist} notify={notify} onBack={back} />;
+  if (sub === "adresses") return <AdressesEtSitesPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "guide") return <GuidePage onBack={back} />;
   if (sub === "categories") return <CategoriesProduitsPage data={data} persist={persist} session={session} notify={notify} onBack={back} />;
   if (sub === "sauvegarde") return <SauvegardePage data={data} persist={persist} notify={notify} session={session} onBack={back} />;
-  if (sub === "sites") return <SitesOperationPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "notifwa") return <NotificationsWhatsAppPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "departs") return <DepartsPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "paiement") return <PaiementConfigPage data={data} persist={persist} notify={notify} onBack={back} />;
-  if (sub === "branding") return <BrandingPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "users") return <UtilisateursPage data={data} persist={persist} notify={notify} onBack={back} session={session} />;
   if (sub === "partenaires") return <PartenairesPage data={data} persist={persist} notify={notify} onBack={back} session={session} />;
   if (sub === "performance") return <PerformanceAgentsPage data={data} onBack={back} />;
@@ -6351,29 +6369,33 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
         </button>
       </div>
 
-      <SectionLabel badge="NOUVEAU">CANAUX DE VENTE</SectionLabel>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 14 }}>
-        <Card icon={Globe} tint="#3D63FF" title="Site Vitrine Public" desc="Personnalisez votre page d’accueil, activez le tracking public et configurez votre nom de domaine." onClick={() => setSub("site")} />
+      {/*
+        Quatre rubriques équilibrées, au lieu d'une de onze cartes.
+
+        « Commercial & logistique » avait fini en fourre-tout : les devises, la sauvegarde, le
+        guide d'utilisation et les sites d'opération y voisinaient sans rapport, et il fallait
+        parcourir la liste entière pour trouver quoi que ce soit. Les rubriques répondent
+        maintenant à une question chacune — qui sommes-nous, combien ça coûte, qui travaille ici,
+        qu'est-ce qui se passe.
+      */}
+      <SectionLabel>VOTRE ENTREPRISE</SectionLabel>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14, marginBottom: 26 }}>
+        <Card icon={Globe} tint="#3D63FF" title="Identité &amp; site public" desc="Votre nom, votre slogan et votre logo — dans l’application comme sur votre page d’accueil publique." onClick={() => setSub("identite")} />
+        <Card icon={MapPin} tint="#5B8DEF" title="Adresses &amp; sites" desc="Où vous enregistrez, où vous remettez, et les coordonnées qui s’impriment sur vos documents." onClick={() => setSub("adresses")} />
+        <Card icon={Plane} tint="#0EA5E9" title="Calendrier des départs" desc="Annoncez quand part le prochain envoi : vos clients cessent d’appeler pour le demander." onClick={() => setSub("departs")} />
       </div>
 
-      <SectionLabel>COMMERCIAL &amp; LOGISTIQUE</SectionLabel>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14 }}>
-        <Card icon={RefreshCw} tint="#0EA5E9" title="Gestion des devises" desc="Un taux par devise, partagé automatiquement par tous les pays concernés." onClick={() => setSub("devises")} />
-        <Card icon={Users} tint="#16A163" title="Commissions par Agence" desc="Définissez combien chaque agence gagne par kg et par unité vendue." onClick={() => setSub("commissions")} />
-        <Card icon={Package} tint="var(--danger-fg)" title="Tarifs de réception client" desc="Le tarif au kg appliqué sur les bordereaux de réception, selon le poids du lot." onClick={() => setSub("reception")} />
-        <Card icon={MapPin} tint="#5B8DEF" title="Siège & agences de réception" desc="Coordonnées de l’entreprise et des agences à l’étranger, affichées automatiquement sur le ticket d’envoi." onClick={() => setSub("agences")} />
-        <Card icon={Sparkles} tint="#8B5CF6" title="Guide d’utilisation" desc="Explications des fonctionnalités récentes : comptes clients, pré-alertes, bordereau de réception, tarifs par palier..." onClick={() => setSub("guide")} />
+      <SectionLabel>TARIFS &amp; ARGENT</SectionLabel>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14, marginBottom: 26 }}>
         <Card icon={Receipt} tint="#E0794E" title="Catégories de Produits" desc="Configuration des types de marchandises et taxes." onClick={() => setSub("categories")} />
-        <Card icon={Download} tint="var(--danger-fg)" title="Sauvegarde des données" desc="Téléchargez une copie complète de votre plateforme. Le seul filet en cas de perte." onClick={() => setSub("sauvegarde")} />
-        <Card icon={Plane} tint="#5B8DEF" title="Calendrier des départs" desc="Annoncez quand part le prochain envoi : vos clients cessent d’appeler pour le demander." onClick={() => setSub("departs")} />
-        <Card icon={MessageCircle} tint="#16A163" title="Notifications clients" desc="Qui est prévenu automatiquement, et pour quel événement — par WhatsApp et par e-mail." onClick={() => setSub("notifwa")} />
-        <Card icon={MapPin} tint="#16A163" title="Sites d’opération" desc="Gérez vos points d’enregistrement et de retrait, et les informations affichées sur le ticket d’envoi (horaires, paiements, stockage...)." onClick={() => setSub("sites")} />
-        <Card icon={Receipt} tint="#5B8DEF" title="Paiement" desc="Configurez vos numéros pour accepter les paiements de vos clients." onClick={() => setSub("paiement")} />
+        <Card icon={RefreshCw} tint="#0EA5E9" title="Gestion des devises" desc="Un taux par devise, partagé automatiquement par tous les pays concernés." onClick={() => setSub("devises")} />
+        <Card icon={Package} tint="var(--danger-fg)" title="Tarifs de réception client" desc="Le tarif au kg appliqué sur les bordereaux de réception, selon le poids du lot." onClick={() => setSub("reception")} />
+        <Card icon={Users} tint="#16A163" title="Commissions par Agence" desc="Définissez combien chaque agence gagne par kg et par unité vendue." onClick={() => setSub("commissions")} />
+        <Card icon={Wallet} tint="#5B8DEF" title="Paiement" desc="Configurez vos numéros pour accepter les paiements de vos clients." onClick={() => setSub("paiement")} />
       </div>
 
-      <SectionLabel>ADMINISTRATION</SectionLabel>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14 }}>
-        <Card icon={ShieldCheck} tint="var(--danger-fg)" title="Branding &amp; Identité" desc="Logo, textes légaux et personnalisation de l’identité." onClick={() => setSub("branding")} />
+      <SectionLabel>ÉQUIPE &amp; PARTENAIRES</SectionLabel>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14, marginBottom: 26 }}>
         <Card icon={Users} tint="#6366F1" title="Gestion Utilisateurs" desc="Accès, rôles et permissions de l’équipe." onClick={() => setSub("users")} />
         {(() => {
           // Le nombre de colis partenaires en attente est porté sur la carte : c'est le seul
@@ -6397,8 +6419,15 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
             onClick={() => setSub("partenaires")} />;
         })()}
         <Card icon={LayoutDashboard} tint="#3D63FF" title="Performance des agents" desc="Colis enregistrés, chiffre d’affaires et paiements encaissés, par agent." onClick={() => setSub("performance")} />
-        <Card icon={Settings} tint="#6B7280" title="Paramètres Système" desc="Options avancées de la plateforme." onClick={() => setSub("systeme")} />
+      </div>
+
+      <SectionLabel>SUIVI &amp; MAINTENANCE</SectionLabel>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14 }}>
+        <Card icon={MessageCircle} tint="#16A163" title="Notifications" desc="Qui est prévenu automatiquement, et pour quel événement — clients, expéditeurs et partenaires." onClick={() => setSub("notifwa")} />
         <Card icon={FileStack} tint="#5B8DEF" title="Journal d’activité" desc="Historique complet des actions effectuées par les utilisateurs." onClick={() => setSub("journal")} />
+        <Card icon={Download} tint="var(--danger-fg)" title="Sauvegarde des données" desc="Téléchargez une copie complète de votre plateforme. Le seul filet en cas de perte." onClick={() => setSub("sauvegarde")} />
+        <Card icon={Settings} tint="#6B7280" title="Paramètres Système" desc="Options avancées de la plateforme." onClick={() => setSub("systeme")} />
+        <Card icon={Sparkles} tint="#8B5CF6" title="Guide d’utilisation" desc="Explications des fonctionnalités récentes : comptes clients, pré-alertes, bordereau de réception, tarifs par palier..." onClick={() => setSub("guide")} />
       </div>
     </div>
   );
@@ -6508,7 +6537,45 @@ function GuidePage({ onBack }) {
   );
 }
 
-function AgencesConfigPage({ data, persist, notify, onBack }) {
+/**
+ * Toutes les adresses de l'entreprise, sur un seul écran.
+ *
+ * Il y en avait deux, et rien ne disait laquelle servait à quoi : « Siège & agences de réception »
+ * tenait le siège et les adresses où l'on reçoit les colis à l'étranger ; « Sites d'opération »
+ * tenait les points où l'on enregistre et où l'on remet. Un administrateur qui cherchait « notre
+ * adresse à Paris » avait une chance sur deux, et les deux écrans acceptaient une adresse
+ * étrangère — de sorte qu'on pouvait la saisir dans le mauvais et ne rien voir apparaître sur le
+ * ticket.
+ *
+ * Les deux formulaires sont conservés tels quels, sous deux onglets : ce sont deux réglages
+ * distincts, ils n'avaient simplement pas à être deux portes.
+ */
+function AdressesEtSitesPage({ data, persist, notify, onBack }) {
+  const [onglet, setOnglet] = useState("sites");
+  const onglets = [
+    ["sites", "Enregistrement & retrait"],
+    ["agences", "Siège & réception à l’étranger"],
+  ];
+  return (
+    <div>
+      <ConfigPageHeader title="Adresses & sites" desc="Où vous enregistrez, où vous remettez, et les coordonnées qui s’impriment sur vos documents." onBack={onBack} />
+      <div style={{ display: "flex", gap: 22, borderBottom: "1px solid var(--border)", marginBottom: 20, flexWrap: "wrap" }}>
+        {onglets.map(([cle, libelle]) => (
+          <button key={cle} onClick={() => setOnglet(cle)} style={{
+            background: "none", border: "none", padding: "0 0 10px", cursor: "pointer",
+            color: onglet === cle ? "var(--info-fg)" : "var(--muted)",
+            borderBottom: onglet === cle ? "2px solid #5B8DEF" : "2px solid transparent", fontSize: 13.5, fontWeight: 600,
+          }}>{libelle}</button>
+        ))}
+      </div>
+      {onglet === "sites"
+        ? <SitesOperationPage data={data} persist={persist} notify={notify} onBack={onBack} sansEntete />
+        : <AgencesConfigPage data={data} persist={persist} notify={notify} onBack={onBack} sansEntete />}
+    </div>
+  );
+}
+
+function AgencesConfigPage({ data, persist, notify, onBack, sansEntete }) {
   const [entreprise, setEntreprise] = useState(data.entreprise || { adresseSiege: "", telephone: "", email: "", siteWeb: "" });
   const [agences, setAgences] = useState(data.agencesReception || {});
 
@@ -6522,7 +6589,7 @@ function AgencesConfigPage({ data, persist, notify, onBack }) {
 
   return (
     <div>
-      <ConfigPageHeader title="Siège & agences de réception" desc="Ces coordonnées s’affichent automatiquement sur le ticket d’envoi, selon l’agence d’enregistrement et le pays de destination du colis." onBack={onBack} />
+      {!sansEntete && <ConfigPageHeader title="Siège & agences de réception" desc="Ces coordonnées s’affichent automatiquement sur le ticket d’envoi, selon l’agence d’enregistrement et le pays de destination du colis." onBack={onBack} />}
 
       <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, maxWidth: 500, border: "1px solid var(--border)", marginBottom: 20 }}>
         <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 14 }}>Siège de l’entreprise</div>
@@ -17013,28 +17080,85 @@ function AiCard({ title, text }) {
   return <div style={{ background: "var(--surface)", borderRadius: 12, padding: "14px 18px", boxShadow: "0 2px 10px rgba(10,38,71,0.06)" }}><div style={{ fontSize: 12, fontWeight: 700, color: "var(--danger-fg)", marginBottom: 4 }}>{title}</div><div style={{ fontSize: 13.5, color: "var(--text)" }}>{text}</div></div>;
 }
 
-function SiteVitrinePage({ data, persist, notify, onBack }) {
+/**
+ * Identité de l'entreprise et page d'accueil publique — un seul écran.
+ *
+ * Il y en avait deux : « Branding & Identité » et « Site Vitrine Public ». Tous deux demandaient
+ * le nom de l'entreprise et son slogan, mais les rangeaient ailleurs — `branding` pour l'un,
+ * `siteVitrine` pour l'autre. Le premier nommait l'application que voient les agents, le second
+ * la page que voient les clients, et rien ne le disait. Un administrateur qui renommait
+ * l'entreprise le faisait donc à moitié, sans jamais savoir laquelle.
+ *
+ * Un seul nom, un seul slogan, un seul logo, écrits dans les deux emplacements pour que tout ce
+ * qui les lisait continue de fonctionner. Quand les deux valeurs diffèrent déjà — c'est le cas
+ * des installations existantes — l'écran le dit et montre celle qu'il s'apprête à généraliser,
+ * plutôt que d'en écraser une en silence.
+ */
+function IdentitePubliquePage({ data, persist, notify, onBack }) {
+  const b = data.branding || {};
   const site = data.siteVitrine || {};
-  const [nomPublic, setNomPublic] = useState(site.nomPublic || "Ba-Diaby Express");
-  const [tagline, setTagline] = useState(site.tagline || "La Ponte entre la France et la Guinée");
+  const nomInitial = b.nom || site.nomPublic || "Ba-Diaby Express";
+  const sloganInitial = b.tagline || site.tagline || "Le pont entre la Guinée et le monde";
+  const [nom, setNom] = useState(nomInitial);
+  const [tagline, setTagline] = useState(sloganInitial);
+  const [logo, setLogo] = useState(b.logo || null);
   const [domaine, setDomaine] = useState(site.domaine || "");
   const [trackingPublic, setTrackingPublic] = useState(site.trackingPublic ?? true);
-  const [departures, setDepartures] = useState(data.departures || {});
+
+  // Deux valeurs qui divergent aujourd'hui : on prévient avant d'unifier.
+  const divergences = [
+    b.nom && site.nomPublic && b.nom !== site.nomPublic ? `le nom (« ${b.nom} » dans l’application, « ${site.nomPublic} » sur la page publique)` : "",
+    b.tagline && site.tagline && b.tagline !== site.tagline ? "le slogan" : "",
+  ].filter(Boolean);
+
+  function onLogoChange(e) {
+    const file = e.target.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setLogo(reader.result);
+    reader.readAsDataURL(file);
+  }
 
   function save() {
-    persist({ ...data, siteVitrine: { nomPublic, tagline, domaine, trackingPublic }, departures });
-    notify?.("Site vitrine mis à jour");
-  }
-  function updateDeparture(code, patch) {
-    setDepartures((d) => ({ ...d, [code]: { ...d[code], ...patch } }));
+    persist({
+      ...data,
+      branding: { ...b, nom, tagline, logo },
+      siteVitrine: { ...site, nomPublic: nom, tagline, domaine, trackingPublic },
+    });
+    notify?.("Identité mise à jour");
   }
 
   return (
     <div>
-      <ConfigPageHeader title="Site Vitrine Public" desc="Personnalisez votre page d’accueil, activez le tracking public et annoncez vos prochains départs." onBack={onBack} />
+      <ConfigPageHeader title="Identité & site public" desc="Votre nom, votre slogan et votre logo — dans l’application comme sur votre page d’accueil publique." onBack={onBack} />
+
+      {divergences.length > 0 && (
+        <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 12, padding: "12px 16px", maxWidth: 620, marginBottom: 18 }}>
+          <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
+            Ces réglages étaient jusqu’ici tenus à deux endroits, et {divergences.join(" et ")} y
+            {divergences.length > 1 ? " diffèrent" : " diffère"}. En enregistrant, la valeur affichée
+            ci-dessous s’appliquera partout.
+          </div>
+        </div>
+      )}
+
       <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, maxWidth: 460, border: "1px solid var(--border)", marginBottom: 20 }}>
-        <Field label="Nom affiché au public"><input value={nomPublic} onChange={(e) => setNomPublic(e.target.value)} style={inputStyle} /></Field>
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 14 }}>Votre identité</div>
+        <Field label="Nom de l’entreprise"><input value={nom} onChange={(e) => setNom(e.target.value)} style={inputStyle} /></Field>
         <Field label="Slogan"><input value={tagline} onChange={(e) => setTagline(e.target.value)} style={inputStyle} /></Field>
+        <Field label="Logo">
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            {logo ? <img src={logo} alt="logo" style={{ width: 48, height: 48, borderRadius: 8, objectFit: "cover", border: "1px solid var(--border)" }} /> : <div style={{ width: 48, height: 48, borderRadius: 8, background: "var(--surface2)" }} />}
+            <label style={{ ...smallBtn, cursor: "pointer" }}>Choisir un fichier<input type="file" accept="image/*" onChange={onLogoChange} style={{ display: "none" }} /></label>
+          </div>
+        </Field>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 }}>
+          Utilisés dans le menu de l’application, sur votre page d’accueil publique et sur tous vos
+          documents imprimés.
+        </div>
+      </div>
+
+      <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, maxWidth: 460, border: "1px solid var(--border)", marginBottom: 20 }}>
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 14 }}>Page d’accueil publique</div>
         <Field label="Nom de domaine personnalisé (optionnel)"><input value={domaine} onChange={(e) => setDomaine(e.target.value)} style={inputStyle} placeholder="www.badiaby-express.com" /></Field>
         <label style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4, cursor: "pointer" }}>
           <input type="checkbox" checked={trackingPublic} onChange={(e) => setTrackingPublic(e.target.checked)} />
@@ -17042,20 +17166,19 @@ function SiteVitrinePage({ data, persist, notify, onBack }) {
         </label>
       </div>
 
-      <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, maxWidth: 620, border: "1px solid var(--border)", marginBottom: 20 }}>
-        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Prochains départs par destination</div>
-        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16 }}>Affiché sur la page d’accueil publique quand un visiteur clique sur le drapeau d’un pays.</div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {COUNTRIES.filter((c) => c.code !== "GN").map((c) => {
-            const dep = departures[c.code] || {};
-            return (
-              <div key={c.code} style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--surface2)", borderRadius: 12, padding: "10px 12px", flexWrap: "wrap" }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", width: 130, flexShrink: 0 }}>{FLAGS[c.code]} {c.name}</div>
-                <input type="date" value={dep.prochaine || ""} onChange={(e) => updateDeparture(c.code, { prochaine: e.target.value })} style={{ ...inputStyle, width: 150, marginBottom: 0 }} />
-                <input value={dep.frequence || ""} onChange={(e) => updateDeparture(c.code, { frequence: e.target.value })} placeholder="ex: Tous les mardis et vendredis" style={{ ...inputStyle, flex: 1, minWidth: 180, marginBottom: 0 }} />
-              </div>
-            );
-          })}
+      {/*
+        Les départs ne se règlent plus ici.
+
+        Cet écran entretenait son propre calendrier — une date et une phrase libre par pays —
+        pendant que « Calendrier des départs » en tenait un autre, celui que lisent le tableau de
+        bord et l'espace partenaire. Deux écrans pour la même annonce, et aucun moyen de savoir
+        lequel faisait foi. La page d'accueil publique lit désormais le calendrier commun.
+      */}
+      <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 16px", maxWidth: 620, marginBottom: 20 }}>
+        <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
+          Les prochains départs annoncés sur votre page d’accueil viennent de
+          <strong> Configuration → Calendrier des départs</strong>. Un seul endroit à tenir à jour,
+          pour vos clients comme pour vos agents.
         </div>
       </div>
 
@@ -17569,7 +17692,7 @@ function SauvegardePage({ data, persist, notify, session, onBack }) {
   );
 }
 
-function SitesOperationPage({ data, persist, notify, onBack }) {
+function SitesOperationPage({ data, persist, notify, onBack, sansEntete }) {
   const [siteASupprimer, setSiteASupprimer] = useState(null);
   const sites = data.sites || [];
   /*
@@ -17648,7 +17771,7 @@ function SitesOperationPage({ data, persist, notify, onBack }) {
           onAnnuler={() => setSiteASupprimer(null)}
         />
       )}
-        <ConfigPageHeader title="Sites d’opération" desc="Gérez vos points d’enregistrement et de retrait, et les informations affichées sur le ticket d’envoi." onBack={onBack} />
+        {!sansEntete && <ConfigPageHeader title="Sites d’opération" desc="Gérez vos points d’enregistrement et de retrait, et les informations affichées sur le ticket d’envoi." onBack={onBack} />}
         <button onClick={() => ouvrirFormulaire({ nom: "", pays: "GN", adresse: "", telephone: "", horaires: "", paiements: "", stockage: "" })} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}><Plus size={16} /> Ajouter un site</button>
       </div>
       <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "14px 16px", marginBottom: 16 }}>
@@ -17745,40 +17868,6 @@ function PaiementConfigPage({ data, persist, notify, onBack }) {
           Le paiement en ligne par carte nécessite un compte Stripe ou une passerelle Mobile Money connectée côté serveur — voir le cahier des charges technique. Ces numéros sont pour l’instant affichés à titre informatif à vos agents.
         </div>
         <button onClick={save} style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
-      </div>
-    </div>
-  );
-}
-
-function BrandingPage({ data, persist, notify, onBack }) {
-  const b = data.branding || {};
-  const [nom, setNom] = useState(b.nom || "Ba-Diaby Express");
-  const [tagline, setTagline] = useState(b.tagline || "La Ponte entre la France et la Guinée");
-  const [logo, setLogo] = useState(b.logo || null);
-
-  function onLogoChange(e) {
-    const file = e.target.files[0]; if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => setLogo(reader.result);
-    reader.readAsDataURL(file);
-  }
-  function save() {
-    persist({ ...data, branding: { nom, tagline, logo } });
-    notify?.("Identité mise à jour");
-  }
-  return (
-    <div>
-      <ConfigPageHeader title="Branding & Identité" desc="Logo, textes légaux et personnalisation de l’identité." onBack={onBack} />
-      <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, maxWidth: 460, border: "1px solid var(--border)" }}>
-        <Field label="Nom de l’entreprise"><input value={nom} onChange={(e) => setNom(e.target.value)} style={inputStyle} /></Field>
-        <Field label="Slogan"><input value={tagline} onChange={(e) => setTagline(e.target.value)} style={inputStyle} /></Field>
-        <Field label="Logo">
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            {logo ? <img src={logo} alt="logo" style={{ width: 48, height: 48, borderRadius: 8, objectFit: "cover", border: "1px solid var(--border)" }} /> : <div style={{ width: 48, height: 48, borderRadius: 8, background: "var(--surface2)" }} />}
-            <label style={{ ...smallBtn, cursor: "pointer" }}>Choisir un fichier<input type="file" accept="image/*" onChange={onLogoChange} style={{ display: "none" }} /></label>
-          </div>
-        </Field>
-        <button onClick={save} style={{ marginTop: 8, background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
       </div>
     </div>
   );

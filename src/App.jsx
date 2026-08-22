@@ -8029,6 +8029,55 @@ function GestionDevisesPage({ data, persist, session, notify, onBack }) {
   const [testTo, setTestTo] = useState("GNF");
   const [syncing, setSyncing] = useState(false);
   const [syncMsg, setSyncMsg] = useState(null);
+  const [rapatriement, setRapatriement] = useState(false);
+  const [tauxMsg, setTauxMsg] = useState(null);
+
+  /*
+   * Les taux du jour, demandés au serveur.
+   *
+   * La clé du fournisseur ne descend jamais dans le navigateur : c'est la fonction api/taux.js
+   * qui la détient et qui interroge le service. Ici on ne reçoit que des nombres, déjà exprimés
+   * dans notre base — un euro — donc directement utilisables.
+   *
+   * L'échec est dit sans jargon et sans catastrophisme : les taux en place continuent de servir,
+   * personne n'est bloqué, et l'administrateur sait s'il doit configurer, attendre, ou saisir
+   * à la main.
+   */
+  async function rapatrierTaux() {
+    setRapatriement(true);
+    setTauxMsg(null);
+    try {
+      const reponse = await fetch("/api/taux");
+      const corps = await reponse.json().catch(() => ({}));
+      if (reponse.status === 501) {
+        setTauxMsg({ ok: false, texte: "Les taux automatiques ne sont pas encore configurés sur le serveur. Vos taux saisis à la main restent en place." });
+        return;
+      }
+      if (!reponse.ok || !corps.taux) {
+        setTauxMsg({ ok: false, texte: `Le service de taux n’a pas répondu${corps.raison ? ` (${corps.raison})` : ""}. Vos taux actuels sont conservés.` });
+        return;
+      }
+      const fusion = { ...rates, ...corps.taux };
+      LIVE_RATES = { ...CURRENCIES, ...fusion };
+      await persist({
+        ...data,
+        exchangeRates: fusion,
+        tauxMisAJourLe: new Date().toISOString(),
+        activityLog: pushActivity(data, session, "Taux de change actualisés",
+          `1 EUR = ${Math.round(fusion.GNF || 0).toLocaleString("fr-FR")} GNF (source : taux du jour)`),
+      });
+      setTauxMsg({
+        ok: true,
+        texte: `Taux à jour — 1 EUR = ${Math.round(fusion.GNF || 0).toLocaleString("fr-FR")} GNF${corps.miseAJour ? `, publiés le ${corps.miseAJour}` : ""}.`,
+      });
+      notify?.("Taux de change actualisés");
+    } catch (e) {
+      console.error(e);
+      setTauxMsg({ ok: false, texte: "Impossible de joindre le service de taux — vérifiez votre connexion. Vos taux actuels sont conservés." });
+    } finally {
+      setRapatriement(false);
+    }
+  }
 
   const currenciesList = Object.keys(rates).filter((c) => c !== "GNF"); // GNF est la devise de référence Guinée, toujours affichée séparément
 
@@ -8153,6 +8202,34 @@ function GestionDevisesPage({ data, persist, session, notify, onBack }) {
               {syncing ? <RefreshCw size={15} /> : <RefreshCw size={15} />} {syncing ? "Synchronisation…" : "Synchroniser toutes les données"}
             </button>
             {syncMsg && <div style={{ marginTop: 12, background: "var(--ok-bg-soft)", color: "var(--ok-fg)", borderRadius: 8, padding: "10px 12px", fontSize: 12 }}>✓ {syncMsg}</div>}
+          </div>
+        )}
+
+        {/*
+          Les taux du jour, repris automatiquement.
+          Les saisir à la main veut dire les oublier : un taux figé pendant trois mois fausse
+          discrètement chaque prix de catégorie et chaque équivalent affiché sur les factures.
+          Le bouton ne remplace pas la saisie manuelle — il la précède, et rien n'empêche de
+          corriger ensuite un taux qu'on négocie autrement avec son bureau de change.
+        */}
+        {isAdmin && (
+          <div style={{ background: "var(--surface)", borderRadius: 14, padding: 20, border: "1px solid var(--border)", width: "min(92vw, 320px)" }}>
+            <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 8 }}>Taux du jour</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
+              Récupère les taux officiels du jour et remplace ceux du tableau. Vos taux restent
+              modifiables ensuite, si votre bureau de change vous en donne d’autres.
+            </div>
+            <button onClick={rapatrierTaux} disabled={rapatriement}
+              style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13, fontWeight: 700, cursor: rapatriement ? "wait" : "pointer", opacity: rapatriement ? 0.7 : 1 }}>
+              <RefreshCw size={15} /> {rapatriement ? "Récupération…" : "Récupérer les taux du jour"}
+            </button>
+            {tauxMsg && (
+              <div style={{
+                marginTop: 12, borderRadius: 8, padding: "10px 12px", fontSize: 12, lineHeight: 1.5,
+                background: tauxMsg.ok ? "var(--ok-bg-soft)" : "var(--warn-bg)",
+                color: tauxMsg.ok ? "var(--ok-fg)" : "var(--warn-fg)",
+              }}>{tauxMsg.texte}</div>
+            )}
           </div>
         )}
       </div>

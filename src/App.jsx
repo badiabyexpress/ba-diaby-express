@@ -1494,7 +1494,10 @@ async function notifierEvenement(data, evenement, colis, message) {
  * Retourne { envoye, raison } — `raison` est un message lisible, ou null si le service est
  * simplement absent (cas normal tant qu'aucune clé n'est configurée).
  */
-async function envoyerEmail(adresse, sujet, message, piecesJointes = []) {
+async function envoyerEmail(adresseBrute, sujet, message, piecesJointes = []) {
+  // Un seul endroit où nettoyer : les trois usages (notification, encaissement, envoi manuel)
+  // passent par ici, et les adresses déjà enregistrées avec un espace fonctionnent de nouveau.
+  const adresse = String(adresseBrute || "").trim();
   if (!adresse) return { envoye: false, raison: null };
   try {
     const reponse = await fetch("/api/email", {
@@ -11882,8 +11885,10 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
     effacerBrouillonColis();
     onSave({
       tracking: genTracking((existingColis || []).map((c) => c.tracking)),
-      expediteur: `${expPrenom} ${expNom}`.trim(), expediteurTelephone: expTelephone, expediteurEmail: expEmail, expediteurAdresse: expAdresse, expediteurPays: expPays,
-      destinataire: `${destPrenom} ${destNom}`.trim(), telephone: destTelephone, destinataireEmail: destEmail, destinataireAdresse: destAdresse, destinataireVille: destVille, destinataireCodePostal: destCodePostal, destinatairePays: destPays,
+      // Les adresses sont débarrassées de leurs espaces de bord : le clavier d'un téléphone en
+      // ajoute après l'auto-complétion, ils ne se voient pas, et l'envoi est refusé pour ça.
+      expediteur: `${expPrenom} ${expNom}`.trim(), expediteurTelephone: expTelephone, expediteurEmail: (expEmail || "").trim(), expediteurAdresse: expAdresse, expediteurPays: expPays,
+      destinataire: `${destPrenom} ${destNom}`.trim(), telephone: destTelephone, destinataireEmail: (destEmail || "").trim(), destinataireAdresse: destAdresse, destinataireVille: destVille, destinataireCodePostal: destCodePostal, destinatairePays: destPays,
       pays, direction, mode, produits, poids: +poidsTotal.toFixed(2), volume: 0, valeurDeclaree, site: agence, partenaireId: partenaireId || null, clientAccountId: clientAccountId || null, provenance: provenance || null, preAlerteRapprochee: preAlerteRapprochee || null,
       agentCreation: session ? `${session.prenom} ${session.nom}`.trim() || session.identifiant : "",
       prixBrut, discountLoyalty, rabaisMontant: Number(rabaisMontant) || 0, rabaisDevise, rabaisEUR, prix, paye: payeNum, reste, photos,
@@ -14421,7 +14426,11 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
     const ajustement = ligneAjustement();
     onSave({
       expediteur, expediteurTelephone, expediteurEmail, expediteurAdresse,
-      destinataire, telephone, destinataireEmail, destinataireAdresse, destinataireVille, destinataireCodePostal,
+      destinataire, telephone,
+      // Un clavier de téléphone ajoute volontiers un espace après l'auto-complétion. Il ne se voit
+      // pas, et suffit à faire refuser l'adresse au moment de l'envoi.
+      destinataireEmail: destinataireEmail.trim(),
+      destinataireAdresse, destinataireVille, destinataireCodePostal,
       pays, direction,
       destinatairePays: direction === "import" ? "GN" : pays, mode,
       poids: Number(poids) || 0, volume: Number(volume) || 0,
@@ -14998,7 +15007,9 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
    * maître de l'envoi plutôt que de rester bloqué.
    */
   async function handleEnvoyerFacture() {
-    const adresse = colis.destinataireEmail || colis.email;
+    // Nettoyée ici aussi : c'est cette valeur qui alimente le brouillon de secours, et un espace
+    // en fin suffit à ce que la messagerie ouvre un brouillon sans destinataire.
+    const adresse = String(colis.destinataireEmail || colis.email || "").trim();
     if (!adresse) return;
     setEmailState("loading");
     try {

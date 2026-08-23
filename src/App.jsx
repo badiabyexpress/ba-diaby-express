@@ -1652,6 +1652,85 @@ async function deposerImage(dataUrl, dossier, nom) {
   }
 }
 
+/** Le chemin d'un fichier dans le stockage, retrouvé depuis son adresse publique. */
+function cheminDansStockage(adresse) {
+  if (typeof adresse !== "string") return null;
+  const marqueur = "/colis-documents/";
+  const i = adresse.indexOf(marqueur);
+  if (i === -1) return null;
+  try { return decodeURIComponent(adresse.slice(i + marqueur.length).split("?")[0]) || null; }
+  catch (e) { return null; }
+}
+
+/** La date à laquelle le colis a été remis, ou null s'il ne l'a pas été. */
+function dateDeRemise(colis) {
+  if (!colis || colis.status !== "Livré") return null;
+  const remise = [...(colis.historique || [])].reverse().find((h) => h.status === "Livré");
+  return remise?.date || colis.remise?.date || null;
+}
+
+/** Délai par défaut avant que les photos d'un colis remis ne soient effacées. */
+const JOURS_CONSERVATION_PHOTOS = 30;
+
+/**
+ * Les colis dont les photos ont fait leur temps.
+ *
+ * Une photo sert à constater l'état d'un colis tant qu'il voyage, et à trancher si le client
+ * conteste. Passé un délai après une remise sans réclamation, elle ne sert plus à rien — mais
+ * continue d'occuper le stockage, indéfiniment, pour chaque colis jamais contesté.
+ *
+ * Trois conditions, et les trois comptent :
+ *   — le colis a été remis (un colis en transit garde ses photos, quoi qu'il arrive) ;
+ *   — la remise date de plus que le délai retenu ;
+ *   — aucun litige n'a été déclaré, ouvert OU résolu. Un dossier réglé peut ressortir des mois
+ *     plus tard, et l'on ne se prive pas des pièces qui l'ont réglé.
+ *
+ * La preuve de remise (`pod`) n'est jamais touchée : c'est elle qui atteste que le colis a bien
+ * été livré, et c'est précisément la pièce qu'on veut avoir sous la main si quelqu'un affirme
+ * n'avoir jamais rien reçu.
+ */
+function colisAuxPhotosPerimees(data, jours = JOURS_CONSERVATION_PHOTOS) {
+  if (!jours) return [];
+  const limite = Date.now() - jours * 86400000;
+  return (data?.colis || []).filter((c) => {
+    if (!(c.photos || []).length) return false;
+    if (c.litige) return false;
+    const remise = dateDeRemise(c);
+    if (!remise) return false;
+    const quand = new Date(remise).getTime();
+    return Number.isFinite(quand) && quand < limite;
+  });
+}
+
+/**
+ * Efface du stockage les photos des colis remis sans réclamation.
+ *
+ * Les fichiers partent d'abord, les données ensuite : si la suppression échoue à mi-chemin, les
+ * colis gardent des adresses valides plutôt que des liens morts. L'inverse laisserait des photos
+ * introuvables sur des fiches consultées des mois après.
+ */
+async function purgerPhotosRemises(data, jours = JOURS_CONSERVATION_PHOTOS) {
+  const concernes = colisAuxPhotosPerimees(data, jours);
+  if (!concernes.length) return { colis: 0, photos: 0, donnees: null };
+  const chemins = concernes.flatMap((c) => (c.photos || []).map(cheminDansStockage).filter(Boolean));
+  if (chemins.length) {
+    // Une photo restée embarquée n'a pas de chemin : elle disparaît avec la fiche, sans passer ici.
+    try { await clientSupabase().storage.from("colis-documents").remove(chemins); }
+    catch (e) { /* le fichier survit ; on efface quand même la référence, il sera perdu de vue */ }
+  }
+  const aPurger = new Set(concernes.map((c) => c.tracking));
+  const maintenant = new Date().toISOString();
+  return {
+    colis: concernes.length,
+    photos: concernes.reduce((n, c) => n + (c.photos || []).length, 0),
+    donnees: {
+      ...data,
+      colis: (data.colis || []).map((c) => (aPurger.has(c.tracking)
+        ? { ...c, photos: [], photosPurgeesLe: maintenant } : c)),
+    },
+  };
+}
+
 function waLink(phone, msg) { return `https://wa.me/${(phone || "").replace(/[^\d]/g, "")}?text=${encodeURIComponent(msg)}`; }
 
 /**
@@ -2893,6 +2972,38 @@ function App() {
     });
     return unsubscribe;
   }, [versionAcces]);
+
+  /*
+   * Ménage des photos de colis remis, une fois par jour.
+   *
+   * Une photo sert tant que le colis voyage et tant qu'un client peut contester. Après, elle
+   * n'occupe plus que de la place — indéfiniment, pour chaque colis jamais contesté. Le délai est
+   * réglable dans Configuration → Sauvegarde ; un colis en litige n'est jamais touché.
+   *
+   * Réservé à l'administrateur, et une fois par jour : sans cela, cinq agents connectés le matin
+   * lanceraient cinq suppressions concurrentes du même lot. Le marqueur est local à l'appareil,
+   * ce qui suffit — un second passage ne trouverait de toute façon plus rien à effacer.
+   */
+  useEffect(() => {
+    if (!data || !session || session.role !== "Administrateur") return;
+    const jours = data?.notificationSettings?.joursConservationPhotos ?? JOURS_CONSERVATION_PHOTOS;
+    if (!jours) return;
+    const aujourdhui = new Date().toISOString().slice(0, 10);
+    try { if (localStorage.getItem("bde-purge-photos") === aujourdhui) return; } catch (e) { return; }
+    if (!colisAuxPhotosPerimees(data, jours).length) return;
+    let vivant = true;
+    // Quelques secondes de délai : l'ouverture de l'application ne doit rien attendre.
+    const minuteur = setTimeout(async () => {
+      try {
+        const r = await purgerPhotosRemises(data, jours);
+        if (!vivant || !r.donnees) return;
+        try { localStorage.setItem("bde-purge-photos", aujourdhui); } catch (e) { /* sans importance */ }
+        persist({ ...r.donnees, activityLog: pushActivity(r.donnees, session, "Photos effacées",
+          `${r.photos} photo(s) de ${r.colis} colis remis depuis plus de ${jours} jours`) });
+      } catch (e) { /* on réessaiera demain */ }
+    }, 8000);
+    return () => { vivant = false; clearTimeout(minuteur); };
+  }, [data, session]);
 
   // Mode hors-ligne : dès que la connexion revient, on rejoue automatiquement les modifications
   // faites pendant la coupure. Fonctionne réellement sur le site déployé (Supabase) ; dans
@@ -20480,6 +20591,11 @@ function PoidsDesDonnees({ data, persist, notify, session }) {
   const moImages = poidsImages / (1024 * 1024);
   const aAlleger = embarquees.length + logos.length;
 
+  // Le délai retenu par l'entreprise, ou trente jours à défaut.
+  const joursPhotos = data?.notificationSettings?.joursConservationPhotos ?? JOURS_CONSERVATION_PHOTOS;
+  const perimes = colisAuxPhotosPerimees(data, joursPhotos);
+  const photosPerimees = perimes.reduce((n, c) => n + (c.photos || []).length, 0);
+
   const LIMITE_MO = 4.5;
   const part = Math.min(100, Math.round((mo / LIMITE_MO) * 100));
   const alerte = mo >= 3 ? "danger" : mo >= 1.5 ? "warn" : "ok";
@@ -20553,6 +20669,21 @@ function PoidsDesDonnees({ data, persist, notify, session }) {
     }
   }
 
+  async function purger() {
+    setEnCours(true);
+    setResultat(null);
+    try {
+      const r = await purgerPhotosRemises(data, joursPhotos);
+      if (r.donnees) await persist(r.donnees);
+      setResultat({ purgeColis: r.colis, purgePhotos: r.photos, avant: octets,
+        apres: r.donnees ? new Blob([JSON.stringify(r.donnees)]).size : octets });
+      notify?.(r.photos > 0 ? `${r.photos} photo(s) effacée(s)` : "Aucune photo à effacer");
+    } catch (e) {
+      setResultat({ erreur: true });
+      notify?.("La suppression n’a pas abouti");
+    } finally { setEnCours(false); }
+  }
+
   const enMo = (o) => `${(o / (1024 * 1024)).toFixed(2)} Mo`;
 
   return (
@@ -20601,8 +20732,60 @@ function PoidsDesDonnees({ data, persist, notify, session }) {
         </div>
       )}
 
+      {/*
+        Les photos des colis remis.
+
+        Elles servent tant que le colis voyage, et tant qu'un client peut contester. Après, elles
+        n'occupent plus que de la place — indéfiniment, pour chaque colis jamais contesté.
+      */}
+      <div style={{ borderTop: "1px solid var(--border)", marginTop: 16, paddingTop: 14 }}>
+        <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text)" }}>Photos des colis remis</div>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4, lineHeight: 1.55 }}>
+          Une fois le colis récupéré et le délai passé sans réclamation, ses photos sont effacées
+          du stockage. Un colis en litige — même réglé — garde les siennes, et la preuve de remise
+          n’est jamais touchée : c’est elle qui atteste la livraison.
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 12.5, color: "var(--muted)" }}>Effacer après</span>
+          <select value={joursPhotos}
+            onChange={(e) => persist({ ...data, notificationSettings: { ...(data.notificationSettings || {}), joursConservationPhotos: Number(e.target.value) } })}
+            style={{ ...inputStyle, marginBottom: 0, width: "auto", padding: "8px 10px", fontSize: 12.5 }}>
+            <option value={7}>7 jours</option>
+            <option value={30}>30 jours</option>
+            <option value={90}>90 jours</option>
+            <option value={0}>jamais</option>
+          </select>
+        </div>
+        {photosPerimees > 0 ? (
+          <>
+            <div style={{ fontSize: 12.5, color: "var(--text)", marginTop: 12, lineHeight: 1.55 }}>
+              <strong>{photosPerimees} photo{photosPerimees > 1 ? "s" : ""}</strong> de {perimes.length} colis
+              remis {perimes.length > 1 ? "ont" : "a"} dépassé ce délai.
+            </div>
+            <button onClick={purger} disabled={enCours}
+              style={{ marginTop: 10, background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "9px 16px", fontSize: 12.5, fontWeight: 600, cursor: enCours ? "wait" : "pointer" }}>
+              {enCours ? "Suppression…" : "Effacer ces photos"}
+            </button>
+          </>
+        ) : (
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 10 }}>
+            {joursPhotos ? "Aucune photo n’a encore dépassé ce délai." : "Les photos sont conservées indéfiniment."}
+          </div>
+        )}
+      </div>
+
       {resultat && !resultat.erreur && (
         <div style={{ background: "var(--ok-bg)", border: "1px solid var(--ok-border)", borderRadius: 8, padding: "12px 14px", marginTop: 14, fontSize: 12.5, color: "var(--text)", lineHeight: 1.6 }}>
+          {resultat.purgePhotos !== undefined ? (
+            <>
+              <strong>
+                {resultat.purgePhotos > 0
+                  ? `${resultat.purgePhotos} photo${resultat.purgePhotos > 1 ? "s" : ""} effacée${resultat.purgePhotos > 1 ? "s" : ""} sur ${resultat.purgeColis} colis remis`
+                  : "Aucune photo à effacer"}.
+              </strong>{" "}
+              Vos données passent de {enMo(resultat.avant)} à {enMo(resultat.apres)}.
+            </>
+          ) : (<>
           <strong>
             {resultat.deplacees > 0 && `${resultat.deplacees} image${resultat.deplacees > 1 ? "s" : ""} déplacée${resultat.deplacees > 1 ? "s" : ""}`}
             {resultat.deplacees > 0 && resultat.logos > 0 && ", "}
@@ -20611,6 +20794,7 @@ function PoidsDesDonnees({ data, persist, notify, session }) {
           </strong>{" "}
           Vos données passent de {enMo(resultat.avant)} à {enMo(resultat.apres)}.
           {resultat.restantes > 0 && ` ${resultat.restantes} image(s) n’ont pas pu être déposées — relancez l’opération avec une meilleure connexion.`}
+          </>)}
         </div>
       )}
       {resultat && resultat.erreur && (

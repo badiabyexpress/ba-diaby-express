@@ -92,6 +92,9 @@ Trois portes, traitées une par une :
 | Suivi d'un colis, mentions légales | `api/public.js` | un seul colis, sans téléphone ni adresse |
 | Vitrine | `api/public.js` | l'identité de l'entreprise et les départs à venir |
 | Application et espace client | `api/donnees.js` | les données, contre un jeton de session valable |
+| Connexion | `api/login.js` | le compte, sans son sel ni son empreinte, et un jeton |
+| Création d'un compte client | `api/inscription.js` | le compte créé, et un jeton — sans jeton d'entrée |
+| Mot de passe oublié | `api/motdepasse.js` | un accusé de réception, jamais le code |
 
 Le jeton de session est signé et vérifié par nos fonctions (`api/_session.js`), pas par Supabase :
 c'est ce qui affranchit toute la manœuvre du secret introuvable. Son secret de signature est
@@ -107,20 +110,29 @@ connecte.
 | 1 | La page de suivi ne livre plus la base à ses visiteurs | fait, en ligne |
 | 2 | Un visiteur non connecté ne charge plus rien | fait, en ligne |
 | 3 | L'application et l'espace client passent par le serveur | fait — reste à configurer |
-| 4 | Inscription et mot de passe oublié côté client | **à faire — bloque la fermeture** |
-| 5 | Resserrage des politiques de la base | à faire — après le lot 4 |
+| 4 | Inscription et mot de passe oublié côté client | fait — reste à configurer |
+| 5 | Resserrage des politiques de la base | **à faire — c'est la dernière étape** |
 
-### Ce qui reste ouvert, et pourquoi la base n'est pas encore fermée
+Plus rien ne passe par la clé publique. La base peut être fermée dès que la clé de service est
+posée sur Vercel et qu'une connexion réelle a été vérifiée sur le site.
 
-**L'inscription d'un nouveau client et la réinitialisation de son mot de passe** écrivent encore
-en direct : ce sont les deux seuls gestes que fait quelqu'un qui n'a, par définition, pas encore
-de jeton. Fermer la base aujourd'hui les casserait — un nouveau client ne pourrait plus créer son
-compte. Il leur faut leur propre fonction serveur, avec ses propres garde-fous (identifiant libre,
-mot de passe recevable, limitation des tentatives).
+### Ce qui reste ouvert après la fermeture
 
 **L'espace client reçoit encore le document entier** une fois connecté, alors qu'il n'affiche que
-ses propres colis. Ce n'est pas une régression — c'était déjà le cas — mais c'est la prochaine
-chose à corriger après le lot 4, en scindant lecture et écriture pour cet espace.
+ses propres colis — donc les colis, les clients et les comptes de toute l'entreprise arrivent dans
+le navigateur de n'importe quel client. Ce n'est pas une régression : c'était déjà le cas avant
+tout ce travail, et la fermeture de la base n'y change rien puisqu'un client est, lui, identifié.
+
+C'est le prochain chantier, et il est plus profond que les précédents : le portail lit ET réécrit
+le document entier à chaque geste (déclarer un paiement, envoyer un message, faire une pré-alerte).
+Ne lui en donner qu'une partie sans toucher à ses écritures lui ferait effacer tout le reste. Il
+faut donc scinder les deux : une lecture réduite à ce qui le concerne, et des écritures ciblées
+côté serveur, geste par geste.
+
+**La clé `bde-reinit`** contient les demandes de réinitialisation en cours, sous forme d'empreintes.
+`api/donnees.js` la refuse explicitement — c'est ce qui empêche un client de lire les codes des
+autres. Toute nouvelle clé de ce genre doit rester hors de la liste autorisée (`bde-data` et
+`bde-backup-*`).
 
 ### Ce qu'il faut configurer sur Vercel
 
@@ -152,7 +164,9 @@ manque, et fermer la base couperait tout le monde.
 
 1. Mettre le code en ligne **en gardant les politiques actuelles**. Rien ne change pour personne.
 2. Vérifier `?etat=1`, puis se connecter réellement avec un vrai compte, sur le site en ligne.
-3. Traiter le lot 4 (inscription et mot de passe oublié).
+3. Essayer aussi les deux gestes qui n'exigent pas de compte : créer un compte client de test
+   depuis `?client=1`, et demander un mot de passe oublié. Ce sont eux qui casseraient en premier
+   si quelque chose manquait.
 4. **Seulement ensuite**, resserrer les politiques.
 5. En cas de problème : rétablir les politiques (SQL ci-dessous) — le site refonctionne en
    quelques secondes, sans redéploiement.
@@ -203,15 +217,32 @@ create policy "Suppression limitée aux sauvegardes" on public.bde_data for dele
   l'agent qui survit à sa propre reconnexion.
 - **L'espace client** (`t56`, 13 cas) : page de connexion sans la base, refus par le serveur,
   connexion réussie, et le mot de passe du client intact après coup.
+- **L'inscription et le mot de passe oublié** (`testcompte`, 53 cas ; `t57`, 22 cas, la base
+  fermée) : identifiant déjà pris refusé quelle que soit la casse, champs obligatoires, mot de
+  passe trop court, création en rafale ralentie, empreinte identique à celle du navigateur, et
+  surtout — le code de réinitialisation absent de la réponse, absent du HTML de la page, absent du
+  document servi aux personnes connectées, inutilisable une seconde fois, et jamais affiché quand
+  WhatsApp est indisponible.
+- **Le déploiement à moitié configuré** (`t58`, 10 cas) : toutes les fonctions serveur répondent
+  501, et le portail, l'inscription et la connexion continuent de fonctionner par l'ancien chemin.
+  C'est l'état exact du site tant que la clé de service n'est pas posée.
 
 Ce qui **n'a pas pu être vérifié depuis ce conteneur** : le site en ligne, dont le réseau sortant
 est filtré. D'où l'étape 2 ci-dessus, à faire depuis un navigateur ordinaire.
 
 ---
 
-## Deux défauts trouvés en chemin
+## Trois défauts trouvés en chemin
 
-Ils sont corrigés, mais méritent d'être notés — le second était en ligne.
+Ils sont corrigés, mais méritent d'être notés — les deux premiers étaient en ligne.
+
+- **Le code de réinitialisation était fabriqué et vérifié dans le navigateur.** La page le tirait
+  au sort, le gardait dans son état, l'envoyait sur WhatsApp, puis le comparait à ce que la
+  personne saisissait — le tout du même côté. N'importe qui pouvait le lire dans les outils de
+  développement et changer le mot de passe de n'importe quel compte client dont il connaissait
+  l'identifiant. L'envoi WhatsApp donnait l'apparence d'une protection sans en être une. Le code
+  est désormais tiré au sort par le serveur, ne redescend jamais, et c'est le serveur qui le
+  compare.
 
 - **`api/login.js` ne pouvait pas s'exécuter.** Deux variables `motdepasse` étaient déclarées dans
   la même portée : le fichier ne se chargeait pas, la fonction répondait 500, et l'application

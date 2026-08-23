@@ -3629,6 +3629,31 @@ function useAntiSpam() {
   return { honeypotField, isSpam };
 }
 
+/*
+ * Création d'un compte client par le serveur.
+ *
+ * Retourne null quand la fonction n'est pas disponible (absente, non configurée, hors ligne) :
+ * l'appelant retombe alors sur la création locale, comme avant. Un refus motivé — identifiant
+ * déjà pris, mot de passe trop court — n'est PAS un cas de repli : le refaire dans le navigateur
+ * reviendrait à ignorer la règle que le serveur vient d'appliquer.
+ */
+async function inscriptionServeur(champs) {
+  let reponse;
+  try {
+    reponse = await fetch("/api/inscription", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(champs),
+    });
+  } catch (e) {
+    return null;
+  }
+  if (reponse.status === 501 || reponse.status === 404) return null;
+  const corps = await reponse.json().catch(() => ({}));
+  if (!reponse.ok) return { refus: corps.error || "La création du compte a échoué." };
+  return corps;
+}
+
 function ClientRegisterForm({ data, persist, onRegistered, onCancel }) {
   const [nom, setNom] = useState("");
   const [prenom, setPrenom] = useState("");
@@ -3647,9 +3672,27 @@ function ClientRegisterForm({ data, persist, onRegistered, onCancel }) {
     setErr("");
     if (isSpam()) { setErr("La soumission a été bloquée. Réessayez."); return; }
     if (!nom || !prenom || !identifiant || !motdepasse || !telephone) { setErr("Merci de renseigner au moins le nom, prénom, identifiant, mot de passe et téléphone."); return; }
-    if ((data.clientAccounts || []).some((c) => c.identifiant.toLowerCase() === identifiant.trim().toLowerCase())) { setErr("Cet identifiant est déjà utilisé. Choisissez-en un autre."); return; }
     setLoading(true);
     try {
+      /*
+       * Le serveur d'abord. C'est lui qui vérifie que l'identifiant est libre — la vérification
+       * faite ici portait sur une copie des données qui pouvait avoir des minutes de retard, et
+       * deux personnes pouvaient prendre le même identifiant sans que rien ne s'y oppose.
+       */
+      const serveur = await inscriptionServeur({ nom, prenom, identifiant, motdepasse, telephone, adresse, email });
+      if (serveur?.refus) { setErr(serveur.refus); setLoading(false); return; }
+      if (serveur?.utilisateur) {
+        if (serveur.session) ecrireJetonSession(serveur.session, serveur.sessionExpireA);
+        onRegistered(serveur.utilisateur);
+        setLoading(false);
+        return;
+      }
+
+      // Serveur absent ou injoignable : création locale, comme avant.
+      if (!data) { setErr("Création impossible pour le moment. Vérifiez votre réseau et réessayez."); setLoading(false); return; }
+      if ((data.clientAccounts || []).some((c) => c.identifiant.toLowerCase() === identifiant.trim().toLowerCase())) {
+        setErr("Cet identifiant est déjà utilisé. Choisissez-en un autre."); setLoading(false); return;
+      }
       const identifiants = await creerIdentifiantsMotDePasse(motdepasse);
       const account = {
         id: `cli${Date.now()}`, nom, prenom, identifiant: identifiant.trim(), ...identifiants,
@@ -3745,9 +3788,49 @@ function ClientResetPasswordForm({ data, persist, onDone, onCancel }) {
     return n.slice(0, 2) + "•".repeat(Math.max(n.length - 4, 3)) + n.slice(-2);
   }
 
+  /*
+   * Appel de la fonction serveur. null = fonction indisponible → l'ancien chemin reprend la main.
+   */
+  async function appelReinit(charge) {
+    let reponse;
+    try {
+      reponse = await fetch("/api/motdepasse", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(charge),
+      });
+    } catch (ex) { return null; }
+    if (reponse.status === 501 || reponse.status === 404) return null;
+    const corps = await reponse.json().catch(() => ({}));
+    return { ok: reponse.ok, ...corps };
+  }
+
   async function envoyerCode(e) {
     e.preventDefault();
     setErr("");
+
+    /*
+     * Le serveur d'abord — et c'est ici que se joue l'essentiel.
+     *
+     * Le code était tiré au sort par cette page, gardé dans son état, puis comparé ici même. Il
+     * était donc lisible dans les outils de développement : qui connaissait un identifiant
+     * pouvait changer le mot de passe du compte correspondant sans jamais voir le WhatsApp.
+     * Désormais le code ne redescend pas — la page ne peut plus rien en savoir.
+     */
+    setLoading(true);
+    const serveur = await appelReinit({ etape: "demande", identifiant: identifiant.trim() });
+    setLoading(false);
+    if (serveur) {
+      if (!serveur.ok) { setErr(serveur.error || "L’envoi a échoué."); return; }
+      setCodeAttendu(null);          // le code vit sur le serveur, pas ici
+      setCompte({ parLeServeur: true });
+      setMasque(serveur.masque || "votre numéro");
+      setExpire(Date.now() + (serveur.minutes || 10) * 60000);
+      setEssais(0);
+      setEtape("code");
+      return;
+    }
+
+    // Fonction absente ou injoignable : ancien chemin, entièrement local.
+    if (!data) { setErr("Service indisponible pour le moment. Contactez notre agence."); return; }
     const acc = (data.clientAccounts || []).find((c) => c.identifiant.toLowerCase() === identifiant.trim().toLowerCase());
     // Message identique que le compte existe ou non : sinon on révélerait quels identifiants
     // sont valides, ce qui aiderait quelqu'un à en chercher.
@@ -3775,6 +3858,24 @@ function ClientResetPasswordForm({ data, persist, onDone, onCancel }) {
   async function valider(e) {
     e.preventDefault();
     setErr("");
+
+    // Le code est parti au serveur : c'est lui qui le compare, et lui seul qui peut le faire.
+    if (compte?.parLeServeur) {
+      if (!motdepasse || motdepasse.length < 8) { setErr("Choisissez un mot de passe d’au moins 8 caractères."); return; }
+      setLoading(true);
+      const serveur = await appelReinit({ etape: "valider", identifiant: identifiant.trim(), code: code.trim(), motdepasse });
+      setLoading(false);
+      if (!serveur) { setErr("Service indisponible. Recommencez la demande."); setEtape("demande"); return; }
+      if (!serveur.ok) {
+        setErr(serveur.error || "Code incorrect.");
+        if (serveur.recommencer) setEtape("demande");
+        return;
+      }
+      setEtape("succes");
+      setTimeout(onDone, 1400);
+      return;
+    }
+
     if (Date.now() > expire) { setErr("Ce code a expiré. Recommencez la demande."); setEtape("demande"); return; }
     if (essais >= 5) { setErr("Trop d’essais. Recommencez la demande."); setEtape("demande"); return; }
     if (code.trim() !== codeAttendu) { setEssais((n) => n + 1); setErr("Code incorrect."); return; }
@@ -4424,6 +4525,25 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
   }
 
   /*
+   * L'inscription et le mot de passe oublié ne réclament la base que si le serveur ne sait pas
+   * les faire.
+   *
+   * Quand api/inscription.js et api/motdepasse.js sont configurés, tout se passe côté serveur et
+   * la base n'a rien à venir faire dans le navigateur de quelqu'un qui n'est même pas identifié.
+   * Quand ils ne le sont pas — le temps qu'une clé soit posée sur Vercel, par exemple — l'ancien
+   * chemin doit rester praticable, et il lui faut les données. Une question au serveur suffit à
+   * trancher, et elle ne coûte rien.
+   */
+  async function preparerRepli() {
+    try {
+      const reponse = await fetch("/api/donnees?etat=1");
+      const corps = await reponse.json().catch(() => ({}));
+      if (reponse.ok && corps.configure) return;
+    } catch (e) { /* injoignable : le repli local est la seule voie qui reste */ }
+    onBesoinBase?.();
+  }
+
+  /*
    * On n'attend les données que si quelqu'un les attend vraiment : un client déjà identifié, ou
    * une session à restaurer. Auparavant la page patientait toujours — ce qui était sans
    * conséquence tant que la base se chargeait pour tout le monde, et qui laisserait désormais le
@@ -4571,14 +4691,12 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
         <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 25, color: "var(--text)", marginBottom: 5 }}>{T("Espace Client")}</div>
         <div style={{ fontSize: 14, color: "var(--muted)", marginBottom: 30, textAlign: "center" }}>{T("Retrouvez tous vos colis, leurs statuts et vos paiements en un coup d'œil.")}</div>
 
-        {/* L'inscription et la réinitialisation ont besoin de la base — pour vérifier qu'un
-            identifiant est libre, et pour écrire. Elle est demandée à l'ouverture de ces écrans,
-            et l'on patiente le temps qu'elle arrive plutôt que d'afficher un formulaire qui
-            n'aurait rien pour répondre. */}
-        {(mode === "inscription" || mode === "reset") && !data ? (
-          <div style={{ padding: 30, color: "var(--muted)", fontSize: 14 }}>{T("Chargement…")}</div>
-        ) : mode === "inscription" ? (
-          <ClientRegisterForm data={data} persist={persist} onRegistered={(acc) => { ecrireSessionClient(acc.id); setCompte(acc); }} onCancel={() => setMode("login")} />
+        {/* Ces deux écrans s'affichent sans la base : c'est le serveur qui vérifie qu'un
+            identifiant est libre et qui écrit. Si le serveur ne peut pas — clé pas encore
+            posée — preparerRepli() a demandé les données, et l'attente est couverte plus haut
+            par l'écran de chargement du portail. */}
+        {mode === "inscription" ? (
+          <ClientRegisterForm data={data} persist={persist} onRegistered={(acc) => { ecrireSessionClient(acc.id); setCompte(acc); onBesoinBase?.(); }} onCancel={() => setMode("login")} />
         ) : mode === "reset" ? (
           <ClientResetPasswordForm data={data} persist={persist} onDone={() => { setMode("login"); setErr(""); }} onCancel={() => setMode("login")} />
         ) : (
@@ -4594,8 +4712,8 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
             </Field>
             {err && <div style={{ color: "var(--danger-fg)", fontSize: 13, marginBottom: 10 }}>{err}</div>}
             <button type="submit" style={{ width: "100%", marginTop: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "13px 0", fontSize: 15, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}>{T("Se connecter")}</button>
-            <button type="button" onClick={() => { setMode("reset"); setErr(""); onBesoinBase?.(); }} style={{ width: "100%", marginTop: 12, background: "none", border: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>{T("Mot de passe oublié ?")}</button>
-            <button type="button" onClick={() => { setMode("inscription"); setErr(""); onBesoinBase?.(); }} style={{ width: "100%", marginTop: 8, background: "none", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 0", fontSize: 14, fontWeight: 700, color: "var(--text)", cursor: "pointer" }}>{T("Créer un compte")}</button>
+            <button type="button" onClick={() => { setMode("reset"); setErr(""); preparerRepli(); }} style={{ width: "100%", marginTop: 12, background: "none", border: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>{T("Mot de passe oublié ?")}</button>
+            <button type="button" onClick={() => { setMode("inscription"); setErr(""); preparerRepli(); }} style={{ width: "100%", marginTop: 8, background: "none", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 0", fontSize: 14, fontWeight: 700, color: "var(--text)", cursor: "pointer" }}>{T("Créer un compte")}</button>
           </form>
         )}
       </div>

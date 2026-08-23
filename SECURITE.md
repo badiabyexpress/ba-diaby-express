@@ -109,25 +109,60 @@ connecte.
 |---|---|---|
 | 1 | La page de suivi ne livre plus la base à ses visiteurs | fait, en ligne |
 | 2 | Un visiteur non connecté ne charge plus rien | fait, en ligne |
-| 3 | L'application et l'espace client passent par le serveur | fait — reste à configurer |
-| 4 | Inscription et mot de passe oublié côté client | fait — reste à configurer |
-| 5 | Resserrage des politiques de la base | **à faire — c'est la dernière étape** |
+| 3 | L'application et l'espace client passent par le serveur | fait, en ligne |
+| 4 | Inscription et mot de passe oublié côté client | fait, en ligne |
+| 5 | Resserrage des politiques de la base | fait — RLS active, aucune politique |
+| 6 | L'espace client cloisonné | fait |
 
-Plus rien ne passe par la clé publique. La base peut être fermée dès que la clé de service est
-posée sur Vercel et qu'une connexion réelle a été vérifiée sur le site.
+Plus rien ne passe par la clé publique, et la base est effectivement fermée : `bde_data` a RLS
+active et **aucune politique**, ce qui ne laisse passer que la clé de service — c'est-à-dire nos
+seules fonctions serveur.
 
-### Ce qui reste ouvert après la fermeture
+### Le cloisonnement de l'espace client (lot 6)
 
-**L'espace client reçoit encore le document entier** une fois connecté, alors qu'il n'affiche que
-ses propres colis — donc les colis, les clients et les comptes de toute l'entreprise arrivent dans
-le navigateur de n'importe quel client. Ce n'est pas une régression : c'était déjà le cas avant
-tout ce travail, et la fermeture de la base n'y change rien puisqu'un client est, lui, identifié.
+**Le problème.** N'importe qui peut créer un compte client depuis la page d'accueil — c'est fait
+pour. Une fois connecté, ce compte présentait un jeton parfaitement valable, et `api/donnees.js`
+lui rendait le document ENTIER : les colis de tous les autres clients avec leurs noms, leurs
+téléphones et ce qu'ils ont payé, le répertoire, le journal d'activité, la caisse, les tarifs du
+partenaire, et la liste des employés avec l'empreinte de leur mot de passe. La fermeture de la
+base n'y changeait rien, puisqu'un client est, lui, identifié.
 
-C'est le prochain chantier, et il est plus profond que les précédents : le portail lit ET réécrit
-le document entier à chaque geste (déclarer un paiement, envoyer un message, faire une pré-alerte).
-Ne lui en donner qu'une partie sans toucher à ses écritures lui ferait effacer tout le reste. Il
-faut donc scinder les deux : une lecture réduite à ce qui le concerne, et des écritures ciblées
-côté serveur, geste par geste.
+**La difficulté.** Le portail lit ET réécrit le document entier à chaque geste — déclarer un
+paiement, envoyer un message, faire une pré-alerte. Ne lui en donner qu'une partie sans toucher à
+ses écritures lui aurait fait effacer tout le reste au premier enregistrement. C'eût été pire que
+le mal.
+
+**La réponse**, dans `api/_client.js`, en deux moitiés indissociables :
+
+- *En lecture*, une **liste blanche** de sections (`SECTIONS_PARTAGEES`), plus les listes
+  personnelles réduites à ce qui porte l'identifiant du compte : ses colis, ses pré-alertes, ses
+  demandes de regroupement, sa fiche — sans empreinte de mot de passe. Ce qui n'est pas sur la
+  liste ne sort pas ; une section ajoutée demain est donc privée par défaut.
+- *En écriture*, on repart **toujours du document réel** et l'on n'y repose que les fragments
+  autorisés : les trois champs qu'un client peut changer sur son colis (demande express,
+  déclaration de paiement, signalement), ses listes personnelles avec son identifiant réimposé, et
+  les champs autorisés de sa propre fiche. Le portail continue d'envoyer le document entier tel
+  qu'il le connaît ; ce qu'il n'a pas le droit de changer est ignoré.
+
+Trois portes de côté se ferment aussi, avant même de toucher à la base : un client ne peut pas
+lire une **sauvegarde** (`bde-backup-*`, une copie complète — c'était le contournement évident),
+ni **lister** les clés, ni **supprimer** quoi que ce soit.
+
+### Ce qui reste ouvert — le compte partenaire
+
+Un partenaire se connecte par `users`, avec un rôle qui n'est pas « client » : il reçoit donc
+encore le document entier. C'est une entreprise tierce, et elle voit aujourd'hui tout le carnet de
+Ba-Diaby — les colis de tous les clients, le répertoire, la caisse, le journal d'activité.
+
+La différence avec le compte client est réelle et vaut d'être notée : un compte partenaire ne se
+crée pas tout seul, c'est l'administrateur qui l'ouvre. Le risque n'est donc pas « n'importe qui »,
+mais « le confrère à qui l'on a ouvert une porte ». Cela reste contraire à la règle que l'entreprise
+s'est donnée — ce qu'un partenaire facture à ses propres clients ne regarde pas Ba-Diaby, et
+l'inverse est tout aussi vrai.
+
+Le chantier est le même que celui du lot 6, et le mécanisme est déjà écrit : il s'agirait d'ajouter
+à `api/_client.js` une vue partenaire — ses colis à lui, ses factures, sa marque — et la fusion en
+écriture correspondante.
 
 **La clé `bde-reinit`** contient les demandes de réinitialisation en cours, sous forme d'empreintes.
 `api/donnees.js` la refuse explicitement — c'est ce qui empêche un client de lire les codes des
@@ -205,18 +240,29 @@ create policy "Suppression limitée aux sauvegardes" on public.bde_data for dele
 - **`api/public.js`**, sur 36 cas : ce qui sort pour un suivi, une vitrine, les mentions légales ;
   une recherche vide qui ne renvoie pas « tous les colis » ; l'absence de téléphone, d'adresse et
   de notes internes dans la réponse ; la marque du partenaire sans ses tarifs.
-- **`api/donnees.js` et le jeton de session**, sur 53 cas : signature et vérification, jeton
+- **`api/donnees.js` et le jeton de session**, sur 111 cas : signature et vérification, jeton
   retouché, expiré, signé avec un autre secret ; aucune donnée sans jeton — et la base pas même
   interrogée ; la clé de service jamais renvoyée au navigateur ; la tête qui ne descend que la
   date ; une clé absente distinguée d'une base injoignable ; une écriture vide refusée ; la liste
   qui ne donne que des noms de clés ; et, du côté de `api/login.js`, qu'un compte client n'ouvre
   pas une session d'agent ni l'inverse.
+- **Le cloisonnement de l'espace client**, dans ces mêmes cas : le colis du voisin qui ne descend
+  pas, ni son nom, ni son téléphone, ni son empreinte ; aucune section réservée (employés,
+  répertoire, journal, caisse, factures du partenaire) ; les sauvegardes, la liste et la
+  suppression refusées. Puis, en écriture, un client qui envoie sa vue réduite sans rien effacer —
+  et un client MALVEILLANT, qui fabrique son envoi à la main : il ne se fait pas administrateur,
+  ne vide ni le répertoire ni la caisse, ne change pas le mot de passe du voisin, ne s'approprie
+  pas son colis, ne remet pas le prix du sien à zéro, et ne dépose pas de pré-alerte au nom d'un
+  autre. C'est le vrai test : l'écran ne protège rien, seul le serveur protège.
 - **L'application, dans un navigateur, la base fermée** (`t55`, 20 cas) : connexion, jeton porté
   jusqu'au serveur, aucun appel direct à la base, aucun canal temps réel, le changement d'un
   collègue qui arrive quand même, la déconnexion qui emporte le jeton — et le mot de passe de
   l'agent qui survit à sa propre reconnexion.
-- **L'espace client** (`t56`, 13 cas) : page de connexion sans la base, refus par le serveur,
-  connexion réussie, et le mot de passe du client intact après coup.
+- **L'espace client** (`t56`, 38 cas) : page de connexion sans la base, refus par le serveur,
+  connexion réussie, et le mot de passe du client intact après coup. Depuis le lot 6, le portail y
+  est nourri par le VRAI tri du serveur — `vueClient` et `fusionnerEcritureClient` sont importés
+  du code livré, pas imités : on ouvre chacun de ses écrans pour vérifier qu'aucun ne tombe faute
+  d'une section, puis on fouille tout ce qui est réellement descendu dans le navigateur.
 - **L'inscription et le mot de passe oublié** (`testcompte`, 53 cas ; `t57`, 22 cas, la base
   fermée) : identifiant déjà pris refusé quelle que soit la casse, champs obligatoires, mot de
   passe trop court, création en rafale ralentie, empreinte identique à celle du navigateur, et

@@ -78,6 +78,38 @@ const TABLE = "bde_data";
 const CACHE_PREFIX = "bde-cache:";
 const QUEUE_KEY = "bde-outbox";
 
+/*
+ * DEUX CACHES, PARCE QU'IL Y A DEUX DOCUMENTS
+ *
+ * Depuis que le serveur ne rend à un client que ce qui le concerne (voir api/_client.js), le
+ * document qu'il garde en cache n'est plus celui de l'entreprise : c'est une vue réduite à ses
+ * propres colis. Or le cache et la file d'attente sont rangés dans le stockage du navigateur, qui
+ * est le même pour l'application et pour le portail.
+ *
+ * Sur un appareil où les deux servent — l'ordinateur de l'agence, où l'on ouvre le portail pour
+ * montrer son espace à un client — un agent hors ligne se serait donc rabattu sur la vue du
+ * client, et l'aurait rejouée à la reconnexion. Il aurait effacé toute l'entreprise en croyant
+ * enregistrer un colis. Chaque espace a donc son propre tiroir.
+ *
+ * Le rôle est lu dans le jeton sans être vérifié : il ne s'agit pas d'accorder un droit — le
+ * serveur s'en charge, et lui seul — mais de choisir un tiroir. Se tromper de tiroir ne donne
+ * accès à rien de plus ; c'est le mélange qu'on veut éviter.
+ */
+let tiroir = "";
+function tiroirDuJeton(jeton) {
+  if (typeof jeton !== "string" || !jeton.includes(".")) return "";
+  try {
+    let corps = jeton.split(".")[0].replace(/-/g, "+").replace(/_/g, "/");
+    // base64url ne porte pas son bourrage ; atob l'exige.
+    while (corps.length % 4) corps += "=";
+    const octets = Uint8Array.from(atob(corps), (c) => c.charCodeAt(0));
+    const charge = JSON.parse(new TextDecoder().decode(octets));
+    return charge?.role === "client" ? "client:" : "";
+  } catch (e) { return ""; }
+}
+function cleCache(key) { return `${CACHE_PREFIX}${tiroir}${key}`; }
+function cleFile() { return `${QUEUE_KEY}${tiroir ? `:${tiroir.replace(/:$/, "")}` : ""}`; }
+
 /* ------------------------------------------------------------------------------------------
  * LA VOIE SERVEUR
  *
@@ -99,6 +131,8 @@ export function definirJetonSession(jeton) {
   if (jeton === jetonSession) return;
   jetonSession = jeton || null;
   voieServeurDisponible = null;
+  // Le tiroir suit le jeton : changer d'espace change de cache, sans jamais mélanger les deux.
+  tiroir = tiroirDuJeton(jetonSession);
 }
 
 /*
@@ -149,10 +183,10 @@ async function appelServeur(chemin, options = {}) {
 }
 
 function getQueue() {
-  try { return JSON.parse(localStorage.getItem(QUEUE_KEY) || "[]"); } catch (e) { return []; }
+  try { return JSON.parse(localStorage.getItem(cleFile()) || "[]"); } catch (e) { return []; }
 }
 function setQueue(q) {
-  try { localStorage.setItem(QUEUE_KEY, JSON.stringify(q)); } catch (e) { /* stockage local indisponible, tant pis */ }
+  try { localStorage.setItem(cleFile(), JSON.stringify(q)); } catch (e) { /* stockage local indisponible, tant pis */ }
 }
 
 export const storage = {
@@ -177,7 +211,7 @@ export const storage = {
         if (!parServeur.ok) throw new Error(parServeur.corps?.error || "Lecture impossible");
         serveurARepondu = true;
         const valeur = parServeur.corps?.value;
-        try { localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(valeur)); } catch (e) { /* pas grave */ }
+        try { localStorage.setItem(cleCache(key), JSON.stringify(valeur)); } catch (e) { /* pas grave */ }
         return { key, value: JSON.stringify(valeur), shared: !!shared };
       }
 
@@ -189,11 +223,11 @@ export const storage = {
         absente.cleAbsente = true;
         throw absente;
       }
-      try { localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(data.value)); } catch (e) { /* pas grave */ }
+      try { localStorage.setItem(cleCache(key), JSON.stringify(data.value)); } catch (e) { /* pas grave */ }
       return { key, value: JSON.stringify(data.value), shared: !!shared };
     } catch (e) {
       // Supabase injoignable (hors ligne) : on se rabat sur la dernière version connue localement.
-      const cached = localStorage.getItem(CACHE_PREFIX + key);
+      const cached = localStorage.getItem(cleCache(key));
       if (cached !== null) return { key, value: cached, shared: !!shared };
       if (!serveurARepondu) e.serveurInjoignable = true;
       throw e;
@@ -202,7 +236,7 @@ export const storage = {
 
   async set(key, value, shared) {
     const parsed = typeof value === "string" ? JSON.parse(value) : value;
-    try { localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(parsed)); } catch (e) { /* pas grave */ }
+    try { localStorage.setItem(cleCache(key), JSON.stringify(parsed)); } catch (e) { /* pas grave */ }
     try {
       const parServeur = await appelServeur(`?cle=${encodeURIComponent(key)}`, {
         method: "PUT", body: JSON.stringify({ value: parsed }),
@@ -232,7 +266,7 @@ export const storage = {
   },
 
   async delete(key, shared) {
-    try { localStorage.removeItem(CACHE_PREFIX + key); } catch (e) { /* pas grave */ }
+    try { localStorage.removeItem(cleCache(key)); } catch (e) { /* pas grave */ }
     const parServeur = await appelServeur(`?cle=${encodeURIComponent(key)}`, { method: "DELETE" });
     if (!parServeur.indisponible) {
       if (!parServeur.ok) throw new Error(parServeur.corps?.error || "Suppression impossible");
@@ -298,7 +332,7 @@ function suivreParInterrogation(key, callback) {
       const complet = await appelServeur(`?cle=${encodeURIComponent(key)}`);
       if (arrete) return;
       if (!complet.indisponible && complet.ok && complet.corps?.value !== undefined) {
-        try { localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(complet.corps.value)); } catch (e) { /* pas grave */ }
+        try { localStorage.setItem(cleCache(key), JSON.stringify(complet.corps.value)); } catch (e) { /* pas grave */ }
         callback(JSON.stringify(complet.corps.value));
       }
     }
@@ -437,7 +471,7 @@ export async function flushOutbox() {
         const { error } = await client.from(TABLE).upsert({ key: item.key, value: valeur, updated_at: new Date().toISOString() });
         if (error) throw error;
       }
-      try { localStorage.setItem(CACHE_PREFIX + item.key, JSON.stringify(valeur)); } catch (e2) { /* pas grave */ }
+      try { localStorage.setItem(cleCache(item.key), JSON.stringify(valeur)); } catch (e2) { /* pas grave */ }
       flushed++;
     } catch (e) {
       stillFailed.push(item); // toujours hors ligne ou erreur ponctuelle : on retente au prochain retour de connexion

@@ -32,6 +32,7 @@
  */
 
 import { sessionDeLaRequete } from "./_session.js";
+import { vueClient, fusionnerEcritureClient } from "./_client.js";
 
 const TABLE = "bde_data";
 
@@ -76,6 +77,36 @@ export default async function handler(req, res) {
   if (clef !== "bde-data" && !clef.startsWith("bde-backup-")) {
     return res.status(403).json({ error: "Clé non accessible." });
   }
+
+  /*
+   * LE CLIENT N'EST PAS UN EMPLOYÉ
+   *
+   * N'importe qui peut créer un compte client depuis la page d'accueil — c'est fait pour. Une
+   * fois connecté, ce compte présente un jeton valide, exactement comme un agent : sans la
+   * distinction qui suit, il obtenait le document entier, avec les colis de tous les autres
+   * clients, le répertoire, la caisse et les empreintes de mots de passe des employés.
+   *
+   * Trois portes se ferment ici, avant même de toucher à la base :
+   *
+   *   — les sauvegardes. Ce sont des copies complètes du document : les laisser lire à un client
+   *     rendrait inutile tout le tri fait plus bas. C'est le contournement le plus évident, et le
+   *     seul qui n'aurait laissé aucune trace ;
+   *   — la liste des clés, qui apprend quelles sauvegardes existent ;
+   *   — la suppression, qui n'a aucun usage légitime depuis un espace client, et dont le seul
+   *     emploi possible serait d'effacer le document de l'entreprise.
+   *
+   * Le tri du contenu, lui, se fait dans api/_client.js — en lecture comme en écriture.
+   */
+  const estClient = session.role === "client";
+  const compteId = session.sub || null;
+  if (estClient) {
+    if (clef !== "bde-data") return res.status(403).json({ error: "Clé non accessible." });
+    if (req.method === "DELETE") return res.status(403).json({ error: "Suppression non autorisée." });
+    if (req.method === "GET" && req.query?.liste !== undefined) {
+      return res.status(403).json({ error: "Liste non accessible." });
+    }
+  }
+
   const entetes = { apikey: cle, Authorization: `Bearer ${cle}`, "Content-Type": "application/json" };
 
   try {
@@ -126,7 +157,8 @@ export default async function handler(req, res) {
       const ligne = Array.isArray(lignes) ? lignes[0] : null;
       if (!ligne) return res.status(404).json({ error: "Donnée absente", cleAbsente: true });
       if (tete) return res.status(200).json({ updated_at: ligne.updated_at || null });
-      return res.status(200).json({ value: ligne.value, updated_at: ligne.updated_at || null });
+      const valeurLue = estClient ? vueClient(ligne.value, compteId) : ligne.value;
+      return res.status(200).json({ value: valeurLue, updated_at: ligne.updated_at || null });
     }
 
     if (req.method === "PUT" || req.method === "POST") {
@@ -140,12 +172,41 @@ export default async function handler(req, res) {
       if (valeur === undefined || valeur === null) {
         return res.status(400).json({ error: "Contenu absent — écriture refusée." });
       }
+
+      /*
+       * Un client n'écrit jamais le document : il propose des modifications, et le serveur ne
+       * retient que celles qui portent sur ce qui est à lui.
+       *
+       * On relit donc la version en base juste avant, et l'on repose dessus les seuls fragments
+       * autorisés. Le portail, lui, ne change pas d'un iota : il envoie toujours le document
+       * entier tel qu'il le connaît — c'est-à-dire la vue réduite qu'on lui a donnée. Sans cette
+       * relecture, cette vue réduite écraserait la vraie, et l'entreprise perdrait tout ce qu'elle
+       * avait justement caché.
+       */
+      let aEcrire = valeur;
+      if (estClient) {
+        const lecture = await fetch(
+          `${url}/rest/v1/${TABLE}?key=eq.${encodeURIComponent(clef)}&select=value`,
+          { headers: entetes },
+        );
+        if (!lecture.ok) return res.status(502).json({ error: "Base de données injoignable" });
+        const lignesActuelles = await lecture.json();
+        const actuel = Array.isArray(lignesActuelles) ? lignesActuelles[0]?.value : null;
+        /*
+         * Pas de document en base : il n'y a rien sur quoi reposer une modification, et écrire la
+         * vue réduite d'un client à la place du document de l'entreprise serait le pire des
+         * accidents. On refuse plutôt que de deviner.
+         */
+        if (!actuel) return res.status(409).json({ error: "Données introuvables — écriture refusée." });
+        aEcrire = fusionnerEcritureClient(actuel, valeur, compteId);
+      }
+
       const reponse = await fetch(
         `${url}/rest/v1/${TABLE}?on_conflict=key`,
         {
           method: "POST",
           headers: { ...entetes, Prefer: "resolution=merge-duplicates,return=minimal" },
-          body: JSON.stringify({ key: clef, value: valeur, updated_at: new Date().toISOString() }),
+          body: JSON.stringify({ key: clef, value: aEcrire, updated_at: new Date().toISOString() }),
         },
       );
       if (!reponse.ok) {

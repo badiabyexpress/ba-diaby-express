@@ -154,7 +154,7 @@ l'accès direct : elle peut être mise en ligne sans rien casser.
 ### Vérifier que la voie serveur est bien en place
 
 ```
-https://ba-diaby-express.vercel.app/api/donnees?etat=1
+https://badiabyexpress.com/api/donnees?etat=1
 ```
 
 `{"configure":true}` : la voie serveur est utilisable. `{"configure":false}` : la clé de service

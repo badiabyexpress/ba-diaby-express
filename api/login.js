@@ -9,18 +9,22 @@
  * connexion ne protège rien : on peut interroger la base sans jamais le voir.
  *
  * Cette fonction déplace la vérification côté serveur. Elle lit les comptes avec la CLÉ DE SERVICE
- * (qui ne quitte jamais le serveur), compare l'empreinte, et renvoie un jeton de session signé.
- * Le navigateur joint ensuite ce jeton à ses appels Supabase. Une fois les politiques de la base
- * resserrées sur `auth.role() = 'authenticated'`, la clé publique seule ne donnera plus rien.
+ * (qui ne quitte jamais le serveur), compare l'empreinte, et renvoie le compte débarrassé de tout
+ * ce qui touche au mot de passe, accompagné d'un jeton de session. C'est ce jeton qui ouvre
+ * api/donnees.js — et donc ce qui permettra à l'application de continuer à travailler le jour où
+ * la base sera fermée à la clé publique.
  *
  * VARIABLES D'ENVIRONNEMENT À CRÉER SUR VERCEL (Supabase → Settings → API)
  * -----------------------------------------------------------------------
- *   SUPABASE_URL                 adresse du projet (ex: https://xxxx.supabase.co)
+ *   SUPABASE_URL                 adresse du projet (à défaut VITE_SUPABASE_URL)
  *   SUPABASE_SERVICE_ROLE_KEY    clé de service — SECRET, ne jamais exposer au navigateur
- *   SUPABASE_JWT_SECRET          secret de signature des jetons — SECRET également
  *
  * Aucune ne commence par VITE_ : ce préfixe les enverrait au navigateur, ce qui annulerait
  * l'intérêt de la manœuvre.
+ *
+ * SUPABASE_JWT_SECRET reste acceptée mais n'est plus nécessaire : elle ne sert qu'au jeton
+ * destiné à Supabase lui-même, une piste abandonnée faute de pouvoir trouver ce secret dans les
+ * interfaces récentes (voir api/_session.js).
  *
  * TANT QUE CES VARIABLES N'EXISTENT PAS, la fonction répond 501 et l'application retombe
  * automatiquement sur son fonctionnement actuel. Elle peut donc être mise en ligne sans risque,
@@ -28,6 +32,7 @@
  */
 
 import crypto from "node:crypto";
+import { signerSession } from "./_session.js";
 
 /** Durée de validité du jeton. Assez longue pour une journée de travail, assez courte pour qu'un
  *  jeton volé sur un téléphone perdu cesse de servir rapidement. */
@@ -133,8 +138,15 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { identifiant, motdepasse } = req.body || {};
+    const { identifiant, motdepasse, espace } = req.body || {};
     if (!identifiant || !motdepasse) return res.status(400).json({ error: "Identifiant et mot de passe requis" });
+
+    /*
+     * Deux populations, deux listes : les employés dans `users`, les clients dans `clientAccounts`.
+     * L'espace demandé est respecté strictement — un compte client ne doit jamais ouvrir une
+     * session d'employé parce qu'il porte le même identifiant qu'un agent, ni l'inverse.
+     */
+    const espaceClient = espace === "client";
 
     const cleEssais = `${req.headers["x-forwarded-for"] || "?"}|${String(identifiant).toLowerCase()}`;
     if (tropDEssais(cleEssais)) {
@@ -150,7 +162,12 @@ export default async function handler(req, res) {
     }
     const lignes = await reponse.json();
     const donnees = lignes?.[0]?.value || {};
-    const compte = (donnees.users || []).find((u) => u.identifiant === String(identifiant).trim());
+    /* Les clients saisissent leur identifiant sans se soucier de la casse ; l'écran du portail a
+     * toujours comparé en minuscules, et changer cela ici enfermerait dehors des comptes existants. */
+    const cherche = String(identifiant).trim();
+    const compte = espaceClient
+      ? (donnees.clientAccounts || []).find((c) => String(c.identifiant || "").toLowerCase() === cherche.toLowerCase())
+      : (donnees.users || []).find((u) => u.identifiant === cherche);
 
     /*
      * Même réponse pour un identifiant inconnu et pour un mot de passe faux : sinon, la page de
@@ -179,6 +196,18 @@ export default async function handler(req, res) {
       : {};
 
     /*
+     * Le jeton de session, lui, ne dépend d'aucune clé introuvable : le serveur le signe et le
+     * vérifie lui-même (voir api/_session.js). C'est ce jeton qui ouvre api/donnees.js, et donc
+     * ce qui permettra à l'application de continuer à travailler une fois la base fermée à la
+     * clé publique.
+     */
+    const session = signerSession({
+      userId: compte.id,
+      identifiant: compte.identifiant,
+      role: espaceClient ? "client" : (compte.role || ""),
+    }) || {};
+
+    /*
      * Le compte revient d'ici, débarrassé de tout ce qui touche au mot de passe.
      *
      * C'est ce qui permet à la page de connexion de ne plus avoir besoin de la liste des comptes :
@@ -187,11 +216,13 @@ export default async function handler(req, res) {
      * l'algorithme restent au serveur — ils ne servent qu'ici.
      */
     const {
-      motdepasse, motdepasseSecure, motdepasseSalt, motdepasseIter, motdepasseAlgo, ...compteSur
+      motdepasse: _mdp, motdepasseSecure: _sec, motdepasseSalt: _sel,
+      motdepasseIter: _iter, motdepasseAlgo: _algo, ...compteSur
     } = compte;
 
     return res.status(200).json({
       ...jeton,
+      ...session,
       userId: compte.id,
       utilisateur: compteSur,
       // Dit à l'application si la base acceptera ce jeton, ou s'il faut rester sur la clé publique.

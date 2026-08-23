@@ -14,16 +14,18 @@
  * écritures en attente. Pendant la coupure, get() se rabat automatiquement sur le cache
  * local si Supabase est injoignable, pour que l'agent puisse continuer à travailler.
  *
- * NOTE DE SÉCURITÉ IMPORTANTE :
- * L'application gère son propre écran de connexion interne (identifiant/mot de passe),
- * indépendant de Supabase Auth. La table `bde_data` est donc accessible en lecture/écriture
- * via la clé publique "anon" (nécessaire puisque le site n'utilise pas de compte Supabase
- * par utilisateur), et la protection réelle est l'écran de connexion de l'application.
- * Cela veut dire que la clé anon, présente dans le code envoyé au navigateur, permettrait
- * techniquement à quelqu'un qui l'extrairait de lire/modifier les données directement,
- * en contournant l'écran de connexion. Pour un usage interne d'entreprise c'est un
- * compromis raisonnable, mais si vous stockez des données très sensibles, il faudra migrer
- * vers de vrais comptes Supabase Auth + des règles RLS par utilisateur.
+ * PAR OÙ PASSENT LES DONNÉES :
+ * Historiquement, ce fichier parlait directement à Supabase avec la clé publique "anon" —
+ * celle qui est embarquée dans le code envoyé à chaque visiteur. La protection tenait alors
+ * au seul écran de connexion de l'application : qui extrayait la clé du code lisait et
+ * modifiait tout sans jamais voir cet écran.
+ *
+ * Il existe désormais une seconde voie : api/donnees.js, côté serveur, qui détient seul la clé
+ * de service et n'ouvre qu'à un jeton de session délivré après vérification du mot de passe.
+ * Quand cette voie répond, la clé publique ne sert plus à rien — ce qui permet de fermer la
+ * base et de rendre cette clé inutile à qui l'extrairait. Quand elle ne répond pas (fonction
+ * absente ou non configurée), tout repasse par l'accès direct, comme avant : les deux chemins
+ * coexistent pour qu'aucun déploiement ne laisse l'application sans accès à ses données.
  */
 
 import { createClient } from "@supabase/supabase-js";
@@ -76,6 +78,76 @@ const TABLE = "bde_data";
 const CACHE_PREFIX = "bde-cache:";
 const QUEUE_KEY = "bde-outbox";
 
+/* ------------------------------------------------------------------------------------------
+ * LA VOIE SERVEUR
+ *
+ * Le jeton ci-dessus s'adresse à Supabase ; celui-ci s'adresse à nos propres fonctions. Quand il
+ * est là et que api/donnees.js est configuré, lectures et écritures passent par le serveur, qui
+ * détient seul la clé de service. La clé publique embarquée dans la page ne sert alors plus à
+ * rien — et c'est ce qui permet de fermer la base au public sans que l'application s'arrête.
+ *
+ * Tant que ce n'est pas le cas — fonction absente, non configurée, ou personne de connecté — tout
+ * repasse par l'accès direct, exactement comme avant. Aucune bascule à faire à la main : le code
+ * marche des deux côtés, ce qui autorise à déployer d'abord et à fermer la base ensuite.
+ * ---------------------------------------------------------------------------------------- */
+
+let jetonSession = null;
+/** null = pas encore su, true/false = réponse du serveur. Remis à zéro à chaque changement de jeton. */
+let voieServeurDisponible = null;
+
+export function definirJetonSession(jeton) {
+  if (jeton === jetonSession) return;
+  jetonSession = jeton || null;
+  voieServeurDisponible = null;
+}
+
+/*
+ * Prévenir l'application que son jeton n'est plus accepté.
+ *
+ * Sans cela, une session expirée ressemblerait à une panne de réseau : l'application basculerait
+ * en mode local et y resterait, avec des données figées et des enregistrements qui s'accumulent
+ * sans jamais partir. Un refus du serveur n'est pas une coupure — c'est une session à rouvrir, et
+ * il faut le dire à celui qui travaille.
+ */
+let rappelSessionExpiree = null;
+export function surSessionExpiree(rappel) { rappelSessionExpiree = rappel; }
+
+async function appelServeur(chemin, options = {}) {
+  if (!jetonSession) return { indisponible: true };
+  if (voieServeurDisponible === false) return { indisponible: true };
+  let reponse;
+  try {
+    reponse = await fetch(`/api/donnees${chemin}`, {
+      ...options,
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${jetonSession}`, ...(options.headers || {}) },
+    });
+  } catch (e) {
+    /*
+     * Réseau coupé : ce n'est PAS « la voie serveur n'existe pas ». La retenir comme indisponible
+     * ferait repartir l'application sur l'accès direct pour le reste de la session, alors qu'il
+     * sera tout aussi coupé — et, une fois la base fermée, définitivement muet.
+     */
+    return { indisponible: true, reseau: true };
+  }
+  /*
+   * 501 : fonction en ligne mais pas configurée. 404 sans corps JSON : fonction pas déployée.
+   * Les deux se retiennent — inutile de retenter à chaque lecture.
+   */
+  if (reponse.status === 501) { voieServeurDisponible = false; return { indisponible: true }; }
+  let corps = null;
+  try { corps = await reponse.json(); } catch (e) { corps = null; }
+  if (reponse.status === 404 && !corps) { voieServeurDisponible = false; return { indisponible: true }; }
+  if (reponse.status === 401) {
+    // Session expirée : le jeton ne vaut plus rien, autant l'oublier tout de suite.
+    jetonSession = null;
+    voieServeurDisponible = null;
+    try { rappelSessionExpiree?.(); } catch (e) { /* l'appelant se débrouillera */ }
+    return { indisponible: true, sessionExpiree: true };
+  }
+  voieServeurDisponible = true;
+  return { reponse, corps, ok: reponse.ok };
+}
+
 function getQueue() {
   try { return JSON.parse(localStorage.getItem(QUEUE_KEY) || "[]"); } catch (e) { return []; }
 }
@@ -94,6 +166,21 @@ export const storage = {
      */
     let serveurARepondu = false;
     try {
+      const parServeur = await appelServeur(`?cle=${encodeURIComponent(key)}`);
+      if (!parServeur.indisponible) {
+        if (parServeur.corps?.cleAbsente) {
+          serveurARepondu = true;
+          const absente = new Error(`Clé "${key}" introuvable`);
+          absente.cleAbsente = true;
+          throw absente;
+        }
+        if (!parServeur.ok) throw new Error(parServeur.corps?.error || "Lecture impossible");
+        serveurARepondu = true;
+        const valeur = parServeur.corps?.value;
+        try { localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(valeur)); } catch (e) { /* pas grave */ }
+        return { key, value: JSON.stringify(valeur), shared: !!shared };
+      }
+
       const { data, error } = await client.from(TABLE).select("value").eq("key", key).maybeSingle();
       if (error) throw error;
       serveurARepondu = true;
@@ -117,6 +204,13 @@ export const storage = {
     const parsed = typeof value === "string" ? JSON.parse(value) : value;
     try { localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(parsed)); } catch (e) { /* pas grave */ }
     try {
+      const parServeur = await appelServeur(`?cle=${encodeURIComponent(key)}`, {
+        method: "PUT", body: JSON.stringify({ value: parsed }),
+      });
+      if (!parServeur.indisponible) {
+        if (!parServeur.ok) throw new Error(parServeur.corps?.error || "Enregistrement impossible");
+        return { key, value, shared: !!shared };
+      }
       const { error } = await client.from(TABLE).upsert({ key, value: parsed, updated_at: new Date().toISOString() });
       if (error) throw error;
       return { key, value, shared: !!shared };
@@ -139,12 +233,22 @@ export const storage = {
 
   async delete(key, shared) {
     try { localStorage.removeItem(CACHE_PREFIX + key); } catch (e) { /* pas grave */ }
+    const parServeur = await appelServeur(`?cle=${encodeURIComponent(key)}`, { method: "DELETE" });
+    if (!parServeur.indisponible) {
+      if (!parServeur.ok) throw new Error(parServeur.corps?.error || "Suppression impossible");
+      return { key, deleted: true, shared: !!shared };
+    }
     const { error } = await client.from(TABLE).delete().eq("key", key);
     if (error) throw error;
     return { key, deleted: true, shared: !!shared };
   },
 
   async list(prefix, shared) {
+    const parServeur = await appelServeur(`?liste=${encodeURIComponent(prefix || "")}`);
+    if (!parServeur.indisponible) {
+      if (!parServeur.ok) throw new Error(parServeur.corps?.error || "Lecture impossible");
+      return { keys: parServeur.corps?.keys || [], prefix, shared: !!shared };
+    }
     let query = client.from(TABLE).select("key");
     if (prefix) query = query.like("key", `${prefix}%`);
     const { data, error } = await query;
@@ -159,7 +263,77 @@ export const storage = {
  * pour que l'application puisse rafraîchir son état sans que l'utilisateur ait à recharger la page.
  * Retourne une fonction "unsubscribe" à appeler au démontage du composant.
  */
+/*
+ * Intervalle de vérification quand la base est fermée au public.
+ *
+ * Vingt secondes : assez court pour qu'un agent voie arriver le colis que son collègue vient
+ * d'enregistrer sans se poser de question, assez long pour ne pas vider la batterie d'un
+ * téléphone laissé ouvert toute la journée sur le tableau de bord.
+ */
+const SECONDES_VERIFICATION = 20;
+
+/*
+ * Le remplacement de l'abonnement temps réel, une fois la base fermée.
+ *
+ * Le canal temps réel de Supabase parle à la clé publique. Fermer la base le coupe : c'est le
+ * prix de la fermeture, et il faut le payer sans perdre ce qu'il apportait — l'écran d'un agent
+ * qui se met à jour quand un collègue enregistre un colis, sans recharger la page.
+ *
+ * On demande donc au serveur la seule date de dernière modification, et on ne redescend le
+ * document que lorsqu'elle a changé. Un appel qui ne rapporte qu'un horodatage coûte à peu près
+ * rien ; c'est le document entier, toutes les vingt secondes, qui aurait été déraisonnable.
+ */
+function suivreParInterrogation(key, callback) {
+  let arrete = false;
+  let derniere = null;
+  let minuteur = null;
+
+  async function verifier() {
+    if (arrete) return;
+    const tete = await appelServeur(`?cle=${encodeURIComponent(key)}&tete=1`);
+    if (arrete) return;
+    if (tete.indisponible) { programmer(); return; }
+    const marque = tete.corps?.updated_at || null;
+    if (marque && derniere && marque !== derniere) {
+      const complet = await appelServeur(`?cle=${encodeURIComponent(key)}`);
+      if (arrete) return;
+      if (!complet.indisponible && complet.ok && complet.corps?.value !== undefined) {
+        try { localStorage.setItem(CACHE_PREFIX + key, JSON.stringify(complet.corps.value)); } catch (e) { /* pas grave */ }
+        callback(JSON.stringify(complet.corps.value));
+      }
+    }
+    if (marque) derniere = marque;
+    programmer();
+  }
+  function programmer() {
+    if (arrete) return;
+    minuteur = setTimeout(verifier, SECONDES_VERIFICATION * 1000);
+  }
+
+  verifier();
+  return () => { arrete = true; if (minuteur) clearTimeout(minuteur); };
+}
+
 export function subscribeToChanges(key, callback) {
+  /*
+   * Le choix se fait à l'usage, pas sur une configuration : au premier appel on ne sait pas
+   * encore si la voie serveur répond. On interroge, et on branche l'un ou l'autre selon la
+   * réponse — ce qui évite d'avoir à déclarer quelque part dans quel mode on tourne.
+   */
+  if (jetonSession && voieServeurDisponible !== false) {
+    let arreterSuivi = null;
+    let annule = false;
+    appelServeur(`?cle=${encodeURIComponent(key)}&tete=1`).then((tete) => {
+      if (annule) return;
+      if (tete.indisponible && !tete.reseau) { arreterSuivi = abonnementTempsReel(key, callback); return; }
+      arreterSuivi = suivreParInterrogation(key, callback);
+    });
+    return () => { annule = true; if (arreterSuivi) arreterSuivi(); };
+  }
+  return abonnementTempsReel(key, callback);
+}
+
+function abonnementTempsReel(key, callback) {
   const channel = client
     .channel(`bde_data_changes_${key}`)
     .on(
@@ -243,11 +417,26 @@ export async function flushOutbox() {
        * coupure, leur travail est là, et l'écraser serait le perdre. Si la relecture échoue, on
        * ne pousse rien — mieux vaut retenter plus tard que remplacer à l'aveugle.
        */
-      const { data: actuel, error: erreurLecture } = await client.from(TABLE).select("value").eq("key", item.key).maybeSingle();
-      if (erreurLecture) throw erreurLecture;
-      const valeur = actuel && actuel.value ? fusionnerDocuments(actuel.value, item.value) : item.value;
-      const { error } = await client.from(TABLE).upsert({ key: item.key, value: valeur, updated_at: new Date().toISOString() });
-      if (error) throw error;
+      let surLeServeur = null;
+      const lecture = await appelServeur(`?cle=${encodeURIComponent(item.key)}`);
+      if (!lecture.indisponible) {
+        if (!lecture.ok && !lecture.corps?.cleAbsente) throw new Error("Relecture impossible");
+        surLeServeur = lecture.corps?.value ?? null;
+      } else {
+        const { data: actuel, error: erreurLecture } = await client.from(TABLE).select("value").eq("key", item.key).maybeSingle();
+        if (erreurLecture) throw erreurLecture;
+        surLeServeur = actuel?.value ?? null;
+      }
+      const valeur = surLeServeur ? fusionnerDocuments(surLeServeur, item.value) : item.value;
+      const ecriture = await appelServeur(`?cle=${encodeURIComponent(item.key)}`, {
+        method: "PUT", body: JSON.stringify({ value: valeur }),
+      });
+      if (!ecriture.indisponible) {
+        if (!ecriture.ok) throw new Error("Enregistrement impossible");
+      } else {
+        const { error } = await client.from(TABLE).upsert({ key: item.key, value: valeur, updated_at: new Date().toISOString() });
+        if (error) throw error;
+      }
       try { localStorage.setItem(CACHE_PREFIX + item.key, JSON.stringify(valeur)); } catch (e2) { /* pas grave */ }
       flushed++;
     } catch (e) {

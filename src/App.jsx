@@ -1570,6 +1570,88 @@ function resizeImageToDataUrl(file, maxWidth = 720, quality = 0.6) {
     reader.readAsDataURL(file);
   });
 }
+/* ============================================================================================
+ * LES IMAGES NE VIVENT PLUS DANS LES DONNÉES
+ *
+ * Toutes les données de l'entreprise tiennent dans un seul document, relu et réécrit à chaque
+ * geste : enregistrer un colis, encaisser, changer un statut. Une image gardée en base64 y pèse
+ * donc à CHAQUE opération, pour chaque agent, sur des connexions mobiles.
+ *
+ * Constaté le 23/08/2026 : 836 ko de données pour quinze colis, dont 394 ko pour un seul logo de
+ * partenaire et 213 ko de photos. Sept dixièmes du poids pour des images que personne ne regarde
+ * la plupart du temps — et l'écriture devenait assez lente pour que les agents appuient deux fois
+ * sur « Enregistrer ».
+ *
+ * Les images partent donc dans le stockage de fichiers, là où vont déjà les tickets PDF, et le
+ * document ne garde qu'une adresse. Une adresse pèse cent octets.
+ * ========================================================================================= */
+
+/** Vrai si la valeur est une image embarquée (par opposition à une adresse déjà déportée). */
+function estImageEmbarquee(valeur) {
+  return typeof valeur === "string" && valeur.startsWith("data:image");
+}
+
+/**
+ * Dépose une image dans le stockage et renvoie son adresse.
+ *
+ * En cas d'échec — hors ligne, stockage indisponible — on renvoie l'image telle quelle. Elle
+ * repart alors dans les données comme avant : c'est lourd, mais un agent ne doit jamais perdre la
+ * photo d'un colis abîmé parce que le réseau a hoqueté. L'outil « Alléger les données »
+ * (Configuration → Sauvegarde) rattrape ensuite ce qui est resté embarqué.
+ */
+/**
+ * Recomprime un logo déjà enregistré, sans changer ce qu'on en voit.
+ *
+ * Les logos restent embarqués — les PDF les dessinent à l'impression, et jsPDF ne sait pas aller
+ * chercher une image distante. Mais rien n'oblige à les garder en PNG plein format : un logo de
+ * partenaire pesait 394 ko, soit près de la moitié de toutes les données de l'entreprise. À
+ * 320 px et en JPEG, le même logo tient dans une quinzaine de kilo-octets, sans différence
+ * visible sur une étiquette thermique.
+ *
+ * Le fond blanc est réappliqué avant le dessin : sans lui, un PNG transparent ressortirait noir.
+ */
+function recompresserLogo(dataUrl, maxWidth = 320) {
+  return new Promise((resolve) => {
+    if (!estImageEmbarquee(dataUrl)) { resolve(dataUrl); return; }
+    const img = new Image();
+    img.onerror = () => resolve(dataUrl);
+    img.onload = () => {
+      try {
+        const scale = Math.min(1, maxWidth / img.width);
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        const compresse = canvas.toDataURL("image/jpeg", 0.85);
+        // On ne remplace que si l'on y gagne : un logo déjà léger n'a rien à y gagner.
+        resolve(compresse.length < dataUrl.length ? compresse : dataUrl);
+      } catch (e) { resolve(dataUrl); }
+    };
+    img.src = dataUrl;
+  });
+}
+
+async function deposerImage(dataUrl, dossier, nom) {
+  if (!estImageEmbarquee(dataUrl)) return dataUrl;
+  try {
+    const reponse = await fetch(dataUrl);
+    const blob = await reponse.blob();
+    const extension = blob.type === "image/png" ? "png" : "jpg";
+    const chemin = `images/${dossier}/${nom}-${Date.now()}${Math.random().toString(36).slice(2, 7)}.${extension}`;
+    const { error } = await clientSupabase().storage
+      .from("colis-documents")
+      .upload(chemin, blob, { contentType: blob.type || "image/jpeg", upsert: true });
+    if (error) throw error;
+    const { data: { publicUrl } } = clientSupabase().storage.from("colis-documents").getPublicUrl(chemin);
+    return publicUrl || dataUrl;
+  } catch (e) {
+    return dataUrl;
+  }
+}
+
 function waLink(phone, msg) { return `https://wa.me/${(phone || "").replace(/[^\d]/g, "")}?text=${encodeURIComponent(msg)}`; }
 
 /**
@@ -12350,7 +12432,16 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
           const scale = Math.min(1, 500 / img.width);
           c.width = img.width * scale; c.height = img.height * scale;
           c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-          setPhotos((p) => [...p, c.toDataURL("image/jpeg", 0.6)]);
+          /*
+           * La photo part au stockage et seule son adresse rejoint le colis. Elle s'affiche
+           * d'abord telle quelle — l'agent la voit tout de suite — puis se remplace par son
+           * adresse une fois déposée.
+           */
+          const apercu = c.toDataURL("image/jpeg", 0.6);
+          setPhotos((p) => [...p, apercu]);
+          deposerImage(apercu, "colis", "photo").then((adresse) => {
+            if (adresse !== apercu) setPhotos((p) => p.map((x) => (x === apercu ? adresse : x)));
+          });
         };
         img.src = reader.result;
       };
@@ -13241,7 +13332,13 @@ async function construireEtiquetteDoc(colis, data) {
    */
   const marque = marquePartenaire(data, colis);
   if (marque?.logo) {
-    try { doc.addImage(marque.logo, "PNG", M, 4.5, 14, 14); } catch (e) { /* logo illisible : on continue sans */ }
+    /*
+     * Le format est déduit de l'image elle-même : les logos déposés avant août 2026 sont des PNG,
+     * ceux d'après des JPEG, et annoncer le mauvais format à jsPDF fait échouer le dessin — donc
+     * une étiquette de partenaire sans son logo.
+     */
+    const format = /^data:image\/png/i.test(marque.logo) ? "PNG" : "JPEG";
+    try { doc.addImage(marque.logo, format, M, 4.5, 14, 14); } catch (e) { /* logo illisible : on continue sans */ }
   } else if (!marque) {
     doc.addImage(DEFAULT_LOGO, "PNG", M, 4.5, 14, 14);
   }
@@ -15667,7 +15764,9 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
         const scale = Math.min(1, 500 / img.width);
         c.width = img.width * scale; c.height = img.height * scale;
         c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-        onUpdate({ pod: c.toDataURL("image/jpeg", 0.6) });
+        // La preuve de livraison suit le même chemin que les photos : stockage, puis adresse.
+        deposerImage(c.toDataURL("image/jpeg", 0.6), "preuves", colis.tracking || "pod")
+          .then((pod) => onUpdate({ pod }));
       };
       img.src = reader.result;
     };
@@ -20017,11 +20116,19 @@ function IdentitePubliquePage({ data, persist, notify, onBack }) {
     b.tagline && site.tagline && b.tagline !== site.tagline ? "le slogan" : "",
   ].filter(Boolean);
 
+  /*
+   * Le logo de l'entreprise était enregistré tel que choisi, sans redimensionnement : une photo
+   * prise au téléphone y entrait à sa taille d'origine, plusieurs méga-octets, et repartait
+   * ensuite à chaque enregistrement de colis. Il suit désormais le même traitement que celui des
+   * partenaires — 320 px, JPEG — et reste embarqué, car les PDF le dessinent à l'impression.
+   */
   function onLogoChange(e) {
     const file = e.target.files[0]; if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => setLogo(reader.result);
-    reader.readAsDataURL(file);
+    redimensionnerLogo(file).then(setLogo).catch(() => {
+      const reader = new FileReader();
+      reader.onload = () => setLogo(reader.result);
+      reader.readAsDataURL(file);
+    });
   }
 
   function save() {
@@ -20341,6 +20448,180 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
  * changer d'hébergeur, ce fichier est le seul filet. Il contient tout : colis, clients,
  * paiements, catégories, tarifs, comptes, journal.
  */
+/**
+ * Le poids des données, et de quoi le réduire.
+ *
+ * Toutes les données de l'entreprise tiennent dans un seul document, relu et réécrit à chaque
+ * geste. Son poids n'est donc pas une curiosité : c'est le temps d'attente de chaque agent à
+ * chaque enregistrement, et au-delà d'environ 4,5 Mo l'écriture est refusée — plus aucun colis ne
+ * s'enregistre.
+ *
+ * Les images en sont presque toujours la cause. Ce panneau les compte, les pèse, et propose de
+ * les déplacer vers le stockage de fichiers d'un seul geste.
+ */
+function PoidsDesDonnees({ data, persist, notify, session }) {
+  const [enCours, setEnCours] = useState(false);
+  const [resultat, setResultat] = useState(null);
+
+  const octets = new Blob([JSON.stringify(data)]).size;
+  const mo = octets / (1024 * 1024);
+  // Ce que pèsent les images encore embarquées, et combien elles sont.
+  const embarquees = [];
+  (data.colis || []).forEach((c) => {
+    (c.photos || []).forEach((ph) => { if (estImageEmbarquee(ph)) embarquees.push(ph); });
+    if (estImageEmbarquee(c.pod)) embarquees.push(c.pod);
+  });
+  // Les logos ne partent pas au stockage, mais ils pèsent : ils comptent dans ce qu'on annonce.
+  const logos = [
+    ...(data.users || []).map((u) => u.partenaire?.logo),
+    data.branding?.logo,
+  ].filter(estImageEmbarquee);
+  const poidsImages = [...embarquees, ...logos].reduce((n, img) => n + img.length, 0);
+  const moImages = poidsImages / (1024 * 1024);
+  const aAlleger = embarquees.length + logos.length;
+
+  const LIMITE_MO = 4.5;
+  const part = Math.min(100, Math.round((mo / LIMITE_MO) * 100));
+  const alerte = mo >= 3 ? "danger" : mo >= 1.5 ? "warn" : "ok";
+
+  /*
+   * Le déplacement se fait colis par colis, en mémoire, puis un seul enregistrement à la fin :
+   * écrire à chaque photo multiplierait par vingt le trafic qu'on cherche justement à réduire.
+   *
+   * Une image que le stockage refuse reste embarquée — deposerImage la rend telle quelle. Rien
+   * n'est donc perdu si le réseau lâche en cours de route, et relancer l'opération reprend là où
+   * elle s'était arrêtée.
+   */
+  async function alleger() {
+    setEnCours(true);
+    setResultat(null);
+    try {
+      let deplacees = 0;
+      const colis = [];
+      for (const c of (data.colis || [])) {
+        const photos = [];
+        for (const ph of (c.photos || [])) {
+          const adresse = await deposerImage(ph, "colis", c.tracking || "photo");
+          if (adresse !== ph) deplacees++;
+          photos.push(adresse);
+        }
+        let pod = c.pod;
+        if (estImageEmbarquee(pod)) {
+          pod = await deposerImage(pod, "preuves", c.tracking || "pod");
+          if (pod !== c.pod) deplacees++;
+        }
+        colis.push({ ...c, photos, pod });
+      }
+      /*
+       * Les logos, eux, restent embarqués mais sont recomprimés : ce sont les PDF qui les
+       * dessinent, et jsPDF ne sait pas aller chercher une image distante. C'était pourtant le
+       * poste le plus lourd — un seul logo de partenaire pesait la moitié des données.
+       */
+      let logosAllegs = 0;
+      let gagneSurLogos = 0;
+      const users = [];
+      for (const u of (data.users || [])) {
+        const logo = u.partenaire?.logo;
+        if (!estImageEmbarquee(logo)) { users.push(u); continue; }
+        const compresse = await recompresserLogo(logo);
+        if (compresse !== logo) { logosAllegs++; gagneSurLogos += logo.length - compresse.length; }
+        users.push({ ...u, partenaire: { ...u.partenaire, logo: compresse } });
+      }
+      let branding = data.branding;
+      if (estImageEmbarquee(branding?.logo)) {
+        const compresse = await recompresserLogo(branding.logo);
+        if (compresse !== branding.logo) {
+          logosAllegs++; gagneSurLogos += branding.logo.length - compresse.length;
+          branding = { ...branding, logo: compresse };
+        }
+      }
+
+      const suivant = {
+        ...data, colis, users, branding,
+        activityLog: pushActivity(data, session, "Données allégées",
+          `${deplacees} image(s) déplacée(s), ${logosAllegs} logo(s) allégé(s)`),
+      };
+      const apres = new Blob([JSON.stringify(suivant)]).size;
+      await persist(suivant);
+      setResultat({ deplacees, logos: logosAllegs, avant: octets, apres, restantes: embarquees.length - deplacees });
+      notify?.(deplacees + logosAllegs > 0 ? `${deplacees + logosAllegs} image(s) allégée(s)` : "Rien à alléger");
+    } catch (e) {
+      setResultat({ erreur: true });
+      notify?.("L’allègement n’a pas abouti — réessayez avec une meilleure connexion");
+    } finally {
+      setEnCours(false);
+    }
+  }
+
+  const enMo = (o) => `${(o / (1024 * 1024)).toFixed(2)} Mo`;
+
+  return (
+    <div style={{ background: "var(--surface)", border: "1px solid " + (alerte === "danger" ? "var(--danger-border)" : alerte === "warn" ? "var(--warn-border)" : "var(--border)"),
+                  borderRadius: 14, padding: 22, maxWidth: 560, marginBottom: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14 }}>Poids des données</div>
+        <div style={{ fontSize: 13, fontWeight: 700, color: alerte === "danger" ? "var(--danger-fg)" : alerte === "warn" ? "var(--warn-fg)" : "var(--text)" }}>
+          {mo.toFixed(2)} Mo
+        </div>
+      </div>
+
+      {/* La jauge dit d'un coup d'œil ce qu'un chiffre seul ne dit pas : la marge qui reste. */}
+      <div style={{ height: 7, borderRadius: 4, background: "var(--surface2)", marginTop: 10, overflow: "hidden" }}>
+        <div style={{ width: `${part}%`, height: "100%",
+                      background: alerte === "danger" ? "var(--danger-fg)" : alerte === "warn" ? "var(--warn-fg)" : "var(--ok-fg, #0E7A4E)" }} />
+      </div>
+      <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 5 }}>
+        {part}% de la limite d’enregistrement ({LIMITE_MO} Mo)
+      </div>
+
+      <div style={{ fontSize: 12, color: "var(--text)", marginTop: 12, lineHeight: 1.55 }}>
+        L’application relit et réécrit l’ensemble de ces données à chaque geste — enregistrer un
+        colis, encaisser, changer un statut. Tout ce qui y pèse ralentit chaque agent, à chaque
+        fois.
+      </div>
+
+      {aAlleger > 0 && (
+        <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "12px 14px", marginTop: 14 }}>
+          <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
+            <strong>{aAlleger} image{aAlleger > 1 ? "s" : ""}</strong> {aAlleger > 1 ? "sont enregistrées" : "est enregistrée"} dans
+            les données, pour <strong>{moImages.toFixed(2)} Mo</strong> — soit {Math.round((poidsImages / octets) * 100)}% du total.
+            Rien ne change à ce que vous voyez : les photos partent au stockage de fichiers et
+            restent consultables sur la fiche de chaque colis, les logos sont simplement
+            recomprimés et continuent d’apparaître sur les étiquettes.
+          </div>
+          <button onClick={alleger} disabled={enCours}
+            style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 12, background: enCours ? "var(--muted)" : "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: enCours ? "wait" : "pointer" }}>
+            {enCours ? "Allègement en cours…" : "Alléger les données"}
+          </button>
+          {enCours && (
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8 }}>
+              Ne fermez pas cette page — les images partent une à une.
+            </div>
+          )}
+        </div>
+      )}
+
+      {resultat && !resultat.erreur && (
+        <div style={{ background: "var(--ok-bg)", border: "1px solid var(--ok-border)", borderRadius: 8, padding: "12px 14px", marginTop: 14, fontSize: 12.5, color: "var(--text)", lineHeight: 1.6 }}>
+          <strong>
+            {resultat.deplacees > 0 && `${resultat.deplacees} image${resultat.deplacees > 1 ? "s" : ""} déplacée${resultat.deplacees > 1 ? "s" : ""}`}
+            {resultat.deplacees > 0 && resultat.logos > 0 && ", "}
+            {resultat.logos > 0 && `${resultat.logos} logo${resultat.logos > 1 ? "s" : ""} allégé${resultat.logos > 1 ? "s" : ""}`}
+            {resultat.deplacees + resultat.logos === 0 && "Rien à alléger"}.
+          </strong>{" "}
+          Vos données passent de {enMo(resultat.avant)} à {enMo(resultat.apres)}.
+          {resultat.restantes > 0 && ` ${resultat.restantes} image(s) n’ont pas pu être déposées — relancez l’opération avec une meilleure connexion.`}
+        </div>
+      )}
+      {resultat && resultat.erreur && (
+        <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "12px 14px", marginTop: 14, fontSize: 12.5, color: "var(--danger-fg)" }}>
+          L’allègement n’a pas abouti. Vos données n’ont pas été modifiées — réessayez avec une meilleure connexion.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SauvegardePage({ data, persist, notify, session, onBack }) {
   const [restauration, setRestauration] = useState(null);
   const [erreur, setErreur] = useState("");
@@ -20478,38 +20759,7 @@ function SauvegardePage({ data, persist, notify, session, onBack }) {
     <div>
       <ConfigPageHeader title="Sauvegarde des données" desc="Téléchargez une copie complète de votre plateforme, ou restaurez-la depuis un fichier." onBack={onBack} />
 
-      {/*
-        Poids des données.
-
-        L'application réécrit l'intégralité des données à chaque modification. Les photos, gardées
-        en base64, en représentent l'essentiel : au-delà de quelques dizaines de méga-octets, la
-        moindre opération devient lente sur une connexion mobile. Mieux vaut le voir venir que le
-        découvrir un jour où le comptoir est plein.
-      */}
-      {(() => {
-        const octets = new Blob([JSON.stringify(data)]).size;
-        const mo = octets / (1024 * 1024);
-        const photos = (data.colis || []).reduce((n, c) => n + (c.photos || []).length, 0);
-        const alerte = mo >= 40 ? "danger" : mo >= 15 ? "warn" : "ok";
-        if (alerte === "ok") return null;
-        return (
-          <div style={{ background: alerte === "danger" ? "var(--danger-bg)" : "var(--warn-bg)",
-                        border: "1px solid " + (alerte === "danger" ? "var(--danger-border)" : "var(--warn-border)"),
-                        borderRadius: 12, padding: "13px 16px", maxWidth: 560, marginBottom: 20 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: alerte === "danger" ? "var(--danger-fg)" : "var(--warn-fg)" }}>
-              Vos données pèsent {mo.toFixed(1)} Mo
-            </div>
-            <div style={{ fontSize: 12, color: "var(--text)", marginTop: 4, lineHeight: 1.55 }}>
-              {photos} photo{photos > 1 ? "s" : ""} enregistrée{photos > 1 ? "s" : ""}. L’application transmet
-              l’ensemble des données à chaque modification : au-delà de 40 Mo, les agents constateront
-              des lenteurs sur connexion mobile.
-              {alerte === "danger"
-                ? " Envisagez de supprimer les photos des colis livrés depuis longtemps."
-                : " Surveillez cette valeur."}
-            </div>
-          </div>
-        );
-      })()}
+      <PoidsDesDonnees data={data} persist={persist} notify={notify} session={session} />
 
       {/*
         Chargement des données de référence.
@@ -21166,7 +21416,16 @@ function PerformanceAgentsPage({ data, onBack }) {
  *
  * Fond blanc appliqué avant le dessin : un PNG transparent exporté tel quel ressortirait noir sur
  * l'étiquette, le canvas partant transparent. 320 px de large suffisent à une étiquette imprimée
- * à 203 dpi, et gardent le logo assez léger pour voyager dans la sauvegarde.
+ * à 203 dpi.
+ *
+ * JPEG, et non PNG. Le fond blanc étant déjà appliqué, la transparence du PNG ne sert plus à
+ * rien — mais elle coûtait cher : un logo photographique de 320 px pesait 394 ko en PNG, soit
+ * près de la moitié de toutes les données de l'entreprise, retransmises à chaque geste de chaque
+ * agent. Le même logo en JPEG de qualité 0,85 pèse une quinzaine de kilo-octets, sans différence
+ * visible sur une étiquette thermique.
+ *
+ * Le logo reste embarqué, et ne part pas au stockage comme les photos : les PDF le dessinent au
+ * moment de l'impression, et jsPDF ne sait pas aller chercher une image distante.
  */
 function redimensionnerLogo(file, maxWidth = 320) {
   return new Promise((resolve, reject) => {
@@ -21184,7 +21443,7 @@ function redimensionnerLogo(file, maxWidth = 320) {
         ctx.fillStyle = "#fff";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        resolve(canvas.toDataURL("image/png"));
+        resolve(canvas.toDataURL("image/jpeg", 0.85));
       };
       img.src = reader.result;
     };

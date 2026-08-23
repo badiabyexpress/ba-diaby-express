@@ -20437,6 +20437,24 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
   const [brouillon, setBrouillon] = useState(prefs);
   const modifie = JSON.stringify(brouillon) !== JSON.stringify(prefs);
 
+  /*
+   * Le plafond d'envoi, demandé à Meta.
+   *
+   * Un numéro neuf peut écrire à 250 destinataires par jour ; le palier monte à 1 000, 10 000,
+   * puis sans limite, à mesure que le compte envoie sans se faire signaler — et redescend si les
+   * clients bloquent les messages. Le compter de notre côté ne dirait rien : un même client
+   * prévenu cinq fois ne compte qu'une fois chez Meta.
+   */
+  const [quota, setQuota] = useState(null);
+  useEffect(() => {
+    let vivant = true;
+    fetch("/api/whatsapp?quota=1")
+      .then((r) => r.json().then((corps) => ({ ok: r.ok, corps })))
+      .then(({ ok, corps }) => { if (vivant) setQuota(ok ? corps : { erreur: corps?.error || "indisponible" }); })
+      .catch(() => { if (vivant) setQuota({ erreur: "indisponible" }); });
+    return () => { vivant = false; };
+  }, []);
+
   const reglages = data.notificationSettings || {};
   const parWhatsApp = reglages.canalWhatsApp !== false;
   const parEmail = reglages.canalEmail !== false;
@@ -20509,6 +20527,44 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
           reçoit un message signé de la marque du partenaire.
         </div>
       </div>
+
+      {/*
+        Ce que Meta autorise encore.
+
+        Le chiffre qui compte n'est pas celui des messages envoyés, mais celui des destinataires
+        que le numéro a le droit de joindre en vingt-quatre heures. Il change tout seul.
+      */}
+      {quota && !quota.erreur && (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "13px 16px", marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>
+              Capacité d’envoi WhatsApp
+            </div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", fontVariantNumeric: "tabular-nums" }}>
+              {quota.illimite ? "sans limite" : quota.parJour ? `${quota.parJour.toLocaleString("fr-FR")} / jour` : quota.palier || "—"}
+            </div>
+          </div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 5, lineHeight: 1.55 }}>
+            {quota.illimite
+              ? "Votre numéro peut écrire à autant de clients qu’il le faut."
+              : `Votre numéro peut prévenir ${quota.parJour ? quota.parJour.toLocaleString("fr-FR") : "un nombre limité de"} clients différents par tranche de 24 h. Un même client prévenu plusieurs fois dans la journée ne compte qu’une fois.`}
+            {quota.numero ? ` Numéro : ${quota.numero}${quota.nom ? ` — ${quota.nom}` : ""}.` : ""}
+          </div>
+          {quota.qualite && (
+            <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 9 }}>
+              <span style={{ width: 9, height: 9, borderRadius: 9,
+                background: quota.qualite === "GREEN" ? "var(--ok-fg)" : quota.qualite === "YELLOW" ? "var(--warn-fg)" : "var(--danger-fg)" }} />
+              <span style={{ fontSize: 12, color: "var(--muted)" }}>
+                {quota.qualite === "GREEN"
+                  ? "Qualité bonne — c’est elle qui fait monter le palier."
+                  : quota.qualite === "YELLOW"
+                    ? "Qualité moyenne : des clients signalent vos messages. Le palier peut redescendre."
+                    : "Qualité basse : le numéro risque d’être restreint. Espacez les envois non essentiels."}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
 
       {/*
         Par où partent les messages.

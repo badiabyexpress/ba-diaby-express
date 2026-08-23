@@ -227,6 +227,56 @@ export default async function handler(req, res) {
     });
   }
 
+  /*
+   * Combien de messages peut-on encore envoyer ?
+   *
+   * La réponse n'est pas chez nous : c'est Meta qui plafonne, et le plafond change tout seul.
+   * Un numéro neuf commence à 250 destinataires par jour ; le palier monte à 1 000, 10 000, puis
+   * sans limite, à mesure que le compte envoie sans se faire bloquer — et redescend si trop de
+   * clients signalent les messages.
+   *
+   * Compter les envois de notre côté ne dirait rien du plafond restant : un même client prévenu
+   * cinq fois dans la journée ne compte qu'une fois chez Meta, et un colis dont le message échoue
+   * ne compte pas du tout. On va donc chercher le chiffre à la source.
+   *
+   * La note de qualité vient avec, et elle vaut d'être regardée : c'est elle qui fait redescendre
+   * le palier. Verte, tout va bien ; rouge, le numéro est en sursis.
+   */
+  if (req.method === "GET" && req.query?.quota !== undefined) {
+    if (!metaPret) {
+      return res.status(501).json({ error: "Le quota n'est connu que chez Meta.", configure: false });
+    }
+    try {
+      const champs = "verified_name,display_phone_number,quality_rating,messaging_limit_tier,throughput";
+      const reponse = await fetch(
+        `https://graph.facebook.com/${VERSION_GRAPH}/${meta.numeroId}?fields=${champs}`,
+        { headers: { Authorization: `Bearer ${meta.jeton}` } },
+      );
+      const corps = await reponse.json();
+      if (!reponse.ok) {
+        const code = corps?.error?.code;
+        return res.status(reponse.status).json({
+          error: EXPLICATIONS_META[code] || corps?.error?.message || "Meta n'a pas répondu.",
+          code: code || null,
+        });
+      }
+      // TIER_1K → 1000. « UNLIMITED » n'a pas de nombre : on le dit en toutes lettres.
+      const palier = String(corps.messaging_limit_tier || "");
+      const correspondance = { TIER_50: 50, TIER_250: 250, TIER_1K: 1000, TIER_10K: 10000, TIER_100K: 100000 };
+      return res.status(200).json({
+        configure: true,
+        numero: corps.display_phone_number || null,
+        nom: corps.verified_name || null,
+        qualite: corps.quality_rating || null,
+        palier: palier || null,
+        parJour: correspondance[palier] ?? (palier === "TIER_UNLIMITED" ? null : null),
+        illimite: palier === "TIER_UNLIMITED",
+      });
+    } catch (e) {
+      return res.status(502).json({ error: "Impossible de joindre Meta." });
+    }
+  }
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Méthode non autorisée" });
   }

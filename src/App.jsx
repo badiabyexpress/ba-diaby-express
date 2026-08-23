@@ -1125,6 +1125,198 @@ function messageEtapePartenaire(evenement, colis) {
   return `Votre colis ${colis?.tracking || ""}${qui} ${etape}.\n\nBa-Diaby Express`;
 }
 
+/* ============================================================================================
+ * L'E-MAIL ENVOYÉ AU CLIENT
+ *
+ * Les notifications partaient en texte brut enveloppé dans un <p>, avec la même phrase pour
+ * toutes les étapes et rien à cliquer. Le client lisait « votre colis vient de quitter notre
+ * entrepôt », puis devait retrouver le site, retrouver le champ de suivi, et recopier un numéro
+ * de neuf caractères. Autant dire qu'il écrivait plutôt à l'agence.
+ *
+ * Ce gabarit donne à chaque étape son titre, ses informations utiles, et surtout un bouton qui
+ * mène directement à la page de suivi de SON colis. C'est la différence entre un message qu'on
+ * subit et un message qui sert.
+ *
+ * Contraintes propres à l'e-mail, qui expliquent la forme du code :
+ *   — mise en page en tableaux, styles en ligne : les messageries ignorent les feuilles de style
+ *     et une bonne part des propriétés modernes ;
+ *   — largeur bornée à 560 px, pour rester lisible sur un téléphone comme sur un écran ;
+ *   — aucune image distante : elles sont bloquées par défaut, et un message qui n'a de sens
+ *     qu'une fois les images acceptées n'a pas de sens.
+ * ========================================================================================= */
+
+/** Neutralise le HTML d'une valeur venue des données — un nom de client, une adresse d'agence. */
+function echapperHtml(valeur) {
+  return String(valeur ?? "")
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/**
+ * Fabrique le corps HTML d'un e-mail au client.
+ *
+ * `marque` est le nom qui signe le message : celui du partenaire quand le colis est le sien.
+ * `details` est une liste de couples { libelle, valeur } affichés en encart — l'agence de
+ * retrait, un code, un reste à payer. `bouton` mène au suivi du colis.
+ */
+function gabaritEmailClient({ marque, titre, intro, details = [], bouton, note, tracking }) {
+  const lignesDetails = details.filter((d) => d && d.valeur).map((d) => `
+    <tr>
+      <td style="padding:7px 0;font-size:13px;color:#6b7280;white-space:nowrap;vertical-align:top">${echapperHtml(d.libelle)}</td>
+      <td style="padding:7px 0 7px 16px;font-size:13px;color:#111827;font-weight:600;text-align:right">${echapperHtml(d.valeur)}</td>
+    </tr>`).join("");
+
+  return `
+<div style="background:#f4f5f7;padding:24px 12px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:560px;margin:0 auto;background:#ffffff;border-radius:14px;overflow:hidden;border:1px solid #e5e7eb">
+    <tr>
+      <td style="background:#0A2647;padding:20px 26px">
+        <div style="color:#ffffff;font-size:17px;font-weight:700;letter-spacing:0.2px">${echapperHtml(marque)}</div>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:28px 26px 8px">
+        <div style="font-size:20px;font-weight:700;color:#111827;line-height:1.3">${echapperHtml(titre)}</div>
+        <div style="font-size:14.5px;color:#374151;line-height:1.6;margin-top:12px">${intro}</div>
+      </td>
+    </tr>
+    ${lignesDetails ? `
+    <tr>
+      <td style="padding:16px 26px 4px">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f9fafb;border:1px solid #e5e7eb;border-radius:10px;padding:6px 16px">
+          ${lignesDetails}
+        </table>
+      </td>
+    </tr>` : ""}
+    ${bouton ? `
+    <tr>
+      <td style="padding:24px 26px 6px" align="center">
+        <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+          <tr>
+            <td style="background:#C8102E;border-radius:9px">
+              <a href="${echapperHtml(bouton.lien)}" style="display:inline-block;padding:13px 30px;font-size:14.5px;font-weight:700;color:#ffffff;text-decoration:none">${echapperHtml(bouton.texte)}</a>
+            </td>
+          </tr>
+        </table>
+        <div style="font-size:12px;color:#9ca3af;margin-top:12px">Numéro de suivi : <span style="color:#374151;font-weight:600">${echapperHtml(tracking)}</span></div>
+      </td>
+    </tr>` : ""}
+    ${note ? `
+    <tr><td style="padding:16px 26px 0"><div style="font-size:13px;color:#6b7280;line-height:1.6">${note}</div></td></tr>` : ""}
+    <tr>
+      <td style="padding:26px 26px 24px">
+        <div style="border-top:1px solid #e5e7eb;padding-top:16px;font-size:11.5px;color:#9ca3af;line-height:1.6">
+          ${echapperHtml(marque)}<br>
+          Ce message vous est envoyé automatiquement au sujet de votre colis. Vous pouvez y répondre.
+        </div>
+      </td>
+    </tr>
+  </table>
+</div>`.trim();
+}
+
+/*
+ * Le texte de chaque étape, pour l'e-mail.
+ *
+ * Une remarque au passage, qui n'était pas qu'une question de style : l'ancien message d'arrivée
+ * disait « est arrivé en Guinée » quelle que soit la destination. Un colis Conakry → Paris
+ * annonçait donc au client parisien que son colis venait d'arriver en Guinée, avant de lui donner
+ * l'adresse de l'agence de Paris. On nomme désormais la destination réelle.
+ */
+function contenuEmailEtape(evenement, colis, data, marque) {
+  const tracking = colis?.tracking || "";
+  const lien = trackingUrlFor(tracking);
+  const destinataire = echapperHtml(colis?.destinataire || "");
+  const bonjour = destinataire ? `Bonjour ${destinataire},` : "Bonjour,";
+  const agence = siteRetraitPourColis(colis, data);
+  const paysArrivee = COUNTRIES.find((p) => p.code === (colis?.destinatairePays || colis?.pays));
+  const destination = paysArrivee ? paysArrivee.name : "destination";
+  const bouton = { texte: "Suivre mon colis", lien };
+
+  const restant = colis?.reste > 0
+    ? fmtGNF(colis.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))
+    : null;
+
+  const commun = { marque, tracking, bouton };
+
+  if (evenement === "expedie") {
+    return {
+      sujet: `Votre colis ${tracking} est en route`,
+      html: gabaritEmailClient({
+        ...commun,
+        titre: "Votre colis est en route",
+        intro: `${bonjour}<br><br>Votre colis a quitté notre entrepôt et poursuit son acheminement vers ${echapperHtml(destination)}.
+                Vous serez prévenu dès son arrivée.`,
+        details: [
+          { libelle: "Destination", valeur: destination },
+          { libelle: "Mode d’acheminement", valeur: colis?.mode === "sea" ? "Maritime" : "Aérien" },
+          { libelle: "Poids", valeur: colis?.poids ? `${colis.poids} kg` : "" },
+        ],
+        note: "Le suivi se met à jour à chaque étape : vous pouvez le consulter à tout moment depuis le bouton ci-dessus.",
+      }),
+    };
+  }
+
+  if (evenement === "arrivee") {
+    return {
+      sujet: `Votre colis ${tracking} est arrivé`,
+      html: gabaritEmailClient({
+        ...commun,
+        titre: `Votre colis est arrivé`,
+        intro: `${bonjour}<br><br>Votre colis vient d’arriver ${echapperHtml(destination === "Guinée" ? "en Guinée" : `en ${destination}`)}.
+                Il est en cours de traitement dans notre agence ; nous vous préviendrons dès qu’il sera disponible au retrait.`,
+        details: [
+          { libelle: "Destination", valeur: destination },
+          { libelle: "Agence de retrait", valeur: agence ? agence.nom : "" },
+        ],
+      }),
+    };
+  }
+
+  if (evenement === "retrait") {
+    return {
+      sujet: `Votre colis ${tracking} vous attend en agence`,
+      html: gabaritEmailClient({
+        ...commun,
+        titre: "Votre colis vous attend",
+        intro: `${bonjour}<br><br>Votre colis est arrivé et vous pouvez venir le retirer dès maintenant.`,
+        details: [
+          { libelle: "Agence", valeur: agence ? agence.nom : "" },
+          { libelle: "Adresse", valeur: agence ? agence.adresse : "" },
+          { libelle: "Horaires", valeur: agence ? agence.horaires : "" },
+          { libelle: "Code de retrait", valeur: colis?.codeRetrait || "" },
+          { libelle: "Reste à régler", valeur: restant || "" },
+        ],
+        note: colis?.codeRetrait
+          ? "Présentez votre code de retrait à l’agence : il nous permet de remettre le colis à la bonne personne."
+          : "Munissez-vous d’une pièce d’identité pour le retrait.",
+      }),
+    };
+  }
+
+  if (evenement === "livre") {
+    return {
+      sujet: `Votre colis ${tracking} vous a été remis`,
+      html: gabaritEmailClient({
+        ...commun,
+        titre: "Votre colis vous a été remis",
+        intro: `${bonjour}<br><br>Votre colis vous a bien été remis. Nous vous remercions de votre confiance et espérons vous revoir bientôt.`,
+        details: [{ libelle: "Remis le", valeur: new Date().toLocaleDateString("fr-FR") }],
+        note: "Une remarque sur votre envoi ? Répondez simplement à ce message.",
+      }),
+    };
+  }
+
+  // Toute étape sans texte dédié garde une forme correcte plutôt que de ne rien envoyer.
+  return {
+    sujet: `Votre colis ${tracking}`,
+    html: gabaritEmailClient({
+      ...commun,
+      titre: "Votre colis avance",
+      intro: `${bonjour}<br><br>Le suivi de votre colis vient d’être mis à jour.`,
+    }),
+  };
+}
+
 function nomExpediteurPourClient(data, colis) {
   const marque = marquePartenaire(data, colis);
   return marque ? marque.nomCommercial : "Ba-Diaby Express";
@@ -1467,18 +1659,22 @@ async function notifierEvenement(data, evenement, colis, message) {
   const adresses = [];
   if (prefs.destinataire && (colis.destinataireEmail || colis.email)) adresses.push(colis.destinataireEmail || colis.email);
   if (prefs.expediteur && colis.expediteurEmail) adresses.push(colis.expediteurEmail);
-  for (const adresse of adresses) {
-    try {
-      await envoyerEmail(
-        adresse,
-        `Ba-Diaby Express — colis ${colis.tracking}`,
-        `<p>${message}</p>
-         <p style="color:#888;font-size:12px;margin-top:18px">
-           Ba-Diaby Express — Transport de colis Conakry - Monde<br>
-           Suivez votre colis à tout moment avec le numéro ${colis.tracking}.
-         </p>`
-      );
-    } catch (e) { /* idem : l'action principale prime sur la notification */ }
+  if (adresses.length > 0) {
+    /*
+     * L'e-mail n'est pas le WhatsApp mis en page.
+     *
+     * WhatsApp impose une ligne : le client la lit d'un coup d'œil, et le message doit tout dire
+     * en une phrase. Un e-mail s'ouvre, se garde, se retrouve deux semaines plus tard — il peut
+     * porter le détail utile et, surtout, un lien qui mène au suivi. Recopier un numéro de neuf
+     * caractères dans un champ de recherche, personne ne le fait.
+     */
+    const marque = nomExpediteurPourClient(data, colis);
+    const contenu = contenuEmailEtape(evenement, colis, data, marque);
+    for (const adresse of adresses) {
+      try {
+        await envoyerEmail(adresse, contenu.sujet, contenu.html);
+      } catch (e) { /* idem : l'action principale prime sur la notification */ }
+    }
   }
 
   return { envoyes };
@@ -10465,15 +10661,22 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
         downloadInvoice(colisPaye, next, { retourner: true })
           .then((piece) => envoyerEmail(
             adresse,
-            `Votre facture Ba-Diaby Express — ${tracking}`,
-            `<p>Bonjour ${colisPaye.destinataire},</p>
-             <p>Nous avons bien reçu votre paiement de <strong>${fmtGNF(applique * (LIVE_RATES.GNF || CURRENCIES.GNF))}</strong>
-             pour le colis <strong>${tracking}</strong>.</p>
-             <p>${colisPaye.reste > 0
-                ? `Reste à régler : <strong>${fmtGNF(colisPaye.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}</strong>.`
-                : "Votre colis est entièrement réglé. Merci de votre confiance !"}</p>
-             <p>Votre facture est jointe à ce message.</p>
-             <p style="color:#888;font-size:12px">Ba-Diaby Express — Transport de colis Conakry - Monde</p>`,
+            `Reçu de paiement — colis ${tracking}`,
+            gabaritEmailClient({
+              marque: nomExpediteurPourClient(next, colisPaye),
+              tracking,
+              titre: colisPaye.reste > 0 ? "Nous avons reçu votre paiement" : "Votre colis est entièrement réglé",
+              intro: `Bonjour ${echapperHtml(colisPaye.destinataire)},<br><br>`
+                + `Nous accusons réception de votre paiement pour le colis <strong>${echapperHtml(tracking)}</strong>.`
+                + (colisPaye.reste > 0 ? "" : " Votre colis est désormais entièrement réglé — merci de votre confiance."),
+              details: [
+                { libelle: "Montant reçu", valeur: fmtGNF(applique * (LIVE_RATES.GNF || CURRENCIES.GNF)) },
+                { libelle: "Reste à régler", valeur: colisPaye.reste > 0 ? fmtGNF(colisPaye.reste * (LIVE_RATES.GNF || CURRENCIES.GNF)) : "" },
+                { libelle: "Date", valeur: new Date().toLocaleDateString("fr-FR") },
+              ],
+              bouton: { texte: "Suivre mon colis", lien: trackingUrlFor(tracking) },
+              note: "Votre facture détaillée est jointe à ce message, au format PDF.",
+            }),
             piece ? [piece] : []
           ))
           .catch(() => { /* l'encaissement ne doit jamais échouer à cause d'un e-mail */ });
@@ -15016,10 +15219,20 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
       const piece = await downloadInvoice(colis, data, { retourner: true });
       const { envoye, raison } = await envoyerEmail(
         adresse,
-        `Votre facture Ba-Diaby Express — ${colis.tracking}`,
-        `<p>Bonjour ${colis.destinataire},</p>
-         <p>Vous trouverez ci-joint la facture de votre colis <strong>${colis.tracking}</strong>.</p>
-         <p style="color:#888;font-size:12px">Ba-Diaby Express — Transport de colis Conakry - Monde</p>`,
+        `Votre facture — colis ${colis.tracking}`,
+        gabaritEmailClient({
+          marque: nomExpediteurPourClient(data, colis),
+          tracking: colis.tracking,
+          titre: "Votre facture",
+          intro: `Bonjour ${echapperHtml(colis.destinataire)},<br><br>`
+            + `Vous trouverez ci-joint la facture de votre colis <strong>${echapperHtml(colis.tracking)}</strong>.`,
+          details: [
+            { libelle: "Montant total", valeur: fmtGNF((colis.prix || 0) * (LIVE_RATES.GNF || CURRENCIES.GNF)) },
+            { libelle: "Reste à régler", valeur: colis.reste > 0 ? fmtGNF(colis.reste * (LIVE_RATES.GNF || CURRENCIES.GNF)) : "" },
+          ],
+          bouton: { texte: "Suivre mon colis", lien: trackingUrlFor(colis.tracking) },
+          note: "Une question sur cette facture ? Répondez simplement à ce message.",
+        }),
         piece ? [piece] : []
       );
       if (envoye) { setEmailState("envoye"); setEmailErreur(""); return; }

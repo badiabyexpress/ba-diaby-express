@@ -64,7 +64,18 @@ export default async function handler(req, res) {
   const session = sessionDeLaRequete(req);
   if (!session) return res.status(401).json({ error: "Session absente ou expirée." });
 
+  /*
+   * Seules les clés de l'application sont accessibles ici : le document vivant et ses sauvegardes.
+   *
+   * Sans cette limite, toute personne connectée — y compris un client, et n'importe qui peut
+   * créer un compte client — pourrait demander n'importe quelle clé de la table, dont
+   * `bde-reinit`, où dorment les codes de réinitialisation en attente. Ce serait leur donner de
+   * quoi prendre le contrôle des comptes des autres.
+   */
   const clef = String(req.query?.cle || "bde-data");
+  if (clef !== "bde-data" && !clef.startsWith("bde-backup-")) {
+    return res.status(403).json({ error: "Clé non accessible." });
+  }
   const entetes = { apikey: cle, Authorization: `Bearer ${cle}`, "Content-Type": "application/json" };
 
   try {
@@ -72,8 +83,14 @@ export default async function handler(req, res) {
       /* Les sauvegardes automatiques ont besoin de connaître les clés existantes pour effacer les
        * plus anciennes. On ne renvoie que les noms — jamais le contenu. */
       const prefixe = String(req.query.liste || "");
-      const filtre = prefixe ? `&key=like.${encodeURIComponent(`${prefixe}%`)}` : "";
-      const reponse = await fetch(`${url}/rest/v1/${TABLE}?select=key${filtre}`, { headers: entetes });
+      // Même raison que ci-dessus : une liste sans préfixe révélerait les clés réservées.
+      if (!prefixe.startsWith("bde-backup-")) {
+        return res.status(403).json({ error: "Liste non accessible." });
+      }
+      const reponse = await fetch(
+        `${url}/rest/v1/${TABLE}?select=key&key=like.${encodeURIComponent(`${prefixe}%`)}`,
+        { headers: entetes },
+      );
       if (!reponse.ok) return res.status(502).json({ error: "Base de données injoignable" });
       const lignes = await reponse.json();
       return res.status(200).json({ keys: (Array.isArray(lignes) ? lignes : []).map((r) => r.key) });

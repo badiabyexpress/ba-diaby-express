@@ -20466,6 +20466,41 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
    * on croit alors que rien ne s'est passé. Ici, la réponse de Meta arrive telle quelle, et l'on
    * relit aussitôt l'état réel du numéro plutôt que de se fier à un affichage.
    */
+  /*
+   * Un message d'essai, vers un numéro que l'on choisit.
+   *
+   * Quand un client ne reçoit rien, tout est suspect à la fois : le jeton, l'ID du numéro,
+   * l'activation, l'approbation des modèles, la publication de l'application. Un essai tranche en
+   * dix secondes — soit le message arrive, soit Meta dit exactement ce qui manque.
+   *
+   * Le modèle choisi est le plus simple des huit : deux variables, ni en-tête ni bouton. Un refus
+   * ne peut donc venir que du compte lui-même, jamais d'un paramètre mal formé.
+   */
+  const [numeroEssai, setNumeroEssai] = useState("");
+  const [essai, setEssai] = useState(null);
+  const [essaiEnCours, setEssaiEnCours] = useState(false);
+  async function envoyerEssai() {
+    setEssaiEnCours(true);
+    setEssai(null);
+    try {
+      const reponse = await fetch("/api/whatsapp", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          to: numeroEssai,
+          message: "Message d’essai de Ba-Diaby Express.",
+          modele: "bde_arrivee",
+          variables: ["Test", "BDE-ESSAI"],
+        }),
+      });
+      const corps = await reponse.json().catch(() => ({}));
+      setEssai(reponse.ok
+        ? { ok: true }
+        : { erreur: corps?.error || "Meta a refusé l’envoi.", code: corps?.code || null });
+    } catch (e) {
+      setEssai({ erreur: "Impossible de joindre le serveur." });
+    } finally { setEssaiEnCours(false); }
+  }
+
   async function activerNumero() {
     setActivationEnCours(true);
     setActivation(null);
@@ -20621,6 +20656,41 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
               Numéro activé — vos messages peuvent partir.
             </div>
           )}
+
+          {/*
+            L'essai.
+
+            Quand un client ne reçoit rien, tout est suspect à la fois. Un envoi réel vers un
+            numéro que l'on tient en main tranche la question : soit il arrive, soit Meta dit ce
+            qui manque.
+          */}
+          <div style={{ borderTop: "1px solid var(--border)", marginTop: 12, paddingTop: 12 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text)" }}>Envoyer un message d’essai</div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 }}>
+              Vers un numéro dont vous avez le téléphone sous la main. Avec l’indicatif : +224…, +33…
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 9, flexWrap: "wrap", alignItems: "center" }}>
+              <input value={numeroEssai} onChange={(e) => setNumeroEssai(e.target.value)}
+                inputMode="tel" placeholder="+224621654796" aria-label="Numéro d’essai"
+                style={{ ...inputStyle, marginBottom: 0, width: 190 }} />
+              <button onClick={envoyerEssai} disabled={numeroEssai.replace(/\D/g, "").length < 8 || essaiEnCours}
+                style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "10px 16px", fontSize: 12.5, fontWeight: 600, cursor: essaiEnCours ? "wait" : "pointer" }}>
+                {essaiEnCours ? "Envoi…" : "Envoyer l’essai"}
+              </button>
+            </div>
+            {essai?.ok && (
+              <div style={{ fontSize: 12, color: "var(--ok-fg)", marginTop: 8, fontWeight: 600, lineHeight: 1.5 }}>
+                Meta a accepté l’envoi. Si rien n’arrive sur le téléphone dans la minute, c’est que
+                l’application Meta n’est pas publiée : seuls les numéros déclarés comme testeurs
+                reçoivent.
+              </div>
+            )}
+            {essai?.erreur && (
+              <div style={{ fontSize: 12, color: "var(--danger-fg)", marginTop: 8, lineHeight: 1.5 }}>
+                {essai.erreur}{essai.code ? ` (code ${essai.code})` : ""}
+              </div>
+            )}
+          </div>
 
           {quota.qualite && (
             <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 9 }}>

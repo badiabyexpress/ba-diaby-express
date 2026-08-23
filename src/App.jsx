@@ -1615,10 +1615,18 @@ const EVENEMENTS_WHATSAPP = [
  * Les noms doivent correspondre EXACTEMENT à ceux validés dans le gestionnaire Meta. Un modèle
  * absent ou refusé fait échouer l'envoi avec un message explicite (voir api/whatsapp.js) plutôt
  * que de laisser croire le client prévenu.
+ *
+ * Les huit portent le même pied de page — « Message automatisé, inutile de répondre. » Il est
+ * figé dans le modèle et ne se remplit pas ici : rien à envoyer pour lui.
  * ========================================================================================= */
 const MODELES_WHATSAPP = {
-  // « Bonjour {{1}}, votre colis {{2}} a bien été enregistré dans notre agence de {{3}}. Vous
-  //   pouvez suivre son acheminement à tout moment avec ce numéro. »
+  /*
+   * « Bonjour {{1}},
+   *   L'enregistrement de votre colis est confirmé.
+   *   Référence : {{2}}
+   *   Agence de dépôt : {{3}}
+   *   Votre ticket d'envoi est joint à ce message. »
+   */
   enregistrement: (colis, data) => {
     const depart = siteEnregistrementPourColis(colis, data);
     return {
@@ -1631,8 +1639,11 @@ const MODELES_WHATSAPP = {
     };
   },
   /*
-   * « Bonjour {{1}}, les informations de votre colis {{2}} ont été mises à jour — {{3}}. Votre
-   *   ticket corrigé est joint à ce message. »
+   * « Bonjour {{1}},
+   *   Les informations de votre colis ont été mises à jour.
+   *   Référence : {{2}}
+   *   Mise à jour : {{3}}
+   *   Votre ticket corrigé est joint à ce message. »
    *
    * Le seul autre moment, avec l'enregistrement, où le client reçoit le lien de suivi et son
    * ticket : ce qu'il avait en main ne vaut plus. Le poids ou le montant a changé, et le ticket
@@ -1646,20 +1657,32 @@ const MODELES_WHATSAPP = {
       colis.detailsModification || "informations corrigées",
     ],
   }),
-  // « Bonjour {{1}}, votre colis {{2}} a quitté notre entrepôt et poursuit son acheminement
-  //   vers {{3}}. Nous vous préviendrons dès son arrivée. »
+  /*
+   * « Bonjour {{1}},
+   *   Votre colis a quitté notre entrepôt.
+   *   Référence : {{2}}
+   *   Destination : {{3}}
+   *   Nous vous préviendrons dès son arrivée. »
+   */
   expedie: (colis, data) => ({
     nom: "colis_en_route",
     variables: [colis.destinataire || "cher client", colis.tracking, paysDuColis(colis)],
   }),
-  // « Bonjour {{1}}, votre colis {{2}} vient d'arriver à destination. Il est en cours de
-  //   traitement dans notre agence et sera bientôt disponible au retrait. »
+  /*
+   * « Bonjour {{1}},
+   *   Votre colis est arrivé à destination.
+   *   Référence : {{2}}
+   *   Il est en cours de traitement dans notre agence et sera bientôt disponible au retrait. »
+   */
   arrivee: (colis) => ({
     nom: "colis_arrive",
     variables: [colis.destinataire || "cher client", colis.tracking],
   }),
   /*
-   * « Bonjour {{1}}, votre colis {{2}} est disponible au retrait à notre agence {{3}}.
+   * « Bonjour {{1}},
+   *   Votre colis est disponible au retrait.
+   *   Référence : {{2}}
+   *   Agence : {{3}}
    *   Munissez-vous d'une pièce d'identité pour le récupérer. »
    *
    * LE CODE DE RETRAIT NE FIGURE PAS ICI, ET C'EST DÉLIBÉRÉ.
@@ -1685,15 +1708,22 @@ const MODELES_WHATSAPP = {
       ],
     };
   },
-  // « Bonjour {{1}}, votre colis {{2}} vous a bien été remis. Nous vous remercions de votre
-  //   confiance et espérons vous revoir bientôt. »
+  /*
+   * « Bonjour {{1}},
+   *   Votre colis vous a bien été remis.
+   *   Référence : {{2}}
+   *   Merci de votre confiance, et à bientôt. »
+   */
   livre: (colis) => ({
     nom: "colis_remis",
     variables: [colis.destinataire || "cher client", colis.tracking],
   }),
   /*
-   * « Bonjour {{1}}, nous avons bien reçu votre paiement de {{2}} pour le colis {{3}}. Il reste
-   *   {{4}} à régler. Merci de votre confiance. »
+   * « Bonjour {{1}},
+   *   Nous avons bien reçu votre paiement de {{2}}.
+   *   Référence : {{3}}
+   *   Reste à régler : {{4}}
+   *   Merci de votre confiance. »
    *
    * Le reste à régler est toujours renseigné, même à zéro — écrit « aucun montant ». Une variable
    * vide fait refuser l'envoi par Meta, et un modèle séparé pour le cas soldé aurait été un
@@ -1716,8 +1746,14 @@ const MODELES_WHATSAPP = {
       ],
     };
   },
-  // « Bonjour {{1}}, votre colis {{2}} vous attend depuis {{3}} à notre agence {{4}}. Merci de
-  //   venir le récupérer dès que possible. »
+  /*
+   * « Bonjour {{1}},
+   *   Votre colis n'a pas encore été retiré.
+   *   Référence : {{2}}
+   *   En attente depuis : {{3}}
+   *   Agence : {{4}}
+   *   Merci de venir le récupérer dès que possible. »
+   */
   relanceRetrait: (colis, data) => {
     const agence = siteRetraitPourColis(colis, data);
     const jours = Number(colis.joursAttente) || 0;

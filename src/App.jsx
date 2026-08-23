@@ -2040,6 +2040,48 @@ function App() {
   const [sessionRestauree, setSessionRestauree] = useState(false);
 
   /*
+   * Une session ouverte avant la fermeture de la base.
+   *
+   * Le cas ne se produit qu'une fois, mais il se produit pour TOUT LE MONDE : chaque appareil déjà
+   * connecté le jour de la fermeture porte une session valide et aucun jeton, puisque les jetons
+   * n'existaient pas encore.
+   *
+   * Ce qui rend ce cas dangereux, c'est qu'il ne ressemble à rien. L'application ne tombe pas en
+   * panne : elle tente l'ancien chemin, la base le refuse, et elle se rabat sur le cache local.
+   * L'agent voit donc ses colis, son tableau de bord, tout paraît normal — mais plus rien ne
+   * remonte au serveur, et chaque enregistrement rejoint une file d'attente qui ne partira jamais.
+   * C'est exactement la forme qu'avait prise la disparition d'un colis.
+   *
+   * On tranche donc au démarrage, avant que le cache ne masque le problème : pas de jeton, mais
+   * une session, et un serveur qui répond « configuré » — alors la session date d'avant, et il
+   * faut se reconnecter. Si le serveur ne répond pas, on est vraiment hors ligne et on ne touche
+   * à rien : le travail continue sur le cache, comme il doit.
+   *
+   * On efface puis on recharge, plutôt que de démêler à la main les états de l'espace agent et de
+   * l'espace client : au redémarrage, l'application lit un appareil sans session et affiche
+   * d'elle-même le bon écran. Aucune boucle possible — sans session, plus rien n'est demandé. La
+   * file d'attente locale, elle, survit au rechargement et repartira à la prochaine connexion.
+   */
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    if (lireJetonSessionEnregistre()) return undefined;                 // un jeton est là : rien à faire
+    if (!lireSessionEnregistree() && !lireSessionClient()) return undefined; // personne de connecté
+    let vivant = true;
+    fetch("/api/donnees?etat=1")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((corps) => {
+        if (!vivant || corps?.configure !== true) return;
+        ecrireSessionEnregistree(null);
+        ecrireSessionClient(null);
+        ecrireJeton(null);
+        ecrireJetonSession(null);
+        window.location.reload();
+      })
+      .catch(() => { /* serveur injoignable : vraie coupure, on laisse travailler */ });
+    return () => { vivant = false; };
+  }, []);
+
+  /*
    * Le serveur refuse le jeton : la session est finie, il faut se reconnecter.
    *
    * On efface tout ce qui la constitue puis on recharge la page, plutôt que de démêler à la main

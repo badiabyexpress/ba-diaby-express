@@ -1998,6 +1998,27 @@ function App() {
     return 0;
   });
   const [sessionRestauree, setSessionRestauree] = useState(false);
+  /*
+   * Faut-il charger la base ?
+   *
+   * Non tant que personne n'est connecté. Un visiteur qui suit un colis, lit les mentions légales
+   * ou regarde la vitrine n'a aucune raison de recevoir les données de l'entreprise — et c'est
+   * pourtant ce qui se passait : le chargement était inconditionnel, avant même de savoir qui
+   * regardait. Chacune de ces pages se sert maintenant auprès du serveur, qui ne lui donne que ce
+   * qu'elle affiche.
+   *
+   * Un appareil qui garde une session ouverte, lui, charge tout de suite : son agent est déjà
+   * identifié, et attendre l'écran de connexion ne protégerait rien.
+   */
+  const [baseDemandee, setBaseDemandee] = useState(() => {
+    if (typeof window === "undefined") return true;
+    const p = new URLSearchParams(window.location.search);
+    if (p.has("suivi") || p.has("cgu")) return false;
+    // L'espace client a sa propre porte : il reste sur l'ancien chemin en attendant son tour.
+    if (p.has("client")) return true;
+    return !!lireSessionEnregistree();
+  });
+  const [donneesPubliques, setDonneesPubliques] = useState(null);
 
   // Restauration : on ne conserve QUE l'identifiant du compte, jamais le mot de passe ni son
   // empreinte. Le compte est relu depuis les données à chaque ouverture, donc une révocation
@@ -2088,10 +2109,8 @@ function App() {
      * leur donne que ce qu'ils affichent. Continuer à charger la base ici la remettrait dans le
      * navigateur du visiteur, et tout ce travail n'aurait servi à rien.
      */
-    if (typeof window !== "undefined") {
-      const p = new URLSearchParams(window.location.search);
-      if (p.has("suivi") || p.has("cgu")) { setLoading(false); return undefined; }
-    }
+    if (!baseDemandee) { setLoading(false); return undefined; }
+    setLoading(true);
     let vivant = true;
     let abouti = false;
     let essais = 0;
@@ -2143,7 +2162,25 @@ function App() {
       }
     }, 15000);
     return () => { vivant = false; clearTimeout(attente); if (minuteur) clearTimeout(minuteur); };
-  }, []);
+  }, [baseDemandee]);
+
+  /*
+   * La vitrine se sert auprès du serveur, comme le suivi.
+   *
+   * Elle n'affiche que l'identité de l'entreprise et les prochains départs : trois champs, pour
+   * lesquels elle recevait la base entière. Tout visiteur du site — donc n'importe qui — en
+   * repartait avec le fichier clients dans son navigateur.
+   */
+  useEffect(() => {
+    if (baseDemandee) return;
+    let vivant = true;
+    fetch("/api/public?vitrine=1")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (vivant && d) setDonneesPubliques(d); })
+      // La vitrine reste affichable sans : elle montrera l'identité par défaut plutôt que rien.
+      .catch(() => {});
+    return () => { vivant = false; };
+  }, [baseDemandee]);
 
   /*
    * Le canal temps réel doit repartir après une connexion : il porte l'en-tête d'autorisation du
@@ -2307,19 +2344,34 @@ function App() {
     return <Shell rtl={false} theme={theme}><CguPage /></Shell>;
   }
 
-  if (loading) {
+  /*
+   * L'attente couvre aussi l'instant qui suit la connexion.
+   *
+   * La base n'est demandée qu'une fois quelqu'un connecté : entre le clic et son arrivée, il y a
+   * un rendu où la session existe mais où les données ne sont pas encore là. Sans cette seconde
+   * condition, l'application s'y affichait à vide et tombait sur la première lecture.
+   */
+  if (loading || (baseDemandee && !data)) {
     return <Shell rtl={false} theme={theme}><BrandedLoader /></Shell>;
   }
   if (!session && !showLogin) {
-    return <Shell rtl={false} theme={theme}><SiteVitrineHomePage data={data} onConnexionClick={() => { setShowLogin(true); const url = new URL(window.location.href); url.searchParams.set("connexion", "1"); window.history.replaceState({}, "", url); }} /></Shell>;
+    // La vitrine se contente du peu que le serveur lui donne ; sur un appareil déjà connecté,
+    // les données complètes sont là et font tout aussi bien l'affaire.
+    return <Shell rtl={false} theme={theme}><SiteVitrineHomePage data={donneesPubliques || data || {}} onConnexionClick={() => { setShowLogin(true); const url = new URL(window.location.href); url.searchParams.set("connexion", "1"); window.history.replaceState({}, "", url); }} /></Shell>;
   }
   if (!session) {
-    return <Shell rtl={false} theme={theme}><Login users={data.users} onLogin={(u) => {
+    return <Shell rtl={false} theme={theme}><Login users={data?.users} onLogin={(u) => {
       const normalized = { prenom: "", nom: "", email: "", telephone: "", twoFA: false, ...u };
       setSession(normalized);
       ecrireSessionEnregistree(normalized.id);
       setView("dashboard");
-      try { persist({ ...data, users: (data.users || []).map((x) => (x.id === u.id ? normalized : x)) }); }
+      /*
+       * La base se charge maintenant, et pas avant : c'est la connexion qui l'ouvre.
+       * Sans cette ligne, un agent connecté sur un appareil neuf resterait devant un écran vide.
+       */
+      setBaseDemandee(true);
+      // La migration d'un compte ne s'écrit que si l'on tient déjà les données.
+      try { if (data) persist({ ...data, users: (data.users || []).map((x) => (x.id === u.id ? normalized : x)) }); }
       catch (ex) { console.error("Migration du compte impossible :", ex); }
     }} offline={modeSecours} theme={theme} onToggleTheme={toggleTheme} onJeton={() => setVersionAcces((n) => n + 1)} onBackToHome={() => { setShowLogin(false); const url = new URL(window.location.href); url.searchParams.delete("connexion"); window.history.replaceState({}, "", url); }} /></Shell>;
   }
@@ -4840,9 +4892,34 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
       const serveur = await connexionServeur(id.trim(), pw);
       if (serveur?.refus) { setErr(serveur.refus); return; }
 
+      /*
+       * Le serveur renvoie le compte lui-même, sans rien de ce qui touche au mot de passe.
+       *
+       * C'est ce qui permet à cet écran de ne plus réclamer la liste des comptes avant de
+       * vérifier quoi que ce soit — elle arrivait avec toute la base, livrée à quiconque ouvrait
+       * le site. Le sel et l'empreinte ne quittent plus le serveur.
+       */
+      if (serveur?.utilisateur) {
+        if (serveur.token) { ecrireJeton(serveur.token, serveur.expireA); onJeton?.(); }
+        const compte = serveur.utilisateur;
+        if (compte.twoFA) { const code = genOtp(); setOtp(code); setPending(compte); }
+        else onLogin(compte);
+        return;
+      }
+
+      /*
+       * Serveur injoignable — coupure réseau, fonction non configurée. On retombe sur la
+       * vérification locale, avec les comptes déjà en cache sur cet appareil : un agent qui s'en
+       * sert tous les jours doit pouvoir ouvrir sa session sans réseau.
+       */
+      let comptes = list;
+      if (comptes.length === 0) {
+        const base = await loadData().catch(() => null);
+        comptes = base?.users || [];
+      }
       const u = serveur?.userId
-        ? list.find((x) => x.id === serveur.userId)
-        : list.find((x) => x.identifiant === id.trim());
+        ? comptes.find((x) => x.id === serveur.userId)
+        : comptes.find((x) => x.identifiant === id.trim());
       if (!u) { setErr("Identifiant ou mot de passe incorrect."); return; }
 
       let migratedUser = null;

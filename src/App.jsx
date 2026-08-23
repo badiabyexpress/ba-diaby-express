@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue, memo } from "react";
 import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, ChevronDown, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell, SlidersHorizontal, Copy, MoreHorizontal, Wallet } from "lucide-react";
-import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces } from "./lib/storage.js";
+import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces, definirJetonSession, surSessionExpiree } from "./lib/storage.js";
 
 /* ---------- design tokens ----------
 Identité : Navy #0A2647 · Rouge de marque #C8102E · Blanc #FFFFFF
@@ -1875,18 +1875,25 @@ const CLE_JETON = "bde-jeton";
  * Un mot de passe refusé (401) ou trop d'essais (429) ne sont PAS des cas de repli : les renvoyer
  * à la vérification locale annulerait le ralentissement des attaques.
  */
-async function connexionServeur(identifiant, motdepasse) {
+async function connexionServeur(identifiant, motdepasse, espace) {
   let reponse;
   try {
     reponse = await fetch("/api/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ identifiant, motdepasse }),
+      body: JSON.stringify({ identifiant, motdepasse, ...(espace ? { espace } : {}) }),
     });
   } catch (e) {
     return null; // hors ligne ou fonction injoignable : l'application se débrouille seule
   }
-  if (reponse.status === 501 || reponse.status === 404 || reponse.status >= 502) return null;
+  /*
+   * Tout ce qui n'est pas une réponse de la vérification elle-même remet l'application sur son
+   * chemin d'origine. 401 et 429 viennent bien d'ici et doivent être respectés ; 500, en revanche,
+   * dit que la fonction n'a pas tourné — et le traiter comme un refus fermait l'application à
+   * tout le monde le jour où elle plantait au démarrage. Un serveur en panne ne doit jamais
+   * pouvoir prononcer un refus de connexion.
+   */
+  if (reponse.status !== 401 && reponse.status !== 429 && !reponse.ok) return null;
   const corps = await reponse.json().catch(() => ({}));
   if (!reponse.ok) return { refus: corps.error || "Identifiant ou mot de passe incorrect." };
   return corps; // { token, expireA, userId }
@@ -1907,6 +1914,29 @@ function ecrireJeton(token, expireA) {
     else window.localStorage.removeItem(CLE_JETON);
   } catch (e) { /* stockage indisponible : le jeton vivra le temps de la page */ }
   definirJetonAcces(token || null);
+}
+
+/*
+ * Le jeton de session — celui qui ouvre api/donnees.js, et donc la base une fois qu'elle sera
+ * fermée à la clé publique. Il est distinct du précédent : celui-là s'adresse à Supabase, celui-ci
+ * à nos propres fonctions, et ils n'ont ni le même secret ni la même durée de vie.
+ */
+const CLE_JETON_SESSION = "bde-jeton-session";
+function lireJetonSessionEnregistre() {
+  try {
+    const brut = window.localStorage.getItem(CLE_JETON_SESSION);
+    if (!brut) return null;
+    const { session, expireA } = JSON.parse(brut);
+    if (!session || !expireA || Date.now() > expireA) { window.localStorage.removeItem(CLE_JETON_SESSION); return null; }
+    return session;
+  } catch (e) { return null; }
+}
+function ecrireJetonSession(session, expireA) {
+  try {
+    if (session) window.localStorage.setItem(CLE_JETON_SESSION, JSON.stringify({ session, expireA }));
+    else window.localStorage.removeItem(CLE_JETON_SESSION);
+  } catch (e) { /* stockage indisponible : le jeton vivra le temps de la page */ }
+  definirJetonSession(session || null);
 }
 const CLE_DERNIERE_VUE = "bde-derniere-vue";
 
@@ -1995,9 +2025,33 @@ function App() {
   const [versionAcces, setVersionAcces] = useState(() => {
     const jeton = lireJetonEnregistre();
     if (jeton) definirJetonAcces(jeton);
+    const session = lireJetonSessionEnregistre();
+    if (session) definirJetonSession(session);
     return 0;
   });
   const [sessionRestauree, setSessionRestauree] = useState(false);
+
+  /*
+   * Le serveur refuse le jeton : la session est finie, il faut se reconnecter.
+   *
+   * On efface tout ce qui la constitue puis on recharge la page, plutôt que de démêler à la main
+   * les états de l'espace agent et de l'espace client : au redémarrage, l'application lit un
+   * appareil sans session et affiche d'elle-même le bon écran. Il n'y a pas de boucle possible —
+   * sans jeton, plus aucun appel n'est fait au serveur de données, donc plus aucun refus.
+   *
+   * Le travail non encore enregistré reste dans la file d'attente locale, qui survit au
+   * rechargement : il repartira à la prochaine connexion.
+   */
+  useEffect(() => {
+    surSessionExpiree(() => {
+      ecrireJetonSession(null);
+      ecrireJeton(null);
+      ecrireSessionEnregistree(null);
+      ecrireSessionClient(null);
+      window.location.reload();
+    });
+    return () => surSessionExpiree(null);
+  }, []);
   /*
    * Faut-il charger la base ?
    *
@@ -2014,8 +2068,12 @@ function App() {
     if (typeof window === "undefined") return true;
     const p = new URLSearchParams(window.location.search);
     if (p.has("suivi") || p.has("cgu")) return false;
-    // L'espace client a sa propre porte : il reste sur l'ancien chemin en attendant son tour.
-    if (p.has("client")) return true;
+    /*
+     * L'espace client suit désormais la même règle : sa page de connexion n'a pas besoin de la
+     * base, et la réclamer avant l'identification était un obstacle autant qu'une fuite — une
+     * fois la base fermée, le portail n'aurait tout simplement plus rien reçu.
+     */
+    if (p.has("client")) return !!lireSessionClient();
     return !!lireSessionEnregistree();
   });
   const [donneesPubliques, setDonneesPubliques] = useState(null);
@@ -2051,8 +2109,9 @@ function App() {
     // Contrôle périodique : au-delà du délai sans action, la session se ferme.
     const minuteur = setInterval(() => {
       if (!lireSessionEnregistree()) {
-        // Le jeton d'accès part avec la session : il ne doit pas survivre à l'expiration.
+        // Les jetons partent avec la session : ils ne doivent pas survivre à l'expiration.
         ecrireJeton(null);
+        ecrireJetonSession(null);
         setVersionAcces((n) => n + 1);
         setSession(null);
         setView("dashboard");
@@ -2337,7 +2396,7 @@ function App() {
   }
   const isClientPortal = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("client");
   if (isClientPortal) {
-    return <Shell rtl={false} theme={theme}><ClientPortalPage data={data} loading={loading} persist={persist} /></Shell>;
+    return <Shell rtl={false} theme={theme}><ClientPortalPage data={data} loading={loading} persist={persist} onBesoinBase={() => setBaseDemandee(true)} /></Shell>;
   }
   const isCguPage = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("cgu");
   if (isCguPage) {
@@ -2370,8 +2429,13 @@ function App() {
        * Sans cette ligne, un agent connecté sur un appareil neuf resterait devant un écran vide.
        */
       setBaseDemandee(true);
-      // La migration d'un compte ne s'écrit que si l'on tient déjà les données.
-      try { if (data) persist({ ...data, users: (data.users || []).map((x) => (x.id === u.id ? normalized : x)) }); }
+      /*
+       * La migration d'un compte ne s'écrit que si l'on tient déjà les données — et elle se
+       * SUPERPOSE à la fiche existante au lieu de la remplacer. Le compte qui arrive ici peut
+       * venir du serveur, qui en retire sel, empreinte et algorithme avant de l'envoyer : le
+       * poser tel quel effacerait le mot de passe de l'agent, qui ne pourrait plus se connecter.
+       */
+      try { if (data) persist({ ...data, users: (data.users || []).map((x) => (x.id === u.id ? { ...x, ...u } : x)) }); }
       catch (ex) { console.error("Migration du compte impossible :", ex); }
     }} offline={modeSecours} theme={theme} onToggleTheme={toggleTheme} onJeton={() => setVersionAcces((n) => n + 1)} onBackToHome={() => { setShowLogin(false); const url = new URL(window.location.href); url.searchParams.delete("connexion"); window.history.replaceState({}, "", url); }} /></Shell>;
   }
@@ -2562,7 +2626,7 @@ function App() {
                 <div style={{ fontSize: 11.5, color: "var(--nav-muted)", marginBottom: 10 }}>{session.role}</div>
               </>
             )}
-            <button onClick={() => { ecrireSessionEnregistree(null); ecrireJeton(null); setVersionAcces((n) => n + 1); setSession(null); setView("dashboard"); setOngletPartenaire("accueil"); setShowLogin(false); const url = new URL(window.location.href); url.searchParams.delete("connexion"); window.history.replaceState({}, "", url); }} title={(collapsed && !isMobile) ? t.logout : undefined} style={{ display: "flex", alignItems: "center", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", gap: 8, width: "100%", fontSize: 13, color: "var(--brand-on-dark)", background: "none", border: "none", cursor: "pointer" }}>
+            <button onClick={() => { ecrireSessionEnregistree(null); ecrireJeton(null); ecrireJetonSession(null); setVersionAcces((n) => n + 1); setSession(null); setView("dashboard"); setOngletPartenaire("accueil"); setShowLogin(false); const url = new URL(window.location.href); url.searchParams.delete("connexion"); window.history.replaceState({}, "", url); }} title={(collapsed && !isMobile) ? t.logout : undefined} style={{ display: "flex", alignItems: "center", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", gap: 8, width: "100%", fontSize: 13, color: "var(--brand-on-dark)", background: "none", border: "none", cursor: "pointer" }}>
               <LogOut size={15} /> {!(collapsed && !isMobile) && t.logout}
             </button>
           </div>
@@ -4255,7 +4319,13 @@ function calculerNotificationsClient(acc, data) {
   return notifs.sort((a, b) => new Date(b.date) - new Date(a.date));
 }
 
-function ClientPortalPage({ data, loading, persist }) {
+/*
+ * `onBesoinBase` : le portail ne charge plus la base pour afficher sa page de connexion. Trois
+ * écrans en ont pourtant besoin — l'inscription et la réinitialisation, qui vérifient qu'un
+ * identifiant est libre, et l'espace lui-même une fois le client identifié. Chacun la réclame au
+ * moment où il s'ouvre, plutôt que tout le monde d'avance.
+ */
+function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
   const [lang, setLang] = useClientLang();
   const T = (x) => tc(x, lang);
   const [mode, setMode] = useState("login"); // login | inscription | reset
@@ -4265,6 +4335,29 @@ function ClientPortalPage({ data, loading, persist }) {
   const [err, setErr] = useState("");
   const [compte, setCompte] = useState(null);
   const [sessionClientRestauree, setSessionClientRestauree] = useState(false);
+  const [visiteEcrite, setVisiteEcrite] = useState(false);
+  // Lu une seule fois : c'est l'état au démarrage qui dit s'il y a une session à restaurer, et
+  // donc s'il faut patienter avant d'afficher quoi que ce soit.
+  const [sessionClientAuDemarrage] = useState(() => (typeof window === "undefined" ? null : lireSessionClient()));
+
+  /*
+   * La date de visite et les notifications attendent l'arrivée des données.
+   *
+   * Quand le serveur a vérifié le mot de passe, le client est identifié avant que la base ait été
+   * chargée — c'est son identification qui la demande. Il ne s'agit donc pas d'un cas rare mais du
+   * chemin normal, et la visite se noterait nulle part sans cet effet.
+   */
+  useEffect(() => {
+    if (!compte || !data || visiteEcrite) return;
+    setVisiteEcrite(true);
+    setNotifications(calculerNotificationsClient(compte, data));
+    const enBase = (data.clientAccounts || []).find((c) => c.id === compte.id);
+    if (!enBase) return;
+    persist({
+      ...data,
+      clientAccounts: data.clientAccounts.map((c) => (c.id === compte.id ? { ...c, ...compte, derniereVisite: new Date().toISOString() } : c)),
+    });
+  }, [compte, data, visiteEcrite]);
 
   // Même principe que pour les agents : la session survit à un rechargement et à un changement
   // d'onglet, mais se ferme après 10 minutes sans action. Seul l'identifiant du compte est
@@ -4280,6 +4373,8 @@ function ClientPortalPage({ data, loading, persist }) {
         const rafraichi = { ...acc, derniereVisite: new Date().toISOString() };
         persist({ ...data, clientAccounts: (data.clientAccounts || []).map((c) => (c.id === acc.id ? rafraichi : c)) });
         setCompte(rafraichi);
+        // La visite vient d'être notée ici : l'effet ci-dessus n'a plus à la réécrire.
+        setVisiteEcrite(true);
       }
     }
     setSessionClientRestauree(true);
@@ -4328,25 +4423,64 @@ function ClientPortalPage({ data, loading, persist }) {
     try { window.localStorage.setItem("bde-devise-client", d); } catch (e) {}
   }
 
-  if (loading || !data) return <BrandedLoader />;
+  /*
+   * On n'attend les données que si quelqu'un les attend vraiment : un client déjà identifié, ou
+   * une session à restaurer. Auparavant la page patientait toujours — ce qui était sans
+   * conséquence tant que la base se chargeait pour tout le monde, et qui laisserait désormais le
+   * portail sur un écran de chargement perpétuel, puisque la base ne s'ouvre qu'après connexion.
+   */
+  if (loading || (!data && (compte || sessionClientAuDemarrage))) return <BrandedLoader />;
 
   async function connecter(e) {
     e.preventDefault();
     setErr("");
-    const acc = (data.clientAccounts || []).find((c) => c.identifiant.toLowerCase() === identifiant.trim().toLowerCase());
-    if (!acc) { setErr("Identifiant ou mot de passe incorrect."); return; }
-    // On transmet le compte ENTIER : un objet partiel ferait perdre motdepasseAlgo/motdepasseIter
-    // et la vérification retomberait sur l'ancien schéma, rendant la connexion impossible.
-    const { ok, migratedUser } = await verifyPassword(motdepasse, acc);
-    if (!ok) { setErr("Identifiant ou mot de passe incorrect."); return; }
+    /*
+     * Le serveur d'abord, comme pour les agents : c'est lui qui délivre le jeton de session, et
+     * ce jeton est ce qui donnera encore accès à la base une fois celle-ci fermée à la clé
+     * publique. Sans lui, le portail client serait le seul écran à rester dehors.
+     */
+    const serveur = await connexionServeur(identifiant.trim(), motdepasse, "client");
+    if (serveur?.refus) { setErr(serveur.refus); return; }
+    if (serveur?.session) ecrireJetonSession(serveur.session, serveur.sessionExpireA);
 
-    setNotifications(calculerNotificationsClient(acc, data));
+    let acc = serveur?.utilisateur || null;
+    let migratedUser = null;
+    // Identifié : c'est maintenant que ses colis, ses paiements et ses messages sont nécessaires.
+    if (acc) onBesoinBase?.();
+    if (!acc) {
+      // Serveur injoignable ou non configuré : vérification locale, comme avant. Sans données en
+      // main, il n'y a personne à comparer — on le dit plutôt que de laisser l'écran muet.
+      if (!data) { setErr("Connexion impossible pour le moment. Vérifiez votre réseau et réessayez."); return; }
+      acc = (data.clientAccounts || []).find((c) => c.identifiant.toLowerCase() === identifiant.trim().toLowerCase());
+      if (!acc) { setErr("Identifiant ou mot de passe incorrect."); return; }
+      // On transmet le compte ENTIER : un objet partiel ferait perdre motdepasseAlgo/motdepasseIter
+      // et la vérification retomberait sur l'ancien schéma, rendant la connexion impossible.
+      const local = await verifyPassword(motdepasse, acc);
+      if (!local.ok) { setErr("Identifiant ou mot de passe incorrect."); return; }
+      migratedUser = local.migratedUser;
+    }
+
+    if (data) setNotifications(calculerNotificationsClient(acc, data));
 
     // Un SEUL enregistrement combinant la date de visite et, le cas échéant, la mise à niveau du
     // mot de passe vers PBKDF2. Deux persist() successifs se seraient écrasés l'un l'autre : le
     // second, construit à partir de `data` non rafraîchi, effaçait la migration.
     const updated = { ...acc, ...(migratedUser || {}), derniereVisite: new Date().toISOString() };
-    persist({ ...data, clientAccounts: (data.clientAccounts || []).map((c) => (c.id === acc.id ? updated : c)) });
+    /*
+     * L'enregistrement n'a lieu que si les données sont déjà là. Quand la connexion vient du
+     * serveur, elles ne le sont pas encore — c'est justement elle qui les demande — et écrire
+     * `{ ...null }` remplacerait la base entière par un document vide. L'effet ci-dessous s'en
+     * charge dès qu'elles arrivent.
+     *
+     * Ce qu'on réécrit part par ailleurs de la fiche telle qu'elle est en base, pas de celle que
+     * le serveur vient de renvoyer : celle-ci arrive sans sel ni empreinte — le serveur les
+     * retire, c'est tout l'intérêt. Les poser par-dessus effacerait le mot de passe du client,
+     * qui ne pourrait plus jamais se connecter.
+     */
+    if (data) {
+      persist({ ...data, clientAccounts: (data.clientAccounts || []).map((c) => (c.id === acc.id ? { ...c, ...updated } : c)) });
+      setVisiteEcrite(true);
+    }
     ecrireSessionClient(updated.id); setCompte(updated);
   }
 
@@ -4358,7 +4492,9 @@ function ClientPortalPage({ data, loading, persist }) {
   const livres = mesColis.filter((c) => c.status === "Livré");
   const nonPayes = mesColis.filter((c) => c.reste > 0 && c.status !== "Annulé");
   const totalRestant = nonPayes.reduce((s, c) => s + c.reste, 0);
-  const expressTarif = data.expressTarifEurKg ?? 12;
+  // `data` est absent tant que le client ne s'est pas identifié : la page de connexion ne charge
+  // plus la base, et le tarif n'a de toute façon rien à y afficher.
+  const expressTarif = data?.expressTarifEurKg ?? 12;
 
   function demanderExpress(c) {
     const montant = +(c.poids * expressTarif).toFixed(2);
@@ -4435,7 +4571,13 @@ function ClientPortalPage({ data, loading, persist }) {
         <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 25, color: "var(--text)", marginBottom: 5 }}>{T("Espace Client")}</div>
         <div style={{ fontSize: 14, color: "var(--muted)", marginBottom: 30, textAlign: "center" }}>{T("Retrouvez tous vos colis, leurs statuts et vos paiements en un coup d'œil.")}</div>
 
-        {mode === "inscription" ? (
+        {/* L'inscription et la réinitialisation ont besoin de la base — pour vérifier qu'un
+            identifiant est libre, et pour écrire. Elle est demandée à l'ouverture de ces écrans,
+            et l'on patiente le temps qu'elle arrive plutôt que d'afficher un formulaire qui
+            n'aurait rien pour répondre. */}
+        {(mode === "inscription" || mode === "reset") && !data ? (
+          <div style={{ padding: 30, color: "var(--muted)", fontSize: 14 }}>{T("Chargement…")}</div>
+        ) : mode === "inscription" ? (
           <ClientRegisterForm data={data} persist={persist} onRegistered={(acc) => { ecrireSessionClient(acc.id); setCompte(acc); }} onCancel={() => setMode("login")} />
         ) : mode === "reset" ? (
           <ClientResetPasswordForm data={data} persist={persist} onDone={() => { setMode("login"); setErr(""); }} onCancel={() => setMode("login")} />
@@ -4452,8 +4594,8 @@ function ClientPortalPage({ data, loading, persist }) {
             </Field>
             {err && <div style={{ color: "var(--danger-fg)", fontSize: 13, marginBottom: 10 }}>{err}</div>}
             <button type="submit" style={{ width: "100%", marginTop: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "13px 0", fontSize: 15, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}>{T("Se connecter")}</button>
-            <button type="button" onClick={() => { setMode("reset"); setErr(""); }} style={{ width: "100%", marginTop: 12, background: "none", border: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>{T("Mot de passe oublié ?")}</button>
-            <button type="button" onClick={() => { setMode("inscription"); setErr(""); }} style={{ width: "100%", marginTop: 8, background: "none", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 0", fontSize: 14, fontWeight: 700, color: "var(--text)", cursor: "pointer" }}>{T("Créer un compte")}</button>
+            <button type="button" onClick={() => { setMode("reset"); setErr(""); onBesoinBase?.(); }} style={{ width: "100%", marginTop: 12, background: "none", border: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>{T("Mot de passe oublié ?")}</button>
+            <button type="button" onClick={() => { setMode("inscription"); setErr(""); onBesoinBase?.(); }} style={{ width: "100%", marginTop: 8, background: "none", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 0", fontSize: 14, fontWeight: 700, color: "var(--text)", cursor: "pointer" }}>{T("Créer un compte")}</button>
           </form>
         )}
       </div>
@@ -4901,6 +5043,12 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
        */
       if (serveur?.utilisateur) {
         if (serveur.token) { ecrireJeton(serveur.token, serveur.expireA); onJeton?.(); }
+        /*
+         * Le jeton de session s'installe AVANT onLogin : c'est lui qui ouvrira la lecture de la
+         * base, et le chargement part dans la foulée. Posé après, le premier appel serait fait
+         * sans lui — et refusé, une fois la base fermée.
+         */
+        if (serveur.session) { ecrireJetonSession(serveur.session, serveur.sessionExpireA); onJeton?.(); }
         const compte = serveur.utilisateur;
         if (compte.twoFA) { const code = genOtp(); setOtp(code); setPending(compte); }
         else onLogin(compte);
@@ -4923,6 +5071,7 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
       if (!u) { setErr("Identifiant ou mot de passe incorrect."); return; }
 
       let migratedUser = null;
+      if (serveur?.session) ecrireJetonSession(serveur.session, serveur.sessionExpireA);
       if (serveur?.token) {
         ecrireJeton(serveur.token, serveur.expireA);
         onJeton?.();

@@ -20749,6 +20749,42 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
               {modeles.refuses > 0 ? ` · ${modeles.refuses} refusé${modeles.refuses > 1 ? "s" : ""}` : ""}
             </div>
           </div>
+          {/*
+            Les modèles que l'application appelle, et qui ne sont pas là.
+
+            Un modèle appartient au compte professionnel, pas au numéro. Déposer les huit sur un
+            compte et envoyer depuis le numéro d'un AUTRE compte produit exactement le même refus
+            qu'un nom mal orthographié — sans que rien ne le laisse deviner. C'est arrivé, et la
+            comparaison ci-dessous est ce qui l'a montré.
+          */}
+          {(() => {
+            const deposes = new Set((modeles.modeles || []).map((m) => m.nom));
+            const attendus = [...new Set(Object.values(MODELES_WHATSAPP).map((f) => {
+              try { return f({ tracking: "X", destinataire: "X", paiements: [] }, data)?.nom; }
+              catch (e) { return null; }
+            }).filter(Boolean))];
+            const absents = attendus.filter((n) => !deposes.has(n));
+            if (!absents.length) return null;
+            return (
+              <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "11px 13px", marginTop: 10 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--danger-fg)" }}>
+                  {absents.length === attendus.length
+                    ? "Aucun de vos modèles n’est déposé sur ce compte"
+                    : `${absents.length} modèle${absents.length > 1 ? "s" : ""} manquant${absents.length > 1 ? "s" : ""} sur ce compte`}
+                </div>
+                <div style={{ fontSize: 12, color: "var(--text)", marginTop: 5, lineHeight: 1.55 }}>
+                  Un modèle appartient au compte professionnel, pas au numéro. S’il a été déposé sur
+                  un autre compte que celui de votre numéro d’envoi, il est introuvable — et Meta
+                  refuse l’envoi comme si le nom était faux. Vérifiez le sélecteur de compte en haut
+                  du gestionnaire de modèles, puis redéposez-les sur le compte de votre numéro.
+                </div>
+                <div style={{ fontSize: 11, fontFamily: "monospace", color: "var(--muted)", marginTop: 8, lineHeight: 1.7, overflowWrap: "anywhere" }}>
+                  {absents.join(" · ")}
+                </div>
+              </div>
+            );
+          })()}
+
           {modeles.enAttente > 0 && (
             <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 5, lineHeight: 1.55 }}>
               Un modèle en examen ne peut pas servir : l’envoi échoue comme s’il n’existait pas.

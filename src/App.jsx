@@ -7979,6 +7979,8 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
   const [mode, setMode] = useState("air");
   const [articles, setArticles] = useState(() => [{ ...emptyProduit(), tarification: "kg", categoriePartenaire: "" }]);
   const [err, setErr] = useState("");
+  // Vrai pendant que le colis s'écrit : le bouton se verrouille et le dit. Voir submit().
+  const [enregistrement, setEnregistrement] = useState(false);
 
   const partenaire = (partenaires || []).find((p) => p.id === partenaireId);
   const reglages = reglagesPartenaire(partenaire);
@@ -8121,8 +8123,10 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
   function ajouterArticle() { setArticles((l) => [...l, { ...emptyProduit(), tarification: "kg", categoriePartenaire: "" }]); }
   function retirerArticle(id) { setArticles((l) => (l.length > 1 ? l.filter((a) => a.id !== id) : l)); }
 
-  function submit(e) {
+  async function submit(e) {
     e.preventDefault();
+    // Le premier appui a lancé l'écriture ; les suivants ne doivent rien faire du tout.
+    if (enregistrement) return;
     if (!partenaireId) { setErr("Choisissez le partenaire pour le compte duquel ce colis est enregistré."); return; }
     if (!expNom.trim()) { setErr("Indiquez le nom de l’expéditeur — la personne qui remet le colis."); return; }
     if (!clientNom.trim()) {
@@ -8150,7 +8154,9 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
       };
     });
     const detail = detailPrixPartenaire({ produits, poids: poidsTotal, pays: paysRoute }, partenaire);
-    onSave({
+    setEnregistrement(true);
+    try {
+      await onSave({
       // Colis expédié sous la marque du partenaire : son numéro de suivi porte son préfixe, pas
       // celui de l'entreprise — son client n'a jamais entendu parler de Ba-Diaby Express.
       tracking: genTracking((existingColis || []).map((c) => c.tracking), null, reglages.prefixeTracking || undefined),
@@ -8198,7 +8204,13 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
       createdAt: new Date().toISOString(), pod: null, signature: null, driverLoc: null,
       // L'annonce reprise est refermée par l'appelant, comme pour les pré-alertes clients.
       preAlertePartenaireRapprochee: annonceReprise || null,
-    });
+      });
+    } catch (erreur) {
+      // Rendre la main plutôt que de laisser un bouton mort devant un partenaire qui attend.
+      setEnregistrement(false);
+      setErr("L’enregistrement n’a pas abouti. Vérifiez votre connexion, puis réessayez.");
+    }
+    // En cas de succès le formulaire se referme : rien à déverrouiller.
   }
 
   return (
@@ -8488,7 +8500,10 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
         )}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, flexWrap: "wrap" }}>
           <button type="button" onClick={onClose} style={{ padding: "10px 18px", borderRadius: 8, border: "1.5px solid var(--border)", background: "var(--surface)", color: "var(--muted)", fontSize: 13.5, cursor: "pointer" }}>Annuler</button>
-          <button type="submit" style={{ padding: "10px 18px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>Enregistrer le colis</button>
+          <button type="submit" disabled={enregistrement}
+            style={{ padding: "10px 18px", borderRadius: 8, border: "none", background: enregistrement ? "var(--muted)" : "var(--brand-solid)", color: "#fff", fontSize: 13.5, fontWeight: 700, cursor: enregistrement ? "wait" : "pointer" }}>
+            {enregistrement ? "Enregistrement…" : "Enregistrer le colis"}
+          </button>
         </div>
       </form>
     </Modal>
@@ -10576,6 +10591,10 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     }
   }
 
+  // Verrou d'enregistrement : voir addColis. Une ref, et non un état — il doit être lu et posé
+  // dans le même tour, avant le moindre réaffichage.
+  const enregistrementColisEnCours = useRef(false);
+
   function logActivity(action, detail) { return pushActivity(data, session, action, detail); }
   function toggleSelectionLot(tracking) {
     setSelectionLot((s) => (s.includes(tracking) ? s.filter((t) => t !== tracking) : [...s, tracking]));
@@ -10605,6 +10624,27 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
    * fermeture d'onglet prennent le relais tant que ce n'est pas synchronisé.
    */
   async function addColis(colis) {
+    /*
+     * Un seul enregistrement à la fois.
+     *
+     * Écrire un colis demande un aller-retour avec le serveur : une seconde au comptoir, dix sur
+     * une connexion faible. Pendant ce temps l'agent, qui ne voit rien bouger, appuyait de
+     * nouveau — et le colis partait en double. Deux numéros de suivi, deux étiquettes, deux
+     * messages au client, et un doublon à retrouver plus tard dans la liste.
+     *
+     * Le bouton se verrouille aussi de son côté (voir ColisForm), mais ce verrou-ci couvre tous
+     * les chemins : la touche Entrée, le formulaire partenaire, un double appui si rapide que le
+     * réaffichage n'a pas encore eu lieu.
+     */
+    if (enregistrementColisEnCours.current) return;
+    enregistrementColisEnCours.current = true;
+    try {
+      return await enregistrerNouveauColis(colis);
+    } finally {
+      enregistrementColisEnCours.current = false;
+    }
+  }
+  async function enregistrerNouveauColis(colis) {
     const { preAlerteRapprochee, preAlertePartenaireRapprochee, ...colisPropre } = colis;
     const preAlertes = preAlerteRapprochee
       ? (data.preAlertes || []).map((p) => (p.id === preAlerteRapprochee ? { ...p, statut: "Rapproché", colisTracking: colis.tracking } : p))
@@ -12149,6 +12189,8 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
   }
   const [photos, setPhotos] = useState([]);
   const [err, setErr] = useState("");
+  // Vrai pendant que le colis s'écrit : le bouton se verrouille et le dit. Voir submit().
+  const [enregistrement, setEnregistrement] = useState(false);
 
   // one side is expected to be Guinée (home base); the other determines the applicable rate table
   const direction = destPays === "GN" ? "import" : "export";
@@ -12338,8 +12380,10 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
    * pas reproposer une saisie que l'agent vient explicitement de refuser. */
   function fermerFormulaire() { effacerBrouillonColis(); onClose(); }
 
-  function submit(e) {
+  async function submit(e) {
     e.preventDefault();
+    // Le premier appui a lancé l'écriture ; les suivants ne doivent rien faire du tout.
+    if (enregistrement) return;
     if (!expNom || !destNom || !destTelephone) return;
     if (!(poidsTotal > 0)) { setErr("Le poids total du colis doit être supérieur à 0 kg."); return; }
     // Même vérification qu'à l'étape Produits — nécessaire ici aussi car les pastilles d'étape
@@ -12347,7 +12391,9 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
     if (produits.some((p) => !p.personnalise && !p.categorie)) { setErr("Choisissez une catégorie pour chaque produit (ou cochez « Utiliser un prix personnalisé »)."); return; }
     if (!(valeurDeclaree > 0)) { setErr("Le montant total du colis doit être supérieur à 0 — vérifiez le prix de chaque produit."); return; }
     effacerBrouillonColis();
-    onSave({
+    setEnregistrement(true);
+    try {
+      await onSave({
       tracking: genTracking((existingColis || []).map((c) => c.tracking)),
       // Les adresses sont débarrassées de leurs espaces de bord : le clavier d'un téléphone en
       // ajoute après l'auto-complétion, ils ne se voient pas, et l'envoi est refusé pour ça.
@@ -12372,7 +12418,14 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
       notesInternes: "",
       status: "Enregistré", historique: [{ status: "Enregistré", date: new Date().toISOString() }],
       createdAt: new Date().toISOString(), pod: null, signature: null, driverLoc: null,
-    });
+      });
+    } catch (erreur) {
+      // L'écriture a échoué pour de bon : on rend la main plutôt que de laisser un bouton mort
+      // devant un agent qui a un client en face de lui.
+      setEnregistrement(false);
+      setErr("L’enregistrement n’a pas abouti. Vérifiez votre connexion, puis réessayez.");
+    }
+    // En cas de succès le formulaire se referme : inutile de déverrouiller un bouton qui disparaît.
   }
 
   return (
@@ -12721,8 +12774,9 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
               Suivant <ChevronRight size={15} />
             </button>
           ) : (
-            <button type="button" onClick={submit} style={{ padding: "10px 20px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
-              Créer le colis
+            <button type="button" onClick={submit} disabled={enregistrement}
+              style={{ padding: "10px 20px", borderRadius: 8, border: "none", background: enregistrement ? "var(--muted)" : "var(--brand-solid)", color: "#fff", fontSize: 13.5, fontWeight: 700, cursor: enregistrement ? "wait" : "pointer" }}>
+              {enregistrement ? "Enregistrement…" : "Créer le colis"}
             </button>
           )}
         </div>

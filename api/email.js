@@ -31,7 +31,40 @@
  * brouillon : rien ne casse, mais rien ne part non plus.
  */
 
+/*
+ * L'adresse expéditrice doit avoir la forme « Nom <adresse@domaine> », ou être une adresse nue.
+ * Resend refuse tout le reste — et son refus ne dit pas ce qui cloche, ce qui laisse chercher
+ * longtemps quand la valeur porte des guillemets de trop ou qu'un chevron manque.
+ */
+function analyserExpediteur(valeur) {
+  const brut = String(valeur || "").trim();
+  const entreChevrons = /<([^>]+)>\s*$/.exec(brut);
+  const adresse = entreChevrons ? entreChevrons[1].trim() : brut;
+  const valide = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(adresse);
+  return { valide, domaine: valide ? adresse.split("@")[1] : null, avecNom: !!entreChevrons };
+}
+
 export default async function handler(req, res) {
+  /*
+   * Un état consultable depuis un navigateur — y compris un téléphone.
+   *
+   * Sans lui, « l'e-mail ne part pas » ne se distingue pas de « le serveur ne voit pas les
+   * variables » : les deux se traduisent par un brouillon qui s'ouvre. On ne renvoie rien de
+   * secret, seulement de quoi savoir où chercher.
+   */
+  if (req.method === "GET" && req.query?.etat !== undefined) {
+    const expediteur = analyserExpediteur(process.env.EMAIL_FROM);
+    return res.status(200).json({
+      configure: !!(process.env.RESEND_API_KEY && process.env.EMAIL_FROM),
+      cle: !!process.env.RESEND_API_KEY,
+      expediteur: !!process.env.EMAIL_FROM,
+      expediteurValide: expediteur.valide,
+      expediteurAvecNom: expediteur.avecNom,
+      domaine: expediteur.domaine,
+      reponsesVers: !!process.env.EMAIL_REPLY_TO,
+    });
+  }
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Méthode non autorisée" });
   }

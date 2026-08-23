@@ -1503,7 +1503,18 @@ async function envoyerEmail(adresse, sujet, message, piecesJointes = []) {
       body: JSON.stringify({ to: adresse, sujet, message, piecesJointes }),
     });
     if (reponse.ok) return { envoye: true };
-    if (reponse.status === 501) return { envoye: false, raison: null };
+    /*
+     * 501 : le serveur ne voit pas les variables d'envoi.
+     *
+     * Ce cas était muet, ce qui se défendait tant que rien n'était configuré — inutile d'alarmer
+     * un agent avec une erreur qui ne le concerne pas. Mais une fois la configuration faite, le
+     * même silence devient trompeur : le brouillon s'ouvre, l'agent croit que c'est normal, et
+     * personne ne remarque que rien ne part. On le dit désormais, en nommant ce qu'il faut aller
+     * regarder.
+     */
+    if (reponse.status === 501) {
+      return { envoye: false, raison: "L’envoi automatique n’est pas configuré sur le serveur (RESEND_API_KEY et EMAIL_FROM)." };
+    }
     const data = await reponse.json().catch(() => ({}));
     return { envoye: false, raison: data.error || "L’envoi de l’e-mail a échoué." };
   } catch (e) {
@@ -14977,6 +14988,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
     catch (e) { console.error(e); setInvoiceState("error"); }
   }
   const [emailState, setEmailState] = useState("idle");
+  const [emailErreur, setEmailErreur] = useState("");
 
   /**
    * Envoie la facture par e-mail au client.
@@ -14999,7 +15011,15 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
          <p style="color:#888;font-size:12px">Ba-Diaby Express — Transport de colis Conakry - Monde</p>`,
         piece ? [piece] : []
       );
-      if (envoye) { setEmailState("envoye"); return; }
+      if (envoye) { setEmailState("envoye"); setEmailErreur(""); return; }
+      /*
+       * La raison s'affiche SOUS le bouton, et pas seulement dans une notification.
+       *
+       * `notify` n'existe pas à cet endroit du composant : la raison partait donc dans le vide,
+       * et l'agent voyait un brouillon s'ouvrir sans savoir pourquoi. Une facture qu'on croit
+       * envoyée et qui ne part pas est exactement le genre de silence qui coûte cher.
+       */
+      setEmailErreur(raison || "");
       if (raison) notify?.(raison);
       // Repli : brouillon dans le logiciel de messagerie de l'agent.
       window.open(`mailto:${adresse}?subject=${encodeURIComponent(`Votre facture Ba-Diaby Express — ${colis.tracking}`)}&body=${encodeURIComponent(`Bonjour ${colis.destinataire},\n\nVeuillez trouver la facture de votre colis ${colis.tracking}.\n\nBa-Diaby Express`)}`, "_blank");
@@ -15212,6 +15232,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
                       {(colis.destinataireEmail || colis.email) && (
                         <button onClick={handleEnvoyerFacture} disabled={emailState === "loading"} style={menuItemStyle}>
                           {emailState === "loading" ? "Envoi…" : emailState === "envoye" ? "Facture envoyée" : emailState === "brouillon" ? "Brouillon e-mail ouvert" : "Renvoyer la facture par e-mail"}
+                          {emailErreur && <span style={{ ...menuItemHint, color: "var(--warn-fg)" }}>{emailErreur}</span>}
                         </button>
                       )}
                       <button onClick={handleDownloadTicketThermal} disabled={ticketThermalState === "loading"} style={menuItemStyle}>

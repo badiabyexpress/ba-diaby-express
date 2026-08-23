@@ -1796,6 +1796,18 @@ const EVENEMENTS_WHATSAPP = [
  * jamais été. Ne revenez pas aux anciens : préférez modifier un modèle approuvé plutôt que de le
  * supprimer, sans quoi il faudra une troisième série de noms.
  * ========================================================================================= */
+/*
+ * Les deux étapes où le client reçoit quelque chose à garder : son lien de suivi, son ticket.
+ *
+ * Ailleurs, le message ne fait que raconter le voyage. Le lien y serait répété quatre ou cinq fois
+ * pour le même colis, et un bouton qu'on voit cinq fois cesse d'être vu.
+ *
+ * L'écran « Notifications clients » lit ces listes pour dire, étape par étape, ce que le client
+ * recevra vraiment — sans quoi on choisit qui est prévenu sans savoir de quoi.
+ */
+const ETAPES_AVEC_SUIVI = ["enregistrement", "modification"];
+const ETAPES_AVEC_TICKET = ["enregistrement", "modification"];
+
 const MODELES_WHATSAPP = {
   /*
    * « Bonjour {{1}},
@@ -2001,8 +2013,7 @@ function modeleWhatsAppPourEtape(evenement, colis, data) {
      * Le modèle validé porte l'adresse « …/?suivi=1&code={{1}} » et l'envoi en complète la fin
      * avec le numéro de suivi : le client arrive sur la page de SON colis d'un seul geste.
      */
-    const AVEC_SUIVI = ["enregistrement", "modification"];
-    if (!AVEC_SUIVI.includes(evenement)) return gabarit;
+    if (!ETAPES_AVEC_SUIVI.includes(evenement)) return gabarit;
     return { ...gabarit, boutonUrl: colis.tracking };
   } catch (e) { return null; }
 }
@@ -2033,10 +2044,9 @@ async function notifierEvenement(data, evenement, colis, message) {
    * sans le ticket, et l'agent voit le refus éventuel de Meta plutôt que de croire le client
    * prévenu.
    */
-  const AVEC_TICKET = ["enregistrement", "modification"];
   let ticket = null;
   let mediaUrl = null;
-  if (AVEC_TICKET.includes(evenement)) {
+  if (ETAPES_AVEC_TICKET.includes(evenement)) {
     try { ticket = await genererUrlEtiquette(colis, data); } catch (e) { /* le message texte part quand même */ }
     if (data?.notificationSettings?.joindreEtiquette) mediaUrl = ticket;
   }
@@ -2059,9 +2069,23 @@ async function notifierEvenement(data, evenement, colis, message) {
     ? { ...gabarit, document: { lien: ticket, nom: `ticket-${colis.tracking || "colis"}.pdf` } }
     : gabarit;
 
+  /*
+   * Les deux canaux se coupent séparément.
+   *
+   * WhatsApp se paie à la conversation, l'e-mail non. Une entreprise peut vouloir tout garder
+   * par écrit sans payer huit conversations par colis, ou l'inverse. Le tableau dit QUI est
+   * prévenu, ces deux réglages disent PAR OÙ.
+   *
+   * Absents des données, ils valent « activés » : une base existante ne doit pas cesser de
+   * prévenir ses clients parce qu'un réglage est apparu.
+   */
+  const canaux = data?.notificationSettings || {};
+  const parWhatsApp = canaux.canalWhatsApp !== false;
+  const parEmail = canaux.canalEmail !== false;
+
   const destinations = [];
-  if (prefs.destinataire && colis.telephone) destinations.push(colis.telephone);
-  if (prefs.expediteur && colis.expediteurTelephone) destinations.push(colis.expediteurTelephone);
+  if (parWhatsApp && prefs.destinataire && colis.telephone) destinations.push(colis.telephone);
+  if (parWhatsApp && prefs.expediteur && colis.expediteurTelephone) destinations.push(colis.expediteurTelephone);
   for (const tel of destinations) {
     try {
       const { envoye } = await envoyerWhatsApp(tel, message, mediaUrl, gabaritComplet);
@@ -2078,7 +2102,7 @@ async function notifierEvenement(data, evenement, colis, message) {
    *
    * L'étiquette PDF ne le suit pas : il l'a déjà imprimée en déposant le colis.
    */
-  if (prefs.partenaire && estColisPartenaire(colis)) {
+  if (parWhatsApp && prefs.partenaire && estColisPartenaire(colis)) {
     const messagePartenaire = messageEtapePartenaire(evenement, colis);
     const p = partenaireDuColis(data, colis);
     const tel = p ? reglagesPartenaire(p).telephone : "";
@@ -2097,12 +2121,12 @@ async function notifierEvenement(data, evenement, colis, message) {
    * sans dépendre de WhatsApp — utile pour vos clients en France, en Belgique ou aux États-Unis,
    * qui n'ont pas toujours WhatsApp mais consultent leur messagerie.
    *
-   * Les préférences sont les mêmes que pour WhatsApp : désactiver une étape la désactive sur
-   * les deux canaux. Un seul réglage à comprendre pour vos agents.
+   * Le tableau des destinataires vaut pour les deux canaux : désactiver une étape la désactive
+   * partout. Ce qui se règle séparément, c'est le canal lui-même — voir plus haut.
    */
   const adresses = [];
-  if (prefs.destinataire && (colis.destinataireEmail || colis.email)) adresses.push(colis.destinataireEmail || colis.email);
-  if (prefs.expediteur && colis.expediteurEmail) adresses.push(colis.expediteurEmail);
+  if (parEmail && prefs.destinataire && (colis.destinataireEmail || colis.email)) adresses.push(colis.destinataireEmail || colis.email);
+  if (parEmail && prefs.expediteur && colis.expediteurEmail) adresses.push(colis.expediteurEmail);
   if (adresses.length > 0) {
     /*
      * L'e-mail n'est pas le WhatsApp mis en page.
@@ -20413,6 +20437,47 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
   const [brouillon, setBrouillon] = useState(prefs);
   const modifie = JSON.stringify(brouillon) !== JSON.stringify(prefs);
 
+  const reglages = data.notificationSettings || {};
+  const parWhatsApp = reglages.canalWhatsApp !== false;
+  const parEmail = reglages.canalEmail !== false;
+  function basculerCanal(cle) {
+    persist({ ...data, notificationSettings: { ...reglages, [cle]: reglages[cle] === false } });
+    notify?.("Préférence enregistrée");
+  }
+
+  /*
+   * Ce que le client reçoit vraiment à cette étape.
+   *
+   * Choisir qui est prévenu sans savoir de quoi n'a pas de sens. Le nom du modèle est celui
+   * déposé chez Meta : s'il n'apparaît pas ici, c'est qu'aucun message WhatsApp ne part.
+   */
+  function contenuEtape(cle) {
+    const fabrique = MODELES_WHATSAPP[cle];
+    let modele = null;
+    try {
+      modele = fabrique
+        ? fabrique({ tracking: "BDE000000", destinataire: "Client", paiements: [] }, data)?.nom
+        : null;
+    } catch (e) { modele = null; }
+    return {
+      modele,
+      suivi: ETAPES_AVEC_SUIVI.includes(cle),
+      ticket: ETAPES_AVEC_TICKET.includes(cle),
+    };
+  }
+
+  /*
+   * Le nombre de messages qu'un colis ordinaire déclenchera, avec ces réglages.
+   *
+   * WhatsApp se facture à la conversation : huit étapes fois deux destinataires, c'est seize
+   * messages payants par colis. Ce chiffre doit être sous les yeux au moment où on coche.
+   */
+  const parColis = EVENEMENTS_WHATSAPP.reduce((n, e) => {
+    if (e.partenaireSeul) return n;
+    const p = brouillon[e.cle] || {};
+    return n + (p.destinataire ? 1 : 0) + (p.expediteur ? 1 : 0);
+  }, 0);
+
   function basculer(cle, qui) {
     setBrouillon((p) => ({ ...p, [cle]: { ...(p[cle] || {}), [qui]: !(p[cle] || {})[qui] } }));
   }
@@ -20445,6 +20510,35 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
         </div>
       </div>
 
+      {/*
+        Par où partent les messages.
+
+        Le tableau ci-dessous dit QUI est prévenu ; ces deux interrupteurs disent PAR OÙ. WhatsApp
+        se paie à la conversation, l'e-mail non : une entreprise peut vouloir tout garder par écrit
+        sans payer huit conversations par colis.
+      */}
+      <div style={{ display: "flex", gap: 12, marginBottom: 16, flexWrap: "wrap" }}>
+        {[
+          { cle: "canalWhatsApp", actif: parWhatsApp, titre: "WhatsApp", detail: "Facturé par Meta à la conversation" },
+          { cle: "canalEmail", actif: parEmail, titre: "E-mail", detail: "Gratuit, si une adresse est renseignée" },
+        ].map((c) => (
+          <div key={c.cle} style={{ flex: 1, minWidth: 210, background: "var(--surface)", border: "1px solid " + (c.actif ? "var(--ok-border)" : "var(--border)"), borderRadius: 12, padding: "13px 15px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{c.titre}</div>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>{c.detail}</div>
+            </div>
+            <Interrupteur actif={c.actif} onClick={() => basculerCanal(c.cle)} />
+          </div>
+        ))}
+      </div>
+
+      {!parWhatsApp && !parEmail && (
+        <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 12, padding: "12px 16px", marginBottom: 16, fontSize: 12.5, color: "var(--text)" }}>
+          Les deux canaux sont coupés : <strong>plus aucun client n’est prévenu</strong>, quels que
+          soient les réglages ci-dessous.
+        </div>
+      )}
+
       <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, overflow: "hidden" }}>
         <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", minWidth: 480, borderCollapse: "collapse" }}>
@@ -20459,7 +20553,28 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
           <tbody>
             {EVENEMENTS_WHATSAPP.map((e) => (
               <tr key={e.cle} style={{ borderTop: "1px solid var(--surface2)" }}>
-                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--text)", whiteSpace: "nowrap" }}>{e.label}</td>
+                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--text)" }}>
+                  {e.label}
+                  {(() => {
+                    const c = contenuEtape(e.cle);
+                    const pastilles = [
+                      c.modele ? { texte: c.modele, titre: "Modèle validé chez Meta" } : null,
+                      c.suivi ? { texte: "lien de suivi", titre: "Bouton « Suivre mon colis »" } : null,
+                      c.ticket ? { texte: "ticket PDF", titre: "Le ticket d’envoi est joint" } : null,
+                    ].filter(Boolean);
+                    if (!pastilles.length) return null;
+                    return (
+                      <div style={{ display: "flex", gap: 5, marginTop: 5, flexWrap: "wrap" }}>
+                        {pastilles.map((p) => (
+                          <span key={p.texte} title={p.titre}
+                            style={{ fontSize: 10.5, color: "var(--muted)", background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 5, padding: "2px 6px", whiteSpace: "nowrap" }}>
+                            {p.texte}
+                          </span>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </td>
                 <td style={{ padding: "12px 16px", textAlign: "center" }}>
                   <div style={{ display: "flex", justifyContent: "center" }}>
                     <Interrupteur actif={!!(brouillon[e.cle] || {}).expediteur} onClick={() => basculer(e.cle, "expediteur")} />
@@ -20488,6 +20603,23 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
           </tbody>
         </table>
         </div>
+      </div>
+
+      {/*
+        Ce que cela représente, par colis.
+
+        Huit étapes fois deux destinataires, c'est seize messages payants pour un seul colis. Le
+        chiffre doit être sous les yeux au moment où l'on coche, pas découvert sur la facture.
+      */}
+      <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: "13px 16px", marginTop: 12, fontSize: 12.5, color: "var(--text)", lineHeight: 1.6 }}>
+        Avec ces réglages, un colis ordinaire déclenche <strong>{parColis} message{parColis > 1 ? "s" : ""}</strong>
+        {parWhatsApp && parEmail
+          ? " — par WhatsApp et par e-mail quand l’adresse est connue."
+          : parWhatsApp ? " par WhatsApp." : parEmail ? " par e-mail." : ", mais les deux canaux sont coupés."}
+        {parWhatsApp && parColis > 8 && (
+          <> Meta facture chaque conversation WhatsApp : l’expéditeur qui vient de déposer au
+          comptoir a-t-il besoin d’être prévenu à chaque étape ?</>
+        )}
       </div>
 
       {/*

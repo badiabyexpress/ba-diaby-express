@@ -3957,11 +3957,52 @@ function ClientProfilModal({ compte, onSave, onClose }) {
   const [email, setEmail] = useState(compte.email || "");
   const [saved, setSaved] = useState(false);
 
+  /*
+   * Changer son mot de passe soi-même.
+   *
+   * Quand un agent en fabrique un provisoire pour dépanner un client au téléphone, ce mot de passe
+   * a été dicté à voix haute : il doit pouvoir être remplacé tout de suite. Sans cet écran, il
+   * restait le mot de passe du compte indéfiniment.
+   *
+   * L'ancien est exigé — sans lui, un téléphone laissé déverrouillé une minute suffirait à
+   * verrouiller le compte de son propriétaire.
+   */
+  const [ouvrirMdp, setOuvrirMdp] = useState(false);
+  const [ancien, setAncien] = useState("");
+  const [nouveau, setNouveau] = useState("");
+  const [errMdp, setErrMdp] = useState("");
+  const [mdpChange, setMdpChange] = useState(false);
+  const [occupe, setOccupe] = useState(false);
+
   function submit(e) {
     e.preventDefault();
     onSave({ telephone, adresse, email });
     setSaved(true);
     setTimeout(onClose, 900);
+  }
+
+  async function changerMdp() {
+    setErrMdp("");
+    /*
+     * L'ancien mot de passe se vérifie auprès du serveur.
+     *
+     * Le compte que cette page tient en main vient de la connexion serveur, qui en retire sel et
+     * empreinte — c'est tout l'intérêt. La vérification locale, qui a besoin de ces champs, y
+     * répondrait « incorrect » quel que soit le mot de passe saisi. On la garde en second, pour
+     * les comptes chargés depuis la base quand le serveur n'est pas disponible.
+     */
+    const parLeServeur = await connexionServeur(compte.identifiant, ancien, "client");
+    const bon = parLeServeur
+      ? !!parLeServeur.utilisateur
+      : (await verifyPassword(ancien, compte)).ok;
+    if (!bon) { setErrMdp(tcx("Mot de passe actuel incorrect.")); return; }
+    if (!nouveau || nouveau.length < 8) { setErrMdp(tcx("Choisissez un mot de passe d’au moins 8 caractères.")); return; }
+    setOccupe(true);
+    const identifiants = await creerIdentifiantsMotDePasse(nouveau);
+    onSave(identifiants);
+    setOccupe(false);
+    setAncien(""); setNouveau("");
+    setMdpChange(true);
   }
 
   return (
@@ -3973,6 +4014,36 @@ function ClientProfilModal({ compte, onSave, onClose }) {
         {saved && <div style={{ color: "var(--ok-fg)", fontSize: 12.5, marginBottom: 10 }}>✓ Profil mis à jour</div>}
         <button type="submit" style={{ width: "100%", background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>{tcx("Enregistrer")}</button>
       </form>
+
+      <div style={{ borderTop: "1px solid var(--border)", marginTop: 18, paddingTop: 14 }}>
+        {!ouvrirMdp ? (
+          <button type="button" onClick={() => { setOuvrirMdp(true); setMdpChange(false); }}
+            style={{ width: "100%", background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 0", fontSize: 13, fontWeight: 600, color: "var(--text)", cursor: "pointer" }}>
+            {tcx("Changer mon mot de passe")}
+          </button>
+        ) : (
+          <>
+            <Field label={tcx("Mot de passe actuel")}>
+              <input type="password" autoComplete="current-password" value={ancien} onChange={(e) => setAncien(e.target.value)} style={inputStyle} />
+            </Field>
+            <Field label={tcx("Nouveau mot de passe")}>
+              <input type="password" autoComplete="new-password" value={nouveau} onChange={(e) => setNouveau(e.target.value)} style={inputStyle} placeholder={tcx("8 caractères au minimum")} />
+            </Field>
+            {errMdp && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10 }}>{errMdp}</div>}
+            {mdpChange && <div style={{ color: "var(--ok-fg)", fontSize: 12.5, marginBottom: 10 }}>✓ {tcx("Mot de passe modifié")}</div>}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button type="button" onClick={changerMdp} disabled={occupe || !ancien || !nouveau}
+                style={{ flex: 1, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 0", fontSize: 13, fontWeight: 700, cursor: occupe ? "wait" : "pointer", opacity: occupe || !ancien || !nouveau ? 0.6 : 1 }}>
+                {occupe ? tcx("Enregistrement…") : tcx("Valider")}
+              </button>
+              <button type="button" onClick={() => { setOuvrirMdp(false); setErrMdp(""); setAncien(""); setNouveau(""); }}
+                style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "10px 16px", fontSize: 13, cursor: "pointer" }}>
+                {tcx("Annuler")}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
     </Modal>
   );
 }
@@ -9246,6 +9317,40 @@ function CentreClientsPage({ data, persist, notify, session }) {
   const [filtrePreAlertes, setFiltrePreAlertes] = useState("en_attente");
   const [rechercheCompte, setRechercheCompte] = useState("");
   const [compteASupprimer, setCompteASupprimer] = useState(null);
+  const [compteAReinit, setCompteAReinit] = useState(null);
+  const [mdpClientTemporaire, setMdpClientTemporaire] = useState(null);
+
+  /*
+   * Donner un nouveau mot de passe à un client.
+   *
+   * Le client dispose d'une procédure automatique — un code envoyé sur son WhatsApp — mais elle
+   * suppose que l'envoi automatique fonctionne. Tant que ce n'est pas le cas, un client qui oublie
+   * son mot de passe n'a aucun recours : il ne peut ni se connecter, ni recevoir de code, et
+   * personne ici ne pouvait le débloquer. C'est ce chemin-là qui manquait.
+   *
+   * L'agent a la personne au téléphone ou devant lui : c'est lui qui vérifie son identité. Le mot
+   * de passe provisoire s'affiche une seule fois — ensuite il n'existe plus nulle part qu'en
+   * empreinte, y compris pour nous.
+   */
+  async function reinitialiserMotDePasseClient(compte) {
+    // Sans O/0 ni I/1 : ce mot de passe se dicte au téléphone, et une confusion coûte un appel.
+    const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    const provisoire = Array.from({ length: 8 }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join("");
+    const identifiants = await creerIdentifiantsMotDePasse(provisoire);
+    const next = {
+      ...data,
+      clientAccounts: (data.clientAccounts || []).map((c) => (c.id === compte.id ? { ...c, ...identifiants } : c)),
+    };
+    next.activityLog = pushActivity(data, session, "Mot de passe client réinitialisé",
+      `${compte.prenom} ${compte.nom} (${compte.identifiant})`);
+    await persist(next);
+    setCompteAReinit(null);
+    setMdpClientTemporaire({
+      identifiant: compte.identifiant,
+      nom: `${compte.prenom || ""} ${compte.nom || ""}`.trim(),
+      motdepasse: provisoire,
+    });
+  }
 
   /**
    * Supprime un compte de l'Espace Client.
@@ -9513,10 +9618,16 @@ function CentreClientsPage({ data, persist, notify, session }) {
                             {c.derniereVisite ? ` · vu le ${new Date(c.derniereVisite).toLocaleDateString("fr-FR")}` : " · jamais revenu"}
                           </div>
                         </div>
-                        <button onClick={() => setCompteASupprimer(c)} title="Supprimer ce compte"
-                          style={{ background: "none", border: "1px solid var(--danger-border)", color: "var(--danger-fg)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer", flexShrink: 0 }}>
-                          <Trash2 size={13} /> Supprimer
-                        </button>
+                        <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                          <button onClick={() => setCompteAReinit(c)} title="Donner un nouveau mot de passe"
+                            style={{ background: "none", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}>
+                            <Key size={13} /> Mot de passe
+                          </button>
+                          <button onClick={() => setCompteASupprimer(c)} title="Supprimer ce compte"
+                            style={{ background: "none", border: "1px solid var(--danger-border)", color: "var(--danger-fg)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                            <Trash2 size={13} /> Supprimer
+                          </button>
+                        </div>
                       </div>
                     );
                   })}
@@ -9525,6 +9636,53 @@ function CentreClientsPage({ data, persist, notify, session }) {
             );
           })()}
         </div>
+      )}
+
+      {compteAReinit && (
+        <Modal onClose={() => setCompteAReinit(null)} title="Donner un nouveau mot de passe ?">
+          <div style={{ fontSize: 13.5, color: "var(--text)", marginBottom: 12 }}>
+            <strong>{compteAReinit.prenom} {compteAReinit.nom}</strong> ({compteAReinit.identifiant})
+            ne pourra plus se connecter avec son mot de passe actuel.
+          </div>
+          <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "11px 13px", marginBottom: 16 }}>
+            <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
+              <strong>Assurez-vous d’avoir bien cette personne au bout du fil.</strong> Le mot de passe
+              provisoire s’affichera une seule fois : notez-le ou dictez-le tout de suite, il ne sera
+              plus lisible ensuite, pour personne.
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => reinitialiserMotDePasseClient(compteAReinit)}
+              style={{ flex: 1, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+              Générer le mot de passe
+            </button>
+            <button onClick={() => setCompteAReinit(null)}
+              style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "11px 18px", fontSize: 13, cursor: "pointer" }}>
+              Annuler
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {mdpClientTemporaire && (
+        <Modal onClose={() => setMdpClientTemporaire(null)} title="Nouveau mot de passe">
+          <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 12 }}>
+            Pour <strong style={{ color: "var(--text)" }}>{mdpClientTemporaire.nom}</strong> — identifiant <strong style={{ color: "var(--text)" }}>{mdpClientTemporaire.identifiant}</strong>
+          </div>
+          <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: "16px 14px", textAlign: "center", marginBottom: 14 }}>
+            <div style={{ fontSize: 24, fontWeight: 700, letterSpacing: 3, color: "var(--text)", fontFamily: "monospace" }}>
+              {mdpClientTemporaire.motdepasse}
+            </div>
+          </div>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.55, marginBottom: 16 }}>
+            Ce mot de passe ne sera plus affiché. Invitez le client à le changer depuis son espace,
+            dans son profil.
+          </div>
+          <button onClick={() => setMdpClientTemporaire(null)}
+            style={{ width: "100%", background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+            J’ai noté
+          </button>
+        </Modal>
       )}
 
       {compteASupprimer && (

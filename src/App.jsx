@@ -20446,14 +20446,47 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
    * prévenu cinq fois ne compte qu'une fois chez Meta.
    */
   const [quota, setQuota] = useState(null);
-  useEffect(() => {
-    let vivant = true;
-    fetch("/api/whatsapp?quota=1")
+  const [pin, setPin] = useState("");
+  const [activation, setActivation] = useState(null);
+  const [activationEnCours, setActivationEnCours] = useState(false);
+
+  function relireQuota() {
+    return fetch("/api/whatsapp?quota=1")
       .then((r) => r.json().then((corps) => ({ ok: r.ok, corps })))
-      .then(({ ok, corps }) => { if (vivant) setQuota(ok ? corps : { erreur: corps?.error || "indisponible" }); })
-      .catch(() => { if (vivant) setQuota({ erreur: "indisponible" }); });
-    return () => { vivant = false; };
-  }, []);
+      .then(({ ok, corps }) => { setQuota(ok ? corps : { erreur: corps?.error || "indisponible" }); })
+      .catch(() => setQuota({ erreur: "indisponible" }));
+  }
+  useEffect(() => { relireQuota(); }, []);
+
+  /*
+   * L'activation du numéro, depuis l'application.
+   *
+   * C'est l'étape « Register » de Meta. Elle se fait normalement depuis la console développeur,
+   * dont l'interface change souvent et n'affiche pas toujours le résultat sans recharger la page —
+   * on croit alors que rien ne s'est passé. Ici, la réponse de Meta arrive telle quelle, et l'on
+   * relit aussitôt l'état réel du numéro plutôt que de se fier à un affichage.
+   */
+  async function activerNumero() {
+    setActivationEnCours(true);
+    setActivation(null);
+    try {
+      const reponse = await fetch("/api/whatsapp?enregistrer=1", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pin }),
+      });
+      const corps = await reponse.json().catch(() => ({}));
+      if (reponse.ok) {
+        await relireQuota();
+        setActivation({ ok: true });
+        setPin("");
+        notify?.("Numéro activé");
+      } else {
+        setActivation({ erreur: corps?.error || "Meta a refusé l’activation." });
+      }
+    } catch (e) {
+      setActivation({ erreur: "Impossible de joindre le serveur." });
+    } finally { setActivationEnCours(false); }
+  }
 
   const reglages = data.notificationSettings || {};
   const parWhatsApp = reglages.canalWhatsApp !== false;
@@ -20550,6 +20583,45 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
               : `Votre numéro peut prévenir ${quota.parJour ? quota.parJour.toLocaleString("fr-FR") : "un nombre limité de"} clients différents par tranche de 24 h. Un même client prévenu plusieurs fois dans la journée ne compte qu’une fois.`}
             {quota.numero ? ` Numéro : ${quota.numero}${quota.nom ? ` — ${quota.nom}` : ""}.` : ""}
           </div>
+          {/*
+            Le numéro n'est pas activé.
+
+            C'est l'étape « Register » de Meta, celle qu'on saute parce que le numéro paraît déjà
+            en ordre. Tant qu'elle manque, tout envoi échoue avec « Account not registered » — et
+            la console de Meta continue d'afficher « Non enregistré » même après coup, tant qu'on
+            ne recharge pas. On le fait donc ici, où le résultat est immédiat.
+          */}
+          {quota.statut && !quota.pret && (
+            <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 10, padding: "12px 14px", marginTop: 12 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text)" }}>
+                Ce numéro n’est pas encore activé pour l’envoi
+              </div>
+              <div style={{ fontSize: 12, color: "var(--text)", marginTop: 4, lineHeight: 1.55 }}>
+                L’ajouter et le vérifier ne suffit pas : Meta demande une activation, avec un code
+                à six chiffres que vous choisissez. Notez-le — il sera redemandé si vous devez un
+                jour réactiver ce numéro.
+                {quota.statut !== "CONNECTED" ? ` (état chez Meta : ${quota.statut})` : ""}
+              </div>
+              <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
+                <input value={pin} onChange={(e) => setPin(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  inputMode="numeric" placeholder="000000" aria-label="Code à six chiffres"
+                  style={{ ...inputStyle, marginBottom: 0, width: 120, letterSpacing: 3, textAlign: "center", fontFamily: "monospace" }} />
+                <button onClick={activerNumero} disabled={pin.length !== 6 || activationEnCours}
+                  style={{ background: pin.length === 6 && !activationEnCours ? "var(--brand-solid)" : "var(--muted)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: pin.length === 6 && !activationEnCours ? "pointer" : "not-allowed" }}>
+                  {activationEnCours ? "Activation…" : "Activer le numéro"}
+                </button>
+              </div>
+              {activation?.erreur && (
+                <div style={{ fontSize: 12, color: "var(--danger-fg)", marginTop: 9, lineHeight: 1.5 }}>{activation.erreur}</div>
+              )}
+            </div>
+          )}
+          {quota.pret && activation?.ok && (
+            <div style={{ fontSize: 12, color: "var(--ok-fg)", marginTop: 9, fontWeight: 600 }}>
+              Numéro activé — vos messages peuvent partir.
+            </div>
+          )}
+
           {quota.qualite && (
             <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 9 }}>
               <span style={{ width: 9, height: 9, borderRadius: 9,

@@ -258,7 +258,11 @@ export default async function handler(req, res) {
       return res.status(501).json({ error: "Le quota n'est connu que chez Meta.", configure: false });
     }
     try {
-      const champs = "verified_name,display_phone_number,quality_rating,messaging_limit_tier,throughput";
+      /*
+       * Champs volontairement limités à ceux que Graph garantit. Un seul nom inconnu fait échouer
+       * la requête entière avec un 400 — on ne diagnostique alors plus rien du tout.
+       */
+      const champs = "verified_name,display_phone_number,quality_rating,messaging_limit_tier,status,code_verification_status";
       const reponse = await fetch(
         `https://graph.facebook.com/${VERSION_GRAPH}/${meta.numeroId}?fields=${champs}`,
         { headers: { Authorization: `Bearer ${meta.jeton}` } },
@@ -274,15 +278,64 @@ export default async function handler(req, res) {
       // TIER_1K → 1000. « UNLIMITED » n'a pas de nombre : on le dit en toutes lettres.
       const palier = String(corps.messaging_limit_tier || "");
       const correspondance = { TIER_50: 50, TIER_250: 250, TIER_1K: 1000, TIER_10K: 10000, TIER_100K: 100000 };
+      /*
+       * `status` dit ce que la page de configuration de Meta n'affiche pas toujours à jour : un
+       * numéro fraîchement enregistré y reste « Non enregistré » tant qu'on n'a pas rechargé.
+       * Ici, la réponse vient de Meta à l'instant même.
+       */
+      const statut = corps.status || null;
       return res.status(200).json({
         configure: true,
         numero: corps.display_phone_number || null,
         nom: corps.verified_name || null,
         qualite: corps.quality_rating || null,
         palier: palier || null,
-        parJour: correspondance[palier] ?? (palier === "TIER_UNLIMITED" ? null : null),
+        parJour: correspondance[palier] ?? null,
         illimite: palier === "TIER_UNLIMITED",
+        statut,
+        // Un numéro « CONNECTED » est enregistré et prêt. Tout le reste demande un geste.
+        pret: statut === "CONNECTED",
+        verification: corps.code_verification_status || null,
       });
+    } catch (e) {
+      return res.status(502).json({ error: "Impossible de joindre Meta." });
+    }
+  }
+
+  /*
+   * Activer le numéro, sans quitter l'application.
+   *
+   * C'est l'étape « Register » de Meta, celle qu'on saute parce que le numéro paraît déjà en
+   * ordre — ajouté, vérifié, affiché. Elle se fait normalement depuis la console développeur,
+   * dont l'interface change tous les six mois et n'affiche pas toujours le résultat sans
+   * recharger. Un appel direct est plus sûr : il répond, ou il dit pourquoi il ne peut pas.
+   *
+   * Le code à six chiffres est celui de la vérification en deux étapes du numéro. S'il n'en avait
+   * pas, celui-ci le devient ; s'il en avait déjà un, c'est lui qu'il faut fournir.
+   */
+  if (req.method === "POST" && req.query?.enregistrer !== undefined) {
+    if (!metaPret) {
+      return res.status(501).json({ error: "Meta n'est pas configuré sur le serveur.", configure: false });
+    }
+    const pin = String(req.body?.pin || "").trim();
+    if (!/^\d{6}$/.test(pin)) {
+      return res.status(400).json({ error: "Le code doit comporter exactement six chiffres." });
+    }
+    try {
+      const reponse = await fetch(`https://graph.facebook.com/${VERSION_GRAPH}/${meta.numeroId}/register`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${meta.jeton}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ messaging_product: "whatsapp", pin }),
+      });
+      const corps = await reponse.json();
+      if (!reponse.ok) {
+        const code = corps?.error?.code;
+        return res.status(reponse.status).json({
+          error: EXPLICATIONS_META[code] || corps?.error?.message || "Meta a refusé l'enregistrement.",
+          code: code || null,
+        });
+      }
+      return res.status(200).json({ ok: true });
     } catch (e) {
       return res.status(502).json({ error: "Impossible de joindre Meta." });
     }

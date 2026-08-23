@@ -1602,6 +1602,74 @@ const EVENEMENTS_WHATSAPP = [
  * l'action principale (créer un colis, encaisser…). Si WhatsApp est indisponible, le colis est
  * quand même enregistré.
  */
+/* ============================================================================================
+ * LES MODÈLES WHATSAPP
+ *
+ * Ce ne sont pas des textes libres : chaque modèle doit être déposé chez Meta, validé, puis
+ * appelé par son nom exact. Ses variables — {{1}}, {{2}}… — sont remplies ici, dans l'ordre.
+ *
+ * L'ordre est donc un contrat : intervertir deux variables ne provoque aucune erreur, cela
+ * enverra simplement un message qui dit n'importe quoi à un client. C'est pourquoi chaque
+ * modèle est écrit ci-dessous tel qu'il a été déposé, en commentaire, à côté de ses variables.
+ *
+ * Les noms doivent correspondre EXACTEMENT à ceux validés dans le gestionnaire Meta. Un modèle
+ * absent ou refusé fait échouer l'envoi avec un message explicite (voir api/whatsapp.js) plutôt
+ * que de laisser croire le client prévenu.
+ * ========================================================================================= */
+const MODELES_WHATSAPP = {
+  // « Bonjour {{1}}, votre colis {{2}} a quitté notre entrepôt et poursuit son acheminement
+  //   vers {{3}}. Nous vous préviendrons dès son arrivée. »
+  expedie: (colis, data) => ({
+    nom: "colis_en_route",
+    variables: [colis.destinataire || "cher client", colis.tracking, paysDuColis(colis)],
+  }),
+  // « Bonjour {{1}}, votre colis {{2}} vient d'arriver à destination. Il est en cours de
+  //   traitement dans notre agence et sera bientôt disponible au retrait. »
+  arrivee: (colis) => ({
+    nom: "colis_arrive",
+    variables: [colis.destinataire || "cher client", colis.tracking],
+  }),
+  // « Bonjour {{1}}, votre colis {{2}} est disponible au retrait à notre agence {{3}}. Votre
+  //   code de retrait est {{4}}. Présentez-le à l'agence pour récupérer votre colis. »
+  retrait: (colis, data) => {
+    const agence = siteRetraitPourColis(colis, data);
+    return {
+      nom: "colis_disponible",
+      variables: [
+        colis.destinataire || "cher client",
+        colis.tracking,
+        agence ? `${agence.nom} — ${agence.adresse}` : "notre agence",
+        colis.codeRetrait || "communiqué à l’agence",
+      ],
+    };
+  },
+  // « Bonjour {{1}}, votre colis {{2}} vous a bien été remis. Nous vous remercions de votre
+  //   confiance et espérons vous revoir bientôt. »
+  livre: (colis) => ({
+    nom: "colis_remis",
+    variables: [colis.destinataire || "cher client", colis.tracking],
+  }),
+};
+
+/** Le nom du pays de destination, tel qu'il apparaît dans le message. */
+function paysDuColis(colis) {
+  const p = COUNTRIES.find((x) => x.code === (colis?.destinatairePays || colis?.pays));
+  return p ? p.name : "sa destination";
+}
+
+/**
+ * Le modèle à utiliser pour cette étape, ou null s'il n'y en a pas.
+ *
+ * Un modèle ne s'applique QU'AU message destiné au client. Celui du partenaire s'adresse à un
+ * professionnel qui nous écrit régulièrement — il tombe donc souvent dans la fenêtre des 24 h,
+ * et un modèle de plus à faire valider pour un usage incertain ne se justifie pas.
+ */
+function modeleWhatsAppPourEtape(evenement, colis, data) {
+  const fabrique = MODELES_WHATSAPP[evenement];
+  if (!fabrique || !colis) return null;
+  try { return fabrique(colis, data); } catch (e) { return null; }
+}
+
 async function notifierEvenement(data, evenement, colis, message) {
   const prefs = (data?.notifWhatsApp || {})[evenement];
   if (!prefs) return { envoyes: 0 };
@@ -1615,12 +1683,26 @@ async function notifierEvenement(data, evenement, colis, message) {
     try { mediaUrl = await genererUrlEtiquette(colis, data); } catch (e) { /* le message texte part quand même */ }
   }
 
+  /*
+   * Le modèle correspondant à l'étape, s'il y en a un.
+   *
+   * WhatsApp n'autorise le texte libre que dans les 24 h suivant le dernier message du client, et
+   * aucune de nos notifications n'arrive dans cette fenêtre : un client n'écrit pas juste avant
+   * que son colis parte. Il faut donc un modèle validé par Meta à l'avance, dont les variables
+   * sont remplies au moment de l'envoi.
+   *
+   * Le texte libre reste transmis en second : il sert quand c'est Twilio qui envoie, et quand
+   * aucun modèle n'est encore validé — auquel cas l'envoi échoue proprement et l'agent voit
+   * pourquoi, plutôt que de croire le client prévenu.
+   */
+  const gabarit = modeleWhatsAppPourEtape(evenement, colis, data);
+
   const destinations = [];
   if (prefs.destinataire && colis.telephone) destinations.push(colis.telephone);
   if (prefs.expediteur && colis.expediteurTelephone) destinations.push(colis.expediteurTelephone);
   for (const tel of destinations) {
     try {
-      const { envoye } = await envoyerWhatsApp(tel, message, mediaUrl);
+      const { envoye } = await envoyerWhatsApp(tel, message, mediaUrl, gabarit);
       if (envoye) envoyes++;
     } catch (e) { /* une notification ne doit jamais bloquer l'action en cours */ }
   }
@@ -1721,12 +1803,18 @@ async function envoyerEmail(adresseBrute, sujet, message, piecesJointes = []) {
   }
 }
 
-async function envoyerWhatsApp(telephone, message, mediaUrl) {
+async function envoyerWhatsApp(telephone, message, mediaUrl, gabarit) {
   try {
     const reponse = await fetch("/api/whatsapp", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(mediaUrl ? { to: telephone, message, mediaUrl } : { to: telephone, message }),
+      body: JSON.stringify({
+        to: telephone,
+        message,
+        ...(mediaUrl ? { mediaUrl } : {}),
+        // Le modèle validé par Meta, quand l'étape en a un — voir modeleWhatsAppPourEtape.
+        ...(gabarit?.nom ? { modele: gabarit.nom, variables: gabarit.variables } : {}),
+      }),
     });
     if (reponse.ok) return { envoye: true };
     const data = await reponse.json().catch(() => ({}));

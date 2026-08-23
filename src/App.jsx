@@ -1617,6 +1617,19 @@ const EVENEMENTS_WHATSAPP = [
  * que de laisser croire le client prévenu.
  * ========================================================================================= */
 const MODELES_WHATSAPP = {
+  // « Bonjour {{1}}, votre colis {{2}} a bien été enregistré dans notre agence de {{3}}. Vous
+  //   pouvez suivre son acheminement à tout moment avec ce numéro. »
+  enregistrement: (colis, data) => {
+    const depart = siteEnregistrementPourColis(colis, data);
+    return {
+      nom: "colis_enregistre",
+      variables: [
+        colis.destinataire || "cher client",
+        colis.tracking,
+        depart ? depart.nom : "départ",
+      ],
+    };
+  },
   // « Bonjour {{1}}, votre colis {{2}} a quitté notre entrepôt et poursuit son acheminement
   //   vers {{3}}. Nous vous préviendrons dès son arrivée. »
   expedie: (colis, data) => ({
@@ -1649,6 +1662,46 @@ const MODELES_WHATSAPP = {
     nom: "colis_remis",
     variables: [colis.destinataire || "cher client", colis.tracking],
   }),
+  /*
+   * « Bonjour {{1}}, nous avons bien reçu votre paiement de {{2}} pour le colis {{3}}. Il reste
+   *   {{4}} à régler. Merci de votre confiance. »
+   *
+   * Le reste à régler est toujours renseigné, même à zéro — écrit « aucun montant ». Une variable
+   * vide fait refuser l'envoi par Meta, et un modèle séparé pour le cas soldé aurait été un
+   * modèle de plus à faire valider pour une nuance d'une ligne.
+   */
+  paiement: (colis) => {
+    // Le versement qui vient d'être enregistré : c'est le dernier de la liste, et c'est de lui
+    // que parle le message. Le total payé dirait autre chose — un client qui règle en trois fois
+    // s'entendrait accuser réception de la somme entière à chaque versement.
+    const versements = Array.isArray(colis.paiements) ? colis.paiements : [];
+    const dernier = versements[versements.length - 1];
+    const enGnf = (v) => fmtGNF((Number(v) || 0) * (LIVE_RATES.GNF || CURRENCIES.GNF));
+    return {
+      nom: "paiement_recu",
+      variables: [
+        colis.destinataire || "cher client",
+        enGnf(dernier ? dernier.montant : colis.paye),
+        colis.tracking,
+        colis.reste > 0 ? enGnf(colis.reste) : "aucun montant",
+      ],
+    };
+  },
+  // « Bonjour {{1}}, votre colis {{2}} vous attend depuis {{3}} à notre agence {{4}}. Merci de
+  //   venir le récupérer dès que possible. »
+  relanceRetrait: (colis, data) => {
+    const agence = siteRetraitPourColis(colis, data);
+    const jours = Number(colis.joursAttente) || 0;
+    return {
+      nom: "colis_a_retirer",
+      variables: [
+        colis.destinataire || "cher client",
+        colis.tracking,
+        jours > 1 ? `${jours} jours` : "plusieurs jours",
+        agence ? `${agence.nom} — ${agence.adresse}` : "notre agence",
+      ],
+    };
+  },
 };
 
 /** Le nom du pays de destination, tel qu'il apparaît dans le message. */

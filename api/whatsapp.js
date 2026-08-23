@@ -101,7 +101,36 @@ const EXPLICATIONS_TWILIO = {
  * `modele` déclenche l'envoi d'un modèle validé plutôt qu'un texte libre — la seule forme
  * acceptée hors des 24 h. Ses variables remplissent {{1}}, {{2}}… dans l'ordre.
  */
-async function envoyerParMeta({ meta, destinataire, message, modele, variables }) {
+async function envoyerParMeta({ meta, destinataire, message, modele, variables, document, boutonUrl }) {
+  /*
+   * Un modèle se remplit par « composants », dans un ordre que Meta impose : l'en-tête, puis le
+   * corps, puis les boutons. Chacun doit correspondre EXACTEMENT à ce qui a été validé — envoyer
+   * un paramètre de bouton à un modèle qui n'en a pas est refusé aussi sûrement que l'inverse.
+   */
+  const composants = [];
+  // En-tête « document » : le ticket d'envoi, déjà déposé sur un stockage public.
+  if (document && document.lien) {
+    composants.push({
+      type: "header",
+      parameters: [{ type: "document", document: { link: document.lien, filename: document.nom || "document.pdf" } }],
+    });
+  }
+  if (variables && variables.length) {
+    composants.push({ type: "body", parameters: variables.map((v) => ({ type: "text", text: String(v) })) });
+  }
+  /*
+   * Bouton d'appel à l'action de type URL, à suffixe variable : le modèle validé porte l'adresse
+   * « …/?suivi=1&code={{1}} » et ce paramètre en complète la fin. C'est ce qui met le suivi du
+   * colis à un doigt du message, au lieu d'obliger le client à retrouver le site et à recopier
+   * neuf caractères.
+   */
+  if (boutonUrl) {
+    composants.push({
+      type: "button", sub_type: "url", index: "0",
+      parameters: [{ type: "text", text: String(boutonUrl) }],
+    });
+  }
+
   const corps = modele
     ? {
       messaging_product: "whatsapp",
@@ -110,9 +139,7 @@ async function envoyerParMeta({ meta, destinataire, message, modele, variables }
       template: {
         name: modele,
         language: { code: meta.langue },
-        ...(variables && variables.length
-          ? { components: [{ type: "body", parameters: variables.map((v) => ({ type: "text", text: String(v) })) }] }
-          : {}),
+        ...(composants.length ? { components: composants } : {}),
       },
     }
     : {
@@ -211,7 +238,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { to, message, mediaUrl, modele, variables } = req.body || {};
+    const { to, message, mediaUrl, modele, variables, document, boutonUrl } = req.body || {};
     if (!to || !message) {
       return res.status(400).json({ error: "Paramètres 'to' et 'message' requis." });
     }
@@ -230,6 +257,10 @@ export default async function handler(req, res) {
         // Le modèle donné par l'appelant l'emporte ; à défaut celui configuré sur le serveur.
         modele: modele || meta.modele || null,
         variables,
+        // Le ticket d'envoi vient de la même URL publique que la pièce jointe Twilio : un seul
+        // fichier déposé, servi par les deux voies.
+        document: document || (mediaUrl ? { lien: mediaUrl, nom: "ticket.pdf" } : null),
+        boutonUrl,
       })
       : await envoyerParTwilio({ twilio, avecIndicatif: `+${chiffres}`, message, mediaUrl });
 

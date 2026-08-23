@@ -1283,6 +1283,9 @@ function contenuEmailEtape(evenement, colis, data, marque) {
           { libelle: "Agence", valeur: agence ? agence.nom : "" },
           { libelle: "Adresse", valeur: agence ? agence.adresse : "" },
           { libelle: "Horaires", valeur: agence ? agence.horaires : "" },
+          // Un client qui ne trouve pas l'agence, ou qui veut vérifier avant de se déplacer,
+          // n'avait personne à appeler.
+          { libelle: "Téléphone", valeur: agence ? agence.telephone : "" },
           { libelle: "Code de retrait", valeur: colis?.codeRetrait || "" },
           { libelle: "Reste à régler", valeur: restant || "" },
         ],
@@ -1710,7 +1713,7 @@ const MODELES_WHATSAPP = {
       variables: [
         colis.destinataire || "cher client",
         colis.tracking,
-        agence ? `${agence.nom} — ${agence.adresse}` : "notre agence",
+        coordonneesAgence(agence),
       ],
     };
   },
@@ -1769,11 +1772,26 @@ const MODELES_WHATSAPP = {
         colis.destinataire || "cher client",
         colis.tracking,
         jours > 1 ? `${jours} jours` : "plusieurs jours",
-        agence ? `${agence.nom} — ${agence.adresse}` : "notre agence",
+        coordonneesAgence(agence),
       ],
     };
   },
 };
+
+/**
+ * L'agence telle qu'on la donne à un client qu'on attend : où venir, et qui appeler.
+ *
+ * Le téléphone manquait. Un client qui ne trouve pas la rue, ou qui veut savoir si son colis est
+ * bien là avant de traverser Conakry, n'avait personne à joindre — et rappeler l'agence est
+ * précisément ce que le message est censé lui éviter.
+ *
+ * Tout tient dans une seule variable du modèle : rien à redéposer chez Meta pour l'ajouter.
+ */
+function coordonneesAgence(agence) {
+  if (!agence) return "notre agence";
+  const lieu = [agence.nom, agence.adresse].filter(Boolean).join(" — ");
+  return agence.telephone ? `${lieu}, tél. ${agence.telephone}` : lieu;
+}
 
 /** Le nom du pays de destination, tel qu'il apparaît dans le message. */
 function paysDuColis(colis) {
@@ -10575,7 +10593,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
       const ag = siteRetraitPourColis(c, data);
       const du = c.reste > 0 ? ` Reste à régler : ${fmtGNF(c.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}.` : "";
       const message = `Bonjour ${c.destinataire}, votre colis ${nomExpediteurPourClient(data, c)} ${c.tracking} vous attend depuis ${c.joursAttente} jours`
-        + (ag ? ` à notre agence ${ag.nom} — ${ag.adresse}${ag.horaires ? ` (${ag.horaires})` : ""}.` : ".")
+        + (ag ? ` à notre agence ${ag.nom} — ${ag.adresse}${ag.horaires ? ` (${ag.horaires})` : ""}${ag.telephone ? `, tél. ${ag.telephone}` : ""}.` : ".")
         + du + " Merci de venir le récupérer.";
       if (!c.telephone && !c.expediteurTelephone) echecs.push({ tracking: c.tracking, raison: "pas de numéro" });
       else {
@@ -10766,7 +10784,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
         expedie: `Bonjour ${colisMaj.destinataire}, votre colis ${nomExpediteurPourClient(data, colisMaj)} ${tracking} vient de quitter notre entrepôt.`,
         arrivee: `Bonjour ${colisMaj.destinataire}, votre colis ${nomExpediteurPourClient(data, colisMaj)} ${tracking} est arrivé en Guinée.`,
         retrait: `Bonjour ${colisMaj.destinataire}, votre colis ${nomExpediteurPourClient(data, colisMaj)} ${tracking} est disponible au retrait.`
-          + (ag ? ` Retrait à notre agence ${ag.nom} — ${ag.adresse}${ag.horaires ? ` (${ag.horaires})` : ""}.` : "")
+          + (ag ? ` Retrait à notre agence ${ag.nom} — ${ag.adresse}${ag.horaires ? ` (${ag.horaires})` : ""}${ag.telephone ? `, tél. ${ag.telephone}` : ""}.` : "")
           + (colisMaj.reste > 0 ? ` Reste à régler : ${fmtGNF(colisMaj.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}.` : "")
           + (colisMaj.codeRetrait ? ` Votre code de retrait : ${colisMaj.codeRetrait} — présentez-le à l’agence.` : ""),
         livre: `Bonjour ${colisMaj.destinataire}, votre colis ${nomExpediteurPourClient(data, colisMaj)} ${tracking} vous a bien été remis. Merci de votre confiance !`,
@@ -11561,7 +11579,7 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
     if (etape.cle === "En transit") return `${base} vient de quitter notre entrepôt. Nous vous préviendrons dès son arrivée en Guinée.`;
     if (etape.cle === "Arrivé") return `${base} est arrivé en Guinée. Il sera bientôt disponible au retrait.`;
     const ag = siteRetraitPourColis(colis, data);
-    const ou = ag ? ` Retrait à notre agence ${ag.nom} — ${ag.adresse}${ag.horaires ? ` (${ag.horaires})` : ""}.` : "";
+    const ou = ag ? ` Retrait à notre agence ${ag.nom} — ${ag.adresse}${ag.horaires ? ` (${ag.horaires})` : ""}${ag.telephone ? `, tél. ${ag.telephone}` : ""}.` : "";
     const du = colis.reste > 0 ? ` Reste à régler : ${fmtGNF(colis.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}.` : "";
     return `${base} est disponible au retrait.${ou}${du}`;
   }

@@ -36,12 +36,57 @@
  * Resend refuse tout le reste — et son refus ne dit pas ce qui cloche, ce qui laisse chercher
  * longtemps quand la valeur porte des guillemets de trop ou qu'un chevron manque.
  */
+const ADRESSE_SEULE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 function analyserExpediteur(valeur) {
-  const brut = String(valeur || "").trim();
+  /*
+   * On répare les deux fautes de saisie courantes plutôt que de les refuser.
+   *
+   * Cette valeur se saisit dans l'interface de Vercel, souvent depuis un téléphone. Les chevrons
+   * demandent d'aller chercher la table des symboles et se perdent en route ; les guillemets, eux,
+   * s'ajoutent par réflexe. Dans les deux cas Resend refuse l'envoi sans dire pourquoi, et
+   * l'application ouvre un brouillon — un refus silencieux pour un caractère manquant.
+   *
+   * Rien n'est deviné : on ne reconstruit l'adresse que si la fin de la valeur EST une adresse
+   * e-mail. Ce qui précède devient le nom affiché.
+   */
+  let brut = String(valeur || "").trim();
+  // Guillemets englobants, simples ou doubles.
+  const englobants = /^(["'])([\s\S]*)\1$/.exec(brut);
+  if (englobants) brut = englobants[2].trim();
+
   const entreChevrons = /<([^>]+)>\s*$/.exec(brut);
-  const adresse = entreChevrons ? entreChevrons[1].trim() : brut;
-  const valide = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(adresse);
-  return { valide, domaine: valide ? adresse.split("@")[1] : null, avecNom: !!entreChevrons };
+  if (entreChevrons) {
+    const adresse = entreChevrons[1].trim();
+    const valide = ADRESSE_SEULE.test(adresse);
+    const nom = brut.slice(0, entreChevrons.index).trim().replace(/^(["'])([\s\S]*)\1$/, "$2");
+    return {
+      valide,
+      domaine: valide ? adresse.split("@")[1] : null,
+      avecNom: !!nom,
+      normalise: valide ? (nom ? `${nom} <${adresse}>` : adresse) : null,
+    };
+  }
+
+  if (ADRESSE_SEULE.test(brut)) {
+    return { valide: true, domaine: brut.split("@")[1], avecNom: false, normalise: brut };
+  }
+
+  // « Ba-Diaby Express contact@badiabyexpress.com » — les chevrons manquent, on les remet.
+  const morceaux = brut.split(/\s+/);
+  const derniere = morceaux[morceaux.length - 1] || "";
+  if (morceaux.length > 1 && ADRESSE_SEULE.test(derniere)) {
+    const nom = morceaux.slice(0, -1).join(" ").replace(/^(["'])([\s\S]*)\1$/, "$2").trim();
+    return {
+      valide: true,
+      domaine: derniere.split("@")[1],
+      avecNom: !!nom,
+      normalise: nom ? `${nom} <${derniere}>` : derniere,
+      repare: true,
+    };
+  }
+
+  return { valide: false, domaine: null, avecNom: false, normalise: null };
 }
 
 export default async function handler(req, res) {
@@ -60,6 +105,8 @@ export default async function handler(req, res) {
       expediteur: !!process.env.EMAIL_FROM,
       expediteurValide: expediteur.valide,
       expediteurAvecNom: expediteur.avecNom,
+      // Vrai quand la valeur saisie n'était pas dans les règles et a été remise en forme.
+      expediteurRepare: !!expediteur.repare,
       domaine: expediteur.domaine,
       reponsesVers: !!process.env.EMAIL_REPLY_TO,
     });
@@ -70,7 +117,9 @@ export default async function handler(req, res) {
   }
 
   const cle = process.env.RESEND_API_KEY;
-  const expediteur = process.env.EMAIL_FROM;
+  // C'est la forme normalisée qui part chez Resend — voir analyserExpediteur.
+  const analyse = analyserExpediteur(process.env.EMAIL_FROM);
+  const expediteur = analyse.normalise;
   /*
    * Où renvoyer les réponses.
    *
@@ -84,10 +133,20 @@ export default async function handler(req, res) {
    */
   const repondreA = process.env.EMAIL_REPLY_TO;
 
-  if (!cle || !expediteur) {
+  if (!cle || !process.env.EMAIL_FROM) {
     return res.status(501).json({
       error: "L'envoi d'e-mails n'est pas configuré sur le serveur.",
       configure: false,
+    });
+  }
+
+  /*
+   * Configuré, mais inutilisable — et c'est un cas différent, qui appelle un geste différent.
+   * Le confondre avec « non configuré » enverrait chercher une variable qui existe déjà.
+   */
+  if (!expediteur) {
+    return res.status(500).json({
+      error: "L'adresse expéditrice (EMAIL_FROM) n'a pas une forme valide. Attendu : Ba-Diaby Express <contact@badiabyexpress.com>",
     });
   }
 

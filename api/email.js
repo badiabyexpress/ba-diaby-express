@@ -10,9 +10,10 @@
  * VARIABLES D'ENVIRONNEMENT À CRÉER SUR VERCEL
  * --------------------------------------------
  *   RESEND_API_KEY   clé fournie par Resend (commence par re_) — À SAISIR UNIQUEMENT DANS VERCEL
- *   EMAIL_FROM       adresse expéditrice, ex. "Ba-Diaby Express <contact@votredomaine.com>"
+ *   EMAIL_FROM       adresse expéditrice, ex. "Ba-Diaby Express <contact@badiabyexpress.com>"
+ *   EMAIL_REPLY_TO   facultatif — où atterrissent les réponses des clients
  *
- * Tant que ces variables sont absentes, la fonction répond 501 et l'application retombe
+ * Tant que les deux premières sont absentes, la fonction répond 501 et l'application retombe
  * proprement sur l'ouverture d'un brouillon : aucune régression.
  *
  * POURQUOI RESEND
@@ -22,9 +23,12 @@
  *
  * ADRESSE EXPÉDITRICE
  * -------------------
- * Resend n'accepte d'envoyer que depuis un domaine vérifié. Sans domaine à vous, utilisez
- * l'adresse de test fournie par Resend : les e-mails ne partiront qu'à votre propre adresse,
- * ce qui suffit pour valider le circuit.
+ * Resend n'accepte d'envoyer que depuis un domaine vérifié — badiabyexpress.com, ici. L'adresse
+ * choisie devant le @ n'a pas besoin d'exister comme boîte aux lettres : le domaine vérifié
+ * suffit à envoyer. C'est pour les RÉPONSES que cela compte, d'où EMAIL_REPLY_TO.
+ *
+ * Sans domaine vérifié, Resend refuse avec `validation_error`, et l'application retombe sur le
+ * brouillon : rien ne casse, mais rien ne part non plus.
  */
 
 export default async function handler(req, res) {
@@ -34,6 +38,18 @@ export default async function handler(req, res) {
 
   const cle = process.env.RESEND_API_KEY;
   const expediteur = process.env.EMAIL_FROM;
+  /*
+   * Où renvoyer les réponses.
+   *
+   * L'adresse expéditrice n'a pas besoin d'exister comme boîte aux lettres pour envoyer : un
+   * domaine vérifié suffit. Mais un client qui répond écrit bien à cette adresse, et sa réponse
+   * se perd si personne ne la relève. C'est le genre de perte qu'on ne remarque jamais — on ne
+   * sait pas ce qu'on n'a pas reçu.
+   *
+   * Cette variable permet donc de faire atterrir les réponses sur une boîte réelle, sans avoir à
+   * créer de messagerie sur le domaine. Absente, rien ne change.
+   */
+  const repondreA = process.env.EMAIL_REPLY_TO;
 
   if (!cle || !expediteur) {
     return res.status(501).json({
@@ -59,6 +75,7 @@ export default async function handler(req, res) {
       to: [String(to)],
       subject: String(sujet),
       html: String(message || ""),
+      ...(repondreA ? { reply_to: repondreA } : {}),
     };
 
     /*

@@ -1642,8 +1642,18 @@ const MODELES_WHATSAPP = {
     nom: "colis_arrive",
     variables: [colis.destinataire || "cher client", colis.tracking],
   }),
-  // « Bonjour {{1}}, votre colis {{2}} est disponible au retrait à notre agence {{3}}. Votre
-  //   code de retrait est {{4}}. Présentez-le à l'agence pour récupérer votre colis. »
+  /*
+   * « Bonjour {{1}}, votre colis {{2}} est disponible au retrait à notre agence {{3}}. Présentez
+   *   la référence {{4}} à notre équipe, avec une pièce d'identité. »
+   *
+   * La formulation évite le mot « code » à dessein. Le classificateur de Meta y reconnaît un code
+   * de connexion à usage unique et bascule le modèle en catégorie « Authentification » — laquelle
+   * impose un format figé, sans texte libre, et rend le modèle inutilisable pour un retrait de
+   * colis. « Référence », présentée avec une pièce d'identité, décrit la même chose sans
+   * déclencher cette lecture.
+   *
+   * Le repli se lit aussi bien : « Présentez la référence de votre colis à notre équipe ».
+   */
   retrait: (colis, data) => {
     const agence = siteRetraitPourColis(colis, data);
     return {
@@ -1652,7 +1662,7 @@ const MODELES_WHATSAPP = {
         colis.destinataire || "cher client",
         colis.tracking,
         agence ? `${agence.nom} — ${agence.adresse}` : "notre agence",
-        colis.codeRetrait || "communiqué à l’agence",
+        colis.codeRetrait || "de votre colis",
       ],
     };
   },

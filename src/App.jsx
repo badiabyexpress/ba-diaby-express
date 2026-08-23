@@ -1643,16 +1643,20 @@ const MODELES_WHATSAPP = {
     variables: [colis.destinataire || "cher client", colis.tracking],
   }),
   /*
-   * « Bonjour {{1}}, votre colis {{2}} est disponible au retrait à notre agence {{3}}. Présentez
-   *   la référence {{4}} à notre équipe, avec une pièce d'identité. »
+   * « Bonjour {{1}}, votre colis {{2}} est disponible au retrait à notre agence {{3}}.
+   *   Munissez-vous d'une pièce d'identité pour le récupérer. »
    *
-   * La formulation évite le mot « code » à dessein. Le classificateur de Meta y reconnaît un code
-   * de connexion à usage unique et bascule le modèle en catégorie « Authentification » — laquelle
-   * impose un format figé, sans texte libre, et rend le modèle inutilisable pour un retrait de
-   * colis. « Référence », présentée avec une pièce d'identité, décrit la même chose sans
-   * déclencher cette lecture.
+   * LE CODE DE RETRAIT NE FIGURE PAS ICI, ET C'EST DÉLIBÉRÉ.
    *
-   * Le repli se lit aussi bien : « Présentez la référence de votre colis à notre équipe ».
+   * Le classificateur de Meta prend tout numéro accompagné d'un mot comme « code » ou
+   * « référence » pour un code de connexion à usage unique, et bascule le modèle en catégorie
+   * « Authentification » — laquelle impose un format figé, sans texte libre, et rend le modèle
+   * inutilisable pour annoncer un colis. Reformuler n'y a rien changé : c'est la présence du
+   * numéro lui-même qui déclenche la lecture.
+   *
+   * Le code n'est pas perdu pour autant. Il figure dans l'e-mail de mise à disposition, où Meta
+   * n'a pas voix au chapitre, et sur la page de suivi du colis. Le message WhatsApp dit où venir ;
+   * le reste s'obtient là où c'est plus sûr de le lire.
    */
   retrait: (colis, data) => {
     const agence = siteRetraitPourColis(colis, data);
@@ -1662,7 +1666,6 @@ const MODELES_WHATSAPP = {
         colis.destinataire || "cher client",
         colis.tracking,
         agence ? `${agence.nom} — ${agence.adresse}` : "notre agence",
-        colis.codeRetrait || "de votre colis",
       ],
     };
   },

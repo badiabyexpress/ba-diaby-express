@@ -1733,7 +1733,18 @@ function paysDuColis(colis) {
 function modeleWhatsAppPourEtape(evenement, colis, data) {
   const fabrique = MODELES_WHATSAPP[evenement];
   if (!fabrique || !colis) return null;
-  try { return fabrique(colis, data); } catch (e) { return null; }
+  try {
+    const gabarit = fabrique(colis, data);
+    /*
+     * Le bouton « Suivre mon colis » accompagne TOUS les modèles.
+     *
+     * Chaque modèle validé porte le même bouton d'appel à l'action, dont l'adresse se termine par
+     * une variable : « …/?suivi=1&code={{1}} ». Ce qu'on envoie ici en complète la fin — le numéro
+     * de suivi — et le client arrive sur la page de SON colis d'un seul geste. Sans lui, il lui
+     * faudrait retrouver le site puis recopier neuf caractères, ce que personne ne fait.
+     */
+    return { ...gabarit, boutonUrl: colis.tracking };
+  } catch (e) { return null; }
 }
 
 async function notifierEvenement(data, evenement, colis, message) {
@@ -1741,12 +1752,27 @@ async function notifierEvenement(data, evenement, colis, message) {
   if (!prefs) return { envoyes: 0 };
   let envoyes = 0;
 
-  // Réglage « Joindre l'étiquette PDF » (Configuration → Notifications clients) : uniquement à
-  // l'enregistrement, seul moment où l'étiquette existe déjà. Un échec de génération/upload ne
-  // doit jamais empêcher l'envoi du message texte — on retombe simplement sans pièce jointe.
+  /*
+   * Le ticket d'envoi, à l'enregistrement — seul moment où l'étiquette existe déjà.
+   *
+   * Il part par deux voies distinctes, et c'est voulu :
+   *
+   * — En-tête « document » du modèle Meta (`ticket`) : le modèle « colis_enregistre » a été validé
+   *   AVEC un en-tête document, et un modèle se remplit exactement comme il a été validé. Laisser
+   *   cet en-tête vide ferait refuser l'envoi entier — le client ne recevrait rien du tout. Le
+   *   ticket est donc préparé à chaque enregistrement, sans dépendre d'un réglage.
+   * — Pièce jointe Twilio (`mediaUrl`) : là, rien n'est figé d'avance, et le réglage « Joindre
+   *   l'étiquette PDF » garde tout son sens.
+   *
+   * Un échec de génération ou de dépôt ne doit jamais empêcher le message de partir : on continue
+   * sans le ticket, et l'agent voit le refus éventuel de Meta plutôt que de croire le client
+   * prévenu.
+   */
+  let ticket = null;
   let mediaUrl = null;
-  if (evenement === "enregistrement" && data?.notificationSettings?.joindreEtiquette) {
-    try { mediaUrl = await genererUrlEtiquette(colis, data); } catch (e) { /* le message texte part quand même */ }
+  if (evenement === "enregistrement") {
+    try { ticket = await genererUrlEtiquette(colis, data); } catch (e) { /* le message texte part quand même */ }
+    if (data?.notificationSettings?.joindreEtiquette) mediaUrl = ticket;
   }
 
   /*
@@ -1762,13 +1788,17 @@ async function notifierEvenement(data, evenement, colis, message) {
    * pourquoi, plutôt que de croire le client prévenu.
    */
   const gabarit = modeleWhatsAppPourEtape(evenement, colis, data);
+  // Le ticket voyage avec le modèle, jamais seul : c'est son en-tête.
+  const gabaritComplet = gabarit && ticket
+    ? { ...gabarit, document: { lien: ticket, nom: `ticket-${colis.tracking || "colis"}.pdf` } }
+    : gabarit;
 
   const destinations = [];
   if (prefs.destinataire && colis.telephone) destinations.push(colis.telephone);
   if (prefs.expediteur && colis.expediteurTelephone) destinations.push(colis.expediteurTelephone);
   for (const tel of destinations) {
     try {
-      const { envoye } = await envoyerWhatsApp(tel, message, mediaUrl, gabarit);
+      const { envoye } = await envoyerWhatsApp(tel, message, mediaUrl, gabaritComplet);
       if (envoye) envoyes++;
     } catch (e) { /* une notification ne doit jamais bloquer l'action en cours */ }
   }
@@ -1879,7 +1909,12 @@ async function envoyerWhatsApp(telephone, message, mediaUrl, gabarit) {
         message,
         ...(mediaUrl ? { mediaUrl } : {}),
         // Le modèle validé par Meta, quand l'étape en a un — voir modeleWhatsAppPourEtape.
-        ...(gabarit?.nom ? { modele: gabarit.nom, variables: gabarit.variables } : {}),
+        ...(gabarit?.nom ? {
+          modele: gabarit.nom,
+          variables: gabarit.variables,
+          ...(gabarit.boutonUrl ? { boutonUrl: gabarit.boutonUrl } : {}),
+          ...(gabarit.document ? { document: gabarit.document } : {}),
+        } : {}),
       }),
     });
     if (reponse.ok) return { envoye: true };
@@ -20106,9 +20141,9 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
           <div style={{ flex: 1, minWidth: 220 }}>
             <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Joindre l’étiquette PDF à l’enregistrement</div>
             <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 }}>
-              Quand un colis est enregistré et que la notification WhatsApp « À l’enregistrement du colis » est activée
-              ci-dessus, l’étiquette part directement en pièce jointe. Nécessite un compte WhatsApp Business Twilio
-              validé par Meta — sans quoi seul le message texte part, comme d’habitude.
+              Concerne l’envoi par Twilio : l’étiquette part alors en pièce jointe du message d’enregistrement.
+              Avec WhatsApp Business (Meta), le ticket accompagne toujours ce message — le modèle validé
+              « colis_enregistre » le porte en en-tête, et ce réglage n’y change rien.
             </div>
           </div>
           <Interrupteur

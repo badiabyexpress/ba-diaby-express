@@ -1630,6 +1630,22 @@ const MODELES_WHATSAPP = {
       ],
     };
   },
+  /*
+   * « Bonjour {{1}}, les informations de votre colis {{2}} ont été mises à jour — {{3}}. Votre
+   *   ticket corrigé est joint à ce message. »
+   *
+   * Le seul autre moment, avec l'enregistrement, où le client reçoit le lien de suivi et son
+   * ticket : ce qu'il avait en main ne vaut plus. Le poids ou le montant a changé, et le ticket
+   * imprimé au comptoir annonce désormais autre chose que ce qu'il devra régler.
+   */
+  modification: (colis) => ({
+    nom: "colis_modifie",
+    variables: [
+      colis.destinataire || "cher client",
+      colis.tracking,
+      colis.detailsModification || "informations corrigées",
+    ],
+  }),
   // « Bonjour {{1}}, votre colis {{2}} a quitté notre entrepôt et poursuit son acheminement
   //   vers {{3}}. Nous vous préviendrons dès son arrivée. »
   expedie: (colis, data) => ({
@@ -1736,13 +1752,19 @@ function modeleWhatsAppPourEtape(evenement, colis, data) {
   try {
     const gabarit = fabrique(colis, data);
     /*
-     * Le bouton « Suivre mon colis » accompagne TOUS les modèles.
+     * Le bouton « Suivre mon colis » n'accompagne que deux modèles : l'enregistrement et la
+     * modification.
      *
-     * Chaque modèle validé porte le même bouton d'appel à l'action, dont l'adresse se termine par
-     * une variable : « …/?suivi=1&code={{1}} ». Ce qu'on envoie ici en complète la fin — le numéro
-     * de suivi — et le client arrive sur la page de SON colis d'un seul geste. Sans lui, il lui
-     * faudrait retrouver le site puis recopier neuf caractères, ce que personne ne fait.
+     * Ce sont les deux moments où le client reçoit quelque chose à garder — son numéro de suivi,
+     * son ticket. Les messages d'étape qui suivent ne font que raconter le voyage ; le lien y
+     * serait répété quatre ou cinq fois pour le même colis, et un client qui reçoit cinq fois le
+     * même bouton cesse de le voir.
+     *
+     * Le modèle validé porte l'adresse « …/?suivi=1&code={{1}} » et l'envoi en complète la fin
+     * avec le numéro de suivi : le client arrive sur la page de SON colis d'un seul geste.
      */
+    const AVEC_SUIVI = ["enregistrement", "modification"];
+    if (!AVEC_SUIVI.includes(evenement)) return gabarit;
     return { ...gabarit, boutonUrl: colis.tracking };
   } catch (e) { return null; }
 }
@@ -1753,14 +1775,19 @@ async function notifierEvenement(data, evenement, colis, message) {
   let envoyes = 0;
 
   /*
-   * Le ticket d'envoi, à l'enregistrement — seul moment où l'étiquette existe déjà.
+   * Le ticket d'envoi, aux deux seuls moments où le client en a besoin.
+   *
+   * À l'enregistrement, c'est sa preuve de dépôt. À la modification, c'est sa correction : le
+   * poids ou le montant a changé, et le ticket qu'il a en main annonce autre chose que ce qu'il
+   * devra régler. Aux étapes suivantes — parti, arrivé, disponible — rien n'a changé sur le
+   * ticket, et le renvoyer chaque fois n'apprendrait rien à personne.
    *
    * Il part par deux voies distinctes, et c'est voulu :
    *
-   * — En-tête « document » du modèle Meta (`ticket`) : le modèle « colis_enregistre » a été validé
-   *   AVEC un en-tête document, et un modèle se remplit exactement comme il a été validé. Laisser
-   *   cet en-tête vide ferait refuser l'envoi entier — le client ne recevrait rien du tout. Le
-   *   ticket est donc préparé à chaque enregistrement, sans dépendre d'un réglage.
+   * — En-tête « document » du modèle Meta (`ticket`) : ces deux modèles ont été validés AVEC un
+   *   en-tête document, et un modèle se remplit exactement comme il a été validé. Laisser cet
+   *   en-tête vide ferait refuser l'envoi entier — le client ne recevrait rien du tout. Le ticket
+   *   est donc préparé à chaque fois, sans dépendre d'un réglage.
    * — Pièce jointe Twilio (`mediaUrl`) : là, rien n'est figé d'avance, et le réglage « Joindre
    *   l'étiquette PDF » garde tout son sens.
    *
@@ -1768,9 +1795,10 @@ async function notifierEvenement(data, evenement, colis, message) {
    * sans le ticket, et l'agent voit le refus éventuel de Meta plutôt que de croire le client
    * prévenu.
    */
+  const AVEC_TICKET = ["enregistrement", "modification"];
   let ticket = null;
   let mediaUrl = null;
-  if (evenement === "enregistrement") {
+  if (AVEC_TICKET.includes(evenement)) {
     try { ticket = await genererUrlEtiquette(colis, data); } catch (e) { /* le message texte part quand même */ }
     if (data?.notificationSettings?.joindreEtiquette) mediaUrl = ticket;
   }
@@ -10582,7 +10610,9 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
         poidsChange ? `poids : ${apres.poids} kg` : null,
         prixChange ? `montant : ${fmtGNF((apres.prix || 0) * (LIVE_RATES.GNF || CURRENCIES.GNF))}` : null,
       ].filter(Boolean).join(", ");
-      notifierEvenement(next, "modification", apres,
+      // Le détail voyage avec le colis : c'est {{3}} du modèle, et le modèle n'a pas d'autre
+      // moyen de savoir ce qui vient de changer.
+      notifierEvenement(next, "modification", { ...apres, detailsModification: details },
         `Bonjour ${apres.destinataire}, les informations de votre colis ${nomExpediteurPourClient(data, apres)} ${tracking} ont été mises à jour — ${details}.`);
     }
   }

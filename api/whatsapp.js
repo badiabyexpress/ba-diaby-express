@@ -78,7 +78,8 @@ const EXPLICATIONS_META = {
   131026: "Ce numéro ne peut pas recevoir de message WhatsApp. Vérifiez qu'il est bien sur WhatsApp, avec son indicatif pays.",
   131030: "Ce numéro n'est pas dans la liste des destinataires autorisés. Tant que l'application Meta n'est pas publiée, seuls les numéros de test peuvent être joints.",
   132001: "Le modèle demandé n'existe pas, ou pas dans cette langue. Vérifiez son nom dans le gestionnaire de modèles Meta.",
-  132000: "Le nombre de variables envoyées ne correspond pas à celui du modèle validé.",
+  132000: "Ce qui a été envoyé ne correspond pas au modèle validé : nombre de variables, en-tête ou bouton. "
+    + "Le modèle doit être rempli exactement comme il a été déposé.",
   132015: "Ce modèle a été refusé ou mis en pause par Meta. Il faut le corriger et le refaire valider.",
   190: "Jeton refusé ou expiré. Regénérez WHATSAPP_TOKEN dans Meta et remettez-le dans Vercel.",
   100: "Paramètre refusé par Meta. Vérifiez WHATSAPP_PHONE_ID — c'est l'« ID de numéro de téléphone », pas le numéro lui-même.",

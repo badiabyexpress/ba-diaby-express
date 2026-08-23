@@ -81,6 +81,17 @@ const EXPLICATIONS_META = {
   132000: "Ce qui a été envoyé ne correspond pas au modèle validé : nombre de variables, en-tête ou bouton. "
     + "Le modèle doit être rempli exactement comme il a été déposé.",
   132015: "Ce modèle a été refusé ou mis en pause par Meta. Il faut le corriger et le refaire valider.",
+  /*
+   * 133010 est le piège de la mise en service : le numéro a été ajouté et vérifié, tout paraît
+   * en ordre dans le gestionnaire — mais il n'a jamais été ENREGISTRÉ sur la Cloud API. C'est une
+   * étape distincte, facile à sauter, et Meta n'en dit rien de plus qu'« Account not registered ».
+   */
+  133010: "Le numéro n'est pas encore activé pour l'envoi. Dans Meta > API Setup, appuyez sur "
+    + "« Register » (ou Configuration > Numéros de téléphone > Enregistrer) et définissez le code "
+    + "à six chiffres. L'ajout et la vérification du numéro ne suffisent pas.",
+  133005: "Le code à six chiffres du numéro est refusé. C'est celui défini à l'enregistrement du numéro chez Meta.",
+  133006: "Ce numéro doit d'abord être vérifié chez Meta avant de pouvoir envoyer.",
+  133016: "Ce numéro a été supprimé puis réenregistré trop souvent. Meta impose d'attendre avant de recommencer.",
   190: "Jeton refusé ou expiré. Regénérez WHATSAPP_TOKEN dans Meta et remettez-le dans Vercel.",
   100: "Paramètre refusé par Meta. Vérifiez WHATSAPP_PHONE_ID — c'est l'« ID de numéro de téléphone », pas le numéro lui-même.",
   368: "Ce compte est temporairement bloqué par Meta pour non-respect des règles de messagerie.",

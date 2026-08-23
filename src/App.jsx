@@ -1289,9 +1289,16 @@ function contenuEmailEtape(evenement, colis, data, marque) {
           { libelle: "Code de retrait", valeur: colis?.codeRetrait || "" },
           { libelle: "Reste à régler", valeur: restant || "" },
         ],
+        /*
+         * Le reçu ou le ticket d'envoi, et non une pièce d'identité.
+         *
+         * C'est ce que le client a réellement en main : le ticket lui a été remis au comptoir, ou
+         * envoyé sur WhatsApp à l'enregistrement. Beaucoup de clients n'ont pas de CNI sur eux,
+         * et l'exiger renvoyait des gens chez eux pour un colis qui les attendait.
+         */
         note: colis?.codeRetrait
           ? "Présentez votre code de retrait à l’agence : il nous permet de remettre le colis à la bonne personne."
-          : "Munissez-vous d’une pièce d’identité pour le retrait.",
+          : "Munissez-vous de votre reçu ou de votre ticket d’envoi pour le retrait.",
       }),
     };
   }
@@ -1692,7 +1699,7 @@ const MODELES_WHATSAPP = {
    *   Votre colis est disponible au retrait.
    *   Référence : {{2}}
    *   Agence : {{3}}
-   *   Munissez-vous d'une pièce d'identité pour le récupérer. »
+   *   Munissez-vous de votre reçu ou de votre ticket d'envoi pour le récupérer. »
    *
    * LE CODE DE RETRAIT NE FIGURE PAS ICI, ET C'EST DÉLIBÉRÉ.
    *
@@ -1789,7 +1796,17 @@ const MODELES_WHATSAPP = {
  */
 function coordonneesAgence(agence) {
   if (!agence) return "notre agence";
-  const lieu = [agence.nom, agence.adresse].filter(Boolean).join(" — ");
+  const nom = (agence.nom || "").trim();
+  const adresse = (agence.adresse || "").trim();
+  /*
+   * Le nom du site n'est répété que s'il n'est pas déjà dans l'adresse. L'agence de Conakry
+   * s'appelle « Conakry » et son adresse dit « Bambeto Park, Conakry » : la forme naïve donnait
+   * « Conakry — Bambeto Park, Conakry », qui a l'air d'une erreur d'application.
+   */
+  const sansAccent = (t) => t.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  const lieu = nom && adresse && !sansAccent(adresse).includes(sansAccent(nom))
+    ? `${nom} — ${adresse}`
+    : (adresse || nom);
   return agence.telephone ? `${lieu}, tél. ${agence.telephone}` : lieu;
 }
 
@@ -2245,7 +2262,7 @@ function defaultSeed() {
       parDefaut: false, commissionRate: null, ...c,
     })),
     sites: [
-      { id: "site-bambeto", nom: "Bambeto", adresse: "Bambeto, Conakry", telephone: "+224612479339", horaires: "Lun–Sam 8h–18h", paiements: "Espèces, Orange Money", stockage: "Retrait sous 7 jours" },
+      { id: "site-bambeto", nom: "Conakry", adresse: "Bambeto Park, Conakry", telephone: "+224612479339", horaires: "Lun–Sam 8h–18h", paiements: "Espèces, Orange Money", stockage: "Retrait sous 7 jours" },
       { id: "site-madina", nom: "Madina", adresse: "Madina, Conakry", telephone: "+224612479339", horaires: "Lun–Sam 8h–18h", paiements: "Espèces, Orange Money", stockage: "Retrait sous 7 jours" },
     ],
     agencesReception: {

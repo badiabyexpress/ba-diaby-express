@@ -156,15 +156,25 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Paramètres 'to' et 'sujet' requis." });
     }
 
+    /*
+     * On enlève les espaces de bord avant de juger.
+     *
+     * Une adresse saisie sur un téléphone arrive régulièrement avec un espace en fin — le clavier
+     * l'ajoute après l'auto-complétion, et rien ne le montre à l'écran. L'adresse était alors
+     * déclarée invalide, l'envoi refusé, et l'agent cherchait une faute de frappe qui n'existe
+     * pas. Refuser pour un espace invisible n'aide personne.
+     */
+    const destinataire = String(to).trim();
+
     // Vérification sommaire : une adresse manifestement invalide part sinon dans le vide,
     // et Resend la facturerait comme un envoi.
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(to))) {
-      return res.status(400).json({ error: "Adresse e-mail invalide." });
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(destinataire)) {
+      return res.status(400).json({ error: `Adresse e-mail invalide : « ${destinataire.slice(0, 60)} »` });
     }
 
     const corps = {
       from: expediteur,
-      to: [String(to)],
+      to: [destinataire],
       subject: String(sujet),
       html: String(message || ""),
       ...(repondreA ? { reply_to: repondreA } : {}),

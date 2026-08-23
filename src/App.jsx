@@ -20459,6 +20459,22 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
   useEffect(() => { relireQuota(); }, []);
 
   /*
+   * L'état des modèles chez Meta.
+   *
+   * Un modèle « En cours d'examen » échoue exactement comme un modèle qui n'existerait pas :
+   * l'envoi renvoie le même refus. Sans cette liste, on cherche une erreur de nom là où il n'y a
+   * qu'à patienter — et l'on ne sait pas non plus lequel des huit a été refusé.
+   */
+  const [modeles, setModeles] = useState(null);
+  function relireModeles() {
+    return fetch("/api/whatsapp?modeles=1")
+      .then((r) => r.json().then((corps) => ({ ok: r.ok, corps })))
+      .then(({ ok, corps }) => setModeles(ok ? corps : { erreur: corps?.error, manquant: corps?.manquant }))
+      .catch(() => setModeles({ erreur: "indisponible" }));
+  }
+  useEffect(() => { relireModeles(); }, []);
+
+  /*
    * L'activation du numéro, depuis l'application.
    *
    * C'est l'étape « Register » de Meta. Elle se fait normalement depuis la console développeur,
@@ -20695,16 +20711,70 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
           {quota.qualite && (
             <div style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 9 }}>
               <span style={{ width: 9, height: 9, borderRadius: 9,
-                background: quota.qualite === "GREEN" ? "var(--ok-fg)" : quota.qualite === "YELLOW" ? "var(--warn-fg)" : "var(--danger-fg)" }} />
+                background: quota.qualite === "GREEN" ? "var(--ok-fg)"
+                  : quota.qualite === "YELLOW" ? "var(--warn-fg)"
+                  : quota.qualite === "RED" ? "var(--danger-fg)" : "var(--muted)" }} />
               <span style={{ fontSize: 12, color: "var(--muted)" }}>
+                {/*
+                  Un numéro neuf n'a pas encore de note : Meta répond « UNKNOWN ». L'annoncer comme
+                  une qualité basse serait alarmant et faux — c'est simplement qu'il n'a jamais
+                  envoyé.
+                */}
                 {quota.qualite === "GREEN"
                   ? "Qualité bonne — c’est elle qui fait monter le palier."
                   : quota.qualite === "YELLOW"
                     ? "Qualité moyenne : des clients signalent vos messages. Le palier peut redescendre."
-                    : "Qualité basse : le numéro risque d’être restreint. Espacez les envois non essentiels."}
+                    : quota.qualite === "RED"
+                      ? "Qualité basse : le numéro risque d’être restreint. Espacez les envois non essentiels."
+                      : "Qualité pas encore évaluée : ce numéro n’a pas assez envoyé. Elle apparaîtra après vos premiers messages."}
               </span>
             </div>
           )}
+        </div>
+      )}
+
+      {/*
+        L'état des huit modèles.
+
+        C'est la question qu'on se pose quand un client ne reçoit rien : sont-ils approuvés ? Elle
+        se posait jusqu'ici dans la console de Meta, sur un autre écran, dans une autre langue.
+      */}
+      {modeles && !modeles.erreur && (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "13px 16px", marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Modèles déposés chez Meta</div>
+            <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
+              {modeles.approuves} approuvé{modeles.approuves > 1 ? "s" : ""}
+              {modeles.enAttente > 0 ? ` · ${modeles.enAttente} en examen` : ""}
+              {modeles.refuses > 0 ? ` · ${modeles.refuses} refusé${modeles.refuses > 1 ? "s" : ""}` : ""}
+            </div>
+          </div>
+          {modeles.enAttente > 0 && (
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 5, lineHeight: 1.55 }}>
+              Un modèle en examen ne peut pas servir : l’envoi échoue comme s’il n’existait pas.
+              Meta répond en général en quelques minutes à quelques heures.
+            </div>
+          )}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
+            {(modeles.modeles || []).map((m) => {
+              const teinte = m.statut === "APPROVED" ? "var(--ok-fg)"
+                : m.statut === "REJECTED" ? "var(--danger-fg)" : "var(--warn-fg)";
+              const mot = m.statut === "APPROVED" ? "approuvé"
+                : m.statut === "REJECTED" ? "refusé"
+                : m.statut === "PENDING" ? "en examen" : m.statut.toLowerCase();
+              return (
+                <span key={`${m.nom}-${m.langue}`} title={`${m.langue} · ${m.categorie || ""}`}
+                  style={{ fontSize: 11, fontFamily: "monospace", color: "var(--text)", background: "var(--surface2)", border: "1px solid " + teinte, borderRadius: 6, padding: "3px 8px" }}>
+                  {m.nom} <span style={{ color: teinte }}>{mot}</span>
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      {modeles?.manquant && (
+        <div style={{ background: "var(--surface2)", border: "1px dashed var(--border)", borderRadius: 12, padding: "12px 16px", marginBottom: 16, fontSize: 12, color: "var(--muted)", lineHeight: 1.55 }}>
+          Pour voir ici l’état de vos modèles : {modeles.erreur}
         </div>
       )}
 

@@ -77,7 +77,15 @@ const EXPLICATIONS_META = {
   131047: "Plus de 24 h se sont écoulées depuis le dernier message de ce client : WhatsApp exige alors un modèle validé par Meta. Envoyez le message autrement pour cette fois.",
   131026: "Ce numéro ne peut pas recevoir de message WhatsApp. Vérifiez qu'il est bien sur WhatsApp, avec son indicatif pays.",
   131030: "Ce numéro n'est pas dans la liste des destinataires autorisés. Tant que l'application Meta n'est pas publiée, seuls les numéros de test peuvent être joints.",
-  132001: "Le modèle demandé n'existe pas, ou pas dans cette langue. Vérifiez son nom dans le gestionnaire de modèles Meta.",
+  /*
+   * 132001 recouvre trois situations très différentes, et l'agent doit pouvoir les distinguer :
+   * le modèle n'a jamais été déposé, il attend encore l'examen de Meta, ou il existe dans une
+   * autre langue que celle demandée. Un modèle « En cours d'examen » est le cas le plus fréquent
+   * dans les heures qui suivent un dépôt — et le seul qui se règle en attendant.
+   */
+  132001: "Ce modèle n'est pas utilisable pour l'instant : soit il attend encore l'examen de Meta "
+    + "(les modèles « En cours d'examen » ne peuvent pas servir), soit son nom ou sa langue ne "
+    + "correspondent pas à ce qui a été déposé.",
   132000: "Ce qui a été envoyé ne correspond pas au modèle validé : nombre de variables, en-tête ou bouton. "
     + "Le modèle doit être rempli exactement comme il a été déposé.",
   132015: "Ce modèle a été refusé ou mis en pause par Meta. Il faut le corriger et le refaire valider.",
@@ -336,6 +344,53 @@ export default async function handler(req, res) {
         });
       }
       return res.status(200).json({ ok: true });
+    } catch (e) {
+      return res.status(502).json({ error: "Impossible de joindre Meta." });
+    }
+  }
+
+  /*
+   * L'état des modèles, tel que Meta le voit.
+   *
+   * Un modèle « En cours d'examen » est invisible à l'envoi : il échoue exactement comme un
+   * modèle qui n'existerait pas. Sans cette liste, on ne peut pas distinguer « Meta n'a pas fini »
+   * de « le nom est faux » — et l'on cherche une erreur là où il n'y a qu'à patienter.
+   *
+   * Demande l'identifiant du compte professionnel (WHATSAPP_WABA_ID). Sans lui, on le dit
+   * plutôt que de faire semblant.
+   */
+  if (req.method === "GET" && req.query?.modeles !== undefined) {
+    const waba = process.env.WHATSAPP_WABA_ID;
+    if (!metaPret) return res.status(501).json({ error: "Meta n'est pas configuré.", configure: false });
+    if (!waba) {
+      return res.status(501).json({
+        error: "Ajoutez WHATSAPP_WABA_ID dans Vercel — c'est l'« ID du compte WhatsApp Business », "
+          + "affiché au-dessus de vos numéros dans la console Meta.",
+        manquant: "WHATSAPP_WABA_ID",
+      });
+    }
+    try {
+      const reponse = await fetch(
+        `https://graph.facebook.com/${VERSION_GRAPH}/${waba}/message_templates?fields=name,status,language,category&limit=100`,
+        { headers: { Authorization: `Bearer ${meta.jeton}` } },
+      );
+      const corps = await reponse.json();
+      if (!reponse.ok) {
+        const code = corps?.error?.code;
+        return res.status(reponse.status).json({
+          error: EXPLICATIONS_META[code] || corps?.error?.message || "Meta n'a pas répondu.",
+          code: code || null,
+        });
+      }
+      const modeles = (corps.data || []).map((m) => ({
+        nom: m.name, statut: m.status, langue: m.language, categorie: m.category,
+      }));
+      return res.status(200).json({
+        modeles,
+        approuves: modeles.filter((m) => m.statut === "APPROVED").length,
+        enAttente: modeles.filter((m) => m.statut === "PENDING" || m.statut === "IN_APPEAL").length,
+        refuses: modeles.filter((m) => m.statut === "REJECTED").length,
+      });
     } catch (e) {
       return res.status(502).json({ error: "Impossible de joindre Meta." });
     }

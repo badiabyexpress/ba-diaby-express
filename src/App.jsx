@@ -1618,6 +1618,12 @@ const EVENEMENTS_WHATSAPP = [
  *
  * Les huit portent le même pied de page — « Message automatisé, inutile de répondre. » Il est
  * figé dans le modèle et ne se remplit pas ici : rien à envoyer pour lui.
+ *
+ * POURQUOI LE PRÉFIXE « bde_ ». Un nom supprimé chez Meta est bloqué trente jours : impossible de
+ * le redéposer entre-temps. La première série — colis_enregistre, colis_en_route… — a été
+ * supprimée le 23/08/2026 et reste donc inutilisable jusqu'à fin septembre. Ces noms-ci ne l'ont
+ * jamais été. Ne revenez pas aux anciens : préférez modifier un modèle approuvé plutôt que de le
+ * supprimer, sans quoi il faudra une troisième série de noms.
  * ========================================================================================= */
 const MODELES_WHATSAPP = {
   /*
@@ -1630,7 +1636,7 @@ const MODELES_WHATSAPP = {
   enregistrement: (colis, data) => {
     const depart = siteEnregistrementPourColis(colis, data);
     return {
-      nom: "colis_enregistre",
+      nom: "bde_enregistrement",
       variables: [
         colis.destinataire || "cher client",
         colis.tracking,
@@ -1650,7 +1656,7 @@ const MODELES_WHATSAPP = {
    * imprimé au comptoir annonce désormais autre chose que ce qu'il devra régler.
    */
   modification: (colis) => ({
-    nom: "colis_modifie",
+    nom: "bde_modification",
     variables: [
       colis.destinataire || "cher client",
       colis.tracking,
@@ -1665,7 +1671,7 @@ const MODELES_WHATSAPP = {
    *   Nous vous préviendrons dès son arrivée. »
    */
   expedie: (colis, data) => ({
-    nom: "colis_en_route",
+    nom: "bde_depart",
     variables: [colis.destinataire || "cher client", colis.tracking, paysDuColis(colis)],
   }),
   /*
@@ -1675,7 +1681,7 @@ const MODELES_WHATSAPP = {
    *   Il est en cours de traitement dans notre agence et sera bientôt disponible au retrait. »
    */
   arrivee: (colis) => ({
-    nom: "colis_arrive",
+    nom: "bde_arrivee",
     variables: [colis.destinataire || "cher client", colis.tracking],
   }),
   /*
@@ -1700,7 +1706,7 @@ const MODELES_WHATSAPP = {
   retrait: (colis, data) => {
     const agence = siteRetraitPourColis(colis, data);
     return {
-      nom: "colis_disponible",
+      nom: "bde_disponible",
       variables: [
         colis.destinataire || "cher client",
         colis.tracking,
@@ -1715,7 +1721,7 @@ const MODELES_WHATSAPP = {
    *   Merci de votre confiance, et à bientôt. »
    */
   livre: (colis) => ({
-    nom: "colis_remis",
+    nom: "bde_remise",
     variables: [colis.destinataire || "cher client", colis.tracking],
   }),
   /*
@@ -1737,7 +1743,7 @@ const MODELES_WHATSAPP = {
     const dernier = versements[versements.length - 1];
     const enGnf = (v) => fmtGNF((Number(v) || 0) * (LIVE_RATES.GNF || CURRENCIES.GNF));
     return {
-      nom: "paiement_recu",
+      nom: "bde_paiement",
       variables: [
         colis.destinataire || "cher client",
         enGnf(dernier ? dernier.montant : colis.paye),
@@ -1758,7 +1764,7 @@ const MODELES_WHATSAPP = {
     const agence = siteRetraitPourColis(colis, data);
     const jours = Number(colis.joursAttente) || 0;
     return {
-      nom: "colis_a_retirer",
+      nom: "bde_relance",
       variables: [
         colis.destinataire || "cher client",
         colis.tracking,
@@ -20209,7 +20215,7 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
             <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 }}>
               Concerne l’envoi par Twilio : l’étiquette part alors en pièce jointe du message d’enregistrement.
               Avec WhatsApp Business (Meta), le ticket accompagne toujours ce message — le modèle validé
-              « colis_enregistre » le porte en en-tête, et ce réglage n’y change rien.
+              « bde_enregistrement » le porte en en-tête, et ce réglage n’y change rien.
             </div>
           </div>
           <Interrupteur

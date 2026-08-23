@@ -1543,9 +1543,17 @@ function extractTrackingFromScan(raw) {
  * arrive directement sur sa page de suivi, au lieu de lire un numéro brut inutilisable.
  * Le scanner interne accepte les deux formes (voir extractTrackingFromScan). */
 function trackingUrlFor(tracking) {
+  /*
+   * L'adresse suit celle depuis laquelle l'agent travaille : une étiquette imprimée depuis
+   * badiabyexpress.com porte un QR code vers badiabyexpress.com, sans rien avoir à changer ici.
+   *
+   * L'adresse écrite en dessous ne sert que si `window` n'existe pas — un rendu hors navigateur.
+   * C'est le domaine de l'entreprise ; l'adresse vercel.app d'origine reste valable, et les
+   * étiquettes déjà imprimées avec elle continuent donc de fonctionner.
+   */
   const base = typeof window !== "undefined" && window.location?.origin && !window.location.origin.startsWith("file")
     ? window.location.origin
-    : "https://ba-diaby-express.vercel.app";
+    : "https://badiabyexpress.com";
   return `${base}/?suivi=1&code=${tracking}`;
 }
 

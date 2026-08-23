@@ -74,16 +74,45 @@ site. C'est ce lien GitHub ↔ Vercel qui permet les mises à jour continues.
 
 ## Étape 4 — Connecter votre nom de domaine
 
-Une fois le domaine acheté (chez Namecheap, OVH, Google Domains, etc.) :
+Le domaine de l'entreprise est **`badiabyexpress.com`**, acheté chez Vercel le 23/08/2026,
+renouvellement automatique activé.
 
-1. Dans votre projet sur Vercel, allez dans **Settings → Domains**
-2. Tapez votre nom de domaine (ex : `badiaby-express.com`) et cliquez sur **Add**
-3. Vercel vous indique les enregistrements DNS à ajouter — en général :
-   - Pour le domaine racine (`badiaby-express.com`) : un enregistrement **A** pointant vers `76.76.21.21`
-   - Pour un sous-domaine (`www.badiaby-express.com`) : un enregistrement **CNAME** pointant vers `cname.vercel-dns.com`
-4. Allez chez votre registrar (là où vous avez acheté le domaine), ouvrez la gestion DNS, et ajoutez exactement les enregistrements indiqués par Vercel
-5. Revenez sur Vercel — la validation se fait automatiquement, ça prend généralement de quelques minutes à quelques heures (le temps que le changement DNS se propage)
-6. Vercel active automatiquement le certificat HTTPS (cadenas) une fois le domaine validé — rien à faire de votre côté
+### Si le domaine est acheté chez Vercel (le cas ici)
+
+C'est le chemin le plus court : les nameservers sont déjà ceux de Vercel, donc **il n'y a aucun
+DNS à saisir à la main**.
+
+1. Vercel → **Domains** → `badiabyexpress.com` → section **Connected Projects** → **Connect**
+2. Choisissez le projet **ba-diaby-express**
+3. Vercel ajoute `badiabyexpress.com` et `www.badiabyexpress.com`, et fabrique le certificat
+   HTTPS tout seul en quelques minutes
+4. Choisissez l'adresse principale : **`badiabyexpress.com`**, sans le `www` — plus court à dicter
+   au téléphone. Le `www` redirige dessus automatiquement.
+
+### Si le domaine est acheté ailleurs (Namecheap, OVH…)
+
+1. Dans le projet sur Vercel, **Settings → Domains**, tapez le domaine et **Add**
+2. Vercel indique les enregistrements DNS à créer — en général :
+   - domaine racine : un enregistrement **A** vers `76.76.21.21`
+   - `www` : un enregistrement **CNAME** vers `cname.vercel-dns.com`
+3. Chez le registrar, ouvrez la gestion DNS et ajoutez exactement ces enregistrements
+4. La validation se fait ensuite toute seule — de quelques minutes à quelques heures, le temps que
+   le changement se propage. Le certificat HTTPS suit automatiquement.
+
+### Ce qui ne change pas
+
+**L'ancienne adresse `ba-diaby-express.vercel.app` reste valable.** Les étiquettes déjà imprimées,
+avec leur QR code, continuent donc de fonctionner : rien à réimprimer.
+
+Les QR codes des nouvelles étiquettes suivent l'adresse depuis laquelle l'agent travaille (voir
+`trackingUrlFor` dans `src/App.jsx`) : ils basculeront d'eux-mêmes sur le nouveau domaine, sans
+aucune modification du code.
+
+### Ce qui mérite d'être repris ensuite
+
+- **Les e-mails** : `EMAIL_FROM` peut maintenant utiliser une adresse du domaine
+  (`contact@badiabyexpress.com`) une fois celui-ci vérifié chez Resend — voir `REDEPLOIEMENT.md`.
+- **WhatsApp / Meta** : un domaine à soi facilite la vérification de l'entreprise.
 
 ---
 
@@ -102,8 +131,10 @@ Le projet Supabase "Site transport colis" est créé et connecté (table `bde_da
 synchronisation en temps réel activée). Toutes les données sont partagées entre tous
 les appareils qui ouvrent le site — plus besoin de migration supplémentaire pour ça.
 
-Point de sécurité à connaître : l'application utilise son propre écran de connexion
-(pas de compte Supabase par utilisateur), donc la clé publique Supabase donne accès à la
-table de données — voir la note détaillée dans `src/lib/storage.js`. Convient à un usage
-interne d'entreprise ; pour des données très sensibles, il faudrait passer à de vrais
-comptes Supabase Auth par utilisateur (dites-le-moi si vous voulez qu'on fasse cette évolution).
+Point de sécurité : **la base est fermée à la clé publique depuis le 23/08/2026.** Le navigateur
+ne lui parle plus directement — il passe par les fonctions serveur, qui détiennent seules la clé
+de service. Quelqu'un qui extrait la clé publique du code n'obtient donc plus rien.
+
+Cela suppose que `SUPABASE_SERVICE_ROLE_KEY` soit configurée sur Vercel : sans elle, les fonctions
+répondent 501 et l'application retomberait sur un accès direct que la base refuse désormais.
+Tout est décrit dans `SECURITE.md`, y compris le SQL pour rouvrir la base en quelques secondes.

@@ -8771,6 +8771,7 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
   if (sub === "paiement") return <PaiementConfigPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "users") return <UtilisateursPage data={data} persist={persist} notify={notify} onBack={back} session={session} />;
   if (sub === "performance") return <PerformanceAgentsPage data={data} onBack={back} />;
+  if (sub === "pointage") return <PointagePage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "systeme") return <ParametresSystemePage data={data} persist={persist} notify={notify} onBack={back} offline={offline} />;
   if (sub === "journal") return <JournalActivitePage data={data} onBack={back} />;
 
@@ -8831,6 +8832,9 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14, marginBottom: 26 }}>
         <Card icon={Users} tint="#6366F1" title="Gestion Utilisateurs" desc="Accès, rôles et permissions de l’équipe." onClick={() => setSub("users")} />
         <Card icon={LayoutDashboard} tint="#3D63FF" title="Performance des agents" desc="Colis enregistrés, chiffre d’affaires et paiements encaissés, par agent." onClick={() => setSub("performance")} />
+        {effectivePermission(session, "equipe.pointage") && (
+          <Card icon={Clock} tint="#E0794E" title="Fiche de pointage" desc="Qui était là, quel jour, à quelles heures — remplie par vous, imprimable et signable." onClick={() => setSub("pointage")} />
+        )}
       </div>
 
       <SectionLabel>SUIVI &amp; MAINTENANCE</SectionLabel>
@@ -21967,6 +21971,498 @@ function ParametresSystemePage({ data, persist, notify, onBack, offline }) {
  * agrégé nulle part. Complète aussi qui a encaissé chaque paiement (paiements[].par), déjà
  * enregistré mais non plus jamais résumé par personne.
  */
+/* =============================================================================================
+ * LA FICHE DE POINTAGE
+ *
+ * Qui était là, quel jour, à quelles heures. C'est une pièce sociale : elle justifie un salaire,
+ * elle tranche une contestation, et elle peut être demandée.
+ *
+ * Elle est tenue À LA MAIN par le responsable, et c'est un choix. Un pointage que l'employé
+ * déclare lui-même depuis son téléphone ne prouve rien — il peut le faire depuis chez lui — et
+ * transforme chaque erreur de saisie en désaccord entre deux personnes. Ici, une seule personne
+ * écrit, et ce qu'elle écrit engage l'entreprise.
+ *
+ * L'écran est donc pensé pour que remplir un mois ne prenne pas une heure : on pré-remplit les
+ * jours ouvrés d'un geste, puis on ne corrige que les exceptions. C'est l'inverse de l'ordre
+ * naturel, et c'est ce qui rend la chose tenable — sur vingt-six jours ouvrés, les exceptions se
+ * comptent sur les doigts d'une main.
+ *
+ * POIDS : une journée pèse environ 140 octets. Cinq employés sur un mois complet, c'est une
+ * vingtaine de kilo-octets ; une année, environ deux cents. C'est peu au regard des images qu'on
+ * a sorties du document, mais ce n'est pas rien — d'où l'écran qui l'annonce, plutôt que de le
+ * laisser grossir en silence.
+ * ========================================================================================== */
+
+const STATUTS_POINTAGE = [
+  { cle: "present", label: "Présent", court: "P", bg: "var(--ok-bg)", fg: "var(--ok-fg)", heures: true },
+  { cle: "retard", label: "Retard", court: "R", bg: "var(--warn-bg)", fg: "var(--warn-fg)", heures: true },
+  { cle: "absent", label: "Absent", court: "A", bg: "var(--danger-bg)", fg: "var(--danger-fg)", heures: false, justifiable: true },
+  { cle: "conge", label: "Congé", court: "C", bg: "var(--info-bg)", fg: "var(--info-fg)", heures: false },
+  { cle: "maladie", label: "Maladie", court: "M", bg: "var(--surface2)", fg: "var(--muted)", heures: false },
+];
+const STATUT_POINTAGE = Object.fromEntries(STATUTS_POINTAGE.map((s) => [s.cle, s]));
+
+/*
+ * UNE ABSENCE EST NON JUSTIFIÉE TANT QU'ELLE N'A PAS ÉTÉ JUSTIFIÉE
+ *
+ * C'est la distinction qui compte sur une fiche de paie, et elle ne se devine pas : le défaut doit
+ * être « non justifiée ». Cocher une case pour justifier est un geste ; l'oublier ne doit pas
+ * transformer une absence sèche en absence excusée. L'ordre inverse serait confortable et faux.
+ *
+ * Congé et maladie sont justifiés par nature — ce sont d'autres états, pas des absences.
+ */
+function absenceJustifiee(entree) {
+  return entree?.statut === "absent" && entree.justifiee === true;
+}
+/** La lettre portée par la case : A pour une absence sèche, J quand elle est justifiée. */
+function lettrePointage(entree) {
+  if (!entree) return "";
+  if (entree.statut === "absent") return absenceJustifiee(entree) ? "J" : "A";
+  return STATUT_POINTAGE[entree.statut]?.court || "";
+}
+/** Les couleurs de la case. Une absence justifiée s'écarte du rouge : elle n'appelle pas la même suite. */
+function couleursPointage(entree) {
+  const s = STATUT_POINTAGE[entree?.statut];
+  if (!s) return null;
+  if (absenceJustifiee(entree)) return { bg: "var(--warn-bg)", fg: "var(--warn-fg)" };
+  return { bg: s.bg, fg: s.fg };
+}
+function libellePointage(entree) {
+  if (!entree) return "";
+  if (entree.statut === "absent") return absenceJustifiee(entree) ? "Absence justifiée" : "Absence NON justifiée";
+  return STATUT_POINTAGE[entree.statut]?.label || "";
+}
+
+/** L'horaire de référence, celui du pré-remplissage. Modifiable, et conservé avec la fiche. */
+const HORAIRE_POINTAGE_DEFAUT = { arrivee: "08:00", depart: "18:00" };
+
+/*
+ * Qui figure sur la fiche : l'équipe salariée.
+ *
+ * Les partenaires en sont exclus — ce sont des entreprises tierces, pas des employés, et leurs
+ * propres accès relèvent de leur contrat, pas du nôtre.
+ */
+function equipeSalariee(data) {
+  return (data?.users || [])
+    .filter((u) => u && u.role !== "Partenaire")
+    .sort((a, b) => `${a.prenom} ${a.nom}`.localeCompare(`${b.prenom} ${b.nom}`, "fr"));
+}
+
+function nomComplet(u) {
+  return `${u?.prenom || ""} ${u?.nom || ""}`.trim() || u?.identifiant || "Sans nom";
+}
+
+const MOIS_FR = ["janvier", "février", "mars", "avril", "mai", "juin",
+  "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
+
+function cleJour(annee, mois, jour) {
+  return `${annee}-${String(mois).padStart(2, "0")}-${String(jour).padStart(2, "0")}`;
+}
+function joursDuMois(annee, mois) {
+  return Array.from({ length: new Date(annee, mois, 0).getDate() }, (_, i) => i + 1);
+}
+/** 0 = dimanche. La semaine de travail va du lundi au samedi, comme les horaires des agences. */
+function estJourOuvre(date) {
+  return new Date(`${date}T12:00:00`).getDay() !== 0;
+}
+function minutesDe(heure) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(heure || "").trim());
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+}
+/**
+ * Les minutes travaillées dans une journée.
+ *
+ * Un départ antérieur à l'arrivée n'est pas une journée négative : c'est une saisie inversée, ou
+ * une équipe de nuit. On compte alors jusqu'au lendemain plutôt que de retrancher des heures.
+ */
+function minutesTravaillees(entree) {
+  if (!entree || !STATUT_POINTAGE[entree.statut]?.heures) return 0;
+  const debut = minutesDe(entree.arrivee);
+  const fin = minutesDe(entree.depart);
+  if (debut === null || fin === null) return 0;
+  return fin >= debut ? fin - debut : fin + 1440 - debut;
+}
+function formatHeures(minutes) {
+  if (!minutes) return "—";
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m ? `${h} h ${String(m).padStart(2, "0")}` : `${h} h`;
+}
+
+/** Le total d'un employé sur le mois : ce qui se reporte sur une fiche de paie. */
+function totalPointage(entrees) {
+  const total = { jours: 0, retards: 0, absences: 0, absencesJustifiees: 0, conges: 0, maladies: 0, minutes: 0 };
+  entrees.forEach((e) => {
+    if (e.statut === "present" || e.statut === "retard") total.jours++;
+    if (e.statut === "retard") total.retards++;
+    if (e.statut === "absent") { if (absenceJustifiee(e)) total.absencesJustifiees++; else total.absences++; }
+    if (e.statut === "conge") total.conges++;
+    if (e.statut === "maladie") total.maladies++;
+    total.minutes += minutesTravaillees(e);
+  });
+  return total;
+}
+
+function PointagePage({ data, persist, notify, onBack }) {
+  const maintenant = new Date();
+  const [mois, setMois] = useState(() => `${maintenant.getFullYear()}-${String(maintenant.getMonth() + 1).padStart(2, "0")}`);
+  const [cellule, setCellule] = useState(null);
+  const [horaireOuvert, setHoraireOuvert] = useState(false);
+
+  const [annee, moisNum] = mois.split("-").map(Number);
+  const jours = joursDuMois(annee, moisNum);
+  const equipe = equipeSalariee(data);
+  const entrees = data.pointages || [];
+  const horaire = data.pointageHoraire || HORAIRE_POINTAGE_DEFAUT;
+  const isoAujourdhui = cleJour(maintenant.getFullYear(), maintenant.getMonth() + 1, maintenant.getDate());
+
+  const parCle = new Map();
+  entrees.forEach((e) => { if (e && e.userId && e.date) parCle.set(`${e.userId}|${e.date}`, e); });
+  const entreeDe = (userId, date) => parCle.get(`${userId}|${date}`) || null;
+  const duMois = (userId) => entrees.filter((e) => e.userId === userId && String(e.date || "").startsWith(mois));
+
+  function changerMois(pas) {
+    const d = new Date(annee, moisNum - 1 + pas, 1);
+    setMois(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+  }
+
+  /*
+   * Une journée s'écrit sous une clé stable — l'employé et la date. Elle sert d'identité pour la
+   * fusion hors ligne, et empêche par construction deux lignes pour le même jour.
+   */
+  function poserJournee(userId, date, patch) {
+    const autres = entrees.filter((e) => !(e.userId === userId && e.date === date));
+    if (!patch) {
+      persist({ ...data, pointages: autres });
+      notify?.("Journée effacée");
+      return;
+    }
+    const ancienne = entreeDe(userId, date) || {};
+    const journee = { ...ancienne, ...patch, id: `${userId}-${date}`, userId, date };
+    if (!STATUT_POINTAGE[journee.statut]?.heures) { delete journee.arrivee; delete journee.depart; }
+    // Quitter l'absence emporte sa justification : elle ne veut plus rien dire ailleurs.
+    if (journee.statut !== "absent") delete journee.justifiee;
+    persist({ ...data, pointages: [...autres, journee] });
+  }
+
+  /*
+   * Le pré-remplissage : tous les jours ouvrés du mois, présents à l'horaire de référence.
+   *
+   * Il ne remplace JAMAIS une journée déjà saisie — sans quoi une seconde pression effacerait les
+   * corrections qu'on vient de faire — et ne va pas au-delà d'aujourd'hui : personne ne peut
+   * constater une présence qui n'a pas encore eu lieu.
+   */
+  function preRemplir() {
+    const ajouts = [];
+    equipe.forEach((u) => {
+      jours.forEach((j) => {
+        const date = cleJour(annee, moisNum, j);
+        if (date > isoAujourdhui || !estJourOuvre(date) || entreeDe(u.id, date)) return;
+        ajouts.push({ id: `${u.id}-${date}`, userId: u.id, date, statut: "present",
+          arrivee: horaire.arrivee, depart: horaire.depart });
+      });
+    });
+    if (!ajouts.length) { notify?.("Rien à pré-remplir : ces journées sont déjà saisies."); return; }
+    persist({ ...data, pointages: [...entrees, ...ajouts] });
+    notify?.(`${ajouts.length} journée(s) pré-remplie(s) — corrigez les exceptions`);
+  }
+
+  function effacerLeMois() {
+    const restantes = entrees.filter((e) => !String(e.date || "").startsWith(mois));
+    persist({ ...data, pointages: restantes });
+    notify?.(`Pointage de ${MOIS_FR[moisNum - 1]} ${annee} effacé`);
+  }
+
+  async function exporterPdf() {
+    try {
+      const jspdf = await loadJsPDF();
+      await ensureAutoTable();
+      const doc = preparerDocPdf(new jspdf.jsPDF({ orientation: "landscape" }));
+      if (!doc.autoTable) { notify?.("Le tableau PDF n’a pas pu être chargé — réessayez avec une connexion."); return; }
+      const marque = data.branding?.nom || "Ba-Diaby Express";
+      doc.setFontSize(15); doc.text(`Fiche de pointage — ${MOIS_FR[moisNum - 1]} ${annee}`, 14, 16);
+      doc.setFontSize(10); doc.setTextColor(110);
+      doc.text(marque, 14, 22);
+      doc.text("P présent · R retard · A absence non justifiée · J absence justifiée · C congé · M maladie", 14, 27);
+      doc.setTextColor(0);
+      doc.autoTable({
+        startY: 32,
+        head: [["Employé", ...jours.map(String), "Jours", "Heures", "Abs. NJ"]],
+        body: equipe.map((u) => {
+          const t = totalPointage(duMois(u.id));
+          return [
+            nomComplet(u),
+            ...jours.map((j) => lettrePointage(entreeDe(u.id, cleJour(annee, moisNum, j)))),
+            String(t.jours),
+            formatHeures(t.minutes).replace("—", ""),
+            t.absences ? String(t.absences) : "",
+          ];
+        }),
+        styles: { fontSize: 6.5, cellPadding: 1, halign: "center" },
+        headStyles: { fillColor: [10, 38, 71], fontSize: 6.5 },
+        columnStyles: { 0: { cellWidth: 42, halign: "left" } },
+        margin: { left: 14, right: 14 },
+      });
+      const y = (doc.lastAutoTable?.finalY || 120) + 14;
+      doc.setFontSize(9); doc.setTextColor(110);
+      doc.text("Signature du responsable :", 14, y);
+      doc.text("Signature de l’employé :", 150, y);
+      doc.setDrawColor(180);
+      doc.line(60, y, 130, y); doc.line(196, y, 266, y);
+      openPdf(doc, `pointage-${mois}.pdf`);
+    } catch (e) {
+      console.error(e);
+      notify?.("La fiche PDF n’a pas pu être produite.");
+    }
+  }
+
+  const poidsFiche = new Blob([JSON.stringify(entrees)]).size;
+  const saisiesDuMois = entrees.filter((e) => String(e.date || "").startsWith(mois)).length;
+
+  const celluleStatut = cellule ? entreeDe(cellule.userId, cellule.date) : null;
+
+  return (
+    <div>
+      <ConfigPageHeader title="Fiche de pointage"
+        desc="Qui était là, quel jour, à quelles heures. Remplie par vous, imprimable et signable."
+        onBack={onBack} />
+
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
+        <button onClick={() => changerMois(-1)} title="Mois précédent" aria-label="Mois précédent" style={{ ...smallBtn, padding: "9px 12px" }}><ChevronLeft size={15} /></button>
+        <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", minWidth: 150, textAlign: "center" }}>
+          {MOIS_FR[moisNum - 1]} {annee}
+        </div>
+        <button onClick={() => changerMois(1)} title="Mois suivant" aria-label="Mois suivant" style={{ ...smallBtn, padding: "9px 12px" }}><ChevronRight size={15} /></button>
+        <div style={{ flex: 1 }} />
+        <button onClick={preRemplir} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+          <Check size={15} /> Pré-remplir les jours ouvrés
+        </button>
+        <button onClick={exporterPdf} style={{ ...smallBtn, display: "flex", alignItems: "center", gap: 6, padding: "10px 16px" }}>
+          <Printer size={15} /> Fiche PDF
+        </button>
+      </div>
+
+      <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 16px", marginBottom: 16, fontSize: 12.5, color: "var(--muted)", lineHeight: 1.55 }}>
+        Appuyez sur <b>Pré-remplir</b> : tous les jours ouvrés jusqu’à aujourd’hui passent à « présent »
+        de {horaire.arrivee} à {horaire.depart}. Il ne vous reste qu’à corriger les exceptions — une journée
+        déjà saisie n’est jamais écrasée. Cliquez sur n’importe quelle case pour la modifier.
+        <div style={{ marginTop: 8, fontSize: 12 }}>
+          <b>P</b> présent · <b>R</b> retard · <b style={{ color: "var(--danger-fg)" }}>A</b> absence
+          non justifiée · <b style={{ color: "var(--warn-fg)" }}>J</b> absence justifiée ·
+          <b> C</b> congé · <b>M</b> maladie
+        </div>
+        <button onClick={() => setHoraireOuvert(true)} style={{ background: "none", border: "none", color: "var(--info-fg)", fontSize: 12.5, fontWeight: 700, cursor: "pointer", padding: "0 0 0 4px", textDecoration: "underline" }}>
+          Changer l’horaire de référence
+        </button>
+      </div>
+
+      {equipe.length === 0 ? (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>
+          Aucun employé enregistré. Créez les accès de votre équipe dans Configuration → Gestion Utilisateurs.
+        </div>
+      ) : (
+        <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden" }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ borderCollapse: "collapse", minWidth: 900 }}>
+              <thead>
+                <tr style={{ background: "var(--surface2)" }}>
+                  <th style={{ padding: "10px 14px", fontSize: 11, color: "var(--muted)", fontWeight: 700, textAlign: "left", position: "sticky", left: 0, background: "var(--surface2)", whiteSpace: "nowrap", zIndex: 1, borderRight: "1px solid var(--border)" }}>Employé · total du mois</th>
+                  {jours.map((j) => {
+                    const date = cleJour(annee, moisNum, j);
+                    const dimanche = !estJourOuvre(date);
+                    return (
+                      <th key={j} title={date} style={{ padding: "10px 0", width: 26, fontSize: 10.5, fontWeight: 700, color: dimanche ? "var(--danger-fg)" : "var(--muted)" }}>{j}</th>
+                    );
+                  })}
+                  {["Retards", "Absences NON justifiées", "Absences justifiées", "Congés", "Maladie"].map((h) => (
+                    <th key={h} style={{ padding: "10px 12px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {equipe.map((u) => {
+                  const t = totalPointage(duMois(u.id));
+                  return (
+                    <tr key={u.id} style={{ borderTop: "1px solid var(--surface2)" }}>
+                      {/*
+                        * Le total voyage avec le nom, dans la colonne fixe.
+                        *
+                        * Trente et une colonnes de jours poussent tout le reste hors de l'écran, et
+                        * personne ne pense à faire défiler un tableau horizontalement : le chiffre
+                        * qu'on vient chercher — combien de jours, combien d'heures — se retrouvait
+                        * précisément là où on ne le voyait pas.
+                        */}
+                      <td style={{ padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap", position: "sticky", left: 0, background: "var(--surface)", zIndex: 1, borderRight: "1px solid var(--border)" }}>
+                        {nomComplet(u)}
+                        <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 500 }}>{u.role}{u.agence ? ` · ${u.agence}` : ""}</div>
+                        <div style={{ fontSize: 12, color: "var(--text)", fontWeight: 700, marginTop: 3 }}>
+                          {t.jours} j · {formatHeures(t.minutes)}
+                        </div>
+                        {/*
+                          * L'absence non justifiée remonte ici, avec le total. C'est le seul chiffre
+                          * de la fiche qui appelle une décision — une retenue, une explication à
+                          * demander — et le laisser au bout de trente et une colonnes revenait à ne
+                          * pas l'afficher.
+                          */}
+                        {t.absences > 0 && (
+                          <div style={{ fontSize: 11.5, color: "var(--danger-fg)", fontWeight: 700, marginTop: 2 }}>
+                            {t.absences} absence{t.absences > 1 ? "s" : ""} non justifiée{t.absences > 1 ? "s" : ""}
+                          </div>
+                        )}
+                      </td>
+                      {jours.map((j) => {
+                        const date = cleJour(annee, moisNum, j);
+                        const e = entreeDe(u.id, date);
+                        const s = couleursPointage(e);
+                        return (
+                          <td key={j} style={{ padding: 2, textAlign: "center" }}>
+                            <button onClick={() => setCellule({ userId: u.id, date })}
+                              title={`${nomComplet(u)} — ${date}${e ? ` : ${libellePointage(e)}${e.note ? ` (${e.note})` : ""}` : ""}`}
+                              style={{ width: 22, height: 22, borderRadius: 5, cursor: "pointer", fontSize: 10.5, fontWeight: 700,
+                                border: `1px solid ${s ? "transparent" : "var(--border)"}`,
+                                background: s ? s.bg : (estJourOuvre(date) ? "transparent" : "var(--surface2)"),
+                                color: s ? s.fg : "var(--muted)" }}>
+                              {lettrePointage(e)}
+                            </button>
+                          </td>
+                        );
+                      })}
+                      <td style={{ padding: "8px 12px", fontSize: 13, color: t.retards ? "var(--warn-fg)" : "var(--muted)", textAlign: "center" }}>{t.retards || "—"}</td>
+                      <td style={{ padding: "8px 12px", fontSize: 13, fontWeight: t.absences ? 700 : 400, color: t.absences ? "var(--danger-fg)" : "var(--muted)", textAlign: "center" }}>{t.absences || "—"}</td>
+                      <td style={{ padding: "8px 12px", fontSize: 13, color: t.absencesJustifiees ? "var(--warn-fg)" : "var(--muted)", textAlign: "center" }}>{t.absencesJustifiees || "—"}</td>
+                      <td style={{ padding: "8px 12px", fontSize: 13, color: "var(--muted)", textAlign: "center" }}>{t.conges || "—"}</td>
+                      <td style={{ padding: "8px 12px", fontSize: 13, color: "var(--muted)", textAlign: "center" }}>{t.maladies || "—"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", marginTop: 14 }}>
+        <div style={{ fontSize: 11.5, color: "var(--muted)" }}>
+          {saisiesDuMois} journée(s) saisie(s) ce mois-ci · la fiche complète pèse {(poidsFiche / 1024).toFixed(0)} ko
+        </div>
+        {saisiesDuMois > 0 && (
+          <button onClick={effacerLeMois} style={{ background: "none", border: "none", color: "var(--danger-fg)", fontSize: 12, cursor: "pointer", textDecoration: "underline" }}>
+            Effacer tout le mois de {MOIS_FR[moisNum - 1]}
+          </button>
+        )}
+      </div>
+
+      {cellule && (
+        <Modal onClose={() => setCellule(null)}
+          title={`${nomComplet(equipe.find((u) => u.id === cellule.userId))} — ${new Date(`${cellule.date}T12:00:00`).toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" })}`}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
+            {STATUTS_POINTAGE.map((s) => (
+              <button key={s.cle} onClick={() => poserJournee(cellule.userId, cellule.date, {
+                statut: s.cle,
+                ...(s.heures ? { arrivee: celluleStatut?.arrivee || horaire.arrivee, depart: celluleStatut?.depart || horaire.depart } : {}),
+              })}
+                style={{ padding: "10px 16px", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer",
+                  border: `1.5px solid ${celluleStatut?.statut === s.cle ? s.fg : "var(--border)"}`,
+                  background: celluleStatut?.statut === s.cle ? s.bg : "var(--surface2)",
+                  color: celluleStatut?.statut === s.cle ? s.fg : "var(--muted)" }}>
+                {s.label}
+              </button>
+            ))}
+          </div>
+
+          {/*
+            * Une absence est non justifiée tant qu'elle n'a pas été justifiée. Le défaut est donc
+            * le rouge, et justifier demande un geste : l'oubli ne doit pas transformer une absence
+            * sèche en absence excusée.
+            */}
+          {celluleStatut?.statut === "absent" && (
+            <div style={{ background: "var(--surface2)", borderRadius: 10, padding: "12px 14px", marginBottom: 16 }}>
+              <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10 }}>
+                Cette absence est-elle justifiée ? Sans justification, elle reste comptée comme
+                non justifiée — c’est cette colonne qui sert au moment de la paie.
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {[[false, "Non justifiée", "var(--danger-bg)", "var(--danger-fg)"],
+                  [true, "Justifiée", "var(--warn-bg)", "var(--warn-fg)"]].map(([valeur, label, bg, fg]) => (
+                  <button key={String(valeur)}
+                    onClick={() => poserJournee(cellule.userId, cellule.date, { justifiee: valeur })}
+                    style={{ padding: "9px 16px", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer",
+                      border: `1.5px solid ${absenceJustifiee(celluleStatut) === valeur ? fg : "var(--border)"}`,
+                      background: absenceJustifiee(celluleStatut) === valeur ? bg : "var(--surface)",
+                      color: absenceJustifiee(celluleStatut) === valeur ? fg : "var(--muted)" }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {STATUT_POINTAGE[celluleStatut?.statut]?.heures && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <Field label="Arrivée">
+                <input type="time" value={celluleStatut?.arrivee || ""} style={inputStyle}
+                  onChange={(e) => poserJournee(cellule.userId, cellule.date, { arrivee: e.target.value })} />
+              </Field>
+              <Field label="Départ">
+                <input type="time" value={celluleStatut?.depart || ""} style={inputStyle}
+                  onChange={(e) => poserJournee(cellule.userId, cellule.date, { depart: e.target.value })} />
+              </Field>
+            </div>
+          )}
+          {celluleStatut && (
+            <>
+              <Field label={absenceJustifiee(celluleStatut) ? "Motif de la justification" : "Note (facultatif)"}>
+                <input value={celluleStatut.note || ""} style={inputStyle}
+                  placeholder={absenceJustifiee(celluleStatut) ? "Ex : certificat médical remis le 12" : "Ex : parti plus tôt, autorisé"}
+                  onChange={(e) => poserJournee(cellule.userId, cellule.date, { note: e.target.value })} />
+              </Field>
+              {STATUT_POINTAGE[celluleStatut.statut]?.heures && (
+                <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>
+                  Journée comptée : <b style={{ color: "var(--text)" }}>{formatHeures(minutesTravaillees(celluleStatut))}</b>
+                </div>
+              )}
+            </>
+          )}
+
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 8, flexWrap: "wrap" }}>
+            {celluleStatut ? (
+              <button onClick={() => { poserJournee(cellule.userId, cellule.date, null); setCellule(null); }}
+                style={{ background: "none", border: "1.5px solid var(--danger-border)", color: "var(--danger-fg)", borderRadius: 9, padding: "9px 16px", fontSize: 13, cursor: "pointer" }}>
+                Effacer cette journée
+              </button>
+            ) : <span style={{ fontSize: 12.5, color: "var(--muted)", alignSelf: "center" }}>Choisissez un état pour enregistrer cette journée.</span>}
+            <button onClick={() => setCellule(null)} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+              Terminé
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {horaireOuvert && (
+        <Modal onClose={() => setHoraireOuvert(false)} title="Horaire de référence">
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 16, lineHeight: 1.55 }}>
+            C’est l’horaire posé par le pré-remplissage. Le changer ne modifie aucune journée déjà
+            saisie : une fiche de pointage constate ce qui a eu lieu, elle ne se recalcule pas.
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <Field label="Arrivée">
+              <input type="time" value={horaire.arrivee} style={inputStyle}
+                onChange={(e) => persist({ ...data, pointageHoraire: { ...horaire, arrivee: e.target.value } })} />
+            </Field>
+            <Field label="Départ">
+              <input type="time" value={horaire.depart} style={inputStyle}
+                onChange={(e) => persist({ ...data, pointageHoraire: { ...horaire, depart: e.target.value } })} />
+            </Field>
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+            <button onClick={() => setHoraireOuvert(false)} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Terminé</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
 function PerformanceAgentsPage({ data, onBack }) {
   const [periode, setPeriode] = useState("mois");
   const colis = data.colis.filter((c) => c.status !== "Annulé");

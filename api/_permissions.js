@@ -79,6 +79,15 @@ export const PERMISSIONS_SCHEMA = [
     { key: "config.tarifs", label: "Modifier les tarifs, devises et commissions" },
     { key: "config.categories", label: "Gérer les catégories de produits" },
   ]},
+  { group: "ÉQUIPE", permissions: [
+    /*
+     * La fiche de pointage est tenue par le responsable, à la main : elle dit qui était là, et à
+     * quelles heures. C'est une pièce sociale — elle justifie un salaire, et elle peut être
+     * demandée. Elle n'est donc pas ouverte à tous par défaut : un agent n'a pas à savoir qui de
+     * ses collègues était absent, ni à corriger sa propre journée.
+     */
+    { key: "equipe.pointage", label: "Tenir la fiche de pointage" },
+  ]},
   { group: "UTILISATEURS", permissions: [
     { key: "users.consulter", label: "Consulter les utilisateurs" },
     { key: "users.gerer", label: "Créer / modifier / supprimer un utilisateur" },

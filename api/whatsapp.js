@@ -40,6 +40,8 @@
  * fonction traduit alors le refus en une phrase qui dit quoi faire, plutôt qu'un code d'erreur.
  */
 
+import { refusSaufEquipe } from "./_session.js";
+
 const VERSION_GRAPH = "v21.0";
 
 /** Numéro en chiffres seuls, forme attendue par Meta (« 224621654796 »). */
@@ -228,6 +230,13 @@ async function envoyerParTwilio({ twilio, avecIndicatif, message, mediaUrl }) {
 }
 
 export default async function handler(req, res) {
+  /*
+   * Cette fonction dépense. Elle n'est donc pas ouverte à qui connaît son adresse — voir
+   * refusSaufEquipe dans api/_session.js.
+   */
+  const refus = refusSaufEquipe(req);
+  if (refus) return res.status(refus.code).json(refus.corps);
+
   const { meta, twilio, metaPret, twilioPret } = configuration();
 
   /*

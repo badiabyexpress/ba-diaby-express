@@ -32,6 +32,11 @@
  */
 
 import { sessionDeLaRequete } from "./_session.js";
+import {
+  vueClient, fusionnerEcritureClient,
+  vuePartenaire, fusionnerEcriturePartenaire, partenaireDuCompte,
+  fusionnerEcritureEquipe,
+} from "./_cloisonnement.js";
 
 const TABLE = "bde_data";
 
@@ -76,6 +81,39 @@ export default async function handler(req, res) {
   if (clef !== "bde-data" && !clef.startsWith("bde-backup-")) {
     return res.status(403).json({ error: "Clé non accessible." });
   }
+
+  /*
+   * DEUX COMPTES QUI NE SONT PAS DE LA MAISON
+   *
+   * Le client, d'abord : n'importe qui peut en créer un depuis la page d'accueil — c'est fait
+   * pour. Le partenaire ensuite, qui est une entreprise tierce. Tous deux présentent un jeton
+   * valide, exactement comme un agent : sans la distinction qui suit, ils obtenaient le document
+   * entier, avec les colis de tous les clients, le répertoire, la caisse et les empreintes de
+   * mots de passe des employés.
+   *
+   * Trois portes se ferment ici, avant même de toucher à la base :
+   *
+   *   — les sauvegardes. Ce sont des copies complètes du document : les laisser lire rendrait
+   *     inutile tout le tri fait plus bas. C'est le contournement le plus évident, et le seul qui
+   *     n'aurait laissé aucune trace ;
+   *   — la liste des clés, qui apprend quelles sauvegardes existent ;
+   *   — la suppression, qui n'a aucun usage légitime depuis ces espaces, et dont le seul emploi
+   *     possible serait d'effacer le document de l'entreprise.
+   *
+   * Le tri du contenu, lui, se fait dans api/_cloisonnement.js — en lecture comme en écriture.
+   */
+  const estClient = session.role === "client";
+  const estPartenaire = session.role === "Partenaire";
+  const cloisonne = estClient || estPartenaire;
+  const compteId = session.sub || null;
+  if (cloisonne) {
+    if (clef !== "bde-data") return res.status(403).json({ error: "Clé non accessible." });
+    if (req.method === "DELETE") return res.status(403).json({ error: "Suppression non autorisée." });
+    if (req.method === "GET" && req.query?.liste !== undefined) {
+      return res.status(403).json({ error: "Liste non accessible." });
+    }
+  }
+
   const entetes = { apikey: cle, Authorization: `Bearer ${cle}`, "Content-Type": "application/json" };
 
   try {
@@ -126,7 +164,10 @@ export default async function handler(req, res) {
       const ligne = Array.isArray(lignes) ? lignes[0] : null;
       if (!ligne) return res.status(404).json({ error: "Donnée absente", cleAbsente: true });
       if (tete) return res.status(200).json({ updated_at: ligne.updated_at || null });
-      return res.status(200).json({ value: ligne.value, updated_at: ligne.updated_at || null });
+      const valeurLue = estClient ? vueClient(ligne.value, compteId)
+        : estPartenaire ? vuePartenaire(ligne.value, partenaireDuCompte(ligne.value, compteId))
+          : ligne.value;
+      return res.status(200).json({ value: valeurLue, updated_at: ligne.updated_at || null });
     }
 
     if (req.method === "PUT" || req.method === "POST") {
@@ -140,12 +181,62 @@ export default async function handler(req, res) {
       if (valeur === undefined || valeur === null) {
         return res.status(400).json({ error: "Contenu absent — écriture refusée." });
       }
+
+      /*
+       * Un compte cloisonné n'écrit jamais le document : il propose des modifications, et le
+       * serveur ne retient que celles qui portent sur ce qui est à lui.
+       *
+       * On relit donc la version en base juste avant, et l'on repose dessus les seuls fragments
+       * autorisés. Le portail, lui, ne change pas d'un iota : il envoie toujours le document
+       * entier tel qu'il le connaît — c'est-à-dire la vue réduite qu'on lui a donnée. Sans cette
+       * relecture, cette vue réduite écraserait la vraie, et l'entreprise perdrait tout ce qu'elle
+       * avait justement caché. C'est le point le plus dangereux de la manœuvre.
+       */
+      /*
+       * L'équipe, elle, reçoit et réécrit le document entier — c'est son travail. On part donc de
+       * ce qu'elle envoie, et l'on remet en place ce que son rôle ne l'autorisait pas à changer :
+       * les droits des comptes, les réglages, et le journal, qui ne se réécrit pas.
+       *
+       * Cela vaut pour le document vivant seulement. Une sauvegarde est écrite d'un bloc par la
+       * rotation automatique : la passer dans ce tamis n'aurait aucun sens.
+       */
+      let aEcrire = valeur;
+      if (!cloisonne && clef === "bde-data") {
+        const lecture = await fetch(
+          `${url}/rest/v1/${TABLE}?key=eq.${encodeURIComponent(clef)}&select=value`,
+          { headers: entetes },
+        );
+        if (!lecture.ok) return res.status(502).json({ error: "Base de données injoignable" });
+        const lignesActuelles = await lecture.json();
+        const actuel = Array.isArray(lignesActuelles) ? lignesActuelles[0]?.value : null;
+        // Première écriture d'une base neuve : il n'y a pas encore de règles à faire respecter.
+        if (actuel) aEcrire = fusionnerEcritureEquipe(actuel, valeur, compteId);
+      }
+      if (cloisonne) {
+        const lecture = await fetch(
+          `${url}/rest/v1/${TABLE}?key=eq.${encodeURIComponent(clef)}&select=value`,
+          { headers: entetes },
+        );
+        if (!lecture.ok) return res.status(502).json({ error: "Base de données injoignable" });
+        const lignesActuelles = await lecture.json();
+        const actuel = Array.isArray(lignesActuelles) ? lignesActuelles[0]?.value : null;
+        /*
+         * Pas de document en base : il n'y a rien sur quoi reposer une modification, et écrire
+         * une vue réduite à la place du document de l'entreprise serait le pire des accidents.
+         * On refuse plutôt que de deviner.
+         */
+        if (!actuel) return res.status(409).json({ error: "Données introuvables — écriture refusée." });
+        aEcrire = estClient
+          ? fusionnerEcritureClient(actuel, valeur, compteId)
+          : fusionnerEcriturePartenaire(actuel, valeur, partenaireDuCompte(actuel, compteId), compteId);
+      }
+
       const reponse = await fetch(
         `${url}/rest/v1/${TABLE}?on_conflict=key`,
         {
           method: "POST",
           headers: { ...entetes, Prefer: "resolution=merge-duplicates,return=minimal" },
-          body: JSON.stringify({ key: clef, value: valeur, updated_at: new Date().toISOString() }),
+          body: JSON.stringify({ key: clef, value: aEcrire, updated_at: new Date().toISOString() }),
         },
       );
       if (!reponse.ok) {

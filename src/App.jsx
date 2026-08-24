@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue, memo } from "react";
 import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, ChevronDown, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell, SlidersHorizontal, Copy, MoreHorizontal, Wallet } from "lucide-react";
-import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces, definirJetonSession, surSessionExpiree } from "./lib/storage.js";
+import { ROLES, PERMISSIONS_SCHEMA, ROLE_DEFAULT_PERMISSIONS, effectivePermission } from "../api/_permissions.js";
+import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree } from "./lib/storage.js";
 
 /* ---------- design tokens ----------
 Identité : Navy #0A2647 · Rouge de marque #C8102E · Blanc #FFFFFF
@@ -135,6 +136,32 @@ function isPhoneValid(dial, rest) {
 function indicatifDuPays(code) {
   const pays = COUNTRIES.find((c) => c.code === code);
   return pays ? DIAL_CODES.find((d) => d.name === pays.name)?.dial : undefined;
+}
+
+/**
+ * Complète à l'enregistrement un numéro d'agence saisi sans indicatif.
+ *
+ * Les numéros des clients passent par PhoneInput, qui impose l'indicatif. Ceux des agences étaient
+ * de simples champs de texte — et « 612479339 » y dormait tranquillement, jusqu'à ce qu'il parte
+ * dans le message « votre colis est disponible », lu par un client à Paris ou à Dakar pour qui ce
+ * numéro n'existe pas. Rien ne le signalait : le message partait quand même.
+ *
+ * Le pays du site donne l'indicatif. Un numéro déjà saisi avec le sien, mais sans le « + », ne le
+ * reçoit pas deux fois — le cas se reconnaît aux premiers chiffres. La confusion resterait
+ * possible avec un numéro national commençant par les chiffres de son propre indicatif ; aucun
+ * plan de numérotation de nos pays ne le permet (les numéros guinéens commencent par 6, les
+ * français par 0).
+ */
+function telephoneAvecIndicatif(valeur, paysCode) {
+  const brut = String(valeur || "").trim();
+  if (!brut) return "";
+  if (brut.startsWith("+")) return brut.replace(/[^\d+]/g, "");
+  const chiffres = brut.replace(/[^\d]/g, "");
+  if (!chiffres) return "";
+  const dial = indicatifDuPays(paysCode) || "224";
+  if (chiffres.startsWith(dial)) return `+${chiffres}`;
+  // Le zéro de tête est une convention nationale : il ne survit pas au passage à l'international.
+  return `+${dial}${chiffres.replace(/^0+/, "")}`;
 }
 
 function PhoneInput({ value, onChange, onBlur, placeholder, defaultDial }) {
@@ -281,7 +308,6 @@ const STATUS_STYLE = {
   "Annulé": { bg: "var(--danger-bg)", fg: "var(--danger-fg)", icon: X },
   "Refusé": { bg: "var(--warn-bg)", fg: "var(--warn-fg)", icon: AlertTriangle },
 };
-const ROLES = ["Administrateur", "Agent", "Comptable", "Chauffeur", "Partenaire"];
 
 /**
  * Langues proposées dans l'interface.
@@ -370,89 +396,6 @@ function normalizeBordereauStatut(statut) {
  * déjà en s'arrêtant à "Disponible au retrait"), donc le bordereau ne force jamais "Livré".
  */
 const BORDEREAU_VERS_STATUT_COLIS = { "Acheminement": "En transit", "Arrivé": "Arrivé", "Livré": "Disponible au retrait" };
-
-const PERMISSIONS_SCHEMA = [
-  { group: "COLIS", permissions: [
-    { key: "colis.voir_propres", label: "Voir ses propres colis" },
-    { key: "colis.voir_tous", label: "Voir tous les colis" },
-    { key: "colis.creer", label: "Créer un colis" },
-    { key: "colis.modifier", label: "Modifier un colis" },
-    { key: "colis.changer_statut", label: "Changer le statut" },
-    { key: "colis.annuler", label: "Annuler un colis" },
-    { key: "colis.enregistrer_paiement", label: "Enregistrer un paiement" },
-    { key: "colis.supprimer", label: "Supprimer un colis" },
-    /*
-     * Import Excel, bordereau de réception et règlement groupé agissent sur plusieurs colis à la
-     * fois (import en masse, encaissement groupé) — des actions plus sensibles que la création
-     * d'un colis à l'unité. Non accordées à l'Agent par défaut : c'est à l'administrateur de
-     * désigner nommément les agences/agents autorisés, comme pour l'Espace Client.
-     */
-    { key: "colis.importer_excel", label: "Importer des colis depuis Excel" },
-    { key: "colis.bordereau_reception", label: "Générer un bordereau de réception" },
-    { key: "colis.reglement_groupe", label: "Encaisser plusieurs colis en une fois (règlement groupé)" },
-  ]},
-  { group: "BORDEREAUX", permissions: [
-    { key: "bordereaux.consulter", label: "Consulter les bordereaux" },
-    { key: "bordereaux.creer", label: "Créer un bordereau" },
-    { key: "bordereaux.modifier", label: "Modifier un bordereau (ajouter/retirer des colis)" },
-    { key: "bordereaux.valider", label: "Marquer un bordereau comme reçu" },
-  ]},
-  { group: "FACTURES", permissions: [
-    { key: "factures.consulter", label: "Consulter les factures" },
-    { key: "factures.creer", label: "Générer une facture" },
-    { key: "factures.modifier", label: "Encaisser / modifier un paiement" },
-  ]},
-  { group: "CLIENTS", permissions: [
-    { key: "clients.consulter", label: "Consulter les clients" },
-  ]},
-  /*
-   * L'Espace Client est un circuit à part : commandes annoncées, réception et pesée, messages,
-   * demandes express. Tous les agents n'ont pas vocation à y toucher — et un partenaire ne doit
-   * jamais y accéder. Cette permission n'est accordée à personne par défaut hors administrateur :
-   * c'est à l'administrateur de désigner nommément les agents concernés.
-   */
-  { group: "ESPACE CLIENT", permissions: [
-    { key: "espaceclient.gerer", label: "Traiter les demandes de l’Espace Client (réception, messages, express)" },
-  ]},
-  { group: "COMPTABILITÉ", permissions: [
-    { key: "compta.consulter", label: "Consulter la comptabilité" },
-    { key: "compta.gerer_depenses", label: "Ajouter / modifier / supprimer une dépense" },
-    { key: "compta.charges_fixes", label: "Gérer les charges fixes (salaires, loyers...)" },
-    { key: "compta.marges", label: "Consulter les marges et bénéfices" },
-  ]},
-  { group: "STATISTIQUES", permissions: [
-    { key: "stats.globales", label: "Voir les statistiques globales (toutes agences)" },
-    { key: "stats.personnelles", label: "Voir ses propres statistiques" },
-    { key: "stats.exporter", label: "Exporter les données (CSV / sauvegarde)" },
-  ]},
-  { group: "CONFIGURATION", permissions: [
-    { key: "config.acceder", label: "Accéder à la configuration" },
-    { key: "config.tarifs", label: "Modifier les tarifs, devises et commissions" },
-    { key: "config.categories", label: "Gérer les catégories de produits" },
-  ]},
-  { group: "UTILISATEURS", permissions: [
-    { key: "users.consulter", label: "Consulter les utilisateurs" },
-    { key: "users.gerer", label: "Créer / modifier / supprimer un utilisateur" },
-    { key: "users.permissions", label: "Gérer les permissions des autres comptes" },
-  ]},
-  { group: "ASSISTANT IA", permissions: [
-    { key: "ia.utiliser", label: "Utiliser l’assistant IA" },
-  ]},
-];
-
-const ROLE_DEFAULT_PERMISSIONS = {
-  "Administrateur": PERMISSIONS_SCHEMA.flatMap((g) => g.permissions.map((p) => p.key)),
-  "Agent": ["colis.voir_propres", "colis.voir_tous", "colis.creer", "colis.modifier", "colis.changer_statut", "colis.enregistrer_paiement", "bordereaux.consulter", "bordereaux.creer", "bordereaux.modifier", "bordereaux.valider", "factures.consulter", "factures.creer", "factures.modifier", "paiements.voir_propres", "clients.consulter", "stats.personnelles", "ia.utiliser"],
-  "Comptable": ["colis.voir_tous", "factures.consulter", "factures.creer", "factures.modifier", "clients.consulter", "bordereaux.consulter", "compta.consulter", "compta.gerer_depenses", "compta.charges_fixes", "compta.marges", "stats.globales", "stats.exporter"],
-  "Chauffeur": ["colis.voir_propres", "colis.changer_statut", "stats.personnelles"],
-  "Partenaire": ["stats.personnelles"],
-};
-
-function effectivePermission(user, key) {
-  if (!user) return false;
-  if (user.permissionsOverride && Object.prototype.hasOwnProperty.call(user.permissionsOverride, key)) return user.permissionsOverride[key];
-  return (ROLE_DEFAULT_PERMISSIONS[user.role] || []).includes(key);
-}
 
 const T = {
   fr: { dashboard: "Tableau de bord", colis: "Colis", tarif: "Tarification", clients: "Clients", admin: "Configuration", ia: "Assistant IA", logout: "Déconnexion", newColis: "Nouveau colis", search: "Rechercher", createAccount: "Créer un compte", bordereaux: "Bordereaux", paiements: "Paiements & Factures" },
@@ -1577,13 +1520,22 @@ function resizeImageToDataUrl(file, maxWidth = 720, quality = 0.6) {
  * geste : enregistrer un colis, encaisser, changer un statut. Une image gardée en base64 y pèse
  * donc à CHAQUE opération, pour chaque agent, sur des connexions mobiles.
  *
- * Constaté le 23/08/2026 : 836 ko de données pour quinze colis, dont 394 ko pour un seul logo de
- * partenaire et 213 ko de photos. Sept dixièmes du poids pour des images que personne ne regarde
- * la plupart du temps — et l'écriture devenait assez lente pour que les agents appuient deux fois
- * sur « Enregistrer ».
+ * Constaté le 23/08/2026 : 836 ko de données pour seize colis, dont 404 ko pour un seul logo de
+ * partenaire, 219 ko de photos d'enregistrement et 87 ko pour une unique photo d'entrepôt. Neuf
+ * dixièmes du poids pour des images que personne ne regarde la plupart du temps — et l'écriture
+ * devenait assez lente pour que les agents appuient deux fois sur « Enregistrer ».
  *
  * Les images partent donc dans le stockage de fichiers, là où vont déjà les tickets PDF, et le
  * document ne garde qu'une adresse. Une adresse pèse cent octets.
+ *
+ * Toute image ajoutée ailleurs dans l'application doit passer par deposerImage AU MOMENT DE LA
+ * PRISE, puis être reprise dans les deux endroits qui rattrapent l'existant : le décompte et la
+ * boucle de PoidsDesDonnees. La photo d'entrepôt avait échappé aux trois, et pesait à elle seule
+ * un dixième des données réelles ; la photo de vérification des colis partenaires aussi.
+ *
+ * Restent volontairement embarqués : les logos, que les PDF dessinent à l'impression (jsPDF ne
+ * sait pas aller chercher une image distante), et la signature du destinataire, qui tient dans
+ * quelques kilo-octets.
  * ========================================================================================= */
 
 /** Vrai si la valeur est une image embarquée (par opposition à une adresse déjà déportée). */
@@ -1685,15 +1637,22 @@ const JOURS_CONSERVATION_PHOTOS = 30;
  *   — aucun litige n'a été déclaré, ouvert OU résolu. Un dossier réglé peut ressortir des mois
  *     plus tard, et l'on ne se prive pas des pièces qui l'ont réglé.
  *
- * La preuve de remise (`pod`) n'est jamais touchée : c'est elle qui atteste que le colis a bien
- * été livré, et c'est précisément la pièce qu'on veut avoir sous la main si quelqu'un affirme
- * n'avoir jamais rien reçu.
+ * Sont effacées les photos de l'enregistrement ET celle de l'entrepôt : les deux constatent l'état
+ * du colis avant remise, et perdent leur objet au même moment.
+ *
+ * Deux pièces ne sont JAMAIS touchées, parce qu'elles ne servent pas à constater un état mais à
+ * prouver un fait :
+ *   — la preuve de remise (`pod`), qui atteste que le colis a bien été livré, et qui est
+ *     précisément ce qu'on veut avoir sous la main si quelqu'un affirme n'avoir jamais rien reçu ;
+ *   — la photo de vérification (`photoVerification`), qui justifie le poids constaté et donc le
+ *     prix facturé au partenaire. Une facture se conteste des mois plus tard, sans qu'aucun litige
+ *     n'ait jamais été déclaré sur le colis : la règle des trente jours ne la protégerait pas.
  */
 function colisAuxPhotosPerimees(data, jours = JOURS_CONSERVATION_PHOTOS) {
   if (!jours) return [];
   const limite = Date.now() - jours * 86400000;
   return (data?.colis || []).filter((c) => {
-    if (!(c.photos || []).length) return false;
+    if (!(c.photos || []).length && !c.photoEntrepot) return false;
     if (c.litige) return false;
     const remise = dateDeRemise(c);
     if (!remise) return false;
@@ -1712,7 +1671,10 @@ function colisAuxPhotosPerimees(data, jours = JOURS_CONSERVATION_PHOTOS) {
 async function purgerPhotosRemises(data, jours = JOURS_CONSERVATION_PHOTOS) {
   const concernes = colisAuxPhotosPerimees(data, jours);
   if (!concernes.length) return { colis: 0, photos: 0, donnees: null };
-  const chemins = concernes.flatMap((c) => (c.photos || []).map(cheminDansStockage).filter(Boolean));
+  const chemins = concernes
+    .flatMap((c) => [...(c.photos || []), c.photoEntrepot])
+    .map(cheminDansStockage)
+    .filter(Boolean);
   if (chemins.length) {
     // Une photo restée embarquée n'a pas de chemin : elle disparaît avec la fiche, sans passer ici.
     try { await clientSupabase().storage.from("colis-documents").remove(chemins); }
@@ -1722,11 +1684,11 @@ async function purgerPhotosRemises(data, jours = JOURS_CONSERVATION_PHOTOS) {
   const maintenant = new Date().toISOString();
   return {
     colis: concernes.length,
-    photos: concernes.reduce((n, c) => n + (c.photos || []).length, 0),
+    photos: concernes.reduce((n, c) => n + (c.photos || []).length + (c.photoEntrepot ? 1 : 0), 0),
     donnees: {
       ...data,
       colis: (data.colis || []).map((c) => (aPurger.has(c.tracking)
-        ? { ...c, photos: [], photosPurgeesLe: maintenant } : c)),
+        ? { ...c, photos: [], photoEntrepot: null, photosPurgeesLe: maintenant } : c)),
     },
   };
 }
@@ -2149,6 +2111,28 @@ async function notifierEvenement(data, evenement, colis, message) {
 }
 
 /**
+ * Un appel aux fonctions serveur QUI DÉPENSENT : WhatsApp, e-mail, l'assistant, les taux du jour.
+ *
+ * Chacune coûte quelque chose à chaque appel — un message facturé par Meta, un e-mail qui engage
+ * la réputation du domaine, des jetons chez Anthropic, une part du quota mensuel des taux. Elles
+ * étaient ouvertes à qui connaissait leur adresse : n'importe qui pouvait faire partir des
+ * messages depuis le numéro de l'entreprise, ou des courriels depuis son domaine.
+ *
+ * Le jeton de session part donc avec l'appel, et le serveur le vérifie. C'est le même jeton que
+ * celui qui ouvre les données ; il ne coûte rien de plus à transporter.
+ */
+function appelServeurQuiDepense(url, options = {}) {
+  const jeton = jetonSessionCourant();
+  return fetch(url, {
+    ...options,
+    headers: {
+      ...(options.headers || {}),
+      ...(jeton ? { Authorization: `Bearer ${jeton}` } : {}),
+    },
+  });
+}
+
+/**
  * Envoie un e-mail au client, avec ses documents en pièce jointe.
  *
  * Tente l'envoi automatique via la fonction serveur ; si le service n'est pas configuré ou si
@@ -2164,7 +2148,7 @@ async function envoyerEmail(adresseBrute, sujet, message, piecesJointes = []) {
   const adresse = String(adresseBrute || "").trim();
   if (!adresse) return { envoye: false, raison: null };
   try {
-    const reponse = await fetch("/api/email", {
+    const reponse = await appelServeurQuiDepense("/api/email", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ to: adresse, sujet, message, piecesJointes }),
@@ -2191,7 +2175,7 @@ async function envoyerEmail(adresseBrute, sujet, message, piecesJointes = []) {
 
 async function envoyerWhatsApp(telephone, message, mediaUrl, gabarit) {
   try {
-    const reponse = await fetch("/api/whatsapp", {
+    const reponse = await appelServeurQuiDepense("/api/whatsapp", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -9014,7 +8998,17 @@ function AgencesConfigPage({ data, persist, notify, onBack, sansEntete }) {
     setAgences((a) => ({ ...a, [code]: { ...(a[code] || {}), [key]: value } }));
   }
   function save() {
-    persist({ ...data, entreprise, agencesReception: agences });
+    /*
+     * Ces numéros s'impriment sur le ticket d'envoi, que le client lit à l'autre bout du voyage.
+     * Sans indicatif, ils n'y servent à rien — et rien ne le signale. Chaque agence porte son
+     * pays : celui du siège est la Guinée, celui d'une agence de réception est sa destination.
+     */
+    const siege = { ...entreprise, telephone: telephoneAvecIndicatif(entreprise.telephone, "GN") };
+    const reception = Object.fromEntries(Object.entries(agences).map(([code, a]) =>
+      [code, { ...a, telephone: telephoneAvecIndicatif(a?.telephone, code) }]));
+    setEntreprise(siege);
+    setAgences(reception);
+    persist({ ...data, entreprise: siege, agencesReception: reception });
     notify?.("Coordonnées mises à jour");
   }
 
@@ -9310,7 +9304,7 @@ function GestionDevisesPage({ data, persist, session, notify, onBack }) {
     setRapatriement(true);
     setTauxMsg(null);
     try {
-      const reponse = await fetch("/api/taux");
+      const reponse = await appelServeurQuiDepense("/api/taux");
       const corps = await reponse.json().catch(() => ({}));
       if (reponse.status === 501) {
         setTauxMsg({ ok: false, texte: "Les taux automatiques ne sont pas encore configurés sur le serveur. Vos taux saisis à la main restent en place." });
@@ -16073,7 +16067,17 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
                         setShowPlusMenu(false);
                         if (!file) return;
                         setUploadingPhoto(true);
-                        try { const dataUrl = await resizeImageToDataUrl(file); onUpdate({ photoEntrepot: dataUrl }); }
+                        try {
+                          const dataUrl = await resizeImageToDataUrl(file);
+                          /*
+                           * La photo part au stockage et seule son adresse rejoint le colis, comme
+                           * celles de l'enregistrement. Sans ce dépôt, une seule photo d'entrepôt
+                           * pesait 87 ko dans le document — relu et réécrit à chaque geste de
+                           * chaque agent. Si le dépôt échoue, deposerImage rend l'image telle
+                           * quelle : on ne perd jamais la photo parce que le réseau a hoqueté.
+                           */
+                          onUpdate({ photoEntrepot: await deposerImage(dataUrl, "colis", colis.tracking || "entrepot") });
+                        }
                         catch (err) { console.error("Échec du traitement de la photo", err); }
                         setUploadingPhoto(false);
                         e.target.value = "";
@@ -19699,7 +19703,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
 }
 
 async function callClaude(prompt) {
-  const response = await fetch("/api/claude", {
+  const response = await appelServeurQuiDepense("/api/claude", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1000, messages: [{ role: "user", content: prompt }] }),
   });
@@ -20451,7 +20455,7 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
   const [activationEnCours, setActivationEnCours] = useState(false);
 
   function relireQuota() {
-    return fetch("/api/whatsapp?quota=1")
+    return appelServeurQuiDepense("/api/whatsapp?quota=1")
       .then((r) => r.json().then((corps) => ({ ok: r.ok, corps })))
       .then(({ ok, corps }) => { setQuota(ok ? corps : { erreur: corps?.error || "indisponible" }); })
       .catch(() => setQuota({ erreur: "indisponible" }));
@@ -20467,7 +20471,7 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
    */
   const [modeles, setModeles] = useState(null);
   function relireModeles() {
-    return fetch("/api/whatsapp?modeles=1")
+    return appelServeurQuiDepense("/api/whatsapp?modeles=1")
       .then((r) => r.json().then((corps) => ({ ok: r.ok, corps })))
       .then(({ ok, corps }) => setModeles(ok ? corps : { erreur: corps?.error, manquant: corps?.manquant }))
       .catch(() => setModeles({ erreur: "indisponible" }));
@@ -20499,7 +20503,7 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
     setEssaiEnCours(true);
     setEssai(null);
     try {
-      const reponse = await fetch("/api/whatsapp", {
+      const reponse = await appelServeurQuiDepense("/api/whatsapp", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           to: numeroEssai,
@@ -20521,7 +20525,7 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
     setActivationEnCours(true);
     setActivation(null);
     try {
-      const reponse = await fetch("/api/whatsapp?enregistrer=1", {
+      const reponse = await appelServeurQuiDepense("/api/whatsapp?enregistrer=1", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pin }),
       });
@@ -21016,6 +21020,8 @@ function PoidsDesDonnees({ data, persist, notify, session }) {
   const embarquees = [];
   (data.colis || []).forEach((c) => {
     (c.photos || []).forEach((ph) => { if (estImageEmbarquee(ph)) embarquees.push(ph); });
+    if (estImageEmbarquee(c.photoEntrepot)) embarquees.push(c.photoEntrepot);
+    if (estImageEmbarquee(c.photoVerification)) embarquees.push(c.photoVerification);
     if (estImageEmbarquee(c.pod)) embarquees.push(c.pod);
   });
   // Les logos ne partent pas au stockage, mais ils pèsent : ils comptent dans ce qu'on annonce.
@@ -21030,7 +21036,7 @@ function PoidsDesDonnees({ data, persist, notify, session }) {
   // Le délai retenu par l'entreprise, ou trente jours à défaut.
   const joursPhotos = data?.notificationSettings?.joursConservationPhotos ?? JOURS_CONSERVATION_PHOTOS;
   const perimes = colisAuxPhotosPerimees(data, joursPhotos);
-  const photosPerimees = perimes.reduce((n, c) => n + (c.photos || []).length, 0);
+  const photosPerimees = perimes.reduce((n, c) => n + (c.photos || []).length + (c.photoEntrepot ? 1 : 0), 0);
 
   const LIMITE_MO = 4.5;
   const part = Math.min(100, Math.round((mo / LIMITE_MO) * 100));
@@ -21057,12 +21063,22 @@ function PoidsDesDonnees({ data, persist, notify, session }) {
           if (adresse !== ph) deplacees++;
           photos.push(adresse);
         }
+        let photoEntrepot = c.photoEntrepot;
+        if (estImageEmbarquee(photoEntrepot)) {
+          photoEntrepot = await deposerImage(photoEntrepot, "colis", c.tracking || "entrepot");
+          if (photoEntrepot !== c.photoEntrepot) deplacees++;
+        }
+        let photoVerification = c.photoVerification;
+        if (estImageEmbarquee(photoVerification)) {
+          photoVerification = await deposerImage(photoVerification, "colis", c.tracking || "verification");
+          if (photoVerification !== c.photoVerification) deplacees++;
+        }
         let pod = c.pod;
         if (estImageEmbarquee(pod)) {
           pod = await deposerImage(pod, "preuves", c.tracking || "pod");
           if (pod !== c.pod) deplacees++;
         }
-        colis.push({ ...c, photos, pod });
+        colis.push({ ...c, photos, photoEntrepot, photoVerification, pod });
       }
       /*
        * Les logos, eux, restent embarqués mais sont recomprimés : ce sont les PDF qui les
@@ -21516,7 +21532,8 @@ function SitesOperationPage({ data, persist, notify, onBack, sansEntete }) {
       setErreurForm(`Une agence nommée « ${nom} » existe déjà. Choisissez un autre nom : c’est le nom qui rattache les colis et les agents à leur agence.`);
       return;
     }
-    const site = { ...form, nom };
+    // Le numéro part au client avec l'adresse de retrait : il doit être joignable de l'étranger.
+    const site = { ...form, nom, telephone: telephoneAvecIndicatif(form.telephone, form.pays || "GN") };
     const next = exists ? sites.map((s) => (s.id === site.id ? site : s)) : [...sites, { ...site, id: site.id || `s${Date.now()}` }];
     /*
      * L'agence de retrait de l'Espace Client doit toujours désigner un site existant, en Guinée
@@ -21603,7 +21620,17 @@ function SitesOperationPage({ data, persist, notify, onBack, sansEntete }) {
             </div>
           )}
           <Field label="Adresse"><input value={form.adresse} onChange={(e) => setForm({ ...form, adresse: e.target.value })} style={inputStyle} /></Field>
-          <Field label="Téléphone"><input value={form.telephone || ""} onChange={(e) => setForm({ ...form, telephone: e.target.value })} style={inputStyle} placeholder="+224..." /></Field>
+          {/*
+            * Ce numéro n'est pas un pense-bête interne : il part dans le message « votre colis est
+            * disponible », lu par un client qui peut être à Paris, à Dakar ou à New York. Saisi
+            * « 612479339 », il n'aboutit nulle part hors de Guinée — et personne ne s'en aperçoit,
+            * puisque le message part quand même. Le sélecteur d'indicatif interdit ce cas : il
+            * enregistre toujours le numéro complet, pré-réglé sur le pays du site.
+            */}
+          <Field label="Téléphone — il est communiqué au client avec l’adresse de retrait">
+            <PhoneInput value={form.telephone || ""} onChange={(v) => setForm({ ...form, telephone: v })}
+              defaultDial={indicatifDuPays(form.pays || "GN")} />
+          </Field>
           <Field label="Horaires"><input value={form.horaires} onChange={(e) => setForm({ ...form, horaires: e.target.value })} style={inputStyle} placeholder="Lun-Sam 8h-18h" /></Field>
           <Field label="Moyens de paiement acceptés"><input value={form.paiements} onChange={(e) => setForm({ ...form, paiements: e.target.value })} style={inputStyle} placeholder="Espèces, Orange Money" /></Field>
           <Field label="Infos stockage"><input value={form.stockage} onChange={(e) => setForm({ ...form, stockage: e.target.value })} style={inputStyle} placeholder="Retrait sous 7 jours" /></Field>
@@ -23327,7 +23354,15 @@ function VerificationColisPartenaire({ partenaire, colis, onValider }) {
     setChargement(tracking);
     try {
       const url = await resizeImageToDataUrl(fichier);
+      /*
+       * L'agent voit sa photo tout de suite, puis elle se remplace par son adresse une fois
+       * déposée — même chemin que les photos d'enregistrement. Embarquée, elle pesait une
+       * cinquantaine de kilo-octets dans le document, sur un écran où l'on vérifie les colis à
+       * la chaîne : dix colis vérifiés, un demi-mégaoctet relu à chaque geste de chaque agent.
+       */
       setPhotos((p) => ({ ...p, [tracking]: url }));
+      const adresse = await deposerImage(url, "colis", tracking || "verification");
+      if (adresse !== url) setPhotos((p) => (p[tracking] === url ? { ...p, [tracking]: adresse } : p));
     } catch (e) { /* une photo illisible ne doit pas empêcher de valider le colis */ }
     setChargement("");
   }

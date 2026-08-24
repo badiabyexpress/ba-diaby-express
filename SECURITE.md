@@ -109,25 +109,161 @@ connecte.
 |---|---|---|
 | 1 | La page de suivi ne livre plus la base à ses visiteurs | fait, en ligne |
 | 2 | Un visiteur non connecté ne charge plus rien | fait, en ligne |
-| 3 | L'application et l'espace client passent par le serveur | fait — reste à configurer |
-| 4 | Inscription et mot de passe oublié côté client | fait — reste à configurer |
-| 5 | Resserrage des politiques de la base | **à faire — c'est la dernière étape** |
+| 3 | L'application et l'espace client passent par le serveur | fait, en ligne |
+| 4 | Inscription et mot de passe oublié côté client | fait, en ligne |
+| 5 | Resserrage des politiques de la base | fait — RLS active, aucune politique |
+| 6 | L'espace client cloisonné | fait |
+| 7 | L'espace partenaire cloisonné | fait |
+| 8 | Les fonctions qui dépensent, fermées aux inconnus | fait |
+| 9 | Les rôles de l'équipe tenus par le serveur | fait |
 
-Plus rien ne passe par la clé publique. La base peut être fermée dès que la clé de service est
-posée sur Vercel et qu'une connexion réelle a été vérifiée sur le site.
+Plus rien ne passe par la clé publique, et la base est effectivement fermée : `bde_data` a RLS
+active et **aucune politique**, ce qui ne laisse passer que la clé de service — c'est-à-dire nos
+seules fonctions serveur.
 
-### Ce qui reste ouvert après la fermeture
+### Le cloisonnement de l'espace client (lot 6)
 
-**L'espace client reçoit encore le document entier** une fois connecté, alors qu'il n'affiche que
-ses propres colis — donc les colis, les clients et les comptes de toute l'entreprise arrivent dans
-le navigateur de n'importe quel client. Ce n'est pas une régression : c'était déjà le cas avant
-tout ce travail, et la fermeture de la base n'y change rien puisqu'un client est, lui, identifié.
+**Le problème.** N'importe qui peut créer un compte client depuis la page d'accueil — c'est fait
+pour. Une fois connecté, ce compte présentait un jeton parfaitement valable, et `api/donnees.js`
+lui rendait le document ENTIER : les colis de tous les autres clients avec leurs noms, leurs
+téléphones et ce qu'ils ont payé, le répertoire, le journal d'activité, la caisse, les tarifs du
+partenaire, et la liste des employés avec l'empreinte de leur mot de passe. La fermeture de la
+base n'y changeait rien, puisqu'un client est, lui, identifié.
 
-C'est le prochain chantier, et il est plus profond que les précédents : le portail lit ET réécrit
-le document entier à chaque geste (déclarer un paiement, envoyer un message, faire une pré-alerte).
-Ne lui en donner qu'une partie sans toucher à ses écritures lui ferait effacer tout le reste. Il
-faut donc scinder les deux : une lecture réduite à ce qui le concerne, et des écritures ciblées
-côté serveur, geste par geste.
+**La difficulté.** Le portail lit ET réécrit le document entier à chaque geste — déclarer un
+paiement, envoyer un message, faire une pré-alerte. Ne lui en donner qu'une partie sans toucher à
+ses écritures lui aurait fait effacer tout le reste au premier enregistrement. C'eût été pire que
+le mal.
+
+**La réponse**, dans `api/_cloisonnement.js`, en deux moitiés indissociables :
+
+- *En lecture*, une **liste blanche** de sections (`SECTIONS_PARTAGEES`), plus les listes
+  personnelles réduites à ce qui porte l'identifiant du compte : ses colis, ses pré-alertes, ses
+  demandes de regroupement, sa fiche — sans empreinte de mot de passe. Ce qui n'est pas sur la
+  liste ne sort pas ; une section ajoutée demain est donc privée par défaut.
+- *En écriture*, on repart **toujours du document réel** et l'on n'y repose que les fragments
+  autorisés : les trois champs qu'un client peut changer sur son colis (demande express,
+  déclaration de paiement, signalement), ses listes personnelles avec son identifiant réimposé, et
+  les champs autorisés de sa propre fiche. Le portail continue d'envoyer le document entier tel
+  qu'il le connaît ; ce qu'il n'a pas le droit de changer est ignoré.
+
+Trois portes de côté se ferment aussi, avant même de toucher à la base : un client ne peut pas
+lire une **sauvegarde** (`bde-backup-*`, une copie complète — c'était le contournement évident),
+ni **lister** les clés, ni **supprimer** quoi que ce soit.
+
+### Le cloisonnement de l'espace partenaire (lot 7)
+
+Un partenaire se connecte par `users`, avec un rôle qui n'est pas « client » : il recevait donc,
+lui aussi, le document entier. C'est une entreprise tierce, et elle voyait tout le carnet de
+Ba-Diaby — les colis de tous les clients, le répertoire, la caisse, le journal d'activité, et les
+tarifs de ses propres confrères.
+
+La différence avec le compte client est réelle et vaut d'être notée : un compte partenaire ne se
+crée pas tout seul, c'est l'administrateur qui l'ouvre. Le risque n'est donc pas « n'importe qui »
+mais « le confrère à qui l'on a ouvert une porte ». Cela restait contraire à la règle que
+l'entreprise s'est donnée — ce qu'un partenaire facture à ses propres clients ne regarde pas
+Ba-Diaby, et l'inverse est tout aussi vrai.
+
+Même mécanisme, même fichier. Il voit ses colis, ses factures, ses annonces de dépôt, sa fiche et
+celles de ses employés — sans empreintes — et les sections partagées. Le journal lui descend
+**vide** plutôt qu'absent : son espace y ajoute une ligne à chaque geste, et une section absente
+lui ferait fabriquer un journal neuf.
+
+En écriture, il enregistre ses colis et gère ses accès, mais :
+
+- le **rattachement** d'un colis est réimposé au sien — pas moyen d'en déposer un au compte d'un
+  confrère — et la **validation** est remise « En attente » : c'est l'entreprise qui pèse et qui
+  arrête le prix, un prix qu'il aurait glissé lui-même n'engage donc rien ;
+- sur un colis déjà enregistré il ne change qu'une chose, sa propre marque de paiement — la seule
+  du circuit partenaire, puisque l'entreprise n'encaisse rien sur ces colis ;
+- de son contrat, il ne touche que les six champs d'identité (nom commercial, logo, adresse,
+  téléphone, e-mail, site) : ni le tarif, ni les destinations, ni le préfixe de suivi ;
+- un accès employé qu'il crée reste un accès partenaire rattaché à lui, le **plafond de cinq** est
+  tenu ici et non à l'écran, et un identifiant déjà pris ailleurs dans l'application fait tomber la
+  création — deux comptes homonymes rendraient imprévisible celui qu'ouvre la page de connexion ;
+- ses gestes restent **tracés au journal**, mais l'auteur est réécrit depuis le compte de la
+  session : un journal ne sert à rien si l'on peut y signer du nom d'un autre.
+
+Un employé de partenaire relève du contrat de son patron : il voit le même espace, mais ne gère pas
+les accès et ne s'ouvre pas lui-même l'accès aux montants.
+
+Deux garde-fous méritent d'être notés, parce qu'ils protègent contre l'accident plutôt que contre
+la malveillance : une suppression d'accès se lisant à une absence, un envoi où la liste des comptes
+manque n'est pas traité comme la suppression de tous les employés ; et une écriture sur une base
+vide est refusée plutôt que devinée.
+
+### Les fonctions qui dépensent (lot 8)
+
+**Le problème.** Une seule fonction vérifiait une session : `api/donnees.js`. Les quatre autres qui
+coûtent quelque chose à chaque appel étaient joignables par n'importe qui connaissant leur adresse.
+
+| Fonction | Ce qu'un inconnu pouvait faire |
+|---|---|
+| `api/whatsapp.js` | faire partir des messages depuis le numéro de l'entreprise, vers n'importe quel numéro, avec ses modèles approuvés |
+| `api/email.js` | envoyer des courriels depuis `contact@badiabyexpress.com` |
+| `api/claude.js` | consommer la clé Anthropic |
+| `api/taux.js` | épuiser le quota mensuel des taux de change |
+
+La première était la plus grave, et pas seulement pour la facture : un numéro qui envoie en masse
+se fait restreindre par Meta. Celui de l'entreprise a demandé des jours d'approbation.
+
+**La réponse**, `refusSaufEquipe` dans `api/_session.js`, posée en tête des quatre fonctions. Ni un
+client ni un partenaire n'y ont affaire — leurs écrans ne les appellent jamais, et le compte client
+est le plus exposé puisque n'importe qui peut en créer un. Le navigateur joint désormais le jeton
+de session à ces appels comme il le fait déjà pour les données.
+
+**Le laissez-passer interne.** `api/motdepasse.js` envoie le code de réinitialisation en repassant
+par `api/whatsapp.js`. Cet appel n'a aucune session à présenter, et pour cause : la personne n'est
+pas connectée, c'est justement son mot de passe qu'elle a perdu. Un jeton dérivé du même secret —
+jamais égal à lui — voyage donc entre les deux fonctions du même déploiement. Sans lui, fermer
+WhatsApp aux inconnus aurait fermé du même coup la réinitialisation.
+
+**Tant que le serveur n'est pas configuré, rien ne change** : sans secret, aucun jeton ne serait
+vérifiable et exiger une session reviendrait à fermer la porte à l'équipe elle-même.
+
+### Les rôles de l'équipe (lot 9)
+
+**Le problème.** `api/donnees.js` distinguait le client et le partenaire du reste. Le reste, il le
+croyait sur parole : un agent, un comptable et un administrateur avaient exactement les mêmes
+droits d'écriture. Les permissions par rôle existaient, mais elles vivaient dans le navigateur —
+elles décidaient quels boutons s'affichent. Un bouton qu'on n'affiche pas n'est pas un bouton qu'on
+ne peut pas actionner.
+
+Le risque n'est pas du même ordre que les précédents : ce n'est ni un inconnu, ni un tiers, mais
+quelqu'un que l'entreprise a embauché et à qui elle a donné un accès. C'est pour cette raison que ce
+lot vient après les autres, et non parce qu'il serait moins réel.
+
+**Une seule table, deux lecteurs.** Les permissions ont déménagé dans `api/_permissions.js`, que
+`src/App.jsx` importe pour construire ses écrans et `api/_cloisonnement.js` pour trancher une
+écriture. En recopier une moitié aurait marché le premier jour et divergé le second — et une
+divergence, ici, ne se voit pas : elle s'appelle une permission qu'on croyait retirée.
+
+**Le sens de la fusion est inverse** des lots 6 et 7. Un membre de l'équipe reçoit et réécrit le
+document entier, c'est son travail : on part donc de ce qu'il envoie, et l'on REMET EN PLACE ce
+qu'il n'avait pas le droit de changer.
+
+Trois choses, celles dont on ne revient pas :
+
+- **Les droits.** `role`, `permissionsOverride`, `paysAutorises`, `agence` : nul ne se les réécrit
+  à soi-même, pas même un administrateur — il les a déjà tous, la règle ne lui coûte rien et vaut
+  surtout pour celui qui n'en a pas. Les modifier chez un autre demande `users.permissions` ;
+  créer, corriger ou supprimer un compte demande `users.gerer`. Gérer les comptes sans gérer les
+  droits reste possible : le compte créé naît alors avec le rôle le plus modeste, sans quoi « je
+  crée un administrateur et je m'y connecte » serait le chemin le plus court pour contourner tout
+  le reste. Chacun garde le droit de changer son propre mot de passe et ses coordonnées.
+- **Les réglages** — marque, siège, agences, calendrier des départs, notifications, taux,
+  commissions, moyens de paiement, catégories : chaque section est gardée par la permission qui
+  ouvre l'écran correspondant, pour qu'un geste possible à l'écran ne soit jamais refusé par le
+  serveur, ni l'inverse.
+- **Le journal**, qui ne se réécrit pas : il s'ajoute. C'est lui qui garde trace de qui a encaissé,
+  annulé, supprimé. Le laisser réécrire à celui-là même dont il consigne les gestes reviendrait à
+  ne rien consigner du tout. L'auteur y est réinscrit depuis le compte de la session.
+
+**Ce que ce lot ne couvre pas.** Les colis, les factures, les bordereaux et la caisse restent
+écrivables par n'importe quel compte de l'équipe, comme avant. C'est un choix : ce sont les gestes
+du métier, faits toute la journée par des rôles différents, et les encadrer demanderait de décrire
+au serveur ce qu'est un encaissement légitime. Le journal, lui, en garde désormais trace de façon
+ineffaçable — ce qui est la vraie réponse à un geste qu'on ne peut pas empêcher.
 
 **La clé `bde-reinit`** contient les demandes de réinitialisation en cours, sous forme d'empreintes.
 `api/donnees.js` la refuse explicitement — c'est ce qui empêche un client de lire les codes des
@@ -205,24 +341,50 @@ create policy "Suppression limitée aux sauvegardes" on public.bde_data for dele
 - **`api/public.js`**, sur 36 cas : ce qui sort pour un suivi, une vitrine, les mentions légales ;
   une recherche vide qui ne renvoie pas « tous les colis » ; l'absence de téléphone, d'adresse et
   de notes internes dans la réponse ; la marque du partenaire sans ses tarifs.
-- **`api/donnees.js` et le jeton de session**, sur 53 cas : signature et vérification, jeton
+- **`api/donnees.js` et le jeton de session**, sur 111 cas : signature et vérification, jeton
   retouché, expiré, signé avec un autre secret ; aucune donnée sans jeton — et la base pas même
   interrogée ; la clé de service jamais renvoyée au navigateur ; la tête qui ne descend que la
   date ; une clé absente distinguée d'une base injoignable ; une écriture vide refusée ; la liste
   qui ne donne que des noms de clés ; et, du côté de `api/login.js`, qu'un compte client n'ouvre
   pas une session d'agent ni l'inverse.
+- **Le cloisonnement**, dans ces mêmes cas — pour le client : le colis du voisin qui ne descend
+  pas, ni son nom, ni son téléphone, ni son empreinte ; aucune section réservée (employés,
+  répertoire, journal, caisse, factures du partenaire) ; les sauvegardes, la liste et la
+  suppression refusées. Puis, en écriture, un client qui envoie sa vue réduite sans rien effacer —
+  et un client MALVEILLANT, qui fabrique son envoi à la main : il ne se fait pas administrateur,
+  ne vide ni le répertoire ni la caisse, ne change pas le mot de passe du voisin, ne s'approprie
+  pas son colis, ne remet pas le prix du sien à zéro, et ne dépose pas de pré-alerte au nom d'un
+  autre. C'est le vrai test : l'écran ne protège rien, seul le serveur protège.
 - **L'application, dans un navigateur, la base fermée** (`t55`, 20 cas) : connexion, jeton porté
   jusqu'au serveur, aucun appel direct à la base, aucun canal temps réel, le changement d'un
   collègue qui arrive quand même, la déconnexion qui emporte le jeton — et le mot de passe de
   l'agent qui survit à sa propre reconnexion.
-- **L'espace client** (`t56`, 13 cas) : page de connexion sans la base, refus par le serveur,
-  connexion réussie, et le mot de passe du client intact après coup.
+- **L'espace client** (`t56`, 38 cas) : page de connexion sans la base, refus par le serveur,
+  connexion réussie, et le mot de passe du client intact après coup. Depuis le lot 6, le portail y
+  est nourri par le VRAI tri du serveur — `vueClient` et `fusionnerEcritureClient` sont importés
+  du code livré, pas imités : on ouvre chacun de ses écrans pour vérifier qu'aucun ne tombe faute
+  d'une section, puis on fouille tout ce qui est réellement descendu dans le navigateur.
+- **L'espace partenaire** (`t68`, 31 cas), même méthode et même exigence : ses cinq onglets
+  s'ouvrent, et rien de la maison ne descend — ni le colis d'un confrère, ni son tarif, ni le
+  répertoire, ni la caisse, ni une seule empreinte.
 - **L'inscription et le mot de passe oublié** (`testcompte`, 53 cas ; `t57`, 22 cas, la base
   fermée) : identifiant déjà pris refusé quelle que soit la casse, champs obligatoires, mot de
   passe trop court, création en rafale ralentie, empreinte identique à celle du navigateur, et
   surtout — le code de réinitialisation absent de la réponse, absent du HTML de la page, absent du
   document servi aux personnes connectées, inutilisable une seconde fois, et jamais affiché quand
   WhatsApp est indisponible.
+- **Les fonctions qui dépensent** (`testgardes`, 41 cas) : les quatre portes éprouvées de la même
+  façon — l'inconnu refusé sans qu'AUCUN APPEL SORTANT ne parte, le jeton inventé refusé, le client
+  et le partenaire refusés, l'équipe qui passe, le laissez-passer interne qui ouvre WhatsApp mais
+  pas s'il est inventé, tronqué ou signé d'un autre secret. Et, dans un navigateur (`t55`), que
+  l'application joint bien ce jeton à ses appels : sans cela, la fermeture ne protégerait rien et
+  casserait tout.
+- **Les rôles de l'équipe**, dans les mêmes cas de `testdonnees` : un agent qui envoie ce qu'il
+  veut ne se fait pas administrateur, ne se donne pas de permissions, ne rétrograde pas
+  l'administrateur ni ne touche à son empreinte, ne supprime personne, ne crée pas de complice, ne
+  renomme pas l'entreprise, ne touche ni au taux de change, ni aux catégories, ni aux commissions,
+  et n'efface pas le journal — mais change bien son propre mot de passe, et son travail passe.
+  L'administrateur, lui, fait tout cela, sauf réécrire son propre rôle.
 - **Le déploiement à moitié configuré** (`t58`, 10 cas) : toutes les fonctions serveur répondent
   501, et le portail, l'inscription et la connexion continuent de fonctionner par l'ancien chemin.
   C'est l'état exact du site tant que la clé de service n'est pas posée.

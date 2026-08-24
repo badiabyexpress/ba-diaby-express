@@ -31,6 +31,8 @@
  * brouillon : rien ne casse, mais rien ne part non plus.
  */
 
+import { refusSaufEquipe } from "./_session.js";
+
 /*
  * L'adresse expéditrice doit avoir la forme « Nom <adresse@domaine> », ou être une adresse nue.
  * Resend refuse tout le reste — et son refus ne dit pas ce qui cloche, ce qui laisse chercher
@@ -90,6 +92,13 @@ function analyserExpediteur(valeur) {
 }
 
 export default async function handler(req, res) {
+  /*
+   * Cette fonction dépense. Elle n'est donc pas ouverte à qui connaît son adresse — voir
+   * refusSaufEquipe dans api/_session.js.
+   */
+  const refus = refusSaufEquipe(req);
+  if (refus) return res.status(refus.code).json(refus.corps);
+
   /*
    * Un état consultable depuis un navigateur — y compris un téléphone.
    *

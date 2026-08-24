@@ -80,3 +80,63 @@ export function sessionDeLaRequete(req) {
   const m = /^Bearer\s+(.+)$/i.exec(String(entete).trim());
   return m ? verifierSession(m[1]) : null;
 }
+
+/** Vrai si le serveur sait signer et vérifier des jetons — c'est-à-dire s'il est configuré. */
+export function signatureDisponible() {
+  return !!secretDeSignature();
+}
+
+/*
+ * LE LAISSEZ-PASSER DES APPELS DE SERVEUR À SERVEUR
+ *
+ * api/motdepasse.js envoie le code de réinitialisation en repassant par api/whatsapp.js — un appel
+ * HTTP qui sort et revient. Il n'a aucune session à présenter, et pour cause : la personne qui
+ * demande n'est pas connectée, c'est justement son mot de passe qu'elle a perdu.
+ *
+ * Sans ce laissez-passer, fermer api/whatsapp.js aux inconnus fermerait du même coup la
+ * réinitialisation. Il est dérivé du même secret — jamais égal à lui — et ne quitte jamais le
+ * serveur : il voyage entre deux fonctions du même déploiement, qui partagent leurs variables.
+ */
+export const ENTETE_INTERNE = "x-bde-interne";
+
+export function jetonInterne() {
+  const secret = secretDeSignature();
+  if (!secret) return null;
+  return crypto.createHmac("sha256", secret).update("bde-interne-v1").digest("hex");
+}
+
+function estAppelInterne(req) {
+  const attendu = jetonInterne();
+  const recu = req.headers?.[ENTETE_INTERNE];
+  if (!attendu || typeof recu !== "string" || recu.length !== attendu.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(recu, "utf8"), Buffer.from(attendu, "utf8"));
+}
+
+/**
+ * Le garde commun des fonctions QUI DÉPENSENT : WhatsApp, e-mail, l'assistant, les taux du jour.
+ *
+ * Chacune coûte à chaque appel — un message facturé par Meta, un courriel qui engage la réputation
+ * du domaine, des jetons chez Anthropic, une part d'un quota mensuel. Elles étaient ouvertes à qui
+ * connaissait leur adresse : n'importe qui pouvait faire partir des messages depuis le numéro de
+ * l'entreprise, et le prix comme la sanction — un numéro que Meta restreint — auraient été pour
+ * elle.
+ *
+ * Ni un client ni un partenaire n'y ont affaire : leurs écrans ne les appellent jamais. Ce sont
+ * des gestes de l'équipe, et le client est ici le compte le plus exposé, puisque n'importe qui
+ * peut en créer un.
+ *
+ * Tant que le serveur n'est pas configuré, rien ne change : sans secret, aucun jeton ne serait
+ * vérifiable et exiger une session reviendrait à tout fermer, y compris à l'équipe.
+ *
+ * Retourne null si l'appel est autorisé, sinon { code, corps } à renvoyer tel quel.
+ */
+export function refusSaufEquipe(req) {
+  if (!signatureDisponible()) return null;
+  if (estAppelInterne(req)) return null;
+  const session = sessionDeLaRequete(req);
+  if (!session) return { code: 401, corps: { error: "Session absente ou expirée." } };
+  if (session.role === "client" || session.role === "Partenaire") {
+    return { code: 403, corps: { error: "Action réservée à l’équipe." } };
+  }
+  return null;
+}

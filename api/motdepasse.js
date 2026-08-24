@@ -30,6 +30,7 @@
 
 import { baseConfiguree, lireCle, ecrireCle, modifierDocument } from "./_base.js";
 import { hashPBKDF2, identifiantsMotDePasse, egaliteSure, genererCode, genererSel } from "./_motdepasse.js";
+import { jetonInterne, ENTETE_INTERNE } from "./_session.js";
 
 export const CLE_REINIT = "bde-reinit";
 
@@ -71,15 +72,24 @@ async function ecrireDemandes(demandes) {
 /*
  * L'envoi WhatsApp réutilise api/whatsapp.js plutôt que d'en refaire une copie : le jour où
  * l'entreprise passera de Twilio à Meta, il n'y aura qu'un fichier à changer.
+ *
+ * Cet appel-là n'a aucune session à présenter, et pour cause : la personne qui demande n'est pas
+ * connectée, c'est justement son mot de passe qu'elle a perdu. Il porte donc le laissez-passer des
+ * appels de serveur à serveur, qui ne quitte jamais le déploiement — sans quoi fermer
+ * api/whatsapp.js aux inconnus fermerait du même coup la réinitialisation.
  */
 async function envoyerCodeWhatsApp(req, telephone, code) {
   const hote = req.headers["x-forwarded-host"] || req.headers.host;
   const protocole = req.headers["x-forwarded-proto"] || "https";
   if (!hote) return false;
+  const laissezPasser = jetonInterne();
   try {
     const reponse = await fetch(`${protocole}://${hote}/api/whatsapp`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(laissezPasser ? { [ENTETE_INTERNE]: laissezPasser } : {}),
+      },
       body: JSON.stringify({
         to: telephone,
         message: `Ba-Diaby Express — votre code de réinitialisation est ${code}. Il expire dans ${MINUTES_VALIDITE} minutes. Si vous n’avez rien demandé, ignorez ce message.`,

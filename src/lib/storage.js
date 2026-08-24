@@ -79,15 +79,15 @@ const CACHE_PREFIX = "bde-cache:";
 const QUEUE_KEY = "bde-outbox";
 
 /*
- * DEUX CACHES, PARCE QU'IL Y A DEUX DOCUMENTS
+ * UN TIROIR PAR ESPACE, PARCE QU'IL Y A TROIS DOCUMENTS
  *
- * Depuis que le serveur ne rend à un client que ce qui le concerne (voir api/_client.js), le
- * document qu'il garde en cache n'est plus celui de l'entreprise : c'est une vue réduite à ses
- * propres colis. Or le cache et la file d'attente sont rangés dans le stockage du navigateur, qui
- * est le même pour l'application et pour le portail.
+ * Depuis que le serveur ne rend à un client — ou à un partenaire — que ce qui le concerne (voir
+ * api/_cloisonnement.js), le document qu'il garde en cache n'est plus celui de l'entreprise :
+ * c'est une vue réduite à ses propres colis. Or le cache et la file d'attente sont rangés dans le
+ * stockage du navigateur, qui est le même pour tous les espaces d'un même site.
  *
- * Sur un appareil où les deux servent — l'ordinateur de l'agence, où l'on ouvre le portail pour
- * montrer son espace à un client — un agent hors ligne se serait donc rabattu sur la vue du
+ * Sur un appareil où deux d'entre eux servent — l'ordinateur de l'agence, où l'on ouvre le portail
+ * pour montrer son espace à un client — un agent hors ligne se serait donc rabattu sur la vue du
  * client, et l'aurait rejouée à la reconnexion. Il aurait effacé toute l'entreprise en croyant
  * enregistrer un colis. Chaque espace a donc son propre tiroir.
  *
@@ -104,7 +104,9 @@ function tiroirDuJeton(jeton) {
     while (corps.length % 4) corps += "=";
     const octets = Uint8Array.from(atob(corps), (c) => c.charCodeAt(0));
     const charge = JSON.parse(new TextDecoder().decode(octets));
-    return charge?.role === "client" ? "client:" : "";
+    if (charge?.role === "client") return "client:";
+    if (charge?.role === "Partenaire") return "partenaire:";
+    return "";
   } catch (e) { return ""; }
 }
 function cleCache(key) { return `${CACHE_PREFIX}${tiroir}${key}`; }

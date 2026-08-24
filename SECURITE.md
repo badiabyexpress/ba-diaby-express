@@ -113,6 +113,7 @@ connecte.
 | 4 | Inscription et mot de passe oublié côté client | fait, en ligne |
 | 5 | Resserrage des politiques de la base | fait — RLS active, aucune politique |
 | 6 | L'espace client cloisonné | fait |
+| 7 | L'espace partenaire cloisonné | fait |
 
 Plus rien ne passe par la clé publique, et la base est effectivement fermée : `bde_data` a RLS
 active et **aucune politique**, ce qui ne laisse passer que la clé de service — c'est-à-dire nos
@@ -132,7 +133,7 @@ paiement, envoyer un message, faire une pré-alerte. Ne lui en donner qu'une par
 ses écritures lui aurait fait effacer tout le reste au premier enregistrement. C'eût été pire que
 le mal.
 
-**La réponse**, dans `api/_client.js`, en deux moitiés indissociables :
+**La réponse**, dans `api/_cloisonnement.js`, en deux moitiés indissociables :
 
 - *En lecture*, une **liste blanche** de sections (`SECTIONS_PARTAGEES`), plus les listes
   personnelles réduites à ce qui porte l'identifiant du compte : ses colis, ses pré-alertes, ses
@@ -148,21 +149,46 @@ Trois portes de côté se ferment aussi, avant même de toucher à la base : un 
 lire une **sauvegarde** (`bde-backup-*`, une copie complète — c'était le contournement évident),
 ni **lister** les clés, ni **supprimer** quoi que ce soit.
 
-### Ce qui reste ouvert — le compte partenaire
+### Le cloisonnement de l'espace partenaire (lot 7)
 
-Un partenaire se connecte par `users`, avec un rôle qui n'est pas « client » : il reçoit donc
-encore le document entier. C'est une entreprise tierce, et elle voit aujourd'hui tout le carnet de
-Ba-Diaby — les colis de tous les clients, le répertoire, la caisse, le journal d'activité.
+Un partenaire se connecte par `users`, avec un rôle qui n'est pas « client » : il recevait donc,
+lui aussi, le document entier. C'est une entreprise tierce, et elle voyait tout le carnet de
+Ba-Diaby — les colis de tous les clients, le répertoire, la caisse, le journal d'activité, et les
+tarifs de ses propres confrères.
 
 La différence avec le compte client est réelle et vaut d'être notée : un compte partenaire ne se
-crée pas tout seul, c'est l'administrateur qui l'ouvre. Le risque n'est donc pas « n'importe qui »,
-mais « le confrère à qui l'on a ouvert une porte ». Cela reste contraire à la règle que l'entreprise
-s'est donnée — ce qu'un partenaire facture à ses propres clients ne regarde pas Ba-Diaby, et
-l'inverse est tout aussi vrai.
+crée pas tout seul, c'est l'administrateur qui l'ouvre. Le risque n'est donc pas « n'importe qui »
+mais « le confrère à qui l'on a ouvert une porte ». Cela restait contraire à la règle que
+l'entreprise s'est donnée — ce qu'un partenaire facture à ses propres clients ne regarde pas
+Ba-Diaby, et l'inverse est tout aussi vrai.
 
-Le chantier est le même que celui du lot 6, et le mécanisme est déjà écrit : il s'agirait d'ajouter
-à `api/_client.js` une vue partenaire — ses colis à lui, ses factures, sa marque — et la fusion en
-écriture correspondante.
+Même mécanisme, même fichier. Il voit ses colis, ses factures, ses annonces de dépôt, sa fiche et
+celles de ses employés — sans empreintes — et les sections partagées. Le journal lui descend
+**vide** plutôt qu'absent : son espace y ajoute une ligne à chaque geste, et une section absente
+lui ferait fabriquer un journal neuf.
+
+En écriture, il enregistre ses colis et gère ses accès, mais :
+
+- le **rattachement** d'un colis est réimposé au sien — pas moyen d'en déposer un au compte d'un
+  confrère — et la **validation** est remise « En attente » : c'est l'entreprise qui pèse et qui
+  arrête le prix, un prix qu'il aurait glissé lui-même n'engage donc rien ;
+- sur un colis déjà enregistré il ne change qu'une chose, sa propre marque de paiement — la seule
+  du circuit partenaire, puisque l'entreprise n'encaisse rien sur ces colis ;
+- de son contrat, il ne touche que les six champs d'identité (nom commercial, logo, adresse,
+  téléphone, e-mail, site) : ni le tarif, ni les destinations, ni le préfixe de suivi ;
+- un accès employé qu'il crée reste un accès partenaire rattaché à lui, le **plafond de cinq** est
+  tenu ici et non à l'écran, et un identifiant déjà pris ailleurs dans l'application fait tomber la
+  création — deux comptes homonymes rendraient imprévisible celui qu'ouvre la page de connexion ;
+- ses gestes restent **tracés au journal**, mais l'auteur est réécrit depuis le compte de la
+  session : un journal ne sert à rien si l'on peut y signer du nom d'un autre.
+
+Un employé de partenaire relève du contrat de son patron : il voit le même espace, mais ne gère pas
+les accès et ne s'ouvre pas lui-même l'accès aux montants.
+
+Deux garde-fous méritent d'être notés, parce qu'ils protègent contre l'accident plutôt que contre
+la malveillance : une suppression d'accès se lisant à une absence, un envoi où la liste des comptes
+manque n'est pas traité comme la suppression de tous les employés ; et une écriture sur une base
+vide est refusée plutôt que devinée.
 
 **La clé `bde-reinit`** contient les demandes de réinitialisation en cours, sous forme d'empreintes.
 `api/donnees.js` la refuse explicitement — c'est ce qui empêche un client de lire les codes des
@@ -246,7 +272,7 @@ create policy "Suppression limitée aux sauvegardes" on public.bde_data for dele
   date ; une clé absente distinguée d'une base injoignable ; une écriture vide refusée ; la liste
   qui ne donne que des noms de clés ; et, du côté de `api/login.js`, qu'un compte client n'ouvre
   pas une session d'agent ni l'inverse.
-- **Le cloisonnement de l'espace client**, dans ces mêmes cas : le colis du voisin qui ne descend
+- **Le cloisonnement**, dans ces mêmes cas — pour le client : le colis du voisin qui ne descend
   pas, ni son nom, ni son téléphone, ni son empreinte ; aucune section réservée (employés,
   répertoire, journal, caisse, factures du partenaire) ; les sauvegardes, la liste et la
   suppression refusées. Puis, en écriture, un client qui envoie sa vue réduite sans rien effacer —
@@ -263,6 +289,9 @@ create policy "Suppression limitée aux sauvegardes" on public.bde_data for dele
   est nourri par le VRAI tri du serveur — `vueClient` et `fusionnerEcritureClient` sont importés
   du code livré, pas imités : on ouvre chacun de ses écrans pour vérifier qu'aucun ne tombe faute
   d'une section, puis on fouille tout ce qui est réellement descendu dans le navigateur.
+- **L'espace partenaire** (`t68`, 31 cas), même méthode et même exigence : ses cinq onglets
+  s'ouvrent, et rien de la maison ne descend — ni le colis d'un confrère, ni son tarif, ni le
+  répertoire, ni la caisse, ni une seule empreinte.
 - **L'inscription et le mot de passe oublié** (`testcompte`, 53 cas ; `t57`, 22 cas, la base
   fermée) : identifiant déjà pris refusé quelle que soit la casse, champs obligatoires, mot de
   passe trop court, création en rafale ralentie, empreinte identique à celle du navigateur, et

@@ -35,6 +35,7 @@ import { sessionDeLaRequete } from "./_session.js";
 import {
   vueClient, fusionnerEcritureClient,
   vuePartenaire, fusionnerEcriturePartenaire, partenaireDuCompte,
+  fusionnerEcritureEquipe,
 } from "./_cloisonnement.js";
 
 const TABLE = "bde_data";
@@ -191,7 +192,26 @@ export default async function handler(req, res) {
        * relecture, cette vue réduite écraserait la vraie, et l'entreprise perdrait tout ce qu'elle
        * avait justement caché. C'est le point le plus dangereux de la manœuvre.
        */
+      /*
+       * L'équipe, elle, reçoit et réécrit le document entier — c'est son travail. On part donc de
+       * ce qu'elle envoie, et l'on remet en place ce que son rôle ne l'autorisait pas à changer :
+       * les droits des comptes, les réglages, et le journal, qui ne se réécrit pas.
+       *
+       * Cela vaut pour le document vivant seulement. Une sauvegarde est écrite d'un bloc par la
+       * rotation automatique : la passer dans ce tamis n'aurait aucun sens.
+       */
       let aEcrire = valeur;
+      if (!cloisonne && clef === "bde-data") {
+        const lecture = await fetch(
+          `${url}/rest/v1/${TABLE}?key=eq.${encodeURIComponent(clef)}&select=value`,
+          { headers: entetes },
+        );
+        if (!lecture.ok) return res.status(502).json({ error: "Base de données injoignable" });
+        const lignesActuelles = await lecture.json();
+        const actuel = Array.isArray(lignesActuelles) ? lignesActuelles[0]?.value : null;
+        // Première écriture d'une base neuve : il n'y a pas encore de règles à faire respecter.
+        if (actuel) aEcrire = fusionnerEcritureEquipe(actuel, valeur, compteId);
+      }
       if (cloisonne) {
         const lecture = await fetch(
           `${url}/rest/v1/${TABLE}?key=eq.${encodeURIComponent(clef)}&select=value`,

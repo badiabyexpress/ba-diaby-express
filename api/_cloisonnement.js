@@ -34,6 +34,8 @@
  * effacerait d'un seul enregistrement tout ce qu'on venait de lui cacher.
  */
 
+import { effectivePermission } from "./_permissions.js";
+
 /*
  * Ce que tout le monde peut voir.
  *
@@ -472,4 +474,169 @@ export function fusionnerEcriturePartenaire(actuel, propose, partenaireId, compt
     preAlertesPartenaire,
     activityLog,
   };
+}
+
+
+/* =============================================================================================
+ * L'ÉQUIPE
+ *
+ * Les deux sections précédentes protègent l'entreprise de gens qui ne sont pas d'elle. Celle-ci
+ * la protège de ses propres comptes — et le risque n'est plus du même ordre : ce n'est ni un
+ * inconnu, ni un tiers, mais quelqu'un qu'elle a embauché et à qui elle a donné un accès.
+ *
+ * Les permissions par rôle existaient déjà (voir api/_permissions.js), mais elles ne vivaient que
+ * dans le navigateur : elles décidaient quels boutons s'affichent. Un bouton qu'on n'affiche pas
+ * n'est pas un bouton qu'on ne peut pas actionner. Un agent qui ouvrait les outils de
+ * développement pouvait réécrire la configuration, effacer le journal qui garde trace de ses
+ * gestes, et se faire administrateur.
+ *
+ * Ici, à la différence des espaces cloisonnés, on ne part PAS du document en base : un membre de
+ * l'équipe reçoit le document entier et le réécrit entier, c'est son travail. On part donc de ce
+ * qu'il envoie, et l'on REMET EN PLACE ce qu'il n'avait pas le droit de changer.
+ *
+ * Ce lot ne couvre pas tout : les colis, les factures, les bordereaux et la caisse restent
+ * écrivables par n'importe quel compte de l'équipe, comme avant. Il couvre les trois choses dont
+ * on ne revient pas — se donner des droits, réécrire les règles, effacer les traces.
+ * ========================================================================================== */
+
+/*
+ * Ce qu'un membre de l'équipe change sur SA propre fiche sans être gestionnaire des comptes : son
+ * mot de passe, et de quoi le joindre. C'est aussi par là que passe la remise à niveau de
+ * l'empreinte, à la première connexion d'un vieux compte.
+ */
+const CHAMPS_SOI_MEME = [
+  "motdepasse", "motdepasseSecure", "motdepasseSalt", "motdepasseIter", "motdepasseAlgo",
+  "twoFA", "telephone", "email",
+];
+
+/*
+ * Ce qui décide des droits d'un compte. Personne ne se les donne à soi-même — pas même un
+ * administrateur, qui les a déjà tous et n'a donc rien à y gagner : la règle vaut surtout pour
+ * celui qui n'en a pas.
+ */
+const CHAMPS_DE_POUVOIR = ["role", "permissionsOverride", "paysAutorises", "agence", "partenaireParent"];
+
+/*
+ * Les sections de réglages, et la permission qu'il faut pour y toucher — les mêmes que celles qui
+ * ouvrent les écrans correspondants, pour qu'un geste possible à l'écran ne soit jamais refusé
+ * par le serveur, ni l'inverse.
+ */
+const SECTIONS_REGLAGES = [
+  ["branding", "config.acceder"],
+  ["entreprise", "config.acceder"],
+  ["sites", "config.acceder"],
+  ["agencesReception", "config.acceder"],
+  ["agenceRetraitClient", "config.acceder"],
+  ["departs", "config.acceder"],
+  ["notificationSettings", "config.acceder"],
+  ["notifWhatsApp", "config.acceder"],
+  ["miraKnowledge", "config.acceder"],
+  ["exchangeRates", "config.tarifs"],
+  ["tauxMisAJourLe", "config.tarifs"],
+  ["commissionConfig", "config.tarifs"],
+  ["paymentConfig", "config.tarifs"],
+  ["expressTarifEurKg", "config.tarifs"],
+  ["categories", "config.categories"],
+];
+
+/** Le rôle le plus modeste : celui qu'on donne quand on n'a pas le droit d'en choisir un. */
+const ROLE_LE_PLUS_MODESTE = "Chauffeur";
+
+function signatureDe(compte) {
+  return `${compte.prenom || ""} ${compte.nom || ""}`.trim() || compte.identifiant || "Compte";
+}
+
+function comptesDeLEquipe(base, envoye, moi, peut) {
+  const gere = peut("users.gerer");
+  const droitsDesAutres = peut("users.permissions");
+  const envoyesParId = new Map();
+  liste(envoye.users).forEach((u) => { if (u && u.id) envoyesParId.set(u.id, u); });
+  /* Même prudence que pour les partenaires : une liste qui ne contient même pas sa propre fiche
+   * n'est pas une suppression de toute l'équipe, c'est un envoi incomplet. */
+  const peutSupprimer = gere && envoyesParId.has(moi.id);
+
+  const sortie = [];
+  liste(base.users).forEach((u) => {
+    if (!u) { sortie.push(u); return; }
+    const envoyeU = envoyesParId.get(u.id);
+
+    if (u.id === moi.id) {
+      if (!envoyeU) { sortie.push(u); return; }
+      const retenu = { ...u };
+      if (gere) {
+        // Il tient déjà les comptes : il corrige sa fiche comme les autres, sauf ses droits.
+        Object.keys(envoyeU).forEach((c) => { if (!CHAMPS_DE_POUVOIR.includes(c)) retenu[c] = envoyeU[c]; });
+      } else {
+        CHAMPS_SOI_MEME.forEach((c) => { if (envoyeU[c] !== undefined) retenu[c] = envoyeU[c]; });
+      }
+      sortie.push(retenu);
+      return;
+    }
+
+    if (!gere) { sortie.push(u); return; }
+    if (!envoyeU) { if (peutSupprimer) return; sortie.push(u); return; }
+    const retenu = { ...envoyeU };
+    if (!droitsDesAutres) {
+      CHAMPS_DE_POUVOIR.forEach((c) => {
+        if (u[c] !== undefined) retenu[c] = u[c]; else delete retenu[c];
+      });
+    }
+    sortie.push(retenu);
+  });
+
+  if (gere) {
+    const connus = new Set(liste(base.users).map((u) => u && u.id).filter(Boolean));
+    liste(envoye.users).forEach((u) => {
+      if (!u || !u.id || connus.has(u.id)) return;
+      /*
+       * Créer un compte, c'est lui choisir un rôle. Sans le droit sur les permissions, le compte
+       * naît donc avec le rôle le plus modeste : sinon, « je crée un administrateur et je m'y
+       * connecte » serait le chemin le plus court pour contourner tout ce qui précède.
+       */
+      sortie.push(droitsDesAutres ? u : { ...u, role: ROLE_LE_PLUS_MODESTE, permissionsOverride: {} });
+    });
+  }
+  return sortie;
+}
+
+/**
+ * Le document réel, augmenté de ce qu'un membre de l'équipe avait le droit de changer.
+ *
+ * Un compte introuvable dans la base ne peut rien : on rend le document tel qu'il est plutôt que
+ * de deviner à quels droits il pourrait bien prétendre.
+ */
+export function fusionnerEcritureEquipe(actuel, propose, compteId) {
+  const base = actuel && typeof actuel === "object" && !Array.isArray(actuel) ? actuel : {};
+  const envoye = propose && typeof propose === "object" && !Array.isArray(propose) ? propose : {};
+  const moi = liste(base.users).find((u) => u && u.id === compteId);
+  if (!moi) return base;
+  const peut = (cle) => effectivePermission(moi, cle);
+
+  const sortie = { ...envoye };
+
+  SECTIONS_REGLAGES.forEach(([cle, permission]) => {
+    if (peut(permission)) return;
+    if (base[cle] === undefined) delete sortie[cle];
+    else sortie[cle] = base[cle];
+  });
+
+  sortie.users = comptesDeLEquipe(base, envoye, moi, peut);
+
+  /*
+   * Le journal ne se réécrit pas, il s'ajoute.
+   *
+   * C'est lui qui garde trace de qui a encaissé, annulé, supprimé. Le laisser réécrire à celui-là
+   * même dont il consigne les gestes reviendrait à ne rien consigner du tout. L'auteur est
+   * réinscrit depuis le compte de la session, pour la même raison.
+   */
+  const anciens = liste(base.activityLog);
+  const dejaLa = new Set(anciens.map((e) => e && e.id).filter(Boolean));
+  const signature = signatureDe(moi);
+  const ajouts = liste(envoye.activityLog)
+    .filter((e) => e && e.id && !dejaLa.has(e.id))
+    .slice(0, MAX_ENTREES_JOURNAL)
+    .map((e) => ({ ...e, utilisateur: signature, role: moi.role }));
+  sortie.activityLog = [...ajouts, ...anciens].slice(0, 500);
+
+  return sortie;
 }

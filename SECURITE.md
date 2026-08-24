@@ -115,6 +115,7 @@ connecte.
 | 6 | L'espace client cloisonné | fait |
 | 7 | L'espace partenaire cloisonné | fait |
 | 8 | Les fonctions qui dépensent, fermées aux inconnus | fait |
+| 9 | Les rôles de l'équipe tenus par le serveur | fait |
 
 Plus rien ne passe par la clé publique, et la base est effectivement fermée : `bde_data` a RLS
 active et **aucune politique**, ce qui ne laisse passer que la clé de service — c'est-à-dire nos
@@ -220,20 +221,49 @@ WhatsApp aux inconnus aurait fermé du même coup la réinitialisation.
 **Tant que le serveur n'est pas configuré, rien ne change** : sans secret, aucun jeton ne serait
 vérifiable et exiger une session reviendrait à fermer la porte à l'équipe elle-même.
 
-### Ce qui reste ouvert — les rôles de l'équipe
+### Les rôles de l'équipe (lot 9)
 
-`api/donnees.js` distingue le client et le partenaire du reste. Le reste, il le croit sur parole :
-un agent, un comptable et un administrateur y ont exactement les mêmes droits d'écriture. Les
-permissions par rôle existent, mais elles vivent dans le navigateur — un agent qui ouvre les outils
-de développement peut écrire la caisse, changer ses propres permissions, ou se faire
-administrateur.
+**Le problème.** `api/donnees.js` distinguait le client et le partenaire du reste. Le reste, il le
+croyait sur parole : un agent, un comptable et un administrateur avaient exactement les mêmes
+droits d'écriture. Les permissions par rôle existaient, mais elles vivaient dans le navigateur —
+elles décidaient quels boutons s'affichent. Un bouton qu'on n'affiche pas n'est pas un bouton qu'on
+ne peut pas actionner.
 
-Le risque n'est plus du même ordre : ce n'est ni un inconnu, ni un tiers, mais quelqu'un que
-l'entreprise a embauché et à qui elle a donné un compte. C'est pour cette raison que ce lot vient
-après les autres, et non parce qu'il serait moins réel.
+Le risque n'est pas du même ordre que les précédents : ce n'est ni un inconnu, ni un tiers, mais
+quelqu'un que l'entreprise a embauché et à qui elle a donné un accès. C'est pour cette raison que ce
+lot vient après les autres, et non parce qu'il serait moins réel.
 
-Le chantier est le même que pour les lots 6 et 7, et plus lourd : il faudrait porter côté serveur
-la table des permissions, et décider section par section qui peut écrire quoi.
+**Une seule table, deux lecteurs.** Les permissions ont déménagé dans `api/_permissions.js`, que
+`src/App.jsx` importe pour construire ses écrans et `api/_cloisonnement.js` pour trancher une
+écriture. En recopier une moitié aurait marché le premier jour et divergé le second — et une
+divergence, ici, ne se voit pas : elle s'appelle une permission qu'on croyait retirée.
+
+**Le sens de la fusion est inverse** des lots 6 et 7. Un membre de l'équipe reçoit et réécrit le
+document entier, c'est son travail : on part donc de ce qu'il envoie, et l'on REMET EN PLACE ce
+qu'il n'avait pas le droit de changer.
+
+Trois choses, celles dont on ne revient pas :
+
+- **Les droits.** `role`, `permissionsOverride`, `paysAutorises`, `agence` : nul ne se les réécrit
+  à soi-même, pas même un administrateur — il les a déjà tous, la règle ne lui coûte rien et vaut
+  surtout pour celui qui n'en a pas. Les modifier chez un autre demande `users.permissions` ;
+  créer, corriger ou supprimer un compte demande `users.gerer`. Gérer les comptes sans gérer les
+  droits reste possible : le compte créé naît alors avec le rôle le plus modeste, sans quoi « je
+  crée un administrateur et je m'y connecte » serait le chemin le plus court pour contourner tout
+  le reste. Chacun garde le droit de changer son propre mot de passe et ses coordonnées.
+- **Les réglages** — marque, siège, agences, calendrier des départs, notifications, taux,
+  commissions, moyens de paiement, catégories : chaque section est gardée par la permission qui
+  ouvre l'écran correspondant, pour qu'un geste possible à l'écran ne soit jamais refusé par le
+  serveur, ni l'inverse.
+- **Le journal**, qui ne se réécrit pas : il s'ajoute. C'est lui qui garde trace de qui a encaissé,
+  annulé, supprimé. Le laisser réécrire à celui-là même dont il consigne les gestes reviendrait à
+  ne rien consigner du tout. L'auteur y est réinscrit depuis le compte de la session.
+
+**Ce que ce lot ne couvre pas.** Les colis, les factures, les bordereaux et la caisse restent
+écrivables par n'importe quel compte de l'équipe, comme avant. C'est un choix : ce sont les gestes
+du métier, faits toute la journée par des rôles différents, et les encadrer demanderait de décrire
+au serveur ce qu'est un encaissement légitime. Le journal, lui, en garde désormais trace de façon
+ineffaçable — ce qui est la vraie réponse à un geste qu'on ne peut pas empêcher.
 
 **La clé `bde-reinit`** contient les demandes de réinitialisation en cours, sous forme d'empreintes.
 `api/donnees.js` la refuse explicitement — c'est ce qui empêche un client de lire les codes des
@@ -349,6 +379,12 @@ create policy "Suppression limitée aux sauvegardes" on public.bde_data for dele
   pas s'il est inventé, tronqué ou signé d'un autre secret. Et, dans un navigateur (`t55`), que
   l'application joint bien ce jeton à ses appels : sans cela, la fermeture ne protégerait rien et
   casserait tout.
+- **Les rôles de l'équipe**, dans les mêmes cas de `testdonnees` : un agent qui envoie ce qu'il
+  veut ne se fait pas administrateur, ne se donne pas de permissions, ne rétrograde pas
+  l'administrateur ni ne touche à son empreinte, ne supprime personne, ne crée pas de complice, ne
+  renomme pas l'entreprise, ne touche ni au taux de change, ni aux catégories, ni aux commissions,
+  et n'efface pas le journal — mais change bien son propre mot de passe, et son travail passe.
+  L'administrateur, lui, fait tout cela, sauf réécrire son propre rôle.
 - **Le déploiement à moitié configuré** (`t58`, 10 cas) : toutes les fonctions serveur répondent
   501, et le portail, l'inscription et la connexion continuent de fonctionner par l'ancien chemin.
   C'est l'état exact du site tant que la clé de service n'est pas posée.

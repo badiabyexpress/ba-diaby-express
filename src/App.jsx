@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue, memo } from "react";
 import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, ChevronDown, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell, SlidersHorizontal, Copy, MoreHorizontal, Wallet } from "lucide-react";
-import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces, definirJetonSession, surSessionExpiree } from "./lib/storage.js";
+import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree } from "./lib/storage.js";
 
 /* ---------- design tokens ----------
 Identité : Navy #0A2647 · Rouge de marque #C8102E · Blanc #FFFFFF
@@ -2194,6 +2194,28 @@ async function notifierEvenement(data, evenement, colis, message) {
 }
 
 /**
+ * Un appel aux fonctions serveur QUI DÉPENSENT : WhatsApp, e-mail, l'assistant, les taux du jour.
+ *
+ * Chacune coûte quelque chose à chaque appel — un message facturé par Meta, un e-mail qui engage
+ * la réputation du domaine, des jetons chez Anthropic, une part du quota mensuel des taux. Elles
+ * étaient ouvertes à qui connaissait leur adresse : n'importe qui pouvait faire partir des
+ * messages depuis le numéro de l'entreprise, ou des courriels depuis son domaine.
+ *
+ * Le jeton de session part donc avec l'appel, et le serveur le vérifie. C'est le même jeton que
+ * celui qui ouvre les données ; il ne coûte rien de plus à transporter.
+ */
+function appelServeurQuiDepense(url, options = {}) {
+  const jeton = jetonSessionCourant();
+  return fetch(url, {
+    ...options,
+    headers: {
+      ...(options.headers || {}),
+      ...(jeton ? { Authorization: `Bearer ${jeton}` } : {}),
+    },
+  });
+}
+
+/**
  * Envoie un e-mail au client, avec ses documents en pièce jointe.
  *
  * Tente l'envoi automatique via la fonction serveur ; si le service n'est pas configuré ou si
@@ -2209,7 +2231,7 @@ async function envoyerEmail(adresseBrute, sujet, message, piecesJointes = []) {
   const adresse = String(adresseBrute || "").trim();
   if (!adresse) return { envoye: false, raison: null };
   try {
-    const reponse = await fetch("/api/email", {
+    const reponse = await appelServeurQuiDepense("/api/email", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ to: adresse, sujet, message, piecesJointes }),
@@ -2236,7 +2258,7 @@ async function envoyerEmail(adresseBrute, sujet, message, piecesJointes = []) {
 
 async function envoyerWhatsApp(telephone, message, mediaUrl, gabarit) {
   try {
-    const reponse = await fetch("/api/whatsapp", {
+    const reponse = await appelServeurQuiDepense("/api/whatsapp", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -9365,7 +9387,7 @@ function GestionDevisesPage({ data, persist, session, notify, onBack }) {
     setRapatriement(true);
     setTauxMsg(null);
     try {
-      const reponse = await fetch("/api/taux");
+      const reponse = await appelServeurQuiDepense("/api/taux");
       const corps = await reponse.json().catch(() => ({}));
       if (reponse.status === 501) {
         setTauxMsg({ ok: false, texte: "Les taux automatiques ne sont pas encore configurés sur le serveur. Vos taux saisis à la main restent en place." });
@@ -19764,7 +19786,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
 }
 
 async function callClaude(prompt) {
-  const response = await fetch("/api/claude", {
+  const response = await appelServeurQuiDepense("/api/claude", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1000, messages: [{ role: "user", content: prompt }] }),
   });
@@ -20516,7 +20538,7 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
   const [activationEnCours, setActivationEnCours] = useState(false);
 
   function relireQuota() {
-    return fetch("/api/whatsapp?quota=1")
+    return appelServeurQuiDepense("/api/whatsapp?quota=1")
       .then((r) => r.json().then((corps) => ({ ok: r.ok, corps })))
       .then(({ ok, corps }) => { setQuota(ok ? corps : { erreur: corps?.error || "indisponible" }); })
       .catch(() => setQuota({ erreur: "indisponible" }));
@@ -20532,7 +20554,7 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
    */
   const [modeles, setModeles] = useState(null);
   function relireModeles() {
-    return fetch("/api/whatsapp?modeles=1")
+    return appelServeurQuiDepense("/api/whatsapp?modeles=1")
       .then((r) => r.json().then((corps) => ({ ok: r.ok, corps })))
       .then(({ ok, corps }) => setModeles(ok ? corps : { erreur: corps?.error, manquant: corps?.manquant }))
       .catch(() => setModeles({ erreur: "indisponible" }));
@@ -20564,7 +20586,7 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
     setEssaiEnCours(true);
     setEssai(null);
     try {
-      const reponse = await fetch("/api/whatsapp", {
+      const reponse = await appelServeurQuiDepense("/api/whatsapp", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           to: numeroEssai,
@@ -20586,7 +20608,7 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
     setActivationEnCours(true);
     setActivation(null);
     try {
-      const reponse = await fetch("/api/whatsapp?enregistrer=1", {
+      const reponse = await appelServeurQuiDepense("/api/whatsapp?enregistrer=1", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pin }),
       });

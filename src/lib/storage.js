@@ -138,6 +138,18 @@ export function definirJetonSession(jeton) {
 }
 
 /*
+ * Le jeton courant, pour les fonctions serveur qui ne passent pas par ce fichier.
+ *
+ * WhatsApp, e-mail, l'assistant et les taux de change dépensent de l'argent ou du quota à chaque
+ * appel : ils doivent savoir qui les appelle, et ce jeton est ce qui le leur dit. Il ne s'agit pas
+ * de contourner l'API ci-dessous — c'est simplement que ces appels-là ne lisent ni n'écrivent la
+ * base, et n'ont donc rien à faire dans storage.
+ */
+export function jetonSessionCourant() {
+  return jetonSession;
+}
+
+/*
  * Prévenir l'application que son jeton n'est plus accepté.
  *
  * Sans cela, une session expirée ressemblerait à une panne de réseau : l'application basculerait

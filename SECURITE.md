@@ -114,6 +114,7 @@ connecte.
 | 5 | Resserrage des politiques de la base | fait — RLS active, aucune politique |
 | 6 | L'espace client cloisonné | fait |
 | 7 | L'espace partenaire cloisonné | fait |
+| 8 | Les fonctions qui dépensent, fermées aux inconnus | fait |
 
 Plus rien ne passe par la clé publique, et la base est effectivement fermée : `bde_data` a RLS
 active et **aucune politique**, ce qui ne laisse passer que la clé de service — c'est-à-dire nos
@@ -189,6 +190,50 @@ Deux garde-fous méritent d'être notés, parce qu'ils protègent contre l'accid
 la malveillance : une suppression d'accès se lisant à une absence, un envoi où la liste des comptes
 manque n'est pas traité comme la suppression de tous les employés ; et une écriture sur une base
 vide est refusée plutôt que devinée.
+
+### Les fonctions qui dépensent (lot 8)
+
+**Le problème.** Une seule fonction vérifiait une session : `api/donnees.js`. Les quatre autres qui
+coûtent quelque chose à chaque appel étaient joignables par n'importe qui connaissant leur adresse.
+
+| Fonction | Ce qu'un inconnu pouvait faire |
+|---|---|
+| `api/whatsapp.js` | faire partir des messages depuis le numéro de l'entreprise, vers n'importe quel numéro, avec ses modèles approuvés |
+| `api/email.js` | envoyer des courriels depuis `contact@badiabyexpress.com` |
+| `api/claude.js` | consommer la clé Anthropic |
+| `api/taux.js` | épuiser le quota mensuel des taux de change |
+
+La première était la plus grave, et pas seulement pour la facture : un numéro qui envoie en masse
+se fait restreindre par Meta. Celui de l'entreprise a demandé des jours d'approbation.
+
+**La réponse**, `refusSaufEquipe` dans `api/_session.js`, posée en tête des quatre fonctions. Ni un
+client ni un partenaire n'y ont affaire — leurs écrans ne les appellent jamais, et le compte client
+est le plus exposé puisque n'importe qui peut en créer un. Le navigateur joint désormais le jeton
+de session à ces appels comme il le fait déjà pour les données.
+
+**Le laissez-passer interne.** `api/motdepasse.js` envoie le code de réinitialisation en repassant
+par `api/whatsapp.js`. Cet appel n'a aucune session à présenter, et pour cause : la personne n'est
+pas connectée, c'est justement son mot de passe qu'elle a perdu. Un jeton dérivé du même secret —
+jamais égal à lui — voyage donc entre les deux fonctions du même déploiement. Sans lui, fermer
+WhatsApp aux inconnus aurait fermé du même coup la réinitialisation.
+
+**Tant que le serveur n'est pas configuré, rien ne change** : sans secret, aucun jeton ne serait
+vérifiable et exiger une session reviendrait à fermer la porte à l'équipe elle-même.
+
+### Ce qui reste ouvert — les rôles de l'équipe
+
+`api/donnees.js` distingue le client et le partenaire du reste. Le reste, il le croit sur parole :
+un agent, un comptable et un administrateur y ont exactement les mêmes droits d'écriture. Les
+permissions par rôle existent, mais elles vivent dans le navigateur — un agent qui ouvre les outils
+de développement peut écrire la caisse, changer ses propres permissions, ou se faire
+administrateur.
+
+Le risque n'est plus du même ordre : ce n'est ni un inconnu, ni un tiers, mais quelqu'un que
+l'entreprise a embauché et à qui elle a donné un compte. C'est pour cette raison que ce lot vient
+après les autres, et non parce qu'il serait moins réel.
+
+Le chantier est le même que pour les lots 6 et 7, et plus lourd : il faudrait porter côté serveur
+la table des permissions, et décider section par section qui peut écrire quoi.
 
 **La clé `bde-reinit`** contient les demandes de réinitialisation en cours, sous forme d'empreintes.
 `api/donnees.js` la refuse explicitement — c'est ce qui empêche un client de lire les codes des
@@ -298,6 +343,12 @@ create policy "Suppression limitée aux sauvegardes" on public.bde_data for dele
   surtout — le code de réinitialisation absent de la réponse, absent du HTML de la page, absent du
   document servi aux personnes connectées, inutilisable une seconde fois, et jamais affiché quand
   WhatsApp est indisponible.
+- **Les fonctions qui dépensent** (`testgardes`, 41 cas) : les quatre portes éprouvées de la même
+  façon — l'inconnu refusé sans qu'AUCUN APPEL SORTANT ne parte, le jeton inventé refusé, le client
+  et le partenaire refusés, l'équipe qui passe, le laissez-passer interne qui ouvre WhatsApp mais
+  pas s'il est inventé, tronqué ou signé d'un autre secret. Et, dans un navigateur (`t55`), que
+  l'application joint bien ce jeton à ses appels : sans cela, la fermeture ne protégerait rien et
+  casserait tout.
 - **Le déploiement à moitié configuré** (`t58`, 10 cas) : toutes les fonctions serveur répondent
   501, et le portail, l'inscription et la connexion continuent de fonctionner par l'ancien chemin.
   C'est l'état exact du site tant que la clé de service n'est pas posée.

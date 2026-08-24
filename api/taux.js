@@ -30,10 +30,19 @@
  * n'est pas un souci tant que personne ne clique en boucle.
  */
 
+import { refusSaufEquipe } from "./_session.js";
+
 /** Les seules devises que l'application manipule — inutile de rapatrier les 160 autres. */
 const DEVISES_UTILES = ["EUR", "USD", "CAD", "GNF", "MAD", "XOF", "GBP"];
 
 export default async function handler(req, res) {
+  /*
+   * Cette fonction dépense. Elle n'est donc pas ouverte à qui connaît son adresse — voir
+   * refusSaufEquipe dans api/_session.js.
+   */
+  const refus = refusSaufEquipe(req);
+  if (refus) return res.status(refus.code).json(refus.corps);
+
   if (req.method !== "GET" && req.method !== "POST") {
     return res.status(405).json({ error: "Méthode non autorisée" });
   }

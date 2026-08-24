@@ -13,7 +13,16 @@
  * directement — un seul endroit à changer, déjà fait dans le code fourni.
  */
 
+import { refusSaufEquipe } from "./_session.js";
+
 export default async function handler(req, res) {
+  /*
+   * Cette fonction dépense. Elle n'est donc pas ouverte à qui connaît son adresse — voir
+   * refusSaufEquipe dans api/_session.js.
+   */
+  const refus = refusSaufEquipe(req);
+  if (refus) return res.status(refus.code).json(refus.corps);
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Méthode non autorisée" });
   }

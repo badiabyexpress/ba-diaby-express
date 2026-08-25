@@ -2296,6 +2296,30 @@ function preparerDocPdf(doc) {
     const propre = Array.isArray(texte) ? texte.map(nettoyerTextePdf) : nettoyerTextePdf(texte);
     return originale(propre, ...reste);
   };
+  /*
+   * autoTable ne passe pas par doc.text() pour mesurer et découper ses cellules : il lit les
+   * chaînes telles quelles. L'espace fine insécable des montants français n'y est donc pas un
+   * point de coupure, et « 1 868 976 GNF » sortait de sa colonne au lieu d'y tenir — c'est ce qui
+   * tronquait les montants sur le bordereau imprimé. On nettoie l'en-tête et le corps avant de les
+   * lui confier.
+   *
+   * L'accesseur rend undefined tant que le greffon n'est pas chargé : les écrans qui testent
+   * « doc.autoTable » pour basculer sur leur tableau de repli continuent de le faire.
+   */
+  const cellulesPropres = (rangs) => (!Array.isArray(rangs) ? rangs : rangs.map((rang) => (!Array.isArray(rang) ? rang
+    : rang.map((cellule) => (cellule && typeof cellule === "object" && "content" in cellule
+      ? { ...cellule, content: nettoyerTextePdf(cellule.content) }
+      : nettoyerTextePdf(cellule))))));
+  Object.defineProperty(doc, "autoTable", {
+    configurable: true,
+    get() {
+      const greffon = Object.getPrototypeOf(doc)?.autoTable || window.jspdf?.jsPDF?.API?.autoTable;
+      if (typeof greffon !== "function") return undefined;
+      return (options, ...reste) => greffon.call(doc, (options && typeof options === "object"
+        ? { ...options, head: cellulesPropres(options.head), body: cellulesPropres(options.body) }
+        : options), ...reste);
+    },
+  });
   return doc;
 }
 
@@ -14123,7 +14147,13 @@ async function downloadRecu(colis, paiement) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a5" }));
   const W = 148, H = 210, M = 10;
-  const qrData = await generateQRDataUrl(`${colis.tracking}-${paiement.id}`, 200).catch(() => null);
+  /*
+   * Le QR du reçu ne contenait que « BDE220805-p1787… » : un téléphone qui le scannait affichait
+   * ce texte et s'arrêtait là — rien à ouvrir, rien à vérifier. Un QR sur un reçu ne sert que s'il
+   * mène quelque part. Il porte donc l'adresse de suivi du colis, comme celui de l'étiquette, avec
+   * le numéro du reçu en plus : le client scanne et voit l'état de son colis.
+   */
+  const qrData = await generateQRDataUrl(`${trackingUrlFor(colis.tracking)}&recu=${encodeURIComponent(paiement.id)}`, 240).catch(() => null);
 
   /*
    * Positions FIXES, comme pour l'étiquette. Auparavant chaque ligne d'information poussait la
@@ -17644,7 +17674,15 @@ function genNumeroRemise(remisesExistantes, rang) {
  * dans la devise des billets. Le repli manuel (sans autoTable) est là pour la même raison que
  * sur les autres documents : le plugin vient d'un CDN et peut ne pas se charger.
  */
-function dessinerBonRemise(doc, remise, lignes, hasAutoTable) {
+/*
+ * Le bon de remise en caisse, en UNE devise.
+ *
+ * Il portait auparavant chaque encaissement dans la monnaie où il avait été reçu, puis un total
+ * à plusieurs têtes (« 300 000 GNF · 58,00 EUR ») et enfin un équivalent en euro : trois chiffres
+ * pour une seule somme, que ni l'agent ni le comptable ne pouvaient pointer. Tout est désormais
+ * converti dans la devise choisie à l'écran, et le taux appliqué est écrit sur le bon.
+ */
+function dessinerBonRemise(doc, remise, lignes, hasAutoTable, devise = "GNF") {
   const INK = [26, 30, 38], MUTED = [122, 130, 142], RED = [214, 39, 63], NAVY = [10, 38, 71];
   let y = 20;
   doc.addImage(DEFAULT_LOGO, "PNG", 14, y - 6, 16, 16);
@@ -17678,10 +17716,10 @@ function dessinerBonRemise(doc, remise, lignes, hasAutoTable) {
   });
   y += 6;
 
-  const head = ["Date", "N° de suivi", "Client", "Site", "Montant"];
+  const head = ["Date", "N° de suivi", "Client", "Site", `Montant (${devise})`];
   const body = lignes.map((l) => [
     new Date(l.date).toLocaleDateString("fr-FR"), l.tracking, l.client, l.site,
-    formaterDevises({ [l.deviseSaisie]: l.montantSaisi }),
+    fmt(l.montant, devise),
   ]);
   if (hasAutoTable && doc.autoTable && body.length > 0) {
     doc.autoTable({
@@ -17715,10 +17753,12 @@ function dessinerBonRemise(doc, remise, lignes, hasAutoTable) {
   doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, 16, "F");
   doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(...NAVY);
   doc.text("Montant remis en espèces", 18, y + 10);
-  doc.text(formaterDevises(remise.devises), 192, y + 10, { align: "right" });
+  doc.text(fmt(remise.totalEUR, devise), 192, y + 10, { align: "right" });
   y += 24;
   doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
-  doc.text(`Équivalent : ${fmt(remise.totalEUR, "EUR")} — seules les espèces figurent sur ce bon.`, 14, y);
+  const taux = LIVE_RATES[devise] || CURRENCIES[devise] || 1;
+  const mention = devise === "EUR" ? "" : ` (1 EUR = ${taux.toLocaleString("fr-FR")} ${devise})`;
+  doc.text(`Montants convertis en ${devise}${mention} — seules les espèces figurent sur ce bon.`, 14, y);
   y += 16;
 
   doc.setFontSize(9); doc.setTextColor(90, 100, 120);
@@ -17773,6 +17813,13 @@ function CaissePage({ data, persist, session, notify }) {
   const [remiseAAnnuler, setRemiseAAnnuler] = useState(null);
   // Encaissement dont on corrige le destinataire ({ ligne, nom }), et son motif.
   const [aReattribuer, setAReattribuer] = useState(null);
+  /*
+   * La devise dans laquelle les bons de remise sont ÉDITÉS. L'écran continue d'afficher les
+   * devises réellement encaissées — l'agent rend des billets. Mais la feuille A4 qui se signe,
+   * elle, ne porte qu'un seul total : deux monnaies côte à côte sur un bon, cela ne se pointe pas.
+   * Le franc guinéen par défaut, c'est la caisse de Conakry.
+   */
+  const [deviseBon, setDeviseBon] = useState("GNF");
 
   const agentActif = voitTousLesAgents ? agentFiltre : (monNom || "Non renseigné");
   const remises = data.remisesCaisse || [];
@@ -17937,7 +17984,7 @@ function CaissePage({ data, persist, session, notify }) {
       const hasAutoTable = await ensureAutoTable();
       listeRemises.forEach((r, i) => {
         if (i > 0) doc.addPage();
-        dessinerBonRemise(doc, r, r.lignesPdf || lignesDeRemise(r), hasAutoTable);
+        dessinerBonRemise(doc, r, r.lignesPdf || lignesDeRemise(r), hasAutoTable, deviseBon);
       });
       openPdf(doc, `bon-remise-${listeRemises.map((r) => r.numero).join("-")}-${new Date().toISOString().slice(0, 10)}.pdf`);
     } catch (e) {
@@ -18146,6 +18193,18 @@ function CaissePage({ data, persist, session, notify }) {
           <div>
             <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Rechercher</div>
             <input value={recherche} onChange={(e) => setRecherche(e.target.value)} placeholder="N° de suivi, client, référence" style={inputStyle} />
+          </div>
+          {/*
+            * Un bon de remise portait autant de totaux que de devises encaissées — « 300 000 GNF ·
+            * 58,00 EUR », plus un équivalent en euro en bas de page. Trois chiffres pour une seule
+            * somme d'argent : impossible à pointer. Le bon s'édite désormais dans UNE devise, celle
+            * que choisit ici l'agent ou le comptable ; tout y est converti au taux du jour.
+            */}
+          <div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Éditer les bons en</div>
+            <select value={deviseBon} onChange={(e) => setDeviseBon(e.target.value)} style={inputStyle}>
+              {Object.keys(CURRENCIES).map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
           </div>
         </div>
       </div>

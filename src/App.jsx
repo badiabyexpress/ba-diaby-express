@@ -1968,6 +1968,36 @@ function coordonneesAgence(agence) {
   return agence.telephone ? `${lieu}, tél. ${agence.telephone}` : lieu;
 }
 
+/* =========================================================================================
+ * LE MODÈLE PROMOTIONNEL
+ * =========================================================================================
+ * Les huit modèles ci-dessus sont des messages de service : ils suivent un colis. Une promotion
+ * n'en est pas un, et Meta le sait — une offre commerciale relève de la catégorie MARKETING, qui
+ * se dépose et s'approuve séparément. On ne peut pas la faire passer par « bde_arrivee ».
+ *
+ * Le corps est presque entièrement figé : trois variables seulement, et un bouton dont l'adresse
+ * ne change pas. C'est ce qui se fait approuver le plus vite — un modèle dont le texte n'est
+ * qu'un trou à remplir se fait refuser, et à juste titre : personne ne peut vérifier ce qu'on
+ * enverra vraiment.
+ *
+ * Le pied de page porte la sortie. Une campagne sans porte de sortie n'est pas une campagne,
+ * c'est du harcèlement — et Meta ferme les numéros qui se font signaler.
+ */
+const MODELE_PROMO_WHATSAPP = {
+  nom: "bde_promo",
+  langue: "fr",
+  categorie: "MARKETING",
+  corps: [
+    "Bonjour {{1}},",
+    "",
+    "{{2}}",
+    "",
+    "Offre valable jusqu’au {{3}}. Passez en agence ou écrivez-nous, nous nous occupons du reste.",
+  ].join("\n"),
+  pied: "Répondez STOP pour ne plus recevoir nos offres.",
+  bouton: "Voir l’offre",
+};
+
 /** Le nom du pays de destination, tel qu'il apparaît dans le message. */
 function paysDuColis(colis) {
   const p = COUNTRIES.find((x) => x.code === (colis?.destinatairePays || colis?.pays));
@@ -10394,6 +10424,9 @@ function CentreClientsPage({ data, persist, notify, session }) {
     ["signalements", "Signalements", signalementsOuverts.length],
     ["express", "Livraison express", expressEnAttente],
     ["comptes", "Comptes inscrits", (data.clientAccounts || []).length],
+    // Écrire à la base est un geste commercial, pas une réponse à une demande : l'onglet n'apparaît
+    // qu'à qui en a le droit.
+    ...(effectivePermission(session, "clients.campagnes") ? [["campagnes", "Campagnes", 0]] : []),
   ];
 
   return (
@@ -10413,6 +10446,10 @@ function CentreClientsPage({ data, persist, notify, session }) {
           </button>
         ))}
       </div>
+
+      {ongletActif === "campagnes" && effectivePermission(session, "clients.campagnes") && (
+        <CampagnesPage data={data} persist={persist} session={session} notify={notify} />
+      )}
 
       {ongletActif === "comptes" && (
         <div>
@@ -17237,6 +17274,84 @@ const DONNEES_REFERENCE = {
   },
 };
 
+/* =========================================================================================
+ * SEGMENTATION DE LA BASE CLIENTS PAR PAYS
+ * =========================================================================================
+ * Le pays d'un client, on ne l'a nulle part — mais on a son numéro, et un numéro international
+ * porte son pays devant lui. « +33 » c'est la France, « +224 » la Guinée. C'est la seule donnée
+ * fiable dont on dispose sur toute la base : elle a été saisie pour appeler les gens.
+ *
+ * Deux précautions.
+ *
+ * L'indicatif le plus long l'emporte : « +1868 » est la Trinité, pas les États-Unis. Sans ce tri,
+ * une poignée de clients seraient rangés dans le mauvais pays.
+ *
+ * Et « +1 » ne se départage pas. Les États-Unis et le Canada partagent le même indicatif ; seuls
+ * les trois chiffres suivants les distinguent, et cette table-là n'existe pas ici. Plutôt que de
+ * ranger des Canadiens chez les Américains, on nomme le segment pour ce qu'il est.
+ */
+const INDICATIFS_DU_PLUS_LONG = [...DIAL_CODES].sort((a, b) => b.dial.length - a.dial.length);
+const SEGMENT_SANS_INDICATIF = "sans-indicatif";
+
+function paysDuNumero(telephone) {
+  const brut = String(telephone || "").replace(/[\s.\-()]/g, "");
+  if (!brut.startsWith("+")) return null;
+  const chiffres = brut.slice(1).replace(/\D/g, "");
+  const trouve = INDICATIFS_DU_PLUS_LONG.find((c) => chiffres.startsWith(c.dial));
+  if (!trouve) return null;
+  if (trouve.dial === "1") return { dial: "1", nom: "États-Unis / Canada", drapeau: "🇺🇸" };
+  return { dial: trouve.dial, nom: trouve.name, drapeau: trouve.flag };
+}
+
+/** Deux numéros désignent la même personne dès qu'ils ont les mêmes chiffres. */
+function clefTelephone(telephone) {
+  return String(telephone || "").replace(/\D/g, "");
+}
+
+/**
+ * L'audience commerciale : une personne, un numéro, un pays.
+ *
+ * Elle réunit l'annuaire tiré des colis et les comptes de l'Espace Client — le même client peut
+ * exister des deux côtés, on ne l'écrit qu'une fois. Les clients des partenaires n'y sont pas :
+ * buildClientDirectory les écarte déjà, et un compte de l'Espace Client appartient toujours à
+ * l'entreprise. Un partenaire garde son fichier ; nous ne démarchons pas ses clients.
+ */
+function audienceMarketing(data) {
+  const parNumero = new Map();
+  const poser = (entree) => {
+    const clef = clefTelephone(entree.telephone);
+    if (!clef) return;
+    const existant = parNumero.get(clef);
+    if (existant) {
+      // L'e-mail et le nom le plus complet gagnent : on ne perd jamais une adresse déjà connue.
+      if (!existant.email && entree.email) existant.email = entree.email;
+      if (entree.nom && entree.nom.length > (existant.nom || "").length) existant.nom = entree.nom;
+      if (entree.compte) existant.compte = true;
+      return;
+    }
+    parNumero.set(clef, { ...entree });
+  };
+  buildClientDirectory(data.colis || [], data.repertoire).forEach((c) => poser({
+    telephone: c.telephone, nom: (c.nomComplet || "").trim(), email: (c.email || "").trim(),
+    envois: c.count || 0, compte: false,
+  }));
+  (data.clientAccounts || []).forEach((c) => poser({
+    telephone: c.telephone, nom: `${c.prenom || ""} ${c.nom || ""}`.trim(),
+    email: (c.email || "").trim(), envois: 0, compte: true,
+  }));
+  const desabonnes = new Set((data.desabonnesMarketing || []).map(clefTelephone).filter(Boolean));
+  return [...parNumero.values()].map((c) => {
+    const pays = paysDuNumero(c.telephone);
+    return {
+      ...c,
+      segment: pays ? pays.dial : SEGMENT_SANS_INDICATIF,
+      paysNom: pays ? pays.nom : "Numéro sans indicatif",
+      drapeau: pays ? pays.drapeau : "❓",
+      desabonne: desabonnes.has(clefTelephone(c.telephone)),
+    };
+  });
+}
+
 function buildClientDirectory(colisList, repertoireEnBase = null) {
   const map = {};
   colisList.forEach((c) => {
@@ -17473,6 +17588,378 @@ function Clients({ data }) {
 
 
 Clients = memo(Clients);
+
+/**
+ * Campagnes — écrire à la base clients, pays par pays.
+ *
+ * Trois choses rendent cet écran différent d'un simple champ de texte.
+ *
+ * LE PAYS. Une promotion n'a de sens que là où elle s'applique : un client de Conakry n'a que
+ * faire d'un tarif Paris → Conakry, et une remise en euros ne parle pas à quelqu'un qui paie en
+ * francs guinéens. Le pays se lit sur l'indicatif du numéro (voir paysDuNumero) — la seule donnée
+ * dont on dispose sur toute la base.
+ *
+ * LA SORTIE. Un client qui ne veut plus d'offres doit pouvoir le dire une fois et être entendu
+ * pour toujours. Sa désinscription est gardée dans les données, et elle prime sur tout choix de
+ * segment : on ne peut pas le réinclure par inadvertance en cochant son pays.
+ *
+ * CE QUE WHATSAPP AUTORISE. Une offre commerciale exige un modèle de catégorie MARKETING approuvé
+ * par Meta à l'avance. Tant qu'il n'existe pas, l'écran le dit et propose la voie qui, elle,
+ * fonctionne tout de suite : l'e-mail. Faire semblant d'envoyer serait pire que de ne rien
+ * envoyer — on croirait la base prévenue.
+ */
+function CampagnesPage({ data, persist, session, notify }) {
+  const audience = useMemo(() => audienceMarketing(data), [data.colis, data.repertoire, data.clientAccounts, data.desabonnesMarketing]);
+  const campagnes = data.campagnes || [];
+
+  const segments = useMemo(() => {
+    const par = new Map();
+    audience.forEach((c) => {
+      if (!par.has(c.segment)) par.set(c.segment, { cle: c.segment, nom: c.paysNom, drapeau: c.drapeau, total: 0, avecEmail: 0, desabonnes: 0 });
+      const s = par.get(c.segment);
+      s.total += 1;
+      if (c.email) s.avecEmail += 1;
+      if (c.desabonne) s.desabonnes += 1;
+    });
+    return [...par.values()].sort((a, b) => {
+      if (a.cle === SEGMENT_SANS_INDICATIF) return 1;
+      if (b.cle === SEGMENT_SANS_INDICATIF) return -1;
+      return b.total - a.total;
+    });
+  }, [audience]);
+
+  const [choisis, setChoisis] = useState([]);
+  const [canal, setCanal] = useState("email");
+  const [objet, setObjet] = useState("Une offre Ba-Diaby Express pour vous");
+  const [offre, setOffre] = useState("");
+  const [echeance, setEcheance] = useState("");
+  const [lien, setLien] = useState(() => (typeof window !== "undefined" && window.location?.origin && !window.location.origin.startsWith("file")
+    ? window.location.origin : "https://badiabyexpress.com"));
+  const [confirmation, setConfirmation] = useState(null);
+  const [envoi, setEnvoi] = useState(null);           // { total, faits, envoyes, echecs, arret }
+  const [bilan, setBilan] = useState(null);
+  const arretRef = useRef(false);
+  const [numeroADesabonner, setNumeroADesabonner] = useState("");
+
+  function basculerSegment(cle) {
+    setChoisis((l) => (l.includes(cle) ? l.filter((x) => x !== cle) : [...l, cle]));
+  }
+
+  /*
+   * Les destinataires réellement joignables.
+   *
+   * Un désabonné n'y est jamais, quel que soit le segment coché. Un numéro sans indicatif non
+   * plus : WhatsApp ne saurait pas où l'envoyer, et l'écrire quand même ferait échouer l'envoi
+   * une fois par client. Pour l'e-mail seul, une adresse suffit — l'indicatif n'y sert à rien.
+   */
+  const destinataires = useMemo(() => audience.filter((c) => {
+    if (c.desabonne) return false;
+    if (!choisis.includes(c.segment)) return false;
+    if (canal === "email") return !!c.email;
+    if (c.segment === SEGMENT_SANS_INDICATIF) return false;
+    return canal === "whatsapp" ? true : true;
+  }), [audience, choisis, canal]);
+
+  const avecEmail = destinataires.filter((c) => c.email).length;
+  const desabonnesTotal = audience.filter((c) => c.desabonne).length;
+
+  const messagePourEmail = (nom) => [
+    `<p>Bonjour ${nom || "cher client"},</p>`,
+    `<p>${(offre || "").replace(/\n/g, "<br>")}</p>`,
+    echeance ? `<p>Offre valable jusqu’au ${echeance}.</p>` : "",
+    `<p><a href="${lien}" style="background:#D6273F;color:#fff;padding:11px 20px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">Voir l’offre</a></p>`,
+    `<p style="color:#777;font-size:12px">Vous recevez ce message parce que vous êtes client de Ba-Diaby Express. Répondez « STOP » pour ne plus recevoir nos offres.</p>`,
+  ].filter(Boolean).join("\n");
+
+  const pret = choisis.length > 0 && offre.trim().length > 0 && destinataires.length > 0;
+
+  /*
+   * L'envoi, un destinataire après l'autre.
+   *
+   * Pas de parallélisme : WhatsApp et Resend comptent les messages par seconde, et une campagne
+   * qui part trop vite se fait couper au milieu — la moitié de la base prévenue, l'autre pas, et
+   * aucun moyen de savoir où l'on s'est arrêté. Un à la fois, avec un compteur visible et un
+   * bouton pour arrêter : c'est plus lent, et c'est reprenable.
+   */
+  async function lancer() {
+    setConfirmation(null);
+    setBilan(null);
+    arretRef.current = false;
+    const liste = destinataires;
+    let envoyes = 0, echecs = 0;
+    const raisons = new Map();
+    setEnvoi({ total: liste.length, faits: 0, envoyes: 0, echecs: 0 });
+    for (let i = 0; i < liste.length; i++) {
+      if (arretRef.current) break;
+      const c = liste[i];
+      let unEnvoi = false;
+      if ((canal === "email" || canal === "les_deux") && c.email) {
+        const r = await envoyerEmail(c.email, objet, messagePourEmail(c.nom));
+        if (r.envoye) unEnvoi = true;
+        else if (r.raison) raisons.set(r.raison, (raisons.get(r.raison) || 0) + 1);
+      }
+      if ((canal === "whatsapp" || canal === "les_deux") && c.segment !== SEGMENT_SANS_INDICATIF) {
+        const r = await envoyerWhatsApp(c.telephone, `${offre}\n${lien}`, null, {
+          nom: MODELE_PROMO_WHATSAPP.nom,
+          variables: [c.nom || "cher client", offre.trim(), echeance || "la fin du mois"],
+          boutonUrl: lien,
+        });
+        if (r.envoye) unEnvoi = true;
+        else if (r.raison) raisons.set(r.raison, (raisons.get(r.raison) || 0) + 1);
+      }
+      if (unEnvoi) envoyes += 1; else echecs += 1;
+      setEnvoi({ total: liste.length, faits: i + 1, envoyes, echecs });
+    }
+    const campagne = {
+      id: `camp${Date.now()}`,
+      date: new Date().toISOString(),
+      par: `${session?.prenom || ""} ${session?.nom || ""}`.trim(),
+      canal, segments: choisis, objet, offre: offre.trim(), echeance, lien,
+      destinataires: liste.length, envoyes, echecs,
+      interrompue: arretRef.current,
+    };
+    persist({
+      ...data,
+      campagnes: [campagne, ...campagnes].slice(0, 100),
+      activityLog: pushActivity(data, session, "Campagne envoyée",
+        `${envoyes}/${liste.length} messages — ${choisis.join(", ")}`),
+    });
+    setEnvoi(null);
+    setBilan({ ...campagne, raisons: [...raisons.entries()].sort((a, b) => b[1] - a[1]) });
+    notify?.(`Campagne terminée — ${envoyes} message(s) envoyé(s)`);
+  }
+
+  function desabonner(telephone) {
+    const clef = String(telephone || "").trim();
+    if (!clef) return;
+    const deja = data.desabonnesMarketing || [];
+    if (deja.some((t) => clefTelephone(t) === clefTelephone(clef))) { notify?.("Ce numéro est déjà désabonné"); return; }
+    persist({ ...data, desabonnesMarketing: [clef, ...deja] });
+    setNumeroADesabonner("");
+    notify?.("Numéro retiré des campagnes");
+  }
+  function reabonner(telephone) {
+    persist({ ...data, desabonnesMarketing: (data.desabonnesMarketing || []).filter((t) => clefTelephone(t) !== clefTelephone(telephone)) });
+  }
+
+  async function exporterSegment() {
+    const XLSX = await loadXLSXLib();
+    const entetes = ["Nom", "Téléphone", "Pays", "E-mail", "Envois"];
+    const rangs = destinataires.map((c) => [c.nom, c.telephone, c.paysNom, c.email, c.envois]);
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet([["BA-DIABY EXPRESS — Segment de campagne"], [`Généré le ${new Date().toLocaleDateString("fr-FR")}`], [], entetes, ...rangs]);
+    ws["!cols"] = entetes.map(() => ({ wch: 24 }));
+    XLSX.utils.book_append_sheet(wb, ws, "Segment");
+    XLSX.writeFile(wb, `campagne-segment-${new Date().toISOString().slice(0, 10)}.xlsx`);
+  }
+
+  const carteStyle = { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 18, marginBottom: 16 };
+
+  return (
+    <div>
+      <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 16px", marginBottom: 16, fontSize: 12.5, color: "var(--text)" }}>
+        Une campagne part vers de vraies personnes et se facture à chaque message. Les clients de vos
+        partenaires n’y figurent jamais — leur fichier reste le leur. Un client désabonné est exclu
+        même si son pays est coché.
+        <br /><br />
+        <strong>WhatsApp</strong> exige un modèle promotionnel approuvé par Meta ({MODELE_PROMO_WHATSAPP.nom},
+        catégorie {MODELE_PROMO_WHATSAPP.categorie}) : tant qu’il n’est pas validé, les envois échoueront
+        et l’écran vous le dira. L’<strong>e-mail</strong>, lui, fonctionne dès maintenant.
+      </div>
+
+      <div style={carteStyle}>
+        <div style={{ fontWeight: 700, fontSize: 14, color: "var(--text)", marginBottom: 4 }}>1. À qui écrivez-vous ?</div>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>
+          {audience.length} client(s) dans la base, répartis par indicatif téléphonique.
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(210px,1fr))", gap: 10 }}>
+          {segments.map((s) => {
+            const actif = choisis.includes(s.cle);
+            return (
+              <button key={s.cle} onClick={() => basculerSegment(s.cle)} aria-pressed={actif}
+                style={{ textAlign: "left", padding: "11px 13px", borderRadius: 11, cursor: "pointer",
+                         border: "1.5px solid " + (actif ? "var(--brand-solid)" : "var(--border)"),
+                         background: actif ? "var(--brand-soft, var(--surface2))" : "var(--surface2)" }}>
+                <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{s.drapeau} {s.nom}</div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
+                  {s.total} client{s.total > 1 ? "s" : ""} · {s.avecEmail} avec e-mail
+                  {s.desabonnes > 0 ? ` · ${s.desabonnes} désabonné(s)` : ""}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+        {segments.some((s) => s.cle === SEGMENT_SANS_INDICATIF) && (
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 10 }}>
+            Les numéros sans indicatif ne peuvent pas être joints sur WhatsApp — seul l’e-mail leur parvient.
+          </div>
+        )}
+      </div>
+
+      <div style={carteStyle}>
+        <div style={{ fontWeight: 700, fontSize: 14, color: "var(--text)", marginBottom: 10 }}>2. Par quel canal ?</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {[["email", "E-mail"], ["whatsapp", "WhatsApp"], ["les_deux", "Les deux"]].map(([k, label]) => (
+            <button key={k} onClick={() => setCanal(k)}
+              style={{ padding: "8px 16px", borderRadius: 20, cursor: "pointer", fontSize: 13, fontWeight: 700,
+                       border: "1.5px solid " + (canal === k ? "var(--brand-solid)" : "var(--border)"),
+                       background: canal === k ? "var(--brand-solid)" : "var(--surface)",
+                       color: canal === k ? "#fff" : "var(--muted)" }}>{label}</button>
+          ))}
+        </div>
+      </div>
+
+      {(canal === "whatsapp" || canal === "les_deux") && (
+        <div style={{ ...carteStyle, borderColor: "var(--warn-border)", background: "var(--warn-bg)" }}>
+          <div style={{ fontWeight: 700, fontSize: 13.5, color: "var(--text)", marginBottom: 6 }}>
+            Le modèle à déposer chez Meta, une fois pour toutes
+          </div>
+          <div style={{ fontSize: 12, color: "var(--text)", marginBottom: 10, lineHeight: 1.55 }}>
+            Gestionnaire WhatsApp → Modèles de message → Créer. Nom exact&nbsp;: <strong>{MODELE_PROMO_WHATSAPP.nom}</strong>,
+            catégorie <strong>{MODELE_PROMO_WHATSAPP.categorie}</strong>, langue <strong>Français</strong>.
+            Recopiez le corps tel quel — les trois variables sont remplies par cet écran (nom du client,
+            votre offre, l’échéance). Ajoutez un bouton « {MODELE_PROMO_WHATSAPP.bouton} » de type URL
+            pointant vers {lien}.
+          </div>
+          <pre style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: 12, fontSize: 12, color: "var(--text)", whiteSpace: "pre-wrap", margin: 0, fontFamily: "ui-monospace, monospace" }}>
+{MODELE_PROMO_WHATSAPP.corps}
+          </pre>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8 }}>
+            Pied de page du modèle : « {MODELE_PROMO_WHATSAPP.pied} »
+          </div>
+        </div>
+      )}
+
+      <div style={carteStyle}>
+        <div style={{ fontWeight: 700, fontSize: 14, color: "var(--text)", marginBottom: 10 }}>3. Votre message</div>
+        {(canal === "email" || canal === "les_deux") && (
+          <Field label="Objet de l’e-mail"><input value={objet} onChange={(e) => setObjet(e.target.value)} style={inputStyle} /></Field>
+        )}
+        <Field label="L’offre, en quelques lignes">
+          <textarea value={offre} onChange={(e) => setOffre(e.target.value)} rows={4}
+            placeholder="ex : -20 % sur tous les envois Paris → Conakry jusqu’à la fin du mois."
+            style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }} />
+        </Field>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <Field label="Valable jusqu’au"><input value={echeance} onChange={(e) => setEcheance(e.target.value)} placeholder="ex : 30 septembre" style={inputStyle} /></Field>
+          <Field label="Lien du site"><input value={lien} onChange={(e) => setLien(e.target.value)} style={inputStyle} /></Field>
+        </div>
+        <div style={{ background: "var(--surface2)", borderRadius: 10, padding: 14, marginTop: 6 }}>
+          <div style={{ fontSize: 11.5, fontWeight: 700, color: "var(--muted)", marginBottom: 8 }}>APERÇU</div>
+          <div style={{ fontSize: 13, color: "var(--text)", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>
+            {`Bonjour ${destinataires[0]?.nom || "Fatoumata Bah"},\n\n${offre || "…"}\n\nOffre valable jusqu’au ${echeance || "…"}. Passez en agence ou écrivez-nous, nous nous occupons du reste.\n${lien}`}
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8 }}>{MODELE_PROMO_WHATSAPP.pied}</div>
+        </div>
+      </div>
+
+      <div style={carteStyle}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: 19, fontWeight: 700, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif" }}>
+              {destinataires.length} destinataire{destinataires.length > 1 ? "s" : ""}
+            </div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
+              dont {avecEmail} avec une adresse e-mail
+              {desabonnesTotal > 0 ? ` · ${desabonnesTotal} désabonné(s) exclu(s)` : ""}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <button onClick={exporterSegment} disabled={destinataires.length === 0}
+              style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 15px", fontSize: 13, fontWeight: 700, cursor: destinataires.length ? "pointer" : "not-allowed" }}>
+              <Download size={15} /> Exporter la liste
+            </button>
+            <button onClick={() => setConfirmation(true)} disabled={!pret || !!envoi}
+              style={{ display: "flex", alignItems: "center", gap: 6, background: pret && !envoi ? "var(--brand-solid)" : "var(--surface2)", color: pret && !envoi ? "#fff" : "var(--muted)", border: "none", borderRadius: 9, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: pret && !envoi ? "pointer" : "not-allowed" }}>
+              <MessageCircle size={15} /> Envoyer la campagne
+            </button>
+          </div>
+        </div>
+
+        {envoi && (
+          <div style={{ marginTop: 16 }}>
+            <div style={{ height: 8, borderRadius: 8, background: "var(--surface2)", overflow: "hidden" }}>
+              <div style={{ height: "100%", width: `${Math.round((envoi.faits / Math.max(envoi.total, 1)) * 100)}%`, background: "var(--brand-solid)", transition: "width .2s" }} />
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
+              <span style={{ fontSize: 12.5, color: "var(--muted)" }}>
+                {envoi.faits} / {envoi.total} — {envoi.envoyes} envoyé(s), {envoi.echecs} échec(s)
+              </span>
+              <button onClick={() => { arretRef.current = true; }}
+                style={{ background: "none", border: "1px solid var(--danger-border, var(--border))", color: "var(--danger-fg)", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                Arrêter
+              </button>
+            </div>
+          </div>
+        )}
+
+        {bilan && (
+          <div style={{ marginTop: 16, background: bilan.echecs > 0 ? "var(--warn-bg)" : "var(--ok-bg)", borderRadius: 10, padding: 14 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>
+              {bilan.envoyes} message(s) envoyé(s) sur {bilan.destinataires}{bilan.interrompue ? " — campagne interrompue" : ""}
+            </div>
+            {bilan.raisons.length > 0 && (
+              <ul style={{ margin: "8px 0 0", paddingLeft: 18, fontSize: 12, color: "var(--muted)" }}>
+                {bilan.raisons.map(([raison, n]) => <li key={raison}>{raison} ({n})</li>)}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div style={carteStyle}>
+        <div style={{ fontWeight: 700, fontSize: 14, color: "var(--text)", marginBottom: 4 }}>Désinscriptions</div>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>
+          Un client qui demande à ne plus recevoir d’offres — par WhatsApp, par mail ou au comptoir —
+          se retire ici. Il restera exclu de toutes les campagnes, quel que soit le pays coché.
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+          <input value={numeroADesabonner} onChange={(e) => setNumeroADesabonner(e.target.value)}
+            placeholder="+224620000000" style={{ ...inputStyle, marginBottom: 0, maxWidth: 240 }} />
+          <button onClick={() => desabonner(numeroADesabonner)}
+            style={{ background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 9, padding: "10px 15px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+            Désabonner
+          </button>
+        </div>
+        {(data.desabonnesMarketing || []).length === 0
+          ? <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Personne n’est désabonné pour l’instant.</div>
+          : (data.desabonnesMarketing || []).map((t) => (
+            <div key={t} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 0", borderTop: "1px solid var(--border)" }}>
+              <span style={{ fontSize: 13, color: "var(--text)" }}>{t}</span>
+              <button onClick={() => reabonner(t)} style={{ background: "none", border: "none", color: "var(--info-fg)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Réinscrire</button>
+            </div>
+          ))}
+      </div>
+
+      {campagnes.length > 0 && (
+        <div style={carteStyle}>
+          <div style={{ fontWeight: 700, fontSize: 14, color: "var(--text)", marginBottom: 10 }}>Campagnes précédentes</div>
+          {campagnes.slice(0, 10).map((c) => (
+            <div key={c.id} style={{ padding: "9px 0", borderTop: "1px solid var(--border)" }}>
+              <div style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>{c.objet || c.offre?.slice(0, 60)}</div>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                {new Date(c.date).toLocaleString("fr-FR")} · {c.canal} · {c.envoyes}/{c.destinataires} envoyés
+                {c.echecs > 0 ? ` · ${c.echecs} échec(s)` : ""} · par {c.par}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {confirmation && (
+        <ConfirmerAction
+          titre={`Envoyer à ${destinataires.length} client(s) ?`}
+          message={`${canal === "email" ? "Par e-mail" : canal === "whatsapp" ? "Par WhatsApp" : "Par e-mail et WhatsApp"} — segments : ${choisis.join(", ")}.`}
+          consequence="Chaque message est facturé et ne peut pas être rappelé une fois parti. Vous pourrez arrêter l’envoi en cours de route, mais pas revenir sur ceux déjà partis."
+          libelleAction="Envoyer"
+          onConfirmer={lancer}
+          onAnnuler={() => setConfirmation(null)}
+        />
+      )}
+    </div>
+  );
+}
+
 function PaiementsPage({ data, notify }) {
   const [filter, setFilter] = useState("tous");
   /*

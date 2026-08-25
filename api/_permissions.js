@@ -53,6 +53,12 @@ export const PERMISSIONS_SCHEMA = [
   ]},
   { group: "CLIENTS", permissions: [
     { key: "clients.consulter", label: "Consulter les clients" },
+    /*
+     * Écrire à toute la base d'un coup n'est pas une consultation : c'est un geste commercial qui
+     * engage la marque, coûte de l'argent à chaque message, et qu'on ne peut pas rattraper une
+     * fois parti. Il reste donc à l'administrateur, sauf désignation expresse.
+     */
+    { key: "clients.campagnes", label: "Envoyer des campagnes marketing aux clients" },
   ]},
   /*
    * L'Espace Client est un circuit à part : commandes annoncées, réception et pesée, messages,

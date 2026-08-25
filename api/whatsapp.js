@@ -450,9 +450,20 @@ export default async function handler(req, res) {
       ["about", "address", "description", "email", "vertical"].forEach((c) => {
         if (champs && champs[c] !== undefined) corpsProfil[c] = String(champs[c]);
       });
+      /*
+       * LES ADRESSES DE SITE, TELLES QUE META LES VEUT
+       *
+       * Il exige une adresse complète : « badiabyexpress.com » est refusé, « https://badiabyexpress.com »
+       * est accepté. Et son refus s'appelle « (#131000) Something went wrong » — un message qui ne dit
+       * rien de la cause et qu'on passerait une soirée à chercher. On complète donc le protocole
+       * manquant plutôt que de laisser partir une adresse qu'il rejettera.
+       */
       if (champs?.websites !== undefined) {
         corpsProfil.websites = (Array.isArray(champs.websites) ? champs.websites : [champs.websites])
-          .map((u) => String(u).trim()).filter(Boolean).slice(0, 2);
+          .map((u) => String(u).trim())
+          .filter(Boolean)
+          .map((u) => (/^https?:\/\//i.test(u) ? u : `https://${u.replace(/^\/+/, "")}`))
+          .slice(0, 2);
       }
 
       if (Object.keys(corpsProfil).length === 1) {
@@ -471,10 +482,27 @@ export default async function handler(req, res) {
       const corps = await reponse.json();
       if (!reponse.ok) {
         const code = corps?.error?.code;
-        return res.status(reponse.status).json({
-          error: EXPLICATIONS_META[code] || corps?.error?.error_user_msg || corps?.error?.message || "Meta a refusé la modification.",
-          code: code || null,
-        });
+        /*
+         * « (#131000) Something went wrong » est le refus fourre-tout de Meta : il tombe dès qu'un
+         * paramètre lui déplaît, sans jamais dire lequel. Plutôt que de le relayer tel quel, on
+         * nomme les causes qu'on peut constater soi-même — c'est presque toujours l'une d'elles.
+         */
+        let explication = EXPLICATIONS_META[code] || corps?.error?.error_user_msg || corps?.error?.message;
+        if (code === 131000 || /something went wrong/i.test(explication || "")) {
+          const soupcons = [];
+          if ((corpsProfil.websites || []).some((u) => !/^https?:\/\/[^\s.]+\.[a-z]{2,}/i.test(u))) {
+            soupcons.push("l’adresse du site (elle doit ressembler à https://exemple.com)");
+          }
+          if (corpsProfil.email && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(corpsProfil.email)) {
+            soupcons.push("l’adresse e-mail");
+          }
+          if ((corpsProfil.about || "").length > 139) soupcons.push("le message d’accueil (139 caractères au plus)");
+          if ((corpsProfil.description || "").length > 512) soupcons.push("la description (512 caractères au plus)");
+          explication = soupcons.length
+            ? `Meta a refusé sans dire pourquoi. Vérifiez ${soupcons.join(", ")}.`
+            : "Meta a refusé sans dire pourquoi. Vérifiez que l’adresse du site commence par https:// et que l’e-mail est valide.";
+        }
+        return res.status(reponse.status).json({ error: explication || "Meta a refusé la modification.", code: code || null });
       }
       return res.status(200).json({ ok: true });
     } catch (e) {

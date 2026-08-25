@@ -19140,13 +19140,13 @@ function encaissementsParAgent(colisInclus, users, remises) {
       const pays = paysDuPaiement(p, c, users);
       const cle = `${agent}@${pays || "?"}`;
       if (!groupes.has(cle)) {
-        groupes.set(cle, { agent, pays, lieu: villeDuPays(pays), totalEUR: 0, devises: {}, verse: {}, aVerser: {}, aVerserEUR: 0 });
+        groupes.set(cle, { agent, pays, lieu: villeDuPays(pays), totalEUR: 0, devises: {}, verse: {}, aVerser: {}, aVerserEUR: 0, verseEUR: 0 });
       }
       const g = groupes.get(cle);
       g.totalEUR += Number(p.montant) || 0;
       ajouterDevise(g.devises, devise, montantSaisi);
       if ((p.mode || MODE_ESPECES) === MODE_ESPECES) {
-        if (remis.has(clePaiement(c.tracking, p, i))) ajouterDevise(g.verse, devise, montantSaisi);
+        if (remis.has(clePaiement(c.tracking, p, i))) { ajouterDevise(g.verse, devise, montantSaisi); g.verseEUR += Number(p.montant) || 0; }
         else { ajouterDevise(g.aVerser, devise, montantSaisi); g.aVerserEUR += Number(p.montant) || 0; }
       }
     });
@@ -19158,9 +19158,11 @@ function encaissementsParAgent(colisInclus, users, remises) {
   const parLieu = new Map();
   lignes.forEach((l) => {
     const cle = l.pays || "?";
-    if (!parLieu.has(cle)) parLieu.set(cle, { pays: l.pays, lieu: l.lieu, totalEUR: 0, devises: {}, aVerser: {} });
+    if (!parLieu.has(cle)) parLieu.set(cle, { pays: l.pays, lieu: l.lieu, totalEUR: 0, devises: {}, aVerser: {}, aVerserEUR: 0, verseEUR: 0 });
     const g = parLieu.get(cle);
     g.totalEUR += l.totalEUR;
+    g.aVerserEUR += l.aVerserEUR;
+    g.verseEUR += l.verseEUR;
     Object.entries(l.devises).forEach(([d, v]) => ajouterDevise(g.devises, d, v));
     Object.entries(l.aVerser).forEach(([d, v]) => ajouterDevise(g.aVerser, d, v));
   });
@@ -19221,8 +19223,21 @@ function statutPaiementColis(c) {
  * Elle reprend les colis embarqués, les dépenses engagées et le résultat, avec une ligne de
  * signature : c'est ce document qu'on valide, et à partir duquel les colis sortent du pool des
  * voyages à venir.
+ *
+ * UNE SEULE DEVISE, UNE SEULE FEUILLE
+ * ----------------------------------
+ * La fiche mélangeait auparavant trois monnaies dans la même page : le tableau des colis en
+ * euros, les encaissements dans la devise réellement reçue (« 300 000 GNF · 58,00 EUR »), les
+ * dépenses en francs, et une phrase de bas de page qui reconvertissait le tout en GNF. Quatre
+ * chiffres pour une même somme, qu'aucun comptable ne peut rapprocher. Tout est désormais
+ * converti dans la devise choisie à l'écran — GNF, EUR, USD… — et le taux appliqué est écrit
+ * dessus.
+ *
+ * Et elle débordait sur une seconde page dès une dizaine de colis : le panneau de résultat et la
+ * signature, qui ne se coupent pas, basculaient seuls au verso. Les espacements ont été resserrés
+ * pour qu'une rotation ordinaire — jusqu'à une vingtaine de colis — tienne sur une seule A4.
  */
-function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data) {
+function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data, devise = "GNF") {
   const INK = [26, 30, 38], MUTED = [122, 130, 142], RED = [214, 39, 63], NAVY = [10, 38, 71];
   const t = totauxVoyage(colisInclus, voyage.depenses, data?.users, data?.remisesCaisse);
   let y = 20;
@@ -19237,66 +19252,79 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data) {
     doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...RED);
     doc.text("BROUILLON", 196, y + 6, { align: "right" });
   }
-  y += 20;
+  y += 18;
   doc.setDrawColor(...RED); doc.setLineWidth(0.6); doc.line(14, y, 196, y);
-  y += 10;
+  y += 8;
 
   const infos = [
     ["Route", libelleVoyage(voyage.pays, voyage.direction)],
     ["Départ", voyage.dateDepart ? new Date(`${voyage.dateDepart}T00:00:00`).toLocaleDateString("fr-FR") : "—"],
     ["Colis embarqués", `${t.nbColis} · ${t.poids.toFixed(1)} kg · ${t.nbPayes} payés, ${t.nbPartiels} partiels, ${t.nbImpayes} impayés${t.nbPartenaires > 0 ? `, ${t.nbPartenaires} partenaire${t.nbPartenaires > 1 ? "s" : ""}` : ""}`],
   ];
-  doc.setFontSize(10);
+  doc.setFontSize(9.5);
   infos.forEach(([label, valeur]) => {
     doc.setFont(undefined, "bold"); doc.setTextColor(...INK); doc.text(label, 14, y);
     doc.setFont(undefined, "normal"); doc.text(String(valeur), 196, y, { align: "right" });
-    y += 6;
+    y += 5.5;
   });
-  y += 4;
+  y += 3;
 
-  const head = ["N° de suivi", "Destinataire", "Sens", "Poids", "Facturé", "Payé", "Reste"];
+  const head = ["N° de suivi", "Destinataire", "Sens", "Poids", `Facturé (${devise})`, `Payé (${devise})`, "Reste"];
   const body = colisInclus.map((c) => [
     c.tracking, c.destinataire || "—",
     (c.direction || "export") === "export" ? "Aller" : "Retour",
     `${(Number(c.poids) || 0).toFixed(1)} kg`,
     // Un colis partenaire n'a ni prix ni règlement chez nous : la fiche le dit, plutôt que
     // d'afficher des zéros qui se liraient comme un colis soldé.
-    estColisPartenaire(c) ? "—" : fmt(c.prix, "EUR"),
-    estColisPartenaire(c) ? "—" : fmt(c.paye, "EUR"),
-    estColisPartenaire(c) ? "Partenaire" : ((Number(c.reste) || 0) > 0 ? fmt(c.reste, "EUR") : "Payé"),
+    estColisPartenaire(c) ? "—" : fmt(c.prix, devise),
+    estColisPartenaire(c) ? "—" : fmt(c.paye, devise),
+    estColisPartenaire(c) ? "Partenaire" : ((Number(c.reste) || 0) > 0 ? fmt(c.reste, devise) : "Payé"),
   ]);
   if (hasAutoTable && doc.autoTable && body.length > 0) {
     doc.autoTable({
       startY: y, head: [head], body,
-      theme: "grid", headStyles: { fillColor: NAVY, textColor: 255, fontSize: 8 },
-      styles: { fontSize: 8, textColor: [40, 40, 40], overflow: "linebreak" },
-      columnStyles: { 0: { cellWidth: 26 }, 1: { cellWidth: 44 }, 2: { cellWidth: 16 }, 3: { cellWidth: 18 }, 4: { cellWidth: 26 }, 5: { cellWidth: 26 }, 6: { cellWidth: 26 } },
+      theme: "grid", headStyles: { fillColor: NAVY, textColor: 255, fontSize: 7.5 },
+      styles: { fontSize: 7.5, textColor: [40, 40, 40], overflow: "linebreak", cellPadding: 1.3 },
+      // Les trois colonnes d'argent sont calées à droite : c'est ainsi qu'on additionne de tête.
+      columnStyles: { 0: { cellWidth: 24 }, 1: { cellWidth: 42 }, 2: { cellWidth: 14 }, 3: { cellWidth: 16 },
+                      4: { cellWidth: 30, halign: "right" }, 5: { cellWidth: 28, halign: "right" }, 6: { cellWidth: 28, halign: "right" } },
       margin: { left: 14, right: 14 },
     });
-    y = doc.lastAutoTable.finalY + 8;
+    y = doc.lastAutoTable.finalY + 7;
   } else {
-    const colX = [14, 40, 84, 100, 118, 144, 170];
-    doc.setFontSize(8); doc.setTextColor(255, 255, 255); doc.setFillColor(...NAVY);
-    doc.rect(14, y, 182, 7, "F");
-    head.forEach((h, i) => doc.text(h, colX[i] + 1, y + 5));
-    y += 9;
-    doc.setTextColor(40, 40, 40);
+    /*
+     * Repli sans le greffon — celui qui imprime vraiment quand le CDN est hors d'atteinte.
+     * L'ancienne version posait la première ligne par-dessus la bande d'en-tête et coupait chaque
+     * cellule à vingt-deux caractères, ce qui décapitait les montants.
+     */
+    const largeurs = [24, 42, 14, 16, 30, 28, 28];
+    const colX = largeurs.reduce((acc, l) => [...acc, acc[acc.length - 1] + l], [14]);
+    doc.setFont(undefined, "bold"); doc.setFontSize(7.5); doc.setTextColor(255, 255, 255); doc.setFillColor(...NAVY);
+    doc.rect(14, y, 182, 6.5, "F");
+    head.forEach((h, i) => (i >= 4
+      ? doc.text(h, colX[i] + largeurs[i] - 1.5, y + 4.5, { align: "right" })
+      : doc.text(h, colX[i] + 1.5, y + 4.5)));
+    y += 6.5;
+    doc.setFont(undefined, "normal"); doc.setTextColor(40, 40, 40);
     body.forEach((row, i) => {
-      if (y > 250) { doc.addPage(); y = 20; }
-      if (i % 2 === 1) { doc.setFillColor(238, 243, 250); doc.rect(14, y - 4.5, 182, 6.5, "F"); }
-      doc.setFontSize(7.5);
-      row.forEach((cell, j) => doc.text(String(cell).slice(0, 22), colX[j] + 1, y));
-      y += 6.5;
+      const lignes = row.map((cell, j) => doc.splitTextToSize(String(cell), largeurs[j] - 3));
+      const hauteur = Math.max(...lignes.map((l) => l.length)) * 3.2 + 2.4;
+      if (y + hauteur > 272) { doc.addPage(); y = 20; }
+      if (i % 2 === 1) { doc.setFillColor(238, 243, 250); doc.rect(14, y, 182, hauteur, "F"); }
+      lignes.forEach((cellules, j) => cellules.forEach((ligne, k) => (j >= 4
+        ? doc.text(ligne, colX[j] + largeurs[j] - 1.5, y + 3.8 + k * 3.2, { align: "right" })
+        : doc.text(ligne, colX[j] + 1.5, y + 3.8 + k * 3.2))));
+      y += hauteur;
     });
-    y += 10;
+    y += 7;
   }
 
   // Où l'argent est réellement entré — le comptoir de Conakry et celui de l'escale n'ont pas la
   // même caisse, et sur un aller-retour les deux ont encaissé.
   if (y > 240) { doc.addPage(); y = 20; }
-  doc.setFont(undefined, "bold"); doc.setFontSize(10.5); doc.setTextColor(...INK);
+  doc.setFont(undefined, "bold"); doc.setFontSize(10); doc.setTextColor(...INK);
   doc.text("Encaissements — qui a reçu l’argent, qui doit verser", 14, y);
-  y += 7;
+  y += 6;
   // Une seule section : le total de chaque caisse, et sous chacune les agents qui l'ont alimentée
   // avec ce qu'ils doivent encore verser. C'est la partie qu'on relit avec chacun pour solder.
   const sauterSiBesoin = () => { if (y > 268) { doc.addPage(); y = 20; } };
@@ -19304,80 +19332,89 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data) {
     sauterSiBesoin();
     doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...INK);
     doc.text(`Encaissé à ${lieu.lieu}`, 16, y);
-    doc.text(formaterDevises(lieu.devises), 196, y, { align: "right" });
-    y += 6;
+    doc.text(fmt(lieu.totalEUR, devise), 196, y, { align: "right" });
+    y += 5.5;
     doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(90, 100, 115);
     t.encaissements.lignes.filter((l) => (l.pays || "?") === (lieu.pays || "?")).forEach((l) => {
       sauterSiBesoin();
-      const du = Object.values(l.aVerser).some((v) => Math.abs(v) >= 0.005) ? `à verser ${formaterDevises(l.aVerser)}` : "rien à verser";
-      const dejaVerse = Object.values(l.verse).some((v) => Math.abs(v) >= 0.005) ? ` · déjà versé ${formaterDevises(l.verse)}` : "";
+      const du = l.aVerserEUR > 0.005 ? `à verser ${fmt(l.aVerserEUR, devise)}` : "rien à verser";
+      const dejaVerse = l.verseEUR > 0.005 ? ` · déjà versé ${fmt(l.verseEUR, devise)}` : "";
       doc.text(`   ${l.agent}`, 16, y);
-      doc.text(`${formaterDevises(l.devises)} · ${du}${dejaVerse}`, 196, y, { align: "right" });
-      y += 5.5;
+      doc.text(`${fmt(l.totalEUR, devise)} · ${du}${dejaVerse}`, 196, y, { align: "right" });
+      y += 5;
     });
-    y += 2;
+    y += 1.5;
   });
   doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(60, 66, 78);
   if (t.encaissements.nonVentileEUR > 0.005) {
     sauterSiBesoin();
     doc.text("Sans détail de paiement", 16, y);
-    doc.text(fmt(t.encaissements.nonVentileEUR, "EUR"), 196, y, { align: "right" });
-    y += 6;
+    doc.text(fmt(t.encaissements.nonVentileEUR, devise), 196, y, { align: "right" });
+    y += 5.5;
   }
   sauterSiBesoin();
   doc.text("Reste à encaisser auprès des clients", 16, y);
-  doc.text(fmt(t.resteAEncaisser, "EUR"), 196, y, { align: "right" });
-  y += 10;
+  doc.text(fmt(t.resteAEncaisser, devise), 196, y, { align: "right" });
+  y += 8;
 
   if ((voyage.depenses || []).length > 0) {
     if (y > 235) { doc.addPage(); y = 20; }
-    doc.setFont(undefined, "bold"); doc.setFontSize(10.5); doc.setTextColor(...INK);
+    doc.setFont(undefined, "bold"); doc.setFontSize(10); doc.setTextColor(...INK);
     doc.text("Dépenses du voyage", 14, y);
-    y += 6;
+    y += 5.5;
     doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(60, 66, 78);
     voyage.depenses.forEach((d) => {
       if (y > 268) { doc.addPage(); y = 20; }
       doc.text(d.libelle || "Dépense", 16, y);
-      doc.text(`${fmt(versEUR(d.montant, d.devise), d.devise)}`, 196, y, { align: "right" });
-      y += 6;
+      // La dépense est ramenée à la devise de la fiche, comme tout le reste : une ligne en francs
+      // au milieu d'un document en euros ne s'additionne pas.
+      doc.text(fmt(versEUR(d.montant, d.devise), devise), 196, y, { align: "right" });
+      y += 5.5;
     });
-    y += 4;
+    y += 3;
   }
 
   // Le panneau de résultat et la signature ont besoin d'environ 58 mm : on ne les laisse jamais
   // déborder sous le pied de page.
   // Le panneau de résultat (34 mm), sa ligne d'explication et le bloc signature demandent environ
   // 80 mm : en dessous de cette marge ils passeraient sous le pied de page, invisibles à l'impression.
-  if (y > 205) { doc.addPage(); y = 20; }
-  doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, 34, "F");
+  /*
+   * Le panneau de résultat (32 mm), sa ligne d'explication et le bloc signature demandent environ
+   * 62 mm, pied de page compris. Au-delà de 224 mm, ils ne tiennent plus : c'est le seul endroit
+   * où l'on accepte une seconde page, et une rotation ordinaire n'y arrive pas.
+   */
+  if (y > 224) { doc.addPage(); y = 20; }
+  doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, 32, "F");
   doc.setFontSize(10); doc.setTextColor(...NAVY); doc.setFont(undefined, "bold");
-  doc.text("Recettes (chiffre d’affaires)", 18, y + 8);
-  doc.text(fmt(t.facture, "EUR"), 192, y + 8, { align: "right" });
+  doc.text("Recettes (chiffre d’affaires)", 18, y + 7.5);
+  doc.text(fmt(t.facture, devise), 192, y + 7.5, { align: "right" });
   doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
-  doc.text("Dépenses du voyage", 18, y + 15);
-  doc.text(`- ${fmt(t.depensesEUR, "EUR")}`, 192, y + 15, { align: "right" });
+  doc.text("Dépenses du voyage", 18, y + 14);
+  doc.text(`- ${fmt(t.depensesEUR, devise)}`, 192, y + 14, { align: "right" });
   doc.setFont(undefined, "bold"); doc.setFontSize(10.5);
   doc.setTextColor(...(t.resultat >= 0 ? [22, 161, 99] : [214, 39, 63]));
-  doc.text("Résultat sur le facturé", 18, y + 23);
-  doc.text(fmt(t.resultat, "EUR"), 192, y + 23, { align: "right" });
+  doc.text("Résultat sur le facturé", 18, y + 21.5);
+  doc.text(fmt(t.resultat, devise), 192, y + 21.5, { align: "right" });
   doc.setFontSize(12);
   doc.setTextColor(...(t.tresorerie >= 0 ? [22, 161, 99] : [214, 39, 63]));
-  doc.text("Bilan final (argent rentré)", 18, y + 31);
-  doc.text(fmt(t.tresorerie, "EUR"), 192, y + 31, { align: "right" });
-  y += 40;
+  doc.text("Bilan final (argent rentré)", 18, y + 29.5);
+  doc.text(fmt(t.tresorerie, devise), 192, y + 29.5, { align: "right" });
+  y += 37;
 
+  const tauxFiche = LIVE_RATES[devise] || CURRENCIES[devise] || 1;
   doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
-  doc.text(`Bilan final = encaissé ${fmt(t.encaisse, "EUR")} - dépenses ${fmt(t.depensesEUR, "EUR")}, soit ${fmtGNF(t.tresorerie * (LIVE_RATES.GNF || CURRENCIES.GNF))}.`, 14, y);
-  y += 14;
+  doc.text(`Bilan final = encaissé ${fmt(t.encaisse, devise)} - dépenses ${fmt(t.depensesEUR, devise)}.`
+    + (devise === "EUR" ? "" : ` Tous les montants sont en ${devise} (1 EUR = ${tauxFiche.toLocaleString("fr-FR")} ${devise}).`), 14, y);
+  y += 11;
   // Le pied de page est à 288 mm : la ligne de signature doit rester au-dessus.
-  if (y > 260) { doc.addPage(); y = 20; }
+  if (y > 262) { doc.addPage(); y = 20; }
   doc.setFontSize(9); doc.setTextColor(90, 100, 120);
   doc.text(voyage.valideeLe
     ? `Validée le ${new Date(voyage.valideeLe).toLocaleString("fr-FR")}${voyage.valideePar ? ` par ${voyage.valideePar}` : ""}`
     : "Fiche non encore validée", 14, y);
-  y += 8;
+  y += 7;
   doc.text("Signature du responsable :", 14, y);
-  doc.setDrawColor(180); doc.line(14, y + 12, 85, y + 12);
+  doc.setDrawColor(180); doc.line(14, y + 11, 85, y + 11);
 
   doc.setFontSize(7.3); doc.setTextColor(150, 150, 150);
   doc.text(`Édité le ${new Date().toLocaleString("fr-FR")} — Ba-Diaby Express`, 14, 288);
@@ -19406,6 +19443,12 @@ function VoyagesPage({ data, persist, session, notify }) {
   const [depLibelle, setDepLibelle] = useState("");
   const [depMontant, setDepMontant] = useState("");
   const [depDevise, setDepDevise] = useState("GNF");
+  /*
+   * La devise dans laquelle la fiche de voyage est ÉDITÉE. La saisie, elle, garde sa monnaie
+   * d'origine — une dépense payée en francs se saisit en francs. C'est le document imprimé qui
+   * doit parler d'une seule voix, pour qu'on puisse additionner ses colonnes.
+   */
+  const [deviseFiche, setDeviseFiche] = useState("GNF");
   const [recherche, setRecherche] = useState("");
   const [confirmation, setConfirmation] = useState(null);
   const [voyageASupprimer, setVoyageASupprimer] = useState(null);
@@ -19569,7 +19612,7 @@ function VoyagesPage({ data, persist, session, notify }) {
       const doc = preparerDocPdf(new jspdf.jsPDF());
       const hasAutoTable = await ensureAutoTable();
       const set = new Set(voyage.trackings || []);
-      dessinerFicheVoyage(doc, voyage, data.colis.filter((c) => set.has(c.tracking)), hasAutoTable, data);
+      dessinerFicheVoyage(doc, voyage, data.colis.filter((c) => set.has(c.tracking)), hasAutoTable, data, deviseFiche);
       openPdf(doc, `fiche-voyage-${voyage.numero}.pdf`);
     } catch (e) {
       console.error(e);
@@ -19965,6 +20008,21 @@ function VoyagesPage({ data, persist, session, notify }) {
           </div>
         </div>
       )}
+
+      {/*
+        * La devise du document imprimé. Elle ne touche pas aux saisies — une dépense payée en
+        * francs reste saisie en francs — mais la fiche, elle, ne parlera que d'une seule monnaie.
+        */}
+      <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 12, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 12.5, color: "var(--muted)" }}>Éditer la fiche en :</span>
+        <select value={deviseFiche} onChange={(e) => setDeviseFiche(e.target.value)}
+          aria-label="Devise de la fiche de voyage" style={{ ...inputStyle, width: 110, marginBottom: 0 }}>
+          {Object.keys(CURRENCIES).map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <span style={{ fontSize: 11.5, color: "var(--muted)" }}>
+          Tous les montants du PDF — colis, encaissements, dépenses et bilan — seront convertis dans cette devise.
+        </span>
+      </div>
 
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 20 }}>
         {!enLecture ? (

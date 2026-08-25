@@ -591,6 +591,29 @@ function fmtGNF(n) {
   return `${Math.round(n || 0).toLocaleString("fr-FR")} GNF`;
 }
 /**
+ * Lit un montant tapé à la main.
+ *
+ * En francs guinéens on écrit de gros nombres, et personne ne les tape collés : « 500 000 »,
+ * « 500.000 », « 1 200 000 GNF ». Or Number() rend NaN sur toutes ces formes, et un « || 0 »
+ * placé derrière transformait alors la saisie en zéro — sans le dire. C'est ainsi que des
+ * dépenses réelles se sont enregistrées à 0 GNF.
+ *
+ * On accepte donc les espaces (y compris insécables), le point et l'apostrophe de milliers, la
+ * virgule décimale et le sigle de la devise. On rend null — et non zéro — quand il n'y a rien de
+ * lisible : c'est à l'appelant de refuser la saisie plutôt que d'inventer un montant.
+ */
+function montantSaisi(valeur) {
+  if (typeof valeur === "number") return Number.isFinite(valeur) ? valeur : null;
+  if (typeof valeur !== "string") return null;
+  let s = valeur.replace(/[\s   '’]/g, "").replace(/gnf|fg|€|eur/gi, "");
+  if (!s) return null;
+  if (s.includes(",")) s = s.replace(/\./g, "").replace(",", ".");
+  else if (/\.\d{3}(\D|$)/.test(s)) s = s.replace(/\./g, ""); // 500.000 → milliers, pas décimales
+  if (!/^-?(\d+(\.\d+)?|\.\d+)$/.test(s)) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+/**
  * Une catégorie peut être universelle (paysLimite null/absent), ou restreinte à un ou plusieurs
  * pays. Les données existantes stockent encore paysLimite comme une simple chaîne (ancien format
  * un-seul-pays) : on l'accepte transparemment aux côtés du nouveau format tableau, sans migration.
@@ -2301,15 +2324,26 @@ function openPdf(doc, filename) {
     doc.save(filename);
   }
 }
+/*
+ * Le greffon des tableaux. Un seul CDN, c'est un seul point de panne : quand cdnjs est bloqué
+ * — filtrage d'entreprise, réseau guinéen capricieux, extension de navigateur — les documents
+ * imprimés basculaient sur le tableau de repli sans que personne ne comprenne pourquoi. On essaie
+ * donc une seconde source avant d'abandonner.
+ */
 async function ensureAutoTable() {
   if (window.jspdf?.jsPDF?.API?.autoTable) return true;
-  try {
-    await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js");
-    return true;
-  } catch (e) {
-    console.error("autoTable indisponible, tableau manuel utilisé à la place.", e);
-    return false;
+  const sources = [
+    "https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js",
+    "https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js",
+  ];
+  for (const src of sources) {
+    try {
+      await loadScript(src);
+      if (window.jspdf?.jsPDF?.API?.autoTable) return true;
+    } catch (e) { /* on essaie la source suivante */ }
   }
+  console.error("autoTable indisponible, tableau manuel utilisé à la place.");
+  return false;
 }
 async function ensureQRCodeLib() {
   if (window.QRCode && window.QRCode.toDataURL) return true;
@@ -11899,8 +11933,11 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
     window.open(`mailto:?subject=${encodeURIComponent(sujet)}&body=${encodeURIComponent(corps)}`, "_blank");
   }
   function ajouterDepense() {
-    if (!depenseForm?.nom || !depenseForm?.montant) return;
-    const entry = { id: `dep${Date.now()}`, type: "Dépense", nom: `${depenseForm.nom} (${bordereau.numero})`, montant: Number(depenseForm.montant) || 0, date: new Date().toISOString() };
+    if (!depenseForm?.nom) return;
+    // Même règle qu'en comptabilité : un montant illisible arrête la saisie, il ne devient pas zéro.
+    const montantDepense = montantSaisi(depenseForm?.montant);
+    if (montantDepense === null || montantDepense <= 0) { setDepenseForm({ ...depenseForm, erreur: "Montant illisible. Tapez le nombre, par exemple 500 000." }); return; }
+    const entry = { id: `dep${Date.now()}`, type: "Dépense", nom: `${depenseForm.nom} (${bordereau.numero})`, montant: Math.round(montantDepense), date: new Date().toISOString() };
     persist({ ...data, depenses: [entry, ...(data.depenses || [])], activityLog: pushActivity(data, session, "Dépense liée à un bordereau", `${bordereau.numero} — ${entry.nom}`) });
     notify?.("Dépense ajoutée");
     setDepenseForm(null);
@@ -12110,7 +12147,15 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
       {depenseForm && (
         <Modal onClose={() => setDepenseForm(null)} title="Ajouter une dépense liée à ce bordereau">
           <Field label="Libellé"><input value={depenseForm.nom} onChange={(e) => setDepenseForm({ ...depenseForm, nom: e.target.value })} style={inputStyle} placeholder="ex: Transport, douane..." /></Field>
-          <Field label="Montant (GNF)"><input value={depenseForm.montant} onChange={(e) => setDepenseForm({ ...depenseForm, montant: e.target.value })} style={inputStyle} /></Field>
+          <Field label="Montant (GNF)">
+            <input value={depenseForm.montant} inputMode="numeric" onChange={(e) => setDepenseForm({ ...depenseForm, montant: e.target.value, erreur: "" })} style={inputStyle} placeholder="ex : 500 000" />
+            <div style={{ fontSize: 12, marginTop: 5, color: montantSaisi(depenseForm.montant) > 0 ? "var(--ok-fg)" : "var(--muted)" }}>
+              {String(depenseForm.montant || "").trim() === "" ? "Espaces et points acceptés : 500 000, 500.000…"
+                : montantSaisi(depenseForm.montant) === null ? "Montant illisible — tapez seulement le nombre."
+                : fmtGNF(montantSaisi(depenseForm.montant))}
+            </div>
+          </Field>
+          {depenseForm.erreur && <div style={{ background: "var(--danger-bg)", color: "var(--danger-fg)", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, fontWeight: 600 }}>{depenseForm.erreur}</div>}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 8 }}>
             <button onClick={() => setDepenseForm(null)} style={{ padding: "9px 16px", borderRadius: 8, border: "1.5px solid var(--border)", background: "var(--surface2)", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>Annuler</button>
             <button onClick={ajouterDepense} style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
@@ -13296,10 +13341,23 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   stat(138, "MONTANT TOTAL", fmt(colisRoute.reduce((s, c) => s + c.prix, 0), cur), true);
   y += 26;
 
-  const head = ["N° de suivi", "Destinataire", "Téléphone", "Mode", "Poids", "Statut", `Montant (${cur})`];
+  /*
+   * Le mode d'acheminement ne figure plus colonne par colonne : un bordereau ne mélange pas les
+   * modes, il est déjà annoncé par la route en en-tête, et répéter « Aérien » dix fois volait la
+   * place au chiffre que l'on cherche vraiment. À la place, le nombre d'articles — ce que l'on
+   * compte à la main devant le transporteur — et, derrière chaque montant, son règlement : payé,
+   * partiellement payé, ou pas payé du tout. C'est la question posée à chaque remise.
+   */
+  const reglementDuColis = (c) => {
+    const paye = Number(c.paye) || 0;
+    if (paye <= 0.005) return { libelle: "Non payé", teinte: [200, 45, 60] };
+    if ((Number(c.reste) || 0) <= 0.005) return { libelle: "Payé", teinte: [40, 140, 90] };
+    return { libelle: `Partiel\n${fmt(paye, cur)}`, teinte: [180, 120, 20] };
+  };
+  const head = ["N° de suivi", "Destinataire", "Téléphone", "Articles", "Poids", "Statut", `Montant (${cur})`, "Règlement"];
   const body = colisRoute.map((c) => [
-    c.tracking, c.destinataire, c.telephone, c.mode === "air" ? "Aérien" : "Maritime",
-    `${c.poids} kg`, c.status, fmt(c.prix, cur),
+    c.tracking, c.destinataire, c.telephone, String(nombreArticles(c)),
+    `${c.poids} kg`, c.status, fmt(c.prix, cur), reglementDuColis(c).libelle,
   ]);
 
   const hasAutoTable = await ensureAutoTable();
@@ -13316,35 +13374,73 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
      */
     doc.autoTable({
       startY: y, head: [head], body,
-      headStyles: { fillColor: [10, 38, 71], fontSize: 8.5 },
-      bodyStyles: { fontSize: 8.5, textColor: [30, 40, 55], overflow: "linebreak" },
+      headStyles: { fillColor: [10, 38, 71], fontSize: 8, halign: "left" },
+      bodyStyles: { fontSize: 8, textColor: [30, 40, 55], overflow: "linebreak", cellPadding: 1.6 },
       alternateRowStyles: { fillColor: [238, 243, 250] },
+      /*
+       * Les montants étaient tronqués à l'impression : un « 1 868 976 GNF » est séparé par des
+       * espaces insécables, sur lesquelles autoTable ne peut pas revenir à la ligne — le texte
+       * sortait donc de sa cellule au lieu d'y tenir. La colonne du montant est élargie et calée
+       * à droite, et la somme des largeurs fait exactement les 182 mm utiles d'une page A4.
+       */
       columnStyles: {
-        0: { cellWidth: 26 },  // N° de suivi
-        1: { cellWidth: 34 },  // Destinataire
-        2: { cellWidth: 26 },  // Téléphone
-        3: { cellWidth: 18 },  // Mode
-        4: { cellWidth: 14 },  // Poids
-        5: { cellWidth: 34 },  // Statut
-        6: { cellWidth: 30 },  // Montant
+        0: { cellWidth: 24 },  // N° de suivi
+        1: { cellWidth: 30 },  // Destinataire
+        2: { cellWidth: 24 },  // Téléphone
+        3: { cellWidth: 14, halign: "center" },  // Articles
+        4: { cellWidth: 13 },  // Poids
+        5: { cellWidth: 19 },  // Statut
+        6: { cellWidth: 32, halign: "right", fontStyle: "bold" },  // Montant
+        7: { cellWidth: 26 },  // Règlement
+      },
+      // Le règlement se lit à la couleur avant de se lire au mot.
+      didParseCell: (donnees) => {
+        if (donnees.section !== "body" || donnees.column.index !== 7) return;
+        const c = colisRoute[donnees.row.index];
+        if (c) { donnees.cell.styles.textColor = reglementDuColis(c).teinte; donnees.cell.styles.fontStyle = "bold"; }
       },
       margin: { left: 14, right: 14 },
     });
     finalY = doc.lastAutoTable.finalY || y + 8;
   } else {
-    // manual fallback table if the autoTable plugin could not be loaded
-    const colX = [14, 55, 90, 125, 148, 168, 185];
-    doc.setFontSize(8); doc.setTextColor(255, 255, 255); doc.setFillColor(10, 38, 71);
-    doc.rect(14, finalY, 182, 7, "F");
-    head.forEach((h, i) => doc.text(h, colX[i] + 1, finalY + 5));
-    finalY += 9;
-    doc.setTextColor(30, 40, 55);
+    /*
+     * Tableau de repli, dessiné à la main quand le greffon n'a pas pu être chargé — c'est lui qui
+     * imprime réellement dès que les CDN sont hors d'atteinte. L'ancienne version coupait chaque
+     * cellule à seize caractères et posait la première ligne par-dessus la bande d'en-tête : sur
+     * un vrai bordereau, les montants sortaient de la feuille. On redessine ici un vrai tableau,
+     * aux mêmes largeurs que le tableau principal, avec retour à la ligne, montants calés à droite
+     * et changement de page propre.
+     */
+    const largeurs = [24, 30, 24, 14, 13, 19, 32, 26];
+    const colX = largeurs.reduce((acc, l) => [...acc, acc[acc.length - 1] + l], [14]);
+    const enTete = (yh) => {
+      doc.setFillColor(10, 38, 71); doc.rect(14, yh, 182, 7, "F");
+      doc.setFont(undefined, "bold"); doc.setFontSize(7.5); doc.setTextColor(255, 255, 255);
+      head.forEach((h, i) => (i === 6
+        ? doc.text(h, colX[i] + largeurs[i] - 1.5, yh + 4.8, { align: "right" })
+        : doc.text(h, colX[i] + 1.5, yh + 4.8)));
+      return yh + 7;
+    };
+    finalY = enTete(finalY);
+    doc.setFontSize(7.5);
     body.forEach((row, i) => {
-      if (finalY > 275) { doc.addPage(); finalY = 20; }
-      if (i % 2 === 1) { doc.setFillColor(238, 243, 250); doc.rect(14, finalY - 4.5, 182, 6.5, "F"); }
-      row.forEach((cell, j) => doc.text(String(cell).slice(0, 16), colX[j] + 1, finalY));
-      finalY += 6.5;
+      const lignes = row.map((cell, j) => doc.splitTextToSize(String(cell), largeurs[j] - 3));
+      const hauteur = Math.max(...lignes.map((l) => l.length)) * 3.4 + 2.6;
+      if (finalY + hauteur > 272) { doc.addPage(); finalY = enTete(20); }
+      if (i % 2 === 1) { doc.setFillColor(238, 243, 250); doc.rect(14, finalY, 182, hauteur, "F"); }
+      lignes.forEach((cellules, j) => {
+        doc.setTextColor(...(j === 7 ? reglementDuColis(colisRoute[i]).teinte : [30, 40, 55]));
+        doc.setFont(undefined, j === 6 || j === 7 ? "bold" : "normal");
+        cellules.forEach((ligne, k) => {
+          const yl = finalY + 4 + k * 3.4;
+          if (j === 6) doc.text(ligne, colX[j] + largeurs[j] - 1.5, yl, { align: "right" });
+          else if (j === 3) doc.text(ligne, colX[j] + largeurs[j] / 2, yl, { align: "center" });
+          else doc.text(ligne, colX[j] + 1.5, yl);
+        });
+      });
+      finalY += hauteur;
     });
+    doc.setFont(undefined, "normal"); doc.setTextColor(30, 40, 55);
     finalY += 6;
   }
 
@@ -13363,11 +13459,13 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   const totalRestant = colisRoute.reduce((s, c) => s + c.reste, 0);
   doc.setFillColor(245, 247, 251); doc.rect(14, finalY + 5, 182, 12, "F");
   doc.setFontSize(9); doc.setFont(undefined, "bold"); doc.setTextColor(10, 38, 71);
+  // Le reste à percevoir est calé sur le bord droit du panneau : en francs guinéens, la ligne est
+  // longue, et posée à une abscisse fixe elle sortait de la feuille.
   doc.text(`Facturé : ${fmt(totalFacture, cur)}`, 18, finalY + 12.5);
   doc.setTextColor(62, 160, 90);
-  doc.text(`Encaissé : ${fmt(totalEncaisse, cur)}`, 85, finalY + 12.5);
+  doc.text(`Encaissé : ${fmt(totalEncaisse, cur)}`, 105, finalY + 12.5, { align: "center" });
   doc.setTextColor(226, 63, 82);
-  doc.text(`Reste à percevoir : ${fmt(totalRestant, cur)}`, 150, finalY + 12.5);
+  doc.text(`Reste à percevoir : ${fmt(totalRestant, cur)}`, 192, finalY + 12.5, { align: "right" });
 
   const sigY = finalY + 30;
   doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(90, 100, 120);
@@ -19446,11 +19544,33 @@ function ComptabilitePage({ data, persist, session, notify }) {
     };
   }, [data.colis, depenses, data.sites, data.users, data.commissionConfig, data.categories, periode]);
 
-  function addDepense() {
-    if (!form.nom.trim() || !form.montant) return;
-    const entry = { id: `dep${Date.now()}`, type: form.type, nom: form.nom.trim(), montant: Number(form.montant) || 0, date: form.date || new Date().toISOString() };
-    persist({ ...data, depenses: [entry, ...depenses], activityLog: pushActivity(data, session, `${form.type} ajouté${form.type === "Dépense" ? "e" : ""}`, `${entry.nom} — ${fmtGNF(entry.montant)}`) });
-    notify?.(`${form.type} enregistré${form.type === "Dépense" ? "e" : ""}`);
+  /*
+   * Une écriture s'enregistre ET se corrige. Elle ne s'enregistre jamais à zéro en silence :
+   * un montant illisible arrête la saisie et se dit, au lieu de laisser une dépense réelle
+   * figurer dans les comptes pour 0 GNF.
+   */
+  const montantDuFormulaire = form ? montantSaisi(form.montant) : null;
+  function enregistrerDepense() {
+    const nom = (form.nom || "").trim();
+    if (!nom) { setForm({ ...form, erreur: "Donnez un libellé à cette écriture." }); return; }
+    if (montantDuFormulaire === null) { setForm({ ...form, erreur: "Montant illisible. Tapez le nombre, par exemple 500 000." }); return; }
+    if (montantDuFormulaire <= 0) { setForm({ ...form, erreur: "Le montant doit être supérieur à zéro." }); return; }
+    const montant = Math.round(montantDuFormulaire);
+    const date = form.date || new Date().toISOString();
+    if (form.id) {
+      const avant = depenses.find((d) => d.id === form.id);
+      persist({
+        ...data,
+        depenses: depenses.map((d) => (d.id === form.id ? { ...d, type: form.type, nom, montant, date } : d)),
+        activityLog: pushActivity(data, session, "Écriture corrigée",
+          `${nom} — ${fmtGNF(avant?.montant || 0)} → ${fmtGNF(montant)}`),
+      });
+      notify?.("Écriture corrigée");
+    } else {
+      const entry = { id: `dep${Date.now()}`, type: form.type, nom, montant, date };
+      persist({ ...data, depenses: [entry, ...depenses], activityLog: pushActivity(data, session, `${form.type} ajouté${form.type === "Dépense" ? "e" : ""}`, `${entry.nom} — ${fmtGNF(entry.montant)}`) });
+      notify?.(`${form.type} enregistré${form.type === "Dépense" ? "e" : ""}`);
+    }
     setForm(null);
   }
   const [depenseASupprimer, setDepenseASupprimer] = useState(null);
@@ -19673,9 +19793,15 @@ function ComptabilitePage({ data, persist, session, notify }) {
               <tr key={d.id} style={{ borderTop: "1px solid var(--border)" }}>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, whiteSpace: "nowrap" }}><span style={{ background: "var(--surface2)", color: "var(--text)", padding: "3px 10px", borderRadius: 20, fontWeight: 600 }}>{d.type}</span></td>
                 <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--text)", whiteSpace: "nowrap" }}>{d.nom}</td>
-                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" }}>{fmtGNF(d.montant)}</td>
+                {/* Une écriture à zéro est presque toujours une saisie perdue : on la signale au lieu de la ranger sagement. */}
+                <td style={{ padding: "12px 16px", fontSize: 13, color: d.montant > 0 ? "var(--muted)" : "var(--danger-fg)", fontWeight: d.montant > 0 ? 400 : 700, whiteSpace: "nowrap" }}>
+                  {fmtGNF(d.montant)}{d.montant > 0 ? "" : " — à corriger"}
+                </td>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{new Date(d.date).toLocaleDateString("fr-FR")}</td>
-                <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>{effectivePermission(session, "compta.gerer_depenses") && <button onClick={() => setDepenseASupprimer(d)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={14} /></button>}</td>
+                <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>{effectivePermission(session, "compta.gerer_depenses") && <>
+                  <button onClick={() => setForm({ id: d.id, type: d.type, nom: d.nom || "", montant: String(d.montant ?? ""), date: String(d.date || "").slice(0, 10), erreur: "" })} title="Modifier cette écriture" aria-label="Modifier cette écriture" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginRight: 6 }}><PenTool size={14} /></button>
+                  <button onClick={() => setDepenseASupprimer(d)} title="Supprimer cette écriture" aria-label="Supprimer cette écriture" style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={14} /></button>
+                </>}</td>
               </tr>
             ))}
             {depensesPeriode.length === 0 && <tr><td colSpan={5} style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucune dépense, salaire ou commission sur cette période.</td></tr>}
@@ -19685,7 +19811,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
       </div>
 
       {form && (
-        <Modal onClose={() => setForm(null)} title="Ajouter une écriture">
+        <Modal onClose={() => setForm(null)} title={form.id ? "Modifier l’écriture" : "Ajouter une écriture"}>
           <Field label="Type">
             <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })} style={inputStyle}>
               <option value="Dépense">Dépense</option>
@@ -19694,11 +19820,20 @@ function ComptabilitePage({ data, persist, session, notify }) {
             </select>
           </Field>
           <Field label="Libellé"><input value={form.nom} onChange={(e) => setForm({ ...form, nom: e.target.value })} style={inputStyle} placeholder="ex: Carburant, Salaire Ibrahima, Commission agent Paris" /></Field>
-          <Field label="Montant (GNF)"><input value={form.montant} onChange={(e) => setForm({ ...form, montant: e.target.value })} style={inputStyle} /></Field>
+          <Field label="Montant (GNF)">
+            <input value={form.montant} inputMode="numeric" onChange={(e) => setForm({ ...form, montant: e.target.value, erreur: "" })} style={inputStyle} placeholder="ex : 500 000" />
+            {/* On relit le montant à voix haute pendant la frappe : plus personne n'enregistre 0 sans le voir. */}
+            <div style={{ fontSize: 12, marginTop: 5, color: montantDuFormulaire > 0 ? "var(--ok-fg)" : "var(--muted)", fontWeight: montantDuFormulaire > 0 ? 700 : 500 }}>
+              {form.montant.trim() === "" ? "Espaces et points acceptés : 500 000, 500.000…"
+                : montantDuFormulaire === null ? "Montant illisible — tapez seulement le nombre."
+                : fmtGNF(montantDuFormulaire)}
+            </div>
+          </Field>
           <Field label="Date"><input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} style={inputStyle} /></Field>
+          {form.erreur && <div style={{ background: "var(--danger-bg)", color: "var(--danger-fg)", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, fontWeight: 600 }}>{form.erreur}</div>}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 8 }}>
             <button onClick={() => setForm(null)} style={{ padding: "9px 16px", borderRadius: 8, border: "1.5px solid var(--border)", background: "var(--surface2)", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>Annuler</button>
-            <button onClick={addDepense} style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
+            <button onClick={enregistrerDepense} style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
           </div>
         </Modal>
       )}

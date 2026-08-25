@@ -10204,6 +10204,222 @@ function TraiterPreAlerteModal({ preAlerte, client, tarifs, onValider, onClose }
   );
 }
 
+/**
+ * Les messages WhatsApp reçus sur le numéro de l'entreprise.
+ *
+ * DEPUIS QUE LE NUMÉRO EST SUR L'API, PLUS AUCUN TÉLÉPHONE NE SONNE
+ * ----------------------------------------------------------------
+ * L'inscription du numéro sur l'API Cloud l'a sorti de l'application WhatsApp Business. Ce qui
+ * arrive n'est plus reçu par un appareil mais poussé par Meta vers une adresse du serveur
+ * (api/whatsapp-entrant.js), qui le range dans la base. Cet écran est le seul endroit où l'on
+ * peut désormais lire ce qu'un client a écrit — s'il n'est pas ouvert, personne ne le lit.
+ *
+ * LA FENÊTRE DE VINGT-QUATRE HEURES
+ * ---------------------------------
+ * Elle change tout, et dans le bon sens pour une fois. Pendant les 24 h qui suivent le dernier
+ * message d'un client, WhatsApp autorise à lui répondre librement — pas de modèle, pas
+ * d'approbation, la vraie conversation. Passé ce délai, seul un modèle validé peut repartir.
+ * L'écran affiche donc le temps restant sur chaque conversation, et refuse d'ouvrir la zone de
+ * réponse quand la fenêtre est close, plutôt que de laisser écrire un message qui sera rejeté.
+ */
+function MessagesWhatsAppPage({ data, persist, session, notify }) {
+  const messages = data.messagesWhatsApp || [];
+  const [ouvert, setOuvert] = useState(null);
+  const [reponse, setReponse] = useState("");
+  const [envoiEnCours, setEnvoiEnCours] = useState(false);
+
+  /*
+   * Une conversation par numéro. Le nom vient de trois sources possibles, dans cet ordre : ce que
+   * le client a mis dans son profil WhatsApp, notre annuaire, un compte de l'Espace Client. Un
+   * numéro sans nom reste un numéro — mieux vaut cela qu'un nom inventé.
+   */
+  const conversations = useMemo(() => {
+    const annuaire = new Map();
+    buildClientDirectory(data.colis || [], data.repertoire).forEach((c) => {
+      if (c.telephone) annuaire.set(clefTelephone(c.telephone), c.nomComplet);
+    });
+    (data.clientAccounts || []).forEach((c) => {
+      if (c.telephone) annuaire.set(clefTelephone(c.telephone), `${c.prenom || ""} ${c.nom || ""}`.trim());
+    });
+    const par = new Map();
+    [...messages].sort((a, b) => new Date(a.date) - new Date(b.date)).forEach((m) => {
+      const clef = clefTelephone(m.de);
+      if (!par.has(clef)) par.set(clef, { clef, numero: m.de, nom: "", lignes: [], nonLus: 0, dernier: null });
+      const c = par.get(clef);
+      c.lignes.push(m);
+      c.dernier = m;
+      if (!m.lu && m.sens !== "sortant") c.nonLus += 1;
+      if (!c.nom) c.nom = m.nom || annuaire.get(clef) || "";
+    });
+    return [...par.values()].sort((a, b) => new Date(b.dernier.date) - new Date(a.dernier.date));
+  }, [messages, data.colis, data.repertoire, data.clientAccounts]);
+
+  const conversation = conversations.find((c) => c.clef === ouvert) || null;
+
+  /** Le dernier message VENU DU CLIENT : c'est lui qui ouvre la fenêtre, pas nos réponses. */
+  function fenetre(conv) {
+    const dernierEntrant = [...(conv?.lignes || [])].reverse().find((m) => m.sens !== "sortant");
+    if (!dernierEntrant) return { ouverte: false, reste: 0 };
+    const restant = 24 * 3600 * 1000 - (Date.now() - new Date(dernierEntrant.date).getTime());
+    return { ouverte: restant > 0, reste: restant };
+  }
+  function resteLisible(ms) {
+    const h = Math.floor(ms / 3600000);
+    const m = Math.floor((ms % 3600000) / 60000);
+    return h > 0 ? `${h} h ${String(m).padStart(2, "0")}` : `${m} min`;
+  }
+
+  function marquerLus(conv) {
+    const clefs = new Set(conv.lignes.filter((m) => !m.lu).map((m) => m.id));
+    if (clefs.size === 0) return;
+    persist({ ...data, messagesWhatsApp: messages.map((m) => (clefs.has(m.id) ? { ...m, lu: true } : m)) });
+  }
+
+  function ouvrirConversation(conv) {
+    setOuvert(conv.clef);
+    setReponse("");
+    marquerLus(conv);
+  }
+
+  async function repondre() {
+    const texte = reponse.trim();
+    if (!texte || !conversation) return;
+    setEnvoiEnCours(true);
+    const r = await envoyerWhatsApp(conversation.numero, texte);
+    setEnvoiEnCours(false);
+    if (!r.envoye) {
+      notify?.(r.raison || "La réponse n’a pas pu partir.");
+      return;
+    }
+    /*
+     * La réponse est rangée dans la même conversation, marquée « sortant ». Elle n'ouvre pas de
+     * nouvelle fenêtre — seul un message du client le fait — et ne compte pas comme non lue.
+     */
+    const sortant = {
+      id: `wa-out-${Date.now()}`, de: conversation.numero, nom: conversation.nom,
+      texte, type: "text", date: new Date().toISOString(), lu: true, sens: "sortant",
+      par: `${session?.prenom || ""} ${session?.nom || ""}`.trim(),
+    };
+    persist({
+      ...data,
+      messagesWhatsApp: [sortant, ...messages].slice(0, 300),
+      activityLog: pushActivity(data, session, "Réponse WhatsApp", `${conversation.numero} — ${texte.slice(0, 60)}`),
+    });
+    setReponse("");
+    notify?.("Réponse envoyée");
+  }
+
+  const carte = { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14 };
+
+  if (messages.length === 0) {
+    return (
+      <div style={{ ...carte, padding: 26 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>
+          Aucun message reçu pour l’instant
+        </div>
+        <div style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.6 }}>
+          Depuis que votre numéro est inscrit sur l’API, les messages de vos clients n’arrivent plus
+          sur un téléphone : Meta les pousse vers votre serveur, et ils s’affichent ici. Pour que cela
+          fonctionne, l’adresse <code>/api/whatsapp-entrant</code> doit être déclarée comme webhook
+          dans votre tableau de bord Meta, abonnée au champ <strong>messages</strong>.
+          <br /><br />
+          Tant qu’elle ne l’est pas, un client qui écrit croit vous avoir joint — et personne ne lit
+          son message. C’est la seule chose à vérifier ici.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}>
+      <div style={{ ...carte, flex: "1 1 280px", minWidth: 250, overflow: "hidden" }}>
+        {conversations.map((c) => {
+          const f = fenetre(c);
+          return (
+            <button key={c.clef} onClick={() => ouvrirConversation(c)}
+              style={{ display: "block", width: "100%", textAlign: "start", cursor: "pointer",
+                background: ouvert === c.clef ? "var(--surface2)" : "none", border: "none",
+                borderBottom: "1px solid var(--border)", padding: "12px 14px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 13, fontWeight: c.nonLus ? 700 : 600, color: "var(--text)" }}>
+                  {c.nom || c.numero}
+                </span>
+                {c.nonLus > 0 && (
+                  <span style={{ background: "var(--brand-solid)", color: "#fff", borderRadius: 20, fontSize: 10.5, fontWeight: 700, padding: "1px 7px" }}>{c.nonLus}</span>
+                )}
+              </div>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {c.dernier.sens === "sortant" ? "Vous : " : ""}{c.dernier.texte}
+              </div>
+              <div style={{ fontSize: 10.5, color: f.ouverte ? "var(--ok-fg)" : "var(--muted)", marginTop: 3, fontWeight: 600 }}>
+                {new Date(c.dernier.date).toLocaleString("fr-FR")}
+                {f.ouverte ? ` · réponse libre encore ${resteLisible(f.reste)}` : " · fenêtre fermée"}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      <div style={{ ...carte, flex: "2 1 420px", minWidth: 300, padding: 16 }}>
+        {!conversation ? (
+          <div style={{ fontSize: 13, color: "var(--muted)", padding: 20, textAlign: "center" }}>
+            Choisissez une conversation à gauche.
+          </div>
+        ) : (
+          <>
+            <div style={{ borderBottom: "1px solid var(--border)", paddingBottom: 10, marginBottom: 12 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{conversation.nom || "Numéro inconnu"}</div>
+              <div style={{ fontSize: 12, color: "var(--muted)" }}>{conversation.numero}</div>
+            </div>
+            <div style={{ maxHeight: 380, overflowY: "auto", marginBottom: 14 }}>
+              {conversation.lignes.map((m) => (
+                <div key={m.id} style={{ display: "flex", justifyContent: m.sens === "sortant" ? "flex-end" : "flex-start", marginBottom: 8 }}>
+                  <div style={{ maxWidth: "78%", background: m.sens === "sortant" ? "var(--brand-solid)" : "var(--surface2)",
+                    color: m.sens === "sortant" ? "#fff" : "var(--text)", borderRadius: 12, padding: "9px 12px" }}>
+                    <div style={{ fontSize: 13, whiteSpace: "pre-wrap", lineHeight: 1.45 }}>{m.texte}</div>
+                    <div style={{ fontSize: 10, opacity: 0.75, marginTop: 4 }}>
+                      {new Date(m.date).toLocaleString("fr-FR")}{m.par ? ` · ${m.par}` : ""}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {(() => {
+              const f = fenetre(conversation);
+              if (!f.ouverte) {
+                return (
+                  <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 10, padding: "12px 14px", fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
+                    Plus de vingt-quatre heures se sont écoulées depuis le dernier message de ce client :
+                    WhatsApp n’autorise plus le texte libre. Seul un modèle validé peut repartir — ou
+                    attendez qu’il vous réécrive, ce qui rouvrira la fenêtre pour une journée.
+                  </div>
+                );
+              }
+              return (
+                <div>
+                  <div style={{ fontSize: 11.5, color: "var(--ok-fg)", fontWeight: 600, marginBottom: 6 }}>
+                    Réponse libre possible encore {resteLisible(f.reste)}.
+                  </div>
+                  <textarea value={reponse} onChange={(e) => setReponse(e.target.value)} rows={3}
+                    placeholder="Votre réponse…" style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }} />
+                  <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                    <button onClick={repondre} disabled={!reponse.trim() || envoiEnCours}
+                      style={{ background: reponse.trim() && !envoiEnCours ? "var(--brand-solid)" : "var(--surface2)",
+                        color: reponse.trim() && !envoiEnCours ? "#fff" : "var(--muted)", border: "none", borderRadius: 9,
+                        padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: reponse.trim() && !envoiEnCours ? "pointer" : "not-allowed" }}>
+                      {envoiEnCours ? "Envoi…" : "Répondre"}
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function CentreClientsPage({ data, persist, notify, session }) {
   const [ongletActif, setOngletActif] = useState("messages");
   const [clientOuvert, setClientOuvert] = useState(null);
@@ -10440,6 +10656,9 @@ function CentreClientsPage({ data, persist, notify, session }) {
     return true;
   }).sort((a, b) => new Date(b.dateCreation) - new Date(a.dateCreation));
 
+  // Les messages WhatsApp entrants n'appartiennent à aucun compte : ils arrivent d'un numéro.
+  const messagesWhatsAppNonLus = (data.messagesWhatsApp || []).filter((m) => !m.lu).length;
+
   const onglets = [
     ["messages", "Messages", messagesNonLus],
     ["prealertes", "Pré-alertes", preAlertesEnAttente],
@@ -10449,6 +10668,7 @@ function CentreClientsPage({ data, persist, notify, session }) {
     ["comptes", "Comptes inscrits", (data.clientAccounts || []).length],
     // Écrire à la base est un geste commercial, pas une réponse à une demande : l'onglet n'apparaît
     // qu'à qui en a le droit.
+    ["whatsapp", "WhatsApp", messagesWhatsAppNonLus],
     ...(effectivePermission(session, "clients.campagnes") ? [["campagnes", "Campagnes", 0]] : []),
   ];
 
@@ -10469,6 +10689,10 @@ function CentreClientsPage({ data, persist, notify, session }) {
           </button>
         ))}
       </div>
+
+      {ongletActif === "whatsapp" && (
+        <MessagesWhatsAppPage data={data} persist={persist} session={session} notify={notify} />
+      )}
 
       {ongletActif === "campagnes" && effectivePermission(session, "clients.campagnes") && (
         <CampagnesPage data={data} persist={persist} session={session} notify={notify} />

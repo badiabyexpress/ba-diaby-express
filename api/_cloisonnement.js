@@ -645,5 +645,26 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId) {
     .map((e) => ({ ...e, utilisateur: signature, role: moi.role }));
   sortie.activityLog = [...ajouts, ...anciens].slice(0, 500);
 
+  /*
+   * Les messages WhatsApp entrants ne se réécrivent pas non plus.
+   *
+   * Ils n'arrivent pas de l'application mais du serveur, poussés par Meta à n'importe quel
+   * moment — y compris pendant qu'un agent a la page ouverte. Sa copie du document ne les
+   * contient donc pas, et sans cette réunion son prochain enregistrement les effacerait : le
+   * client aurait écrit, et son message aurait disparu avant d'être lu. On réunit les deux
+   * listes par identifiant, en laissant l'application décider de ce qui est lu et de ce qu'elle
+   * a répondu.
+   */
+  const messagesBase = liste(base.messagesWhatsApp);
+  const messagesEnvoyes = liste(envoye.messagesWhatsApp);
+  if (messagesBase.length || messagesEnvoyes.length) {
+    const parId = new Map();
+    messagesBase.forEach((m) => { if (m && m.id) parId.set(m.id, m); });
+    messagesEnvoyes.forEach((m) => { if (m && m.id) parId.set(m.id, { ...parId.get(m.id), ...m }); });
+    sortie.messagesWhatsApp = [...parId.values()]
+      .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))
+      .slice(0, 300);
+  }
+
   return sortie;
 }

@@ -2038,8 +2038,16 @@ function modeleWhatsAppPourEtape(evenement, colis, data) {
 
 async function notifierEvenement(data, evenement, colis, message) {
   const prefs = (data?.notifWhatsApp || {})[evenement];
-  if (!prefs) return { envoyes: 0 };
+  if (!prefs) return { envoyes: 0, traces: [] };
   let envoyes = 0;
+  /*
+   * Ce qui part est consigné.
+   *
+   * Un envoi automatique ne laissait aucune trace : quand un client affirmait n'avoir rien reçu,
+   * personne ne pouvait dire si le message était parti, s'il avait échoué, ni pourquoi. Chaque
+   * envoi est désormais inscrit avec son identifiant Meta, que l'accusé viendra compléter.
+   */
+  const traces = [];
 
   /*
    * Le ticket d'envoi, aux deux seuls moments où le client en a besoin.
@@ -2106,8 +2114,9 @@ async function notifierEvenement(data, evenement, colis, message) {
   if (parWhatsApp && prefs.expediteur && colis.expediteurTelephone) destinations.push(colis.expediteurTelephone);
   for (const tel of destinations) {
     try {
-      const { envoye } = await envoyerWhatsApp(tel, message, mediaUrl, gabaritComplet);
-      if (envoye) envoyes++;
+      const resultat = await envoyerWhatsApp(tel, message, mediaUrl, gabaritComplet);
+      traces.push(traceEnvoiWhatsApp({ telephone: tel, texte: message, resultat, evenement, tracking: colis?.tracking }));
+      if (resultat.envoye) envoyes++;
     } catch (e) { /* une notification ne doit jamais bloquer l'action en cours */ }
   }
 
@@ -2126,8 +2135,9 @@ async function notifierEvenement(data, evenement, colis, message) {
     const tel = p ? reglagesPartenaire(p).telephone : "";
     if (messagePartenaire && tel) {
       try {
-        const { envoye } = await envoyerWhatsApp(tel, messagePartenaire);
-        if (envoye) envoyes++;
+        const resultat = await envoyerWhatsApp(tel, messagePartenaire);
+        traces.push(traceEnvoiWhatsApp({ telephone: tel, texte: messagePartenaire, resultat, evenement, tracking: colis?.tracking }));
+        if (resultat.envoye) envoyes++;
       } catch (e) { /* une notification ne doit jamais bloquer l'action en cours */ }
     }
   }
@@ -2163,7 +2173,7 @@ async function notifierEvenement(data, evenement, colis, message) {
     }
   }
 
-  return { envoyes };
+  return { envoyes, traces };
 }
 
 /**
@@ -2229,6 +2239,33 @@ async function envoyerEmail(adresseBrute, sujet, message, piecesJointes = []) {
   }
 }
 
+/**
+ * La trace d'un message que NOUS avons envoyé.
+ *
+ * Elle prend place dans la même liste que les messages reçus, marquée « sortant ». C'est ce qui
+ * permet de lire une conversation dans l'ordre, et — l'identifiant Meta aidant — de dire plus tard
+ * si le client l'a reçu, s'il l'a lu, ou si l'envoi a échoué et pourquoi.
+ */
+function traceEnvoiWhatsApp({ telephone, texte, resultat, evenement, par, tracking }) {
+  return {
+    id: `wa-out-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    de: telephone, texte: String(texte || "").slice(0, 4096), type: "text",
+    date: new Date().toISOString(), lu: true, sens: "sortant",
+    wamid: resultat?.id || null,
+    statut: resultat?.envoye ? "envoye" : "echec",
+    ...(resultat?.raison ? { erreur: resultat.raison } : {}),
+    ...(evenement ? { evenement } : {}),
+    ...(par ? { par } : {}),
+    ...(tracking ? { tracking } : {}),
+  };
+}
+
+/** Ajoute des traces à la liste, sans jamais la laisser enfler indéfiniment. */
+function avecTraces(data, traces) {
+  if (!traces || traces.length === 0) return data.messagesWhatsApp || [];
+  return [...traces, ...(data.messagesWhatsApp || [])].slice(0, 300);
+}
+
 async function envoyerWhatsApp(telephone, message, mediaUrl, gabarit) {
   try {
     const reponse = await appelServeurQuiDepense("/api/whatsapp", {
@@ -2247,8 +2284,13 @@ async function envoyerWhatsApp(telephone, message, mediaUrl, gabarit) {
         } : {}),
       }),
     });
-    if (reponse.ok) return { envoye: true };
     const data = await reponse.json().catch(() => ({}));
+    /*
+     * L'identifiant que Meta donne au message revient avec la réponse. C'est la seule clé qui
+     * permettra de rattacher plus tard son accusé — parti, remis, lu, échoué. Sans lui, on saurait
+     * qu'un message est parti sans jamais savoir s'il est arrivé.
+     */
+    if (reponse.ok) return { envoye: true, id: data?.id || null };
     // 501 = Twilio pas encore configuré : cas normal, on ne parle pas d'erreur à l'agent.
     if (reponse.status === 501) return { envoye: false, raison: null };
     return { envoye: false, raison: data.error || "L’envoi automatique a échoué." };
@@ -10222,9 +10264,31 @@ function TraiterPreAlerteModal({ preAlerte, client, tarifs, onValider, onClose }
  * L'écran affiche donc le temps restant sur chaque conversation, et refuse d'ouvrir la zone de
  * réponse quand la fenêtre est close, plutôt que de laisser écrire un message qui sera rejeté.
  */
+/*
+ * L'état d'un message que nous avons envoyé, tel que Meta le rapporte.
+ *
+ * Il n'arrive pas avec le message : il arrive après, par le webhook, et se range à part sous
+ * `statutsWhatsApp` (voir api/whatsapp-entrant.js). On les réunit ici, au moment de l'affichage.
+ */
+const ETATS_WHATSAPP = {
+  envoye: { libelle: "Envoyé", court: "✓", couleur: "var(--muted)" },
+  delivre: { libelle: "Remis", court: "✓✓", couleur: "var(--muted)" },
+  lu: { libelle: "Lu", court: "✓✓", couleur: "#34B7F1" },
+  echec: { libelle: "Échec", court: "✕", couleur: "var(--danger-fg)" },
+};
+
 function MessagesWhatsAppPage({ data, persist, session, notify }) {
   const messages = data.messagesWhatsApp || [];
+  const accuses = data.statutsWhatsApp || {};
+  /** L'état le plus récent connu d'un message sortant : l'accusé de Meta prime sur le nôtre. */
+  const etatDe = (m) => {
+    if (m.sens !== "sortant") return null;
+    const accuse = m.wamid ? accuses[m.wamid] : null;
+    const clef = accuse?.statut || m.statut || "envoye";
+    return { ...(ETATS_WHATSAPP[clef] || ETATS_WHATSAPP.envoye), clef, erreur: accuse?.erreur || m.erreur || null };
+  };
   const [ouvert, setOuvert] = useState(null);
+  const [vue, setVue] = useState("conversations");
   const [reponse, setReponse] = useState("");
   const [envoiEnCours, setEnvoiEnCours] = useState(false);
 
@@ -10296,9 +10360,11 @@ function MessagesWhatsAppPage({ data, persist, session, notify }) {
      * nouvelle fenêtre — seul un message du client le fait — et ne compte pas comme non lue.
      */
     const sortant = {
-      id: `wa-out-${Date.now()}`, de: conversation.numero, nom: conversation.nom,
-      texte, type: "text", date: new Date().toISOString(), lu: true, sens: "sortant",
-      par: `${session?.prenom || ""} ${session?.nom || ""}`.trim(),
+      ...traceEnvoiWhatsApp({
+        telephone: conversation.numero, texte, resultat: r,
+        par: `${session?.prenom || ""} ${session?.nom || ""}`.trim(),
+      }),
+      nom: conversation.nom,
     };
     persist({
       ...data,
@@ -10330,7 +10396,90 @@ function MessagesWhatsAppPage({ data, persist, session, notify }) {
     );
   }
 
+  /*
+   * L'HISTORIQUE — tout ce qui est parti, et ce qu'il en est advenu.
+   *
+   * Les conversations répondent à « que m'a-t-on écrit ». L'historique répond à l'autre question,
+   * celle qui se pose un mois plus tard : « le client a-t-il vraiment reçu son message ? ». Les
+   * notifications automatiques y figurent au même titre que les réponses écrites à la main —
+   * c'est le même numéro, la même facture chez Meta.
+   */
+  if (vue === "historique") {
+    const sortants = messages.filter((m) => m.sens === "sortant");
+    const compte = { envoye: 0, delivre: 0, lu: 0, echec: 0 };
+    sortants.forEach((m) => { const e = etatDe(m); compte[e.clef] = (compte[e.clef] || 0) + 1; });
+    return (
+      <div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+          {[["conversations", "Conversations"], ["historique", "Historique des envois"]].map(([k, label]) => (
+            <button key={k} onClick={() => setVue(k)} style={{ padding: "7px 14px", borderRadius: 20, cursor: "pointer", fontSize: 12.5, fontWeight: 600,
+              border: "1.5px solid " + (vue === k ? "var(--brand-solid)" : "var(--border)"),
+              background: vue === k ? "var(--brand-solid)" : "var(--surface)", color: vue === k ? "#fff" : "var(--muted)" }}>{label}</button>
+          ))}
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 12, marginBottom: 16 }}>
+          {[["Envoyés", sortants.length, "var(--text)"], ["Remis", compte.delivre + compte.lu, "var(--text)"],
+            ["Lus", compte.lu, "#34B7F1"], ["Échecs", compte.echec, compte.echec ? "var(--danger-fg)" : "var(--muted)"]].map(([label, valeur, couleur]) => (
+            <div key={label} style={{ ...carte, padding: 14 }}>
+              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 600 }}>{label}</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: couleur, fontFamily: "'Space Grotesk',sans-serif", marginTop: 4 }}>{valeur}</div>
+            </div>
+          ))}
+        </div>
+        {sortants.length === 0 ? (
+          <div style={{ ...carte, padding: 24, fontSize: 13, color: "var(--muted)" }}>
+            Aucun message envoyé depuis l’application pour l’instant.
+          </div>
+        ) : (
+          <div style={{ ...carte, overflow: "hidden" }}>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", minWidth: 700, borderCollapse: "collapse" }}>
+                <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>
+                  {["Date", "Destinataire", "Message", "Déclencheur", "État"].map((h) => (
+                    <th key={h} style={{ padding: "10px 14px", fontSize: 11, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>
+                  ))}
+                </tr></thead>
+                <tbody>
+                  {sortants.slice(0, 200).map((m) => {
+                    const e = etatDe(m);
+                    return (
+                      <tr key={m.id} style={{ borderTop: "1px solid var(--border)" }}>
+                        <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>{new Date(m.date).toLocaleString("fr-FR")}</td>
+                        <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{m.de}</td>
+                        <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={m.texte}>{m.texte}</td>
+                        <td style={{ padding: "9px 14px", fontSize: 11.5, color: "var(--muted)", whiteSpace: "nowrap" }}>
+                          {m.evenement || (m.par ? "réponse" : "—")}{m.tracking ? ` · ${m.tracking}` : ""}
+                        </td>
+                        <td style={{ padding: "9px 14px", fontSize: 12, fontWeight: 700, color: e.couleur, whiteSpace: "nowrap" }} title={e.erreur || ""}>
+                          {e.court} {e.libelle}
+                          {e.erreur && <div style={{ fontSize: 10.5, fontWeight: 400, color: "var(--danger-fg)", maxWidth: 220, whiteSpace: "normal" }}>{e.erreur}</div>}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 10, lineHeight: 1.5 }}>
+          Les états « Remis » et « Lu » viennent de Meta, par le webhook. Tant qu’il n’est pas
+          déclaré, un message reste à « Envoyé » : c’est vrai — il est parti — mais on ne sait pas
+          s’il est arrivé.
+        </div>
+      </div>
+    );
+  }
+
   return (
+    <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+        {[["conversations", "Conversations"], ["historique", "Historique des envois"]].map(([k, label]) => (
+          <button key={k} onClick={() => setVue(k)} style={{ padding: "7px 14px", borderRadius: 20, cursor: "pointer", fontSize: 12.5, fontWeight: 600,
+            border: "1.5px solid " + (vue === k ? "var(--brand-solid)" : "var(--border)"),
+            background: vue === k ? "var(--brand-solid)" : "var(--surface)", color: vue === k ? "#fff" : "var(--muted)" }}>{label}</button>
+        ))}
+      </div>
     <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}>
       <div style={{ ...carte, flex: "1 1 280px", minWidth: 250, overflow: "hidden" }}>
         {conversations.map((c) => {
@@ -10370,6 +10519,33 @@ function MessagesWhatsAppPage({ data, persist, session, notify }) {
             <div style={{ borderBottom: "1px solid var(--border)", paddingBottom: 10, marginBottom: 12 }}>
               <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{conversation.nom || "Numéro inconnu"}</div>
               <div style={{ fontSize: 12, color: "var(--muted)" }}>{conversation.numero}</div>
+              {/*
+                * LE NUMÉRO RATTACHÉ À SES COLIS.
+                *
+                * « Où est mon colis ? » est la question posée neuf fois sur dix. Sans cela, l'agent
+                * lit le message ici, ouvre un autre écran, cherche le numéro, revient. Les colis de
+                * ce numéro sont donc affichés à côté de la conversation, avec leur état du moment.
+                */}
+              {(() => {
+                const clef = clefTelephone(conversation.numero);
+                const siens = (data.colis || [])
+                  .filter((c) => clefTelephone(c.telephone) === clef || clefTelephone(c.expediteurTelephone) === clef)
+                  .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+                  .slice(0, 4);
+                if (siens.length === 0) {
+                  return <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6, fontStyle: "italic" }}>Aucun colis à ce numéro.</div>;
+                }
+                return (
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                    {siens.map((c) => (
+                      <span key={c.tracking} title={`${c.destinataire || ""} · ${c.poids || 0} kg`}
+                        style={{ background: "var(--surface2)", borderRadius: 20, padding: "3px 10px", fontSize: 11.5, color: "var(--text)", fontWeight: 600 }}>
+                        {c.tracking} · <span style={{ color: "var(--muted)", fontWeight: 500 }}>{c.status}</span>
+                      </span>
+                    ))}
+                  </div>
+                );
+              })()}
             </div>
             <div style={{ maxHeight: 380, overflowY: "auto", marginBottom: 14 }}>
               {conversation.lignes.map((m) => (
@@ -10379,6 +10555,10 @@ function MessagesWhatsAppPage({ data, persist, session, notify }) {
                     <div style={{ fontSize: 13, whiteSpace: "pre-wrap", lineHeight: 1.45 }}>{m.texte}</div>
                     <div style={{ fontSize: 10, opacity: 0.75, marginTop: 4 }}>
                       {new Date(m.date).toLocaleString("fr-FR")}{m.par ? ` · ${m.par}` : ""}
+                      {(() => {
+                        const e = etatDe(m);
+                        return e ? <span title={e.erreur || e.libelle} style={{ marginInlineStart: 6, fontWeight: 700 }}>{e.court} {e.libelle}</span> : null;
+                      })()}
                     </div>
                   </div>
                 </div>
@@ -10416,6 +10596,7 @@ function MessagesWhatsAppPage({ data, persist, session, notify }) {
           </>
         )}
       </div>
+    </div>
     </div>
   );
 }
@@ -11162,6 +11343,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     setRelanceEnCours({ total: aRelancer.length, faits: 0, envoyes: 0, echecs: [] });
     let envoyes = 0;
     const echecs = [];
+    const tracesRelance = [];
     for (let i = 0; i < aRelancer.length; i++) {
       const c = aRelancer[i];
       const ag = siteRetraitPourColis(c, data);
@@ -11171,12 +11353,14 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
         + du + " Merci de venir le récupérer.";
       if (!c.telephone && !c.expediteurTelephone) echecs.push({ tracking: c.tracking, raison: "pas de numéro" });
       else {
-        const { envoyes: n } = await notifierEvenement(data, "relanceRetrait", c, message);
+        const { envoyes: n, traces } = await notifierEvenement(data, "relanceRetrait", c, message);
+        tracesRelance.push(...(traces || []));
         if (n > 0) envoyes++;
         else echecs.push({ tracking: c.tracking, raison: "envoi automatique indisponible" });
       }
       setRelanceEnCours({ total: aRelancer.length, faits: i + 1, envoyes, echecs: [...echecs] });
     }
+    if (tracesRelance.length) persist({ ...data, messagesWhatsApp: avecTraces(data, tracesRelance) });
     if (envoyes === 0 && echecs.every((e) => e.raison === "envoi automatique indisponible")) {
       setRelanceEnCours(null);
       notify("Envoi automatique indisponible — contactez les clients depuis leur fiche");
@@ -11261,7 +11445,9 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     // Ba-Diaby Express : il a commandé chez le partenaire et ne nous connaît pas.
     notifierEvenement(data, "enregistrement", colis,
       `Bonjour ${colis.destinataire}, votre colis ${nomExpediteurPourClient(data, colis)} ${colis.tracking} a bien été enregistré`
-      + `${colis.poids ? ` (${colis.poids} kg)` : ""}. Suivez-le à tout moment sur notre plateforme.`);
+      + `${colis.poids ? ` (${colis.poids} kg)` : ""}. Suivez-le à tout moment sur notre plateforme.`)
+      .then(({ traces }) => { if (traces?.length) persist({ ...data, messagesWhatsApp: avecTraces(data, traces) }); })
+      .catch(() => { /* une notification ne bloque jamais l'enregistrement */ });
     setShowForm(false);
   }
   function importerColisMany(nouveaux) {
@@ -11820,7 +12006,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
         onClose={() => setRemiseEnCours(null)} />}
       {showEncaisseGroupe && <EncaisserGroupeModal data={data} session={session} onEncaisser={encaisserGroupe} onClose={() => setShowEncaisseGroupe(false)} />}
       {showReception && <ReceptionBordereauModal onClose={() => setShowReception(false)} data={data} persist={persist} notify={notify} session={session} />}
-      {selected && <ColisDetail colis={selected} onClose={() => setSelected(null)} onAdvance={() => advance(selected.tracking)} onDelete={() => remove(selected.tracking)} onCancel={(motif) => annuler(selected.tracking, motif)} onRefuser={(motif) => refuser(selected.tracking, motif)} onDeclarerLitige={(t, d) => declarerLitige(selected.tracking, t, d)} onResoudreLitige={(r, i) => resoudreLitige(selected.tracking, r, i)} onMajRetour={(statutRetour) => majRetour(selected.tracking, statutRetour)} onUpdate={(patch) => updateColis(selected.tracking, patch)} onEncaisser={(montant, mode, montantSaisi, deviseSaisie, details, declarationId) => encaisser(selected.tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId)} canManage={!isChauffeur} isAdmin={session.role === "Administrateur"} isChauffeur={isChauffeur} data={data} session={session} notify={notify} />}
+      {selected && <ColisDetail colis={selected} onClose={() => setSelected(null)} onAdvance={() => advance(selected.tracking)} onDelete={() => remove(selected.tracking)} onCancel={(motif) => annuler(selected.tracking, motif)} onRefuser={(motif) => refuser(selected.tracking, motif)} onDeclarerLitige={(t, d) => declarerLitige(selected.tracking, t, d)} onResoudreLitige={(r, i) => resoudreLitige(selected.tracking, r, i)} onMajRetour={(statutRetour) => majRetour(selected.tracking, statutRetour)} onUpdate={(patch) => updateColis(selected.tracking, patch)} onEncaisser={(montant, mode, montantSaisi, deviseSaisie, details, declarationId) => encaisser(selected.tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId)} onTrace={(trace) => persist({ ...data, messagesWhatsApp: avecTraces(data, [trace]) })} canManage={!isChauffeur} isAdmin={session.role === "Administrateur"} isChauffeur={isChauffeur} data={data} session={session} notify={notify} />}
     </div>
   );
 }
@@ -12170,6 +12356,7 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
     setEnvoiWa({ total: colisConcernes.length, faits: 0, envoyes: 0, echecs: [] });
     let envoyes = 0;
     const echecs = [];
+    const toutesTraces = [];
     for (let i = 0; i < colisConcernes.length; i++) {
       const c = colisConcernes[i];
       // On passe par notifierEvenement pour que les réglages (Configuration → Notifications
@@ -12178,12 +12365,15 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
       const evt = { "En transit": "expedie", "Arrivé": "arrivee", "Disponible au retrait": "retrait" }[etape.cle] || "arrivee";
       if (!c.telephone && !c.expediteurTelephone) { echecs.push({ tracking: c.tracking, raison: "pas de numéro" }); }
       else {
-        const { envoyes: n } = await notifierEvenement(data, evt, c, messagePourEtape(c, etape));
+        const { envoyes: n, traces } = await notifierEvenement(data, evt, c, messagePourEtape(c, etape));
+        toutesTraces.push(...(traces || []));
         if (n > 0) envoyes++;
         else echecs.push({ tracking: c.tracking, raison: "envoi automatique indisponible" });
       }
       setEnvoiWa({ total: colisConcernes.length, faits: i + 1, envoyes, echecs: [...echecs] });
     }
+    // Ce qui est parti est consigné, avec son identifiant Meta : l'accusé viendra s'y rattacher.
+    if (toutesTraces.length) persist({ ...data, messagesWhatsApp: avecTraces(data, toutesTraces) });
     return { envoyes, echecs };
   }
 
@@ -16083,7 +16273,7 @@ function ImpressionDirecteModal({ colis, onClose, data }) {
   );
 }
 
-function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser, onDeclarerLitige, onResoudreLitige, onMajRetour, onUpdate, onEncaisser, canManage, isAdmin, isChauffeur, data, session, notify }) {
+function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser, onDeclarerLitige, onResoudreLitige, onMajRetour, onUpdate, onEncaisser, canManage, isAdmin, isChauffeur, data, session, notify, onTrace }) {
   const [cancelling, setCancelling] = useState(false);
   const [refusing, setRefusing] = useState(false);
   const [motifRefus, setMotifRefus] = useState("");
@@ -16138,7 +16328,15 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
     // Écrire au client d'un partenaire, c'est se servir de son contact : le registre le dit.
     if (colisPartenaire) onUpdate({ accesContacts: inscrireAccesContact(colis, session, "Message de suivi envoyé au client") });
     setWaErreur(""); setWaState("envoi");
-    const { envoye, raison } = await envoyerWhatsApp(colis.telephone, message);
+    const resultat = await envoyerWhatsApp(colis.telephone, message);
+    const { envoye, raison } = resultat;
+    // Un envoi à la main se consigne comme un envoi automatique : c'est le même client, la même
+    // conversation, et la même question un mois plus tard — « l'a-t-il reçu ? ».
+    onTrace?.(traceEnvoiWhatsApp({
+      telephone: colis.telephone, texte: message, resultat,
+      evenement: "message manuel", par: `${session?.prenom || ""} ${session?.nom || ""}`.trim(),
+      tracking: colis.tracking,
+    }));
     if (envoye) { setWaState("envoye"); return; }
     if (raison) setWaErreur(raison);
     setWaState("brouillon");
@@ -21495,6 +21693,78 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
    * l'envoi renvoie le même refus. Sans cette liste, on cherche une erreur de nom là où il n'y a
    * qu'à patienter — et l'on ne sait pas non plus lequel des huit a été refusé.
    */
+  /*
+   * LE PROFIL DE L'ENTREPRISE — la photo, la description, l'adresse.
+   *
+   * C'est la première chose qu'un client voit : avant même de lire le message, il regarde qui
+   * écrit. Depuis que le numéro est sur l'API, l'application WhatsApp Business ne l'ouvre plus,
+   * et ces champs ne se changeaient donc plus nulle part — sauf à traverser le gestionnaire de
+   * Meta. Ils se modifient ici.
+   */
+  const [profil, setProfil] = useState(null);
+  const [profilBrouillon, setProfilBrouillon] = useState(null);
+  const [profilEnCours, setProfilEnCours] = useState(false);
+  const [profilResultat, setProfilResultat] = useState(null);
+  function relireProfil() {
+    return appelServeurQuiDepense("/api/whatsapp?profil=1")
+      .then((r) => r.json().then((corps) => ({ ok: r.ok, corps })))
+      .then(({ ok, corps }) => {
+        setProfil(ok ? corps.profil : { erreur: corps?.error || "indisponible" });
+        if (ok) {
+          setProfilBrouillon({
+            about: corps.profil?.about || "", description: corps.profil?.description || "",
+            address: corps.profil?.address || "", email: corps.profil?.email || "",
+            websites: (corps.profil?.websites || []).join(", "),
+          });
+        }
+      })
+      .catch(() => setProfil({ erreur: "indisponible" }));
+  }
+  useEffect(() => { relireProfil(); }, []);
+
+  /*
+   * La photo passe par la même compression que celles des colis : Meta plafonne à 5 Mo, et une
+   * photo prise au téléphone en pèse trois fois plus. 640 px suffisent largement pour une pastille
+   * ronde de quarante pixels sur l'écran d'un client.
+   */
+  async function choisirPhotoProfil(fichier) {
+    if (!fichier) return;
+    setProfilResultat(null);
+    setProfilEnCours(true);
+    try {
+      const compressee = await resizeImageToDataUrl(fichier, 640, 0.85);
+      const reponse = await appelServeurQuiDepense("/api/whatsapp?profil=1", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ photo: { contenu: compressee, type: "image/jpeg" } }),
+      });
+      const corps = await reponse.json().catch(() => ({}));
+      if (reponse.ok) { setProfilResultat({ ok: true, quoi: "photo" }); await relireProfil(); }
+      else setProfilResultat({ erreur: corps?.error || "Meta a refusé la photo." });
+    } catch (e) {
+      setProfilResultat({ erreur: "La photo n’a pas pu être envoyée." });
+    } finally { setProfilEnCours(false); }
+  }
+
+  async function enregistrerProfil() {
+    setProfilResultat(null);
+    setProfilEnCours(true);
+    try {
+      const reponse = await appelServeurQuiDepense("/api/whatsapp?profil=1", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ champs: {
+          about: profilBrouillon.about, description: profilBrouillon.description,
+          address: profilBrouillon.address, email: profilBrouillon.email,
+          websites: profilBrouillon.websites.split(",").map((x) => x.trim()).filter(Boolean),
+        } }),
+      });
+      const corps = await reponse.json().catch(() => ({}));
+      if (reponse.ok) { setProfilResultat({ ok: true, quoi: "profil" }); await relireProfil(); }
+      else setProfilResultat({ erreur: corps?.error || "Meta a refusé la modification." });
+    } catch (e) {
+      setProfilResultat({ erreur: "Impossible de joindre le serveur." });
+    } finally { setProfilEnCours(false); }
+  }
+
   const [modeles, setModeles] = useState(null);
   function relireModeles() {
     return appelServeurQuiDepense("/api/whatsapp?modeles=1")
@@ -21641,6 +21911,85 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
           reçoit un message signé de la marque du partenaire.
         </div>
       </div>
+
+      {/*
+        LE PROFIL QUE VOIENT LES CLIENTS
+
+        Avant de lire le message, le client regarde qui écrit : une pastille ronde, un nom, une
+        ligne de description. Ces champs vivaient dans l'application WhatsApp Business, qui ne
+        s'ouvre plus sur ce numéro depuis son inscription sur l'API. Ils sont ici.
+      */}
+      {profil && !profil.erreur && (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "15px 16px", marginBottom: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>
+            Profil WhatsApp de l’entreprise
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
+            C’est ce que voit un client quand il reçoit un message de vous. Le numéro étant sur
+            l’API, ces champs ne se modifient plus depuis l’application WhatsApp Business.
+          </div>
+
+          <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap", marginBottom: 14 }}>
+            <div style={{ textAlign: "center" }}>
+              {profil.profile_picture_url ? (
+                <img src={profil.profile_picture_url} alt="Photo de profil WhatsApp"
+                  style={{ width: 84, height: 84, borderRadius: "50%", objectFit: "cover", border: "2px solid var(--border)" }} />
+              ) : (
+                <div style={{ width: 84, height: 84, borderRadius: "50%", background: "var(--surface2)", border: "2px dashed var(--border)", display: "grid", placeItems: "center", color: "var(--muted)", fontSize: 11 }}>
+                  aucune
+                </div>
+              )}
+              <label style={{ display: "block", marginTop: 8, fontSize: 12, fontWeight: 700, color: "var(--info-fg)", cursor: profilEnCours ? "wait" : "pointer" }}>
+                {profilEnCours ? "Envoi…" : "Changer la photo"}
+                <input type="file" accept="image/*" disabled={profilEnCours} style={{ display: "none" }}
+                  onChange={(e) => choisirPhotoProfil(e.target.files?.[0])} />
+              </label>
+            </div>
+            <div style={{ flex: 1, minWidth: 240 }}>
+              <Field label="Message d’accueil (« à propos »)">
+                <input value={profilBrouillon?.about || ""} maxLength={139}
+                  onChange={(e) => setProfilBrouillon({ ...profilBrouillon, about: e.target.value })}
+                  placeholder="Transport de colis Conakry ↔ Monde" style={inputStyle} />
+              </Field>
+              <Field label="Description">
+                <textarea value={profilBrouillon?.description || ""} maxLength={512} rows={2}
+                  onChange={(e) => setProfilBrouillon({ ...profilBrouillon, description: e.target.value })}
+                  style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }} />
+              </Field>
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 10 }}>
+            <Field label="Adresse">
+              <input value={profilBrouillon?.address || ""} maxLength={256}
+                onChange={(e) => setProfilBrouillon({ ...profilBrouillon, address: e.target.value })} style={inputStyle} />
+            </Field>
+            <Field label="Adresse e-mail">
+              <input value={profilBrouillon?.email || ""} maxLength={128}
+                onChange={(e) => setProfilBrouillon({ ...profilBrouillon, email: e.target.value })} style={inputStyle} />
+            </Field>
+            <Field label="Site web (deux au plus, séparés par une virgule)">
+              <input value={profilBrouillon?.websites || ""}
+                onChange={(e) => setProfilBrouillon({ ...profilBrouillon, websites: e.target.value })} style={inputStyle} />
+            </Field>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <button onClick={enregistrerProfil} disabled={profilEnCours}
+              style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: profilEnCours ? "wait" : "pointer" }}>
+              {profilEnCours ? "Enregistrement…" : "Enregistrer le profil"}
+            </button>
+            {profilResultat?.ok && (
+              <span style={{ fontSize: 12.5, color: "var(--ok-fg)", fontWeight: 600 }}>
+                {profilResultat.quoi === "photo" ? "Photo mise à jour chez Meta." : "Profil mis à jour chez Meta."}
+              </span>
+            )}
+            {profilResultat?.erreur && (
+              <span style={{ fontSize: 12.5, color: "var(--danger-fg)", fontWeight: 600 }}>{profilResultat.erreur}</span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/*
         Ce que Meta autorise encore.

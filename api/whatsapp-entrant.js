@@ -12,8 +12,16 @@
  *
  * GET  — la vérification. Meta appelle l'adresse avec un jeton et un défi ; il faut lui rendre
  *        le défi tel quel, sinon il refuse d'enregistrer le webhook. Une fois pour toutes.
- * POST — la réception. Chaque message entrant est rangé dans le document principal, sous
- *        `messagesWhatsApp`, avec son numéro, son texte et l'heure. Le Centre clients le lit.
+ * POST — la réception. Deux choses arrivent par cette porte, et elles n'ont rien à voir :
+ *        les MESSAGES qu'un client écrit (rangés sous `messagesWhatsApp`), et les ACCUSÉS de
+ *        ce que nous avons nous-mêmes envoyé — parti, remis, lu, échoué (rangés sous
+ *        `statutsWhatsApp`, indexés par l'identifiant que Meta a donné au message).
+ *
+ * POURQUOI LES ACCUSÉS SONT RANGÉS À PART. Ils arrivent souvent AVANT que l'application ait fini
+ * d'enregistrer le message qu'elle vient d'envoyer — Meta est plus rapide que notre écriture en
+ * base. Les ranger dans la liste des messages supposerait de retrouver une ligne qui n'existe pas
+ * encore, et l'accusé serait perdu. Une table à part, indexée par identifiant, n'a pas ce
+ * problème : l'écran réunit les deux au moment de l'affichage.
  *
  * CE QU'ELLE NE FAIT PAS
  * ----------------------
@@ -47,6 +55,8 @@ import { baseConfiguree, modifierDocument } from "./_base.js";
 
 /** On ne garde pas l'historique complet : le document principal est relu à chaque écran. */
 const MAX_MESSAGES = 300;
+/** Autant d'accusés que de messages suivis : au-delà, les plus anciens ne servent plus à rien. */
+const MAX_STATUTS = 500;
 /** Un message WhatsApp fait au plus 4096 caractères ; au-delà, ce n'est plus un message. */
 const MAX_TEXTE = 4096;
 
@@ -108,11 +118,41 @@ function texteDuMessage(m) {
   return nature ? `[${nature}]` : "[message non textuel]";
 }
 
-/**
- * Les messages contenus dans une notification Meta.
+/*
+ * Les accusés de réception : ce qu'il est advenu de CE QUE NOUS AVONS ENVOYÉ.
  *
- * Une même notification peut porter plusieurs messages, et porte aussi des accusés de lecture
- * (`statuses`) dont nous n'avons rien à faire ici : on ne retient que ce qu'un client a écrit.
+ * Meta les nomme en anglais — sent, delivered, read, failed. On les traduit ici une fois pour
+ * toutes, plutôt que dans chaque écran. « failed » porte une erreur, et c'est la seule qui
+ * intéresse vraiment : elle dit pourquoi un client n'a rien reçu.
+ */
+const ETATS_META = { sent: "envoye", delivered: "delivre", read: "lu", failed: "echec" };
+
+function statutsDeLaNotification(corps) {
+  const sortie = [];
+  (corps?.entry || []).forEach((entree) => {
+    (entree?.changes || []).forEach((changement) => {
+      (changement?.value?.statuses || []).forEach((s) => {
+        if (!s?.id || !s?.status) return;
+        const erreur = Array.isArray(s.errors) && s.errors[0]
+          ? String(s.errors[0].title || s.errors[0].message || s.errors[0].code || "").slice(0, 200)
+          : null;
+        sortie.push({
+          wamid: s.id,
+          statut: ETATS_META[s.status] || String(s.status),
+          date: s.timestamp ? new Date(Number(s.timestamp) * 1000).toISOString() : new Date().toISOString(),
+          ...(erreur ? { erreur } : {}),
+        });
+      });
+    });
+  });
+  return sortie;
+}
+
+/**
+ * Les messages contenus dans une notification Meta : ce qu'un client a écrit.
+ *
+ * Une même notification peut en porter plusieurs, et porte aussi les accusés traités ci-dessus —
+ * on ne retient ici que les messages entrants.
  */
 function messagesDeLaNotification(corps) {
   const sortie = [];
@@ -192,7 +232,8 @@ export default async function handler(req, res) {
     catch (e) { return res.status(200).json({ recu: true }); }
 
     const messages = messagesDeLaNotification(corps);
-    if (messages.length === 0) return res.status(200).json({ recu: true });
+    const statuts = statutsDeLaNotification(corps);
+    if (messages.length === 0 && statuts.length === 0) return res.status(200).json({ recu: true });
 
     await modifierDocument((document) => {
       const existants = Array.isArray(document.messagesWhatsApp) ? document.messagesWhatsApp : [];
@@ -202,10 +243,36 @@ export default async function handler(req, res) {
        */
       const connus = new Set(existants.map((m) => m.id));
       const nouveaux = messages.filter((m) => !connus.has(m.id));
-      if (nouveaux.length === 0) return null;
+
+      /*
+       * Les accusés ne s'accumulent pas : un même message passe par « parti », « remis », « lu ».
+       * On garde le dernier état connu de chacun, jamais l'historique de ses états.
+       */
+      const anciensStatuts = document.statutsWhatsApp && typeof document.statutsWhatsApp === "object"
+        ? document.statutsWhatsApp : {};
+      const majStatuts = { ...anciensStatuts };
+      statuts.forEach((s) => {
+        const precedent = majStatuts[s.wamid];
+        // Un accusé en retard ne doit pas faire reculer l'état : « lu » ne redevient pas « parti ».
+        const rang = { envoye: 1, delivre: 2, lu: 3, echec: 4 };
+        if (precedent && (rang[precedent.statut] || 0) > (rang[s.statut] || 0)) return;
+        majStatuts[s.wamid] = { statut: s.statut, date: s.date, ...(s.erreur ? { erreur: s.erreur } : {}) };
+      });
+      const clefs = Object.keys(majStatuts);
+      const tailles = clefs.length > MAX_STATUTS
+        ? Object.fromEntries(clefs
+            .sort((a, b) => new Date(majStatuts[b].date || 0) - new Date(majStatuts[a].date || 0))
+            .slice(0, MAX_STATUTS).map((k) => [k, majStatuts[k]]))
+        : majStatuts;
+
+      if (nouveaux.length === 0 && statuts.length === 0) return null;
       return {
-        document: { ...document, messagesWhatsApp: [...nouveaux, ...existants].slice(0, MAX_MESSAGES) },
-        retour: nouveaux.length,
+        document: {
+          ...document,
+          ...(nouveaux.length ? { messagesWhatsApp: [...nouveaux, ...existants].slice(0, MAX_MESSAGES) } : {}),
+          ...(statuts.length ? { statutsWhatsApp: tailles } : {}),
+        },
+        retour: nouveaux.length + statuts.length,
       };
     });
     return res.status(200).json({ recu: true });

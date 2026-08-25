@@ -666,5 +666,14 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId) {
       .slice(0, 300);
   }
 
+  /*
+   * Les accusés de réception non plus : c'est le webhook qui les écrit, pas l'application.
+   * Un agent dont la page est ouverte depuis dix minutes renverrait sinon un document où le
+   * message parti tout à l'heure n'a jamais été remis.
+   */
+  const accusesBase = base.statutsWhatsApp && typeof base.statutsWhatsApp === "object" ? base.statutsWhatsApp : null;
+  const accusesEnvoyes = envoye.statutsWhatsApp && typeof envoye.statutsWhatsApp === "object" ? envoye.statutsWhatsApp : null;
+  if (accusesBase || accusesEnvoyes) sortie.statutsWhatsApp = { ...accusesEnvoyes, ...accusesBase };
+
   return sortie;
 }

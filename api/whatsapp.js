@@ -359,6 +359,130 @@ export default async function handler(req, res) {
   }
 
   /*
+   * LE PROFIL DE L'ENTREPRISE — ce que le client voit avant de lire le message.
+   *
+   * Depuis que le numéro est sur l'API, l'application WhatsApp Business ne l'ouvre plus : la photo
+   * de profil, la description, l'adresse ne se changent plus depuis un téléphone. Elles se lisent
+   * et s'écrivent ici.
+   *
+   * `profile_picture_url` est un lien signé qui expire : on le redonne tel quel, l'écran l'affiche
+   * et ne le conserve pas.
+   */
+  if (req.method === "GET" && req.query?.profil !== undefined) {
+    if (!metaPret) {
+      return res.status(501).json({ error: "Le profil n'existe que chez Meta.", configure: false });
+    }
+    try {
+      const champs = "about,address,description,email,profile_picture_url,websites,vertical";
+      const reponse = await fetch(
+        `https://graph.facebook.com/${VERSION_GRAPH}/${meta.numeroId}/whatsapp_business_profile?fields=${champs}`,
+        { headers: { Authorization: `Bearer ${meta.jeton}` } },
+      );
+      const corps = await reponse.json();
+      if (!reponse.ok) {
+        const code = corps?.error?.code;
+        return res.status(reponse.status).json({
+          error: EXPLICATIONS_META[code] || corps?.error?.message || "Meta n'a pas répondu.",
+          code: code || null,
+        });
+      }
+      return res.status(200).json({ profil: corps?.data?.[0] || {} });
+    } catch (e) {
+      return res.status(502).json({ error: "Impossible de joindre Meta." });
+    }
+  }
+
+  /*
+   * Écrire le profil : les champs textuels d'un côté, la photo de l'autre.
+   *
+   * LA PHOTO NE S'ENVOIE PAS DIRECTEMENT. Meta veut d'abord qu'on dépose le fichier sur son
+   * service de téléversement, qui rend une « poignée » ; c'est cette poignée que l'on pose ensuite
+   * sur le profil. Trois appels, dans cet ordre, et il faut l'identifiant de l'application
+   * (WHATSAPP_APP_ID) pour le premier — sans lui on le dit, plutôt que d'échouer sur un 400.
+   */
+  if (req.method === "POST" && req.query?.profil !== undefined) {
+    if (!metaPret) {
+      return res.status(501).json({ error: "Le profil n'existe que chez Meta.", configure: false });
+    }
+    const { champs, photo } = req.body || {};
+    try {
+      const corpsProfil = { messaging_product: "whatsapp" };
+
+      if (photo?.contenu) {
+        const appId = process.env.WHATSAPP_APP_ID;
+        if (!appId) {
+          return res.status(501).json({
+            error: "WHATSAPP_APP_ID n'est pas configuré : sans lui, Meta refuse le dépôt de la photo. Ajoutez-le dans les variables d'environnement (identifiant de votre application Meta).",
+          });
+        }
+        const binaire = Buffer.from(String(photo.contenu).replace(/^data:[^,]+,/, ""), "base64");
+        const type = photo.type || "image/jpeg";
+
+        // 1. On annonce le fichier, et Meta rend une session de dépôt.
+        const session = await fetch(
+          `https://graph.facebook.com/${VERSION_GRAPH}/${appId}/uploads`
+          + `?file_length=${binaire.length}&file_type=${encodeURIComponent(type)}`,
+          { method: "POST", headers: { Authorization: `Bearer ${meta.jeton}` } },
+        );
+        const sessionCorps = await session.json();
+        if (!session.ok || !sessionCorps?.id) {
+          return res.status(session.status || 502).json({
+            error: sessionCorps?.error?.message || "Meta a refusé d'ouvrir le dépôt de la photo.",
+          });
+        }
+
+        // 2. On dépose les octets. L'en-tête d'autorisation change de forme ici : OAuth, pas Bearer.
+        const depot = await fetch(`https://graph.facebook.com/${VERSION_GRAPH}/${sessionCorps.id}`, {
+          method: "POST",
+          headers: { Authorization: `OAuth ${meta.jeton}`, file_offset: "0", "Content-Type": type },
+          body: binaire,
+        });
+        const depotCorps = await depot.json();
+        if (!depot.ok || !depotCorps?.h) {
+          return res.status(depot.status || 502).json({
+            error: depotCorps?.error?.message || "Le dépôt de la photo a échoué.",
+          });
+        }
+        corpsProfil.profile_picture_handle = depotCorps.h;
+      }
+
+      // Les champs textuels. Un champ absent n'est pas effacé : on n'envoie que ce qui est fourni.
+      ["about", "address", "description", "email", "vertical"].forEach((c) => {
+        if (champs && champs[c] !== undefined) corpsProfil[c] = String(champs[c]);
+      });
+      if (champs?.websites !== undefined) {
+        corpsProfil.websites = (Array.isArray(champs.websites) ? champs.websites : [champs.websites])
+          .map((u) => String(u).trim()).filter(Boolean).slice(0, 2);
+      }
+
+      if (Object.keys(corpsProfil).length === 1) {
+        return res.status(400).json({ error: "Rien à modifier." });
+      }
+
+      // 3. On pose le tout sur le profil.
+      const reponse = await fetch(
+        `https://graph.facebook.com/${VERSION_GRAPH}/${meta.numeroId}/whatsapp_business_profile`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${meta.jeton}`, "Content-Type": "application/json" },
+          body: JSON.stringify(corpsProfil),
+        },
+      );
+      const corps = await reponse.json();
+      if (!reponse.ok) {
+        const code = corps?.error?.code;
+        return res.status(reponse.status).json({
+          error: EXPLICATIONS_META[code] || corps?.error?.error_user_msg || corps?.error?.message || "Meta a refusé la modification.",
+          code: code || null,
+        });
+      }
+      return res.status(200).json({ ok: true });
+    } catch (e) {
+      return res.status(502).json({ error: "Impossible de joindre Meta." });
+    }
+  }
+
+  /*
    * L'état des modèles, tel que Meta le voit.
    *
    * Un modèle « En cours d'examen » est invisible à l'envoi : il échoue exactement comme un

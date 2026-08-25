@@ -446,8 +446,17 @@ d'agent ne peut pas réécrire : un message arrivé pendant qu'une page était o
 effacé par le prochain enregistrement de cet agent — le client aurait écrit, et son message aurait
 disparu avant d'être lu.
 
+Le webhook reçoit aussi les ACCUSÉS de ce que nous avons envoyé — parti, remis, lu, échoué. Ils
+sont rangés à part, sous `statutsWhatsApp`, indexés par l'identifiant que Meta donne au message :
+ils arrivent souvent avant que l'application ait fini d'enregistrer le message correspondant, et
+les ranger dans la liste des messages supposerait de retrouver une ligne qui n'existe pas encore.
+Comme `messagesWhatsApp`, cette table est protégée à la fusion : une écriture d'agent ne peut pas
+l'effacer.
+
 Variables à poser dans Vercel : `WHATSAPP_VERIFY_TOKEN` (obligatoire, choisie par vous et
-recopiée chez Meta) et `WHATSAPP_APP_SECRET` (facultative, secret de l'application Meta).
+recopiée chez Meta), `WHATSAPP_APP_SECRET` (facultative, secret de l'application Meta) et
+`WHATSAPP_APP_ID` (nécessaire seulement pour changer la photo de profil depuis l'application :
+Meta exige un dépôt de fichier préalable, qui passe par l'identifiant de l'application).
 
 ---
 

@@ -569,7 +569,8 @@ function fmtRaw(n, cur) {
  * millions de fois le taux — une facture réglée mille fois son montant.
  */
 function versBase(valeur, cur) {
-  const v = Number(String(valeur).replace(",", ".")) || 0;
+  // La lecture passe par montantSaisi : « 1 200 » et « 12,5 » sont des saisies normales.
+  const v = montantSaisi(valeur) ?? 0;
   return +(v / (LIVE_RATES[cur] || CURRENCIES[cur] || 1)).toFixed(6);
 }
 /*
@@ -626,7 +627,8 @@ function paysAutorisePourCategorie(cat, pays) {
 /** Calcule en direct l’équivalent GNF d’une catégorie à partir du taux de change actuel — se met à jour automatiquement si le taux change. */
 function catPriceGNF(cat) {
   if (!cat) return 0;
-  const montant = Number(cat.montant ?? cat.prixGNF ?? 0);
+  // Le montant peut arriver tel qu'il a été tapé (aperçu de saisie) : « 12 000 » doit se lire.
+  const montant = montantSaisi(cat.montant ?? cat.prixGNF ?? 0) ?? 0;
   const devise = cat.deviseSaisie || "GNF";
   if (devise === "GNF") return montant;
   const eurBase = montant / (LIVE_RATES[devise] || CURRENCIES[devise] || 1);
@@ -842,7 +844,7 @@ function depotsAnnonces(data, partenaireId) {
 }
 /** Poids annoncé d'un dépôt : la somme de ce que le partenaire a estimé, à vérifier à la balance. */
 function poidsAnnonce(preAlerte) {
-  return (preAlerte?.articles || []).reduce((s, a) => s + (Number(a.poids) || 0), 0);
+  return (preAlerte?.articles || []).reduce((s, a) => s + (montantSaisi(a.poids) ?? 0), 0);
 }
 
 /*
@@ -978,7 +980,7 @@ function normaliserDestinationPartenaire(d) {
     agentResponsable: d?.agentResponsable
       ? { id: d.agentResponsable.id || "", nom: d.agentResponsable.nom || "" }
       : null,
-    fraisPoste: Number(d?.fraisPoste) || 0,
+    fraisPoste: montantSaisi(d?.fraisPoste) ?? 0,
     /*
      * Catégories tarifaires propres à ce partenaire, sur cette destination.
      *
@@ -990,7 +992,7 @@ function normaliserDestinationPartenaire(d) {
       id: cat?.id || `cp${i}${Math.random().toString(36).slice(2, 6)}`,
       nom: cat?.nom || "",
       type: cat?.type === "kg" ? "kg" : "unite",
-      montant: Number(cat?.montant) || 0,
+      montant: montantSaisi(cat?.montant) ?? 0,
       /*
        * L'icône, comme sur les catégories de nos propres colis. Une liste de dix lignes de texte
        * se lit mal au comptoir ; l'agent reconnaît « 👕 » avant d'avoir lu « vêtements », et il
@@ -1007,8 +1009,9 @@ function libelleCategoriePartenaire(cat, devise) {
 }
 /** Prix d'un article : celui de sa catégorie si elle est choisie, sinon le tarif général du pays. */
 function prixArticlePartenaire(article, tarif) {
-  const quantite = Number(article?.quantite) || 1;
-  const poids = Number(article?.poids) || 0;
+  // Quantité et poids sont tapés à la main : « 12,5 » doit valoir douze kilos et demi, pas zéro.
+  const quantite = montantSaisi(article?.quantite) || 1;
+  const poids = montantSaisi(article?.poids) ?? 0;
   const cat = (tarif?.categories || []).find((c) => c.id === article?.categoriePartenaire);
   if (cat) return cat.type === "unite" ? cat.montant * quantite : cat.montant * poids;
   return article?.tarification === "unite" ? (tarif?.parUnite || 0) * quantite : (tarif?.parKg || 0) * poids;
@@ -1309,7 +1312,7 @@ function detailPrixPartenaire(colis, user) {
   const tarif = tarifPartenairePourPays(user, colis?.pays);
   const articles = colis?.produits || [];
   const transport = articles.length === 0
-    ? (Number(colis?.poids) || 0) * tarif.parKg
+    ? (montantSaisi(colis?.poids) ?? 0) * tarif.parKg
     : articles.reduce((s, a) => s + prixArticlePartenaire(a, tarif), 0);
   /*
    * Les frais de poste ne sont pas une marge : c'est un timbre que l'entreprise achète pour le
@@ -1317,7 +1320,7 @@ function detailPrixPartenaire(colis, user) {
    * refacturés tels quels, et affichés à part partout pour qu'on ne les confonde pas avec le prix
    * du transport.
    */
-  const fraisPoste = tarif.acheminement === "poste" ? (Number(tarif.fraisPoste) || 0) : 0;
+  const fraisPoste = tarif.acheminement === "poste" ? (montantSaisi(tarif.fraisPoste) ?? 0) : 0;
   return { tarif, transport: +transport.toFixed(2), fraisPoste, total: +(transport + fraisPoste).toFixed(2) };
 }
 function calcPrixPartenaire(colis, user) {
@@ -7996,7 +7999,7 @@ function AnnoncerDepotModal({ partenaire, onClose, onAnnoncer }) {
       return;
     }
     const propres = articles
-      .map((a) => ({ nom: a.nom.trim(), quantite: Math.max(1, Number(a.quantite) || 1), poids: Number(String(a.poids).replace(",", ".")) || 0 }))
+      .map((a) => ({ nom: a.nom.trim(), quantite: Math.max(1, montantSaisi(a.quantite) || 1), poids: montantSaisi(a.poids) ?? 0 }))
       .filter((a) => a.nom);
     if (propres.length === 0) { setErr("Décrivez au moins un article."); return; }
     if (propres.some((a) => a.poids < 0)) { setErr("Les poids annoncés doivent être positifs."); return; }
@@ -8848,7 +8851,7 @@ function calcPrice(countryCode, poids, volume, mode) {
   const c = COUNTRIES.find((x) => x.code === countryCode);
   if (!c) return 0;
   const rate = mode === "air" ? c.air : c.sea;
-  const volKg = Math.max(Number(poids) || 0, (Number(volume) || 0) * 167);
+  const volKg = Math.max(montantSaisi(poids) ?? 0, (montantSaisi(volume) ?? 0) * 167);
   return +(5 + volKg * rate).toFixed(2);
 }
 
@@ -9634,7 +9637,8 @@ function CategoriesProduitsPage({ data, persist, session, notify, onBack }) {
   }
 
   function confirmPrix() {
-    if (isNaN(Number(form.prix)) || Number(form.prix) < 0) return;
+    // Le tarif d'une catégorie se tape comme un prix : « 12 000 », « 12,5 ».
+    if ((montantSaisi(form.prix) ?? -1) < 0) return;
     setSaved(true);
     notify?.(`Montant confirmé : ${form.prix} ${form.devise} — équivalent actuel ${fmtGNF(catPriceGNF({ montant: form.prix, deviseSaisie: form.devise }))}, se recalculera automatiquement si le taux change`);
   }
@@ -9643,7 +9647,7 @@ function CategoriesProduitsPage({ data, persist, session, notify, onBack }) {
     if (!form.nom.trim()) return;
     const motsCles = motsClesText.split(",").map((k) => k.trim()).filter(Boolean);
     const exists = categories.some((c) => c.id === form.id);
-    const payload = { ...form, montant: Number(form.prix) || 0, deviseSaisie: form.devise, motsCles };
+    const payload = { ...form, montant: montantSaisi(form.prix) ?? 0, deviseSaisie: form.devise, motsCles };
     delete payload.prix; delete payload.devise; delete payload.prixGNF;
     const next = exists ? categories.map((c) => (c.id === form.id ? payload : c)) : [...categories, payload];
     persist({ ...data, categories: next });
@@ -9842,7 +9846,7 @@ function SimulateurCoutPartenaire({ reglages }) {
 
   const categorie = (dest?.categories || []).find((c) => c.id === categorieId) || null;
   const article = {
-    poids: Number(String(poids).replace(",", ".")) || 0,
+    poids: montantSaisi(poids) ?? 0,
     quantite: Number(quantite) || 1,
     categoriePartenaire: categorieId,
     tarification: "kg",
@@ -10134,7 +10138,7 @@ function TraiterPreAlerteModal({ preAlerte, client, tarifs, onValider, onClose }
   const [paysOrigine, setPaysOrigine] = useState("FR");
   const [erreur, setErreur] = useState("");
 
-  const poidsNum = Number(poids) || 0;
+  const poidsNum = montantSaisi(poids) ?? 0;
   const calcul = poidsNum > 0 ? calcReceptionFee(poidsNum, tarifs) : null;
 
   function valider() {
@@ -10290,7 +10294,7 @@ function CentreClientsPage({ data, persist, notify, session }) {
   function deciderExpress(colis, accepte) {
     const maintenant = new Date().toISOString();
     const dejaFacture = !!colis.demandeExpress?.facture;
-    const montant = Number(colis.demandeExpress?.montant) || 0;
+    const montant = montantSaisi(colis.demandeExpress?.montant) ?? 0;
     // On n'ajoute le supplément qu'une seule fois, même si l'agent clique deux fois.
     const ajout = accepte && !dejaFacture ? montant : 0;
     const retrait = !accepte && dejaFacture ? montant : 0;
@@ -12292,9 +12296,14 @@ function remiseVolumePourcent(poidsTotal, config) {
 }
 
 function produitValeurGNF(p, categories) {
-  const qty = Number(p.quantite) || 1;
+  /*
+   * Poids, quantité et montant sont tapés à la main, et l'on écrit « 12,5 » pour douze kilos et
+   * demi. Number() rend NaN sur cette forme : le produit était alors valorisé à zéro, et le colis
+   * facturé zéro sans que rien ne le signale. montantSaisi lit la virgule comme les espaces.
+   */
+  const qty = montantSaisi(p.quantite) || 1;
   if (p.personnalise) {
-    const montant = Number(p.montant) || 0;
+    const montant = montantSaisi(p.montant) ?? 0;
     const devise = p.devise || "GNF";
     const montantGNF = devise === "GNF" ? montant : (montant / (LIVE_RATES[devise] || CURRENCIES[devise] || 1)) * (LIVE_RATES.GNF || CURRENCIES.GNF);
     return p.typePrix === "total" ? montantGNF : montantGNF * qty;
@@ -12302,7 +12311,7 @@ function produitValeurGNF(p, categories) {
   const cat = (categories || []).find((c) => c.nom === p.categorie);
   if (!cat) return 0;
   const rate = catPriceGNF(cat);
-  return cat.type === "kg" ? rate * (Number(p.poids) || 0) : rate * qty;
+  return cat.type === "kg" ? rate * (montantSaisi(p.poids) ?? 0) : rate * qty;
 }
 function emptyProduit() { return { id: `p${Date.now()}${Math.random().toString(36).slice(2, 6)}`, nom: "", quantite: "1", poids: "", categorie: "", personnalise: false, montant: "", devise: "GNF", typePrix: "unitaire" }; }
 
@@ -15290,7 +15299,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   // total, exactement comme à la création.
   const valeurProduits = produits.reduce((somme, prod) => somme + produitValeurGNF(prod, categories || []), 0);
   const prixBrut = auxPaliers
-    ? +(calcReceptionFee(Number(poids) || 0, tarifsReception).total / (LIVE_RATES.GNF || CURRENCIES.GNF)).toFixed(2)
+    ? +(calcReceptionFee(montantSaisi(poids) ?? 0, tarifsReception).total / (LIVE_RATES.GNF || CURRENCIES.GNF)).toFixed(2)
     : valeurProduits > 0
       ? +(valeurProduits / (LIVE_RATES.GNF || CURRENCIES.GNF)).toFixed(2)
       : calcPrice(pays, poids, volume, mode);
@@ -15384,7 +15393,9 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
     }
     // Un colis de 0 kg n'existe pas : on refuse l'enregistrement plutôt que de créer une
     // ligne qui faussera ensuite les totaux de poids, le chiffre d'affaires et les commissions.
-    if (!(Number(poids) > 0)) { setErr("Le poids doit être supérieur à 0 kg."); return; }
+    // « 12,5 » est la façon normale d'écrire douze kilos et demi : Number() y voit NaN, et le
+    // colis se refusait avec un message parlant d'un poids nul que l'agent venait pourtant de saisir.
+    if (!((montantSaisi(poids) ?? 0) > 0)) { setErr("Le poids doit être supérieur à 0 kg — écrivez par exemple 12,5."); return; }
     // Mêmes règles que sur l'encaissement d'un colis : on n'enregistre jamais plus que ce qui est
     // dû (le surplus est de la monnaie à rendre, pas une recette), et une somme retirée de la
     // caisse d'un agent doit être justifiée.
@@ -15400,7 +15411,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
       destinataireAdresse, destinataireVille, destinataireCodePostal,
       pays, direction,
       destinatairePays: direction === "import" ? "GN" : pays, mode,
-      poids: Number(poids) || 0, volume: Number(volume) || 0,
+      poids: montantSaisi(poids) ?? 0, volume: montantSaisi(volume) ?? 0,
       produits, valeurDeclaree: produits.length ? valeurProduits : (colis.valeurDeclaree || 0),
       /*
        * Sur un colis partenaire, les montants de l'entreprise restent tels quels — à zéro — et
@@ -15422,7 +15433,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
       }),
       ...(estPartenaire
         ? {
-            prixPartenaire: detailPrixPartenaire({ produits, poids: Number(poids) || 0, pays }, partenaire).total,
+            prixPartenaire: detailPrixPartenaire({ produits, poids: montantSaisi(poids) ?? 0, pays }, partenaire).total,
             devisePartenaire: contratPartenaire.devise,
             /*
              * Un repère saisi rend le colis « sous repère », et le vide : un colis dont on vient
@@ -16029,8 +16040,8 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
     catch (e) { console.error(e); setRecuState("error"); }
   }
   function validerEncaissement() {
-    const n = Number(String(montantPaye).replace(",", "."));
-    if (isNaN(n) || n <= 0) return;
+    const n = montantSaisi(montantPaye);
+    if (n === null || n <= 0) return;
     // convertit le montant saisi (dans devisePaiement) vers l’équivalent EUR, notre unité de référence interne
     const montantEUR = +(n / (LIVE_RATES[devisePaiement] || CURRENCIES[devisePaiement] || 1)).toFixed(2);
     const recu = percuPar === "__autre" ? percuAutre.trim() : percuPar;
@@ -16111,8 +16122,8 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
           <div style={{ fontSize: 12.5, color: "var(--warn-fg)" }}>⚡ Livraison express demandée par le client — {fmt(colis.demandeExpress.montant, "EUR")} · statut : <strong>{colis.demandeExpress.statut}</strong></div>
           {canManage && colis.demandeExpress.statut === "En attente" && (
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => onUpdate((() => { const m = Number(colis.demandeExpress?.montant) || 0; const deja = !!colis.demandeExpress?.facture; const ajout = m && !deja ? m : 0; const retrait = 0; const prix = Math.max(+((colis.prix || 0) + ajout - retrait).toFixed(2), 0); return { prix, reste: Math.max(+(prix - (colis.paye || 0)).toFixed(2), 0), demandeExpress: { ...colis.demandeExpress, statut: "Confirmée", dateDecision: new Date().toISOString(), traitePar: `${session.prenom} ${session.nom}`.trim(), facture: true } }; })())} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Confirmer</button>
-              <button onClick={() => onUpdate((() => { const m = Number(colis.demandeExpress?.montant) || 0; const deja = !!colis.demandeExpress?.facture; const ajout = 0; const retrait = deja ? m : 0; const prix = Math.max(+((colis.prix || 0) + ajout - retrait).toFixed(2), 0); return { prix, reste: Math.max(+(prix - (colis.paye || 0)).toFixed(2), 0), demandeExpress: { ...colis.demandeExpress, statut: "Refusée", dateDecision: new Date().toISOString(), traitePar: `${session.prenom} ${session.nom}`.trim(), facture: false } }; })())} style={{ background: "none", border: "1px solid var(--warn-border)", color: "var(--warn-fg)", borderRadius: 6, padding: "5px 12px", fontSize: 11.5, cursor: "pointer" }}>Refuser</button>
+              <button onClick={() => onUpdate((() => { const m = montantSaisi(colis.demandeExpress?.montant) ?? 0; const deja = !!colis.demandeExpress?.facture; const ajout = m && !deja ? m : 0; const retrait = 0; const prix = Math.max(+((colis.prix || 0) + ajout - retrait).toFixed(2), 0); return { prix, reste: Math.max(+(prix - (colis.paye || 0)).toFixed(2), 0), demandeExpress: { ...colis.demandeExpress, statut: "Confirmée", dateDecision: new Date().toISOString(), traitePar: `${session.prenom} ${session.nom}`.trim(), facture: true } }; })())} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Confirmer</button>
+              <button onClick={() => onUpdate((() => { const m = montantSaisi(colis.demandeExpress?.montant) ?? 0; const deja = !!colis.demandeExpress?.facture; const ajout = 0; const retrait = deja ? m : 0; const prix = Math.max(+((colis.prix || 0) + ajout - retrait).toFixed(2), 0); return { prix, reste: Math.max(+(prix - (colis.paye || 0)).toFixed(2), 0), demandeExpress: { ...colis.demandeExpress, statut: "Refusée", dateDecision: new Date().toISOString(), traitePar: `${session.prenom} ${session.nom}`.trim(), facture: false } }; })())} style={{ background: "none", border: "1px solid var(--warn-border)", color: "var(--warn-fg)", borderRadius: 6, padding: "5px 12px", fontSize: 11.5, cursor: "pointer" }}>Refuser</button>
             </div>
           )}
         </div>
@@ -20102,6 +20113,16 @@ VoyagesPage = memo(VoyagesPage);
 
 function ComptabilitePage({ data, persist, session, notify }) {
   const [periode, setPeriode] = useState("mois");
+  /*
+   * UNE SEULE DEVISE À L'ÉCRAN COMME SUR LE PAPIER
+   *
+   * Cet écran affichait les recettes en euros et les dépenses en francs, côte à côte, et le
+   * récapitulatif PDF reprenait ce mélange ligne à ligne. Un comptable ne peut rien en faire :
+   * additionner « 745,31 EUR » et « 250 000 GNF » n'a aucun sens, et le lecteur ne sait même pas
+   * lequel des deux chiffres est le plus gros. Les dépenses restent SAISIES en francs — c'est ce
+   * qu'on paie — mais tout ce qui s'affiche est ramené à la devise choisie ici.
+   */
+  const [devise, setDevise] = useState("GNF");
   const [form, setForm] = useState(null);
   const depenses = data.depenses || [];
 
@@ -20212,9 +20233,11 @@ function ComptabilitePage({ data, persist, session, notify }) {
     />
   );
   function exportRapport() {
-    const headers = ["Type", "Nom", "Montant_GNF", "Date"];
-    const rows = depensesPeriode.map((d) => [d.type, d.nom, d.montant, new Date(d.date).toLocaleDateString("fr-FR")]);
-    rows.push(["Recette", "Total encaissé (période)", recettes, ""]);
+    // Le fichier suit la devise affichée : un tableur qui mélange deux monnaies dans la même
+    // colonne ne s'additionne pas non plus.
+    const headers = ["Type", "Nom", `Montant_${devise}`, "Date"];
+    const rows = depensesPeriode.map((d) => [d.type, d.nom, fmtRaw((d.montant || 0) / gnfRate, devise), new Date(d.date).toLocaleDateString("fr-FR")]);
+    rows.push(["Recette", "Total encaissé (période)", fmtRaw(recettes, devise), ""]);
     const csv = [headers, ...rows].map((r) => r.map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
     const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -20238,21 +20261,26 @@ function ComptabilitePage({ data, persist, session, notify }) {
       doc.text("BA-DIABY EXPRESS", 34, y);
       doc.setFont(undefined, "normal"); doc.setFontSize(10); doc.setTextColor(...MUTED);
       doc.text(`Récapitulatif financier — ${periodeLabels[periode]}`, 34, y + 6);
+      doc.setFontSize(8.5);
+      doc.text(`Tous les montants en ${devise}${devise === "EUR" ? "" : ` · 1 EUR = ${gnfRate.toLocaleString("fr-FR")} GNF`}`, 34, y + 11);
       y += 20;
       doc.setDrawColor(...RED); doc.setLineWidth(0.6); doc.line(14, y, 196, y);
       y += 10;
 
+      /*
+       * Tout dans la devise choisie à l'écran. « Reste à encaisser » figurait deux fois, sous deux
+       * calculs qui donnaient le même chiffre : une seule ligne suffit.
+       */
       const kpis = [
         ["Colis enregistrés", `${colisPeriode.length}`],
-        ["Chiffre d’affaires facturé", fmt(facture, "EUR")],
-        ["Recettes encaissées", fmt(recettes, "EUR")],
-        ["Reste à encaisser", fmt(facture - recettes, "EUR")],
-        ["Dépenses", fmtGNF(totalDepenses)],
-        ["Salaires", fmtGNF(totalSalaires)],
-        ["Commissions", fmt(totalCommissions, "EUR")],
-        ["Résultat de la période (sur le facturé)", fmt(benefice, "EUR")],
-        ["Reste à encaisser", fmt(resteAEncaisser, "EUR")],
-        ["Indemnités de litige", fmt(totalIndemnites, "EUR")],
+        ["Chiffre d’affaires facturé", fmt(facture, devise)],
+        ["Recettes encaissées", fmt(recettes, devise)],
+        ["Reste à encaisser", fmt(resteAEncaisser, devise)],
+        ["Dépenses", fmt(totalDepenses / gnfRate, devise)],
+        ["Salaires", fmt(totalSalaires / gnfRate, devise)],
+        ["Commissions", fmt(totalCommissions, devise)],
+        ["Indemnités de litige", fmt(totalIndemnites, devise)],
+        ["Résultat de la période (sur le facturé)", fmt(benefice, devise)],
       ];
       const hasAutoTable = await ensureAutoTable();
       if (hasAutoTable && doc.autoTable) {
@@ -20278,10 +20306,10 @@ function ComptabilitePage({ data, persist, session, notify }) {
       doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(...INK);
       doc.text("Détail des colis de la période", 14, y);
       y += 4;
-      const rows = colisPeriode.map((c) => [c.tracking, c.destinataire, routeLabel(c.pays, c.direction), fmt(c.prix, "EUR"), c.reste > 0 ? fmt(c.reste, "EUR") : "Payé"]);
+      const rows = colisPeriode.map((c) => [c.tracking, c.destinataire, routeLabel(c.pays, c.direction), fmt(c.prix, devise), c.reste > 0 ? fmt(c.reste, devise) : "Payé"]);
       if (hasAutoTable && doc.autoTable && rows.length > 0) {
         doc.autoTable({
-          startY: y + 4, head: [["N° de suivi", "Destinataire", "Route", "Montant", "Solde"]], body: rows,
+          startY: y + 4, head: [["N° de suivi", "Destinataire", "Route", `Montant (${devise})`, "Solde"]], body: rows,
           theme: "grid", headStyles: { fillColor: [10, 38, 71], textColor: 255, fontSize: 8.5 }, styles: { fontSize: 8.5, textColor: [40, 40, 40], overflow: "linebreak" },
           // Largeurs fixes (somme = 182 mm), même raison que sur le bordereau d'expédition et le
           // bordereau de réception : éviter qu'autoTable ne laisse une colonne empiéter sur la suivante.
@@ -20348,25 +20376,37 @@ function ComptabilitePage({ data, persist, session, notify }) {
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap", alignItems: "center" }}>
         {[["jour", "Aujourd’hui"], ["semaine", "Cette semaine"], ["mois", "Ce mois"], ["tout", "Tout"]].map(([k, label]) => (
           <button key={k} onClick={() => setPeriode(k)} style={{ padding: "7px 14px", borderRadius: 20, border: "1.5px solid " + (periode === k ? "var(--brand-solid)" : "var(--border)"), background: periode === k ? "var(--brand-solid)" : "var(--surface)", color: periode === k ? "#fff" : "var(--muted)", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>{label}</button>
         ))}
+        <div style={{ flex: 1 }} />
+        <span style={{ fontSize: 12, color: "var(--muted)" }}>Afficher les montants en :</span>
+        <select value={devise} onChange={(e) => setDevise(e.target.value)} aria-label="Devise d’affichage de la comptabilité"
+          style={{ ...inputStyle, width: 110, marginBottom: 0 }}>
+          {Object.keys(CURRENCIES).map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
       </div>
+      {devise !== "GNF" && (
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -10, marginBottom: 14 }}>
+          Les dépenses et salaires sont saisis en francs guinéens ; ils sont convertis ici au taux du
+          jour (1 EUR = {gnfRate.toLocaleString("fr-FR")} GNF).
+        </div>
+      )}
 
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 20 }}>
-        <StatCard label="Recettes encaissées" value={fmt(recettes, "EUR")} icon={CheckCircle2} tint="#16A163" trend={`Facturé : ${fmt(facture, "EUR")}`} trendColor="var(--muted)" />
-        <StatCard label="Dépenses" value={fmtGNF(totalDepenses)} icon={Receipt} tint="#E23F52" />
-        <StatCard label="Salaires" value={fmtGNF(totalSalaires)} icon={Users} tint="#B8801C" />
-        <StatCard label="Commissions" value={fmt(totalCommissions, "EUR")} icon={DollarSign} tint="#8B5CF6" trend={`dont auto : ${fmt(commissionsAuto, "EUR")}`} trendColor="var(--muted)" />
+        <StatCard label="Recettes encaissées" value={fmt(recettes, devise)} icon={CheckCircle2} tint="#16A163" trend={`Facturé : ${fmt(facture, devise)}`} trendColor="var(--muted)" />
+        <StatCard label="Dépenses" value={fmt(totalDepenses / gnfRate, devise)} icon={Receipt} tint="#E23F52" />
+        <StatCard label="Salaires" value={fmt(totalSalaires / gnfRate, devise)} icon={Users} tint="#B8801C" />
+        <StatCard label="Commissions" value={fmt(totalCommissions, devise)} icon={DollarSign} tint="#8B5CF6" trend={`dont auto : ${fmt(commissionsAuto, devise)}`} trendColor="var(--muted)" />
       </div>
 
       <div style={{ background: benefice >= 0 ? "var(--ok-bg)" : "var(--danger-bg)", borderRadius: 14, padding: 20, marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div>
           <div style={{ fontSize: 13, color: "var(--text)", fontWeight: 700 }}>Résultat de la période</div>
-          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3 }}>Sur le chiffre d’affaires facturé, charges, commissions{totalIndemnites > 0.005 ? " et indemnités de litige" : ""} déduites{resteAEncaisser > 0.005 ? ` · ${fmt(resteAEncaisser, "EUR")} encore à encaisser` : ""}</div>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3 }}>Sur le chiffre d’affaires facturé, charges, commissions{totalIndemnites > 0.005 ? " et indemnités de litige" : ""} déduites{resteAEncaisser > 0.005 ? ` · ${fmt(resteAEncaisser, devise)} encore à encaisser` : ""}</div>
         </div>
-        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 22, fontWeight: 700, color: benefice >= 0 ? "var(--ok-fg)" : "var(--danger-fg)" }}>{fmt(benefice, "EUR")}</div>
+        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 22, fontWeight: 700, color: benefice >= 0 ? "var(--ok-fg)" : "var(--danger-fg)" }}>{fmt(benefice, devise)}</div>
       </div>
 
       {paiementsPeriode.length > 0 && (
@@ -20376,7 +20416,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
             {Object.entries(parMode).sort((a, b) => b[1] - a[1]).map(([mode, montant]) => (
               <div key={mode} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderTop: "1px solid var(--border)" }}>
                 <span style={{ fontSize: 13, color: "var(--text)" }}>{mode}</span>
-                <span style={{ fontSize: 13, fontWeight: 700, color: "var(--ok-fg)" }}>{fmt(montant, "EUR")}</span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: "var(--ok-fg)" }}>{fmt(montant, devise)}</span>
               </div>
             ))}
           </div>
@@ -20385,7 +20425,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
             {joursTries.map(([jour, montant]) => (
               <div key={jour} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderTop: "1px solid var(--border)" }}>
                 <span style={{ fontSize: 13, color: "var(--text)" }}>{jour}</span>
-                <span style={{ fontSize: 13, fontWeight: 700, color: "var(--ok-fg)" }}>{fmt(montant, "EUR")}</span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: "var(--ok-fg)" }}>{fmt(montant, devise)}</span>
               </div>
             ))}
           </div>
@@ -20400,7 +20440,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
             {commissionsParAgence.map((a) => (
               <div key={a.nom} style={{ background: "var(--surface2)", borderRadius: 12, padding: 14 }}>
                 <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{a.nom}</div>
-                <div style={{ fontSize: 18, fontWeight: 700, color: "var(--ok-fg)", fontFamily: "'Space Grotesk',sans-serif", marginTop: 4 }}>{fmt(a.montant, "EUR")}</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: "var(--ok-fg)", fontFamily: "'Space Grotesk',sans-serif", marginTop: 4 }}>{fmt(a.montant, devise)}</div>
               </div>
             ))}
           </div>
@@ -20410,7 +20450,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
       <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden" }}>
         <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", minWidth: 520, borderCollapse: "collapse" }}>
-          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["Type", "Libellé", "Montant", "Date", ""].map((h) => <th key={h} style={{ padding: "12px 16px", fontSize: 11.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
+          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["Type", "Libellé", `Montant (${devise})`, "Date", ""].map((h) => <th key={h} style={{ padding: "12px 16px", fontSize: 11.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
           <tbody>
             {depensesPeriode.map((d) => (
               <tr key={d.id} style={{ borderTop: "1px solid var(--border)" }}>
@@ -20418,7 +20458,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
                 <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--text)", whiteSpace: "nowrap" }}>{d.nom}</td>
                 {/* Une écriture à zéro est presque toujours une saisie perdue : on la signale au lieu de la ranger sagement. */}
                 <td style={{ padding: "12px 16px", fontSize: 13, color: d.montant > 0 ? "var(--muted)" : "var(--danger-fg)", fontWeight: d.montant > 0 ? 400 : 700, whiteSpace: "nowrap" }}>
-                  {fmtGNF(d.montant)}{d.montant > 0 ? "" : " — à corriger"}
+                  {fmt((d.montant || 0) / gnfRate, devise)}{d.montant > 0 ? "" : " — à corriger"}
                 </td>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{new Date(d.date).toLocaleDateString("fr-FR")}</td>
                 <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>{effectivePermission(session, "compta.gerer_depenses") && <>
@@ -20680,7 +20720,7 @@ function ImportExcelModal({ onClose, onImportMany, data, session }) {
           telephone: getVal(row, "Destinataire Telephone", "Destinataire Téléphone"),
           destinataireAdresse: getVal(row, "Destinataire Adresse"),
           destinatairePays: valid ? destPays : "",
-          poids: Number(getVal(row, "Poids (kg)", "Poids")) || 0,
+          poids: montantSaisi(getVal(row, "Poids (kg)", "Poids")) ?? 0,
           produit: getVal(row, "Produit") || "Colis",
           prixEur: getVal(row, "Prix EUR (optionnel)", "Prix EUR") ? Number(getVal(row, "Prix EUR (optionnel)", "Prix EUR")) : null,
         };

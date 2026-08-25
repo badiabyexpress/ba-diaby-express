@@ -2050,21 +2050,24 @@ async function notifierEvenement(data, evenement, colis, message) {
   const traces = [];
 
   /*
-   * Le ticket d'envoi, aux deux seuls moments où le client en a besoin.
+   * La facture, aux deux seuls moments où le client en a besoin.
    *
-   * À l'enregistrement, c'est sa preuve de dépôt. À la modification, c'est sa correction : le
-   * poids ou le montant a changé, et le ticket qu'il a en main annonce autre chose que ce qu'il
-   * devra régler. Aux étapes suivantes — parti, arrivé, disponible — rien n'a changé sur le
-   * ticket, et le renvoyer chaque fois n'apprendrait rien à personne.
+   * À l'enregistrement, c'est sa preuve de dépôt et le montant qu'il devra régler. À la
+   * modification, c'est sa correction : le poids ou le prix a changé, et le document qu'il a en
+   * main annonce autre chose que ce qu'il devra payer. Aux étapes suivantes — parti, arrivé,
+   * disponible — rien n'a changé sur la facture, et la renvoyer chaque fois n'apprendrait rien.
+   *
+   * C'était l'étiquette qui partait, celle qu'on colle sur le carton. Le client la recevait sur
+   * son téléphone sans rien pouvoir en faire.
    *
    * Il part par deux voies distinctes, et c'est voulu :
    *
    * — En-tête « document » du modèle Meta (`ticket`) : ces deux modèles ont été validés AVEC un
    *   en-tête document, et un modèle se remplit exactement comme il a été validé. Laisser cet
-   *   en-tête vide ferait refuser l'envoi entier — le client ne recevrait rien du tout. Le ticket
-   *   est donc préparé à chaque fois, sans dépendre d'un réglage.
+   *   en-tête vide ferait refuser l'envoi entier — le client ne recevrait rien du tout. La facture
+   *   est donc préparée à chaque fois, sans dépendre d'un réglage.
    * — Pièce jointe Twilio (`mediaUrl`) : là, rien n'est figé d'avance, et le réglage « Joindre
-   *   l'étiquette PDF » garde tout son sens.
+   *   la facture PDF » garde tout son sens.
    *
    * Un échec de génération ou de dépôt ne doit jamais empêcher le message de partir : on continue
    * sans le ticket, et l'agent voit le refus éventuel de Meta plutôt que de croire le client
@@ -2073,7 +2076,7 @@ async function notifierEvenement(data, evenement, colis, message) {
   let ticket = null;
   let mediaUrl = null;
   if (ETAPES_AVEC_TICKET.includes(evenement)) {
-    try { ticket = await genererUrlEtiquette(colis, data); } catch (e) { /* le message texte part quand même */ }
+    try { ticket = await genererUrlFacture(colis, data); } catch (e) { /* le message texte part quand même */ }
     if (data?.notificationSettings?.joindreEtiquette) mediaUrl = ticket;
   }
 
@@ -3229,7 +3232,23 @@ function App() {
    * l'enregistrement a vraiment été confirmé par le serveur ou seulement mis en file d'attente
    * locale — cas où fermer l'onglet ferait perdre la donnée pour de bon.
    */
-  const persist = useCallback((next) => {
+  /*
+   * LE DOCUMENT LE PLUS FRAIS, MÊME AVANT QUE REACT AIT REDESSINÉ
+   *
+   * Un enregistrement part d'une copie du document. Quand deux enregistrements s'enchaînent dans
+   * le même instant — on enregistre un colis, puis la notification partie pour ce colis vient
+   * inscrire sa trace — le second travaille encore sur la copie d'avant, et efface le premier.
+   * Le colis disparaissait ainsi entre deux clics, sans le moindre message.
+   *
+   * On garde donc le dernier document enregistré dans une référence, mise à jour AVANT que React
+   * ne redessine. Un appelant qui doit s'ajouter à ce qui vient d'être écrit passe une fonction
+   * plutôt qu'un document : elle reçoit l'état réel, jamais une copie périmée.
+   */
+  const documentCourant = useRef(data);
+  useEffect(() => { documentCourant.current = data; }, [data]);
+  const persist = useCallback((suivant) => {
+    const next = typeof suivant === "function" ? suivant(documentCourant.current) : suivant;
+    documentCourant.current = next;
     setData(next);
     if (next.exchangeRates) LIVE_RATES = { ...CURRENCIES, ...next.exchangeRates };
     /*
@@ -11360,7 +11379,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
       }
       setRelanceEnCours({ total: aRelancer.length, faits: i + 1, envoyes, echecs: [...echecs] });
     }
-    if (tracesRelance.length) persist({ ...data, messagesWhatsApp: avecTraces(data, tracesRelance) });
+    if (tracesRelance.length) persist((courant) => ({ ...courant, messagesWhatsApp: avecTraces(courant, tracesRelance) }));
     if (envoyes === 0 && echecs.every((e) => e.raison === "envoi automatique indisponible")) {
       setRelanceEnCours(null);
       notify("Envoi automatique indisponible — contactez les clients depuis leur fiche");
@@ -11446,7 +11465,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     notifierEvenement(data, "enregistrement", colis,
       `Bonjour ${colis.destinataire}, votre colis ${nomExpediteurPourClient(data, colis)} ${colis.tracking} a bien été enregistré`
       + `${colis.poids ? ` (${colis.poids} kg)` : ""}. Suivez-le à tout moment sur notre plateforme.`)
-      .then(({ traces }) => { if (traces?.length) persist({ ...data, messagesWhatsApp: avecTraces(data, traces) }); })
+      .then(({ traces }) => { if (traces?.length) persist((courant) => ({ ...courant, messagesWhatsApp: avecTraces(courant, traces) })); })
       .catch(() => { /* une notification ne bloque jamais l'enregistrement */ });
     setShowForm(false);
   }
@@ -12006,7 +12025,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
         onClose={() => setRemiseEnCours(null)} />}
       {showEncaisseGroupe && <EncaisserGroupeModal data={data} session={session} onEncaisser={encaisserGroupe} onClose={() => setShowEncaisseGroupe(false)} />}
       {showReception && <ReceptionBordereauModal onClose={() => setShowReception(false)} data={data} persist={persist} notify={notify} session={session} />}
-      {selected && <ColisDetail colis={selected} onClose={() => setSelected(null)} onAdvance={() => advance(selected.tracking)} onDelete={() => remove(selected.tracking)} onCancel={(motif) => annuler(selected.tracking, motif)} onRefuser={(motif) => refuser(selected.tracking, motif)} onDeclarerLitige={(t, d) => declarerLitige(selected.tracking, t, d)} onResoudreLitige={(r, i) => resoudreLitige(selected.tracking, r, i)} onMajRetour={(statutRetour) => majRetour(selected.tracking, statutRetour)} onUpdate={(patch) => updateColis(selected.tracking, patch)} onEncaisser={(montant, mode, montantSaisi, deviseSaisie, details, declarationId) => encaisser(selected.tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId)} onTrace={(trace) => persist({ ...data, messagesWhatsApp: avecTraces(data, [trace]) })} canManage={!isChauffeur} isAdmin={session.role === "Administrateur"} isChauffeur={isChauffeur} data={data} session={session} notify={notify} />}
+      {selected && <ColisDetail colis={selected} onClose={() => setSelected(null)} onAdvance={() => advance(selected.tracking)} onDelete={() => remove(selected.tracking)} onCancel={(motif) => annuler(selected.tracking, motif)} onRefuser={(motif) => refuser(selected.tracking, motif)} onDeclarerLitige={(t, d) => declarerLitige(selected.tracking, t, d)} onResoudreLitige={(r, i) => resoudreLitige(selected.tracking, r, i)} onMajRetour={(statutRetour) => majRetour(selected.tracking, statutRetour)} onUpdate={(patch) => updateColis(selected.tracking, patch)} onEncaisser={(montant, mode, montantSaisi, deviseSaisie, details, declarationId) => encaisser(selected.tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId)} onTrace={(trace) => persist((courant) => ({ ...courant, messagesWhatsApp: avecTraces(courant, [trace]) }))} canManage={!isChauffeur} isAdmin={session.role === "Administrateur"} isChauffeur={isChauffeur} data={data} session={session} notify={notify} />}
     </div>
   );
 }
@@ -12373,7 +12392,7 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
       setEnvoiWa({ total: colisConcernes.length, faits: i + 1, envoyes, echecs: [...echecs] });
     }
     // Ce qui est parti est consigné, avec son identifiant Meta : l'accusé viendra s'y rattacher.
-    if (toutesTraces.length) persist({ ...data, messagesWhatsApp: avecTraces(data, toutesTraces) });
+    if (toutesTraces.length) persist((courant) => ({ ...courant, messagesWhatsApp: avecTraces(courant, toutesTraces) }));
     return { envoyes, echecs };
   }
 
@@ -14264,10 +14283,20 @@ async function downloadLabel(colis, data) {
  * réécrit à chaque appel (upsert) : il n'y a pas besoin d'historiser les étiquettes, seule la
  * dernière version compte. Lève une erreur si l'upload échoue — à l'appelant de décider quoi faire.
  */
-async function genererUrlEtiquette(colis, data) {
-  const doc = await construireEtiquetteDoc(colis, data);
-  const blob = doc.output("blob");
-  const chemin = `etiquettes/${colis.tracking}.pdf`;
+/**
+ * Le document joint aux messages du client : SA FACTURE.
+ *
+ * C'était l'étiquette — celle qu'on colle sur le carton, avec son code-barres et son QR. Elle ne
+ * sert à personne d'autre qu'à l'agent qui manipule le colis : le client, lui, la reçoit sur son
+ * téléphone sans rien pouvoir en faire. Ce qu'il attend, c'est ce qu'il doit, ce qu'il a déjà
+ * réglé, et le détail de ce qu'il envoie — c'est-à-dire la facture.
+ *
+ * L'étiquette n'a pas disparu pour autant : elle continue de s'imprimer depuis la fiche du colis,
+ * là où elle a un sens.
+ */
+async function genererUrlFacture(colis, data) {
+  const blob = await downloadInvoice(colis, data, { blob: true });
+  const chemin = `factures/${colis.tracking}.pdf`;
   const { error: erreurUpload } = await clientSupabase().storage
     .from("colis-documents")
     .upload(chemin, blob, { contentType: "application/pdf", upsert: true });
@@ -14276,21 +14305,21 @@ async function genererUrlEtiquette(colis, data) {
   return publicUrl;
 }
 
-/** Envoi manuel de l'étiquette au destinataire sur WhatsApp (bouton "Ticket d'envoi" de la fiche colis). */
-async function envoyerEtiquetteWhatsApp(colis, data) {
+/** Envoi manuel de la facture au destinataire sur WhatsApp, depuis la fiche du colis. */
+async function envoyerFactureWhatsApp(colis, data) {
   let publicUrl;
-  try { publicUrl = await genererUrlEtiquette(colis, data); }
+  try { publicUrl = await genererUrlFacture(colis, data); }
   catch (e) { return { envoye: false, raison: "Échec de l’envoi du PDF vers le stockage." }; }
   // Sous la marque d'un partenaire, le message ne doit pas nommer Ba-Diaby Express : son client
   // ne nous connaît pas.
   const marque = marquePartenaire(data, colis);
-  const message = `Bonjour ${colis.destinataire}, voici l’étiquette de votre colis ${nomExpediteurPourClient(data, colis)} (${colis.tracking}).`;
+  const message = `Bonjour ${colis.destinataire}, voici la facture de votre colis ${nomExpediteurPourClient(data, colis)} (${colis.tracking}).`;
   const resultat = await envoyerWhatsApp(colis.telephone, message, publicUrl);
   // Contrairement à notifierWhatsApp() (message texte), il n'existe pas de brouillon WhatsApp de
   // secours pour une pièce jointe — wa.me ne sait pré-remplir que du texte. Sans Twilio configuré,
   // il n'y a donc rien à faire automatiquement : on le dit clairement plutôt que de rester muet.
   if (!resultat.envoye && !resultat.raison) {
-    return { envoye: false, raison: "Envoi automatique non configuré — téléchargez l’étiquette et envoyez-la manuellement." };
+    return { envoye: false, raison: "Envoi automatique non configuré — téléchargez la facture et envoyez-la manuellement." };
   }
   return resultat;
 }
@@ -15069,6 +15098,7 @@ async function downloadInvoice(colis, data, options = {}) {
   doc.text("BA-DIABY EXPRESS · badiabyexpress.bde@gmail.com", M, Z.pied + 1.5);
   doc.text("Page 1 / 1", W - M, Z.pied + 1.5, { align: "right" });
 
+  if (options.blob) return doc.output("blob");
   if (options.retourner) {
     return { nom: `facture-${colis.tracking}.pdf`, contenu: doc.output("datauristring").split(",")[1] };
   }
@@ -16345,10 +16375,10 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
   const [etiquetteWaState, setEtiquetteWaState] = useState("idle");
   const [etiquetteWaErreur, setEtiquetteWaErreur] = useState("");
   async function handleEnvoyerEtiquetteWhatsApp() {
-    if (colisPartenaire) onUpdate({ accesContacts: inscrireAccesContact(colis, session, "Étiquette envoyée au client par WhatsApp") });
+    if (colisPartenaire) onUpdate({ accesContacts: inscrireAccesContact(colis, session, "Facture envoyée au client par WhatsApp") });
     setEtiquetteWaErreur(""); setEtiquetteWaState("envoi");
     try {
-      const { envoye, raison } = await envoyerEtiquetteWhatsApp(colis, data);
+      const { envoye, raison } = await envoyerFactureWhatsApp(colis, data);
       if (envoye) { setEtiquetteWaState("envoye"); return; }
       setEtiquetteWaErreur(raison || "Échec de l’envoi.");
       setEtiquetteWaState("idle");
@@ -16635,7 +16665,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
                   <button onClick={() => { setShowImpressionDirecte(true); setShowDocMenu(false); }} style={menuItemStyle}>Imprimer l’étiquette (imprimante connectée)</button>
                   {colis.telephone && (
                     <button onClick={handleEnvoyerEtiquetteWhatsApp} disabled={etiquetteWaState === "envoi"} style={menuItemStyle}>
-                      {etiquetteWaState === "envoi" ? "Envoi…" : etiquetteWaState === "envoye" ? "Étiquette envoyée" : "Envoyer l’étiquette par WhatsApp"}
+                      {etiquetteWaState === "envoi" ? "Envoi…" : etiquetteWaState === "envoye" ? "Facture envoyée" : "Envoyer la facture par WhatsApp"}
                       {etiquetteWaErreur && <span style={{ ...menuItemHint, color: "var(--warn-fg)" }}>{etiquetteWaErreur}</span>}
                     </button>
                   )}
@@ -22333,11 +22363,15 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
       <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: "16px 18px", marginTop: 16 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
           <div style={{ flex: 1, minWidth: 220 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Joindre l’étiquette PDF à l’enregistrement</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Joindre la facture PDF à l’enregistrement</div>
             <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 }}>
-              Concerne l’envoi par Twilio : l’étiquette part alors en pièce jointe du message d’enregistrement.
-              Avec WhatsApp Business (Meta), le ticket accompagne toujours ce message — le modèle validé
-              « bde_enregistrement » le porte en en-tête, et ce réglage n’y change rien.
+              Le document envoyé au client est sa <strong>facture</strong> : ce qu’il doit, ce qu’il a
+              déjà réglé, le détail de ce qu’il envoie. L’étiquette — celle qu’on colle sur le carton —
+              n’a d’usage que pour l’agence ; elle s’imprime depuis la fiche du colis.
+              <br />
+              Ce réglage concerne l’envoi par Twilio. Avec WhatsApp Business (Meta), la facture accompagne
+              toujours ce message : le modèle validé « bde_enregistrement » la porte en en-tête, et ce
+              réglage n’y change rien.
             </div>
           </div>
           <Interrupteur

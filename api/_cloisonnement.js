@@ -537,6 +537,13 @@ const SECTIONS_REGLAGES = [
   ["paymentConfig", "config.tarifs"],
   ["expressTarifEurKg", "config.tarifs"],
   ["categories", "config.categories"],
+  /*
+   * La fiche de pointage n'est pas un réglage, mais elle se garde de la même façon : c'est une
+   * pièce sociale, tenue par le responsable. Un agent qui pourrait la réécrire pourrait effacer
+   * ses propres absences.
+   */
+  ["pointages", "equipe.pointage"],
+  ["pointageHoraire", "equipe.pointage"],
 ];
 
 /** Le rôle le plus modeste : celui qu'on donne quand on n'a pas le droit d'en choisir un. */

@@ -591,6 +591,29 @@ function fmtGNF(n) {
   return `${Math.round(n || 0).toLocaleString("fr-FR")} GNF`;
 }
 /**
+ * Lit un montant tapé à la main.
+ *
+ * En francs guinéens on écrit de gros nombres, et personne ne les tape collés : « 500 000 »,
+ * « 500.000 », « 1 200 000 GNF ». Or Number() rend NaN sur toutes ces formes, et un « || 0 »
+ * placé derrière transformait alors la saisie en zéro — sans le dire. C'est ainsi que des
+ * dépenses réelles se sont enregistrées à 0 GNF.
+ *
+ * On accepte donc les espaces (y compris insécables), le point et l'apostrophe de milliers, la
+ * virgule décimale et le sigle de la devise. On rend null — et non zéro — quand il n'y a rien de
+ * lisible : c'est à l'appelant de refuser la saisie plutôt que d'inventer un montant.
+ */
+function montantSaisi(valeur) {
+  if (typeof valeur === "number") return Number.isFinite(valeur) ? valeur : null;
+  if (typeof valeur !== "string") return null;
+  let s = valeur.replace(/[\s   '’]/g, "").replace(/gnf|fg|€|eur/gi, "");
+  if (!s) return null;
+  if (s.includes(",")) s = s.replace(/\./g, "").replace(",", ".");
+  else if (/\.\d{3}(\D|$)/.test(s)) s = s.replace(/\./g, ""); // 500.000 → milliers, pas décimales
+  if (!/^-?(\d+(\.\d+)?|\.\d+)$/.test(s)) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+/**
  * Une catégorie peut être universelle (paysLimite null/absent), ou restreinte à un ou plusieurs
  * pays. Les données existantes stockent encore paysLimite comme une simple chaîne (ancien format
  * un-seul-pays) : on l'accepte transparemment aux côtés du nouveau format tableau, sans migration.
@@ -1945,6 +1968,36 @@ function coordonneesAgence(agence) {
   return agence.telephone ? `${lieu}, tél. ${agence.telephone}` : lieu;
 }
 
+/* =========================================================================================
+ * LE MODÈLE PROMOTIONNEL
+ * =========================================================================================
+ * Les huit modèles ci-dessus sont des messages de service : ils suivent un colis. Une promotion
+ * n'en est pas un, et Meta le sait — une offre commerciale relève de la catégorie MARKETING, qui
+ * se dépose et s'approuve séparément. On ne peut pas la faire passer par « bde_arrivee ».
+ *
+ * Le corps est presque entièrement figé : trois variables seulement, et un bouton dont l'adresse
+ * ne change pas. C'est ce qui se fait approuver le plus vite — un modèle dont le texte n'est
+ * qu'un trou à remplir se fait refuser, et à juste titre : personne ne peut vérifier ce qu'on
+ * enverra vraiment.
+ *
+ * Le pied de page porte la sortie. Une campagne sans porte de sortie n'est pas une campagne,
+ * c'est du harcèlement — et Meta ferme les numéros qui se font signaler.
+ */
+const MODELE_PROMO_WHATSAPP = {
+  nom: "bde_promo",
+  langue: "fr",
+  categorie: "MARKETING",
+  corps: [
+    "Bonjour {{1}},",
+    "",
+    "{{2}}",
+    "",
+    "Offre valable jusqu’au {{3}}. Passez en agence ou écrivez-nous, nous nous occupons du reste.",
+  ].join("\n"),
+  pied: "Répondez STOP pour ne plus recevoir nos offres.",
+  bouton: "Voir l’offre",
+};
+
 /** Le nom du pays de destination, tel qu'il apparaît dans le message. */
 function paysDuColis(colis) {
   const p = COUNTRIES.find((x) => x.code === (colis?.destinatairePays || colis?.pays));
@@ -2273,6 +2326,30 @@ function preparerDocPdf(doc) {
     const propre = Array.isArray(texte) ? texte.map(nettoyerTextePdf) : nettoyerTextePdf(texte);
     return originale(propre, ...reste);
   };
+  /*
+   * autoTable ne passe pas par doc.text() pour mesurer et découper ses cellules : il lit les
+   * chaînes telles quelles. L'espace fine insécable des montants français n'y est donc pas un
+   * point de coupure, et « 1 868 976 GNF » sortait de sa colonne au lieu d'y tenir — c'est ce qui
+   * tronquait les montants sur le bordereau imprimé. On nettoie l'en-tête et le corps avant de les
+   * lui confier.
+   *
+   * L'accesseur rend undefined tant que le greffon n'est pas chargé : les écrans qui testent
+   * « doc.autoTable » pour basculer sur leur tableau de repli continuent de le faire.
+   */
+  const cellulesPropres = (rangs) => (!Array.isArray(rangs) ? rangs : rangs.map((rang) => (!Array.isArray(rang) ? rang
+    : rang.map((cellule) => (cellule && typeof cellule === "object" && "content" in cellule
+      ? { ...cellule, content: nettoyerTextePdf(cellule.content) }
+      : nettoyerTextePdf(cellule))))));
+  Object.defineProperty(doc, "autoTable", {
+    configurable: true,
+    get() {
+      const greffon = Object.getPrototypeOf(doc)?.autoTable || window.jspdf?.jsPDF?.API?.autoTable;
+      if (typeof greffon !== "function") return undefined;
+      return (options, ...reste) => greffon.call(doc, (options && typeof options === "object"
+        ? { ...options, head: cellulesPropres(options.head), body: cellulesPropres(options.body) }
+        : options), ...reste);
+    },
+  });
   return doc;
 }
 
@@ -2301,15 +2378,26 @@ function openPdf(doc, filename) {
     doc.save(filename);
   }
 }
+/*
+ * Le greffon des tableaux. Un seul CDN, c'est un seul point de panne : quand cdnjs est bloqué
+ * — filtrage d'entreprise, réseau guinéen capricieux, extension de navigateur — les documents
+ * imprimés basculaient sur le tableau de repli sans que personne ne comprenne pourquoi. On essaie
+ * donc une seconde source avant d'abandonner.
+ */
 async function ensureAutoTable() {
   if (window.jspdf?.jsPDF?.API?.autoTable) return true;
-  try {
-    await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js");
-    return true;
-  } catch (e) {
-    console.error("autoTable indisponible, tableau manuel utilisé à la place.", e);
-    return false;
+  const sources = [
+    "https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js",
+    "https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js",
+  ];
+  for (const src of sources) {
+    try {
+      await loadScript(src);
+      if (window.jspdf?.jsPDF?.API?.autoTable) return true;
+    } catch (e) { /* on essaie la source suivante */ }
   }
+  console.error("autoTable indisponible, tableau manuel utilisé à la place.");
+  return false;
 }
 async function ensureQRCodeLib() {
   if (window.QRCode && window.QRCode.toDataURL) return true;
@@ -8771,6 +8859,7 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
   if (sub === "paiement") return <PaiementConfigPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "users") return <UtilisateursPage data={data} persist={persist} notify={notify} onBack={back} session={session} />;
   if (sub === "performance") return <PerformanceAgentsPage data={data} onBack={back} />;
+  if (sub === "pointage") return <PointagePage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "systeme") return <ParametresSystemePage data={data} persist={persist} notify={notify} onBack={back} offline={offline} />;
   if (sub === "journal") return <JournalActivitePage data={data} onBack={back} />;
 
@@ -8831,6 +8920,9 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14, marginBottom: 26 }}>
         <Card icon={Users} tint="#6366F1" title="Gestion Utilisateurs" desc="Accès, rôles et permissions de l’équipe." onClick={() => setSub("users")} />
         <Card icon={LayoutDashboard} tint="#3D63FF" title="Performance des agents" desc="Colis enregistrés, chiffre d’affaires et paiements encaissés, par agent." onClick={() => setSub("performance")} />
+        {effectivePermission(session, "equipe.pointage") && (
+          <Card icon={Clock} tint="#E0794E" title="Fiche de pointage" desc="Qui était là, quel jour, à quelles heures — remplie par vous, imprimable et signable." onClick={() => setSub("pointage")} />
+        )}
       </div>
 
       <SectionLabel>SUIVI &amp; MAINTENANCE</SectionLabel>
@@ -10332,6 +10424,9 @@ function CentreClientsPage({ data, persist, notify, session }) {
     ["signalements", "Signalements", signalementsOuverts.length],
     ["express", "Livraison express", expressEnAttente],
     ["comptes", "Comptes inscrits", (data.clientAccounts || []).length],
+    // Écrire à la base est un geste commercial, pas une réponse à une demande : l'onglet n'apparaît
+    // qu'à qui en a le droit.
+    ...(effectivePermission(session, "clients.campagnes") ? [["campagnes", "Campagnes", 0]] : []),
   ];
 
   return (
@@ -10351,6 +10446,10 @@ function CentreClientsPage({ data, persist, notify, session }) {
           </button>
         ))}
       </div>
+
+      {ongletActif === "campagnes" && effectivePermission(session, "clients.campagnes") && (
+        <CampagnesPage data={data} persist={persist} session={session} notify={notify} />
+      )}
 
       {ongletActif === "comptes" && (
         <div>
@@ -11895,8 +11994,11 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
     window.open(`mailto:?subject=${encodeURIComponent(sujet)}&body=${encodeURIComponent(corps)}`, "_blank");
   }
   function ajouterDepense() {
-    if (!depenseForm?.nom || !depenseForm?.montant) return;
-    const entry = { id: `dep${Date.now()}`, type: "Dépense", nom: `${depenseForm.nom} (${bordereau.numero})`, montant: Number(depenseForm.montant) || 0, date: new Date().toISOString() };
+    if (!depenseForm?.nom) return;
+    // Même règle qu'en comptabilité : un montant illisible arrête la saisie, il ne devient pas zéro.
+    const montantDepense = montantSaisi(depenseForm?.montant);
+    if (montantDepense === null || montantDepense <= 0) { setDepenseForm({ ...depenseForm, erreur: "Montant illisible. Tapez le nombre, par exemple 500 000." }); return; }
+    const entry = { id: `dep${Date.now()}`, type: "Dépense", nom: `${depenseForm.nom} (${bordereau.numero})`, montant: Math.round(montantDepense), date: new Date().toISOString() };
     persist({ ...data, depenses: [entry, ...(data.depenses || [])], activityLog: pushActivity(data, session, "Dépense liée à un bordereau", `${bordereau.numero} — ${entry.nom}`) });
     notify?.("Dépense ajoutée");
     setDepenseForm(null);
@@ -12106,7 +12208,15 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
       {depenseForm && (
         <Modal onClose={() => setDepenseForm(null)} title="Ajouter une dépense liée à ce bordereau">
           <Field label="Libellé"><input value={depenseForm.nom} onChange={(e) => setDepenseForm({ ...depenseForm, nom: e.target.value })} style={inputStyle} placeholder="ex: Transport, douane..." /></Field>
-          <Field label="Montant (GNF)"><input value={depenseForm.montant} onChange={(e) => setDepenseForm({ ...depenseForm, montant: e.target.value })} style={inputStyle} /></Field>
+          <Field label="Montant (GNF)">
+            <input value={depenseForm.montant} inputMode="numeric" onChange={(e) => setDepenseForm({ ...depenseForm, montant: e.target.value, erreur: "" })} style={inputStyle} placeholder="ex : 500 000" />
+            <div style={{ fontSize: 12, marginTop: 5, color: montantSaisi(depenseForm.montant) > 0 ? "var(--ok-fg)" : "var(--muted)" }}>
+              {String(depenseForm.montant || "").trim() === "" ? "Espaces et points acceptés : 500 000, 500.000…"
+                : montantSaisi(depenseForm.montant) === null ? "Montant illisible — tapez seulement le nombre."
+                : fmtGNF(montantSaisi(depenseForm.montant))}
+            </div>
+          </Field>
+          {depenseForm.erreur && <div style={{ background: "var(--danger-bg)", color: "var(--danger-fg)", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, fontWeight: 600 }}>{depenseForm.erreur}</div>}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 8 }}>
             <button onClick={() => setDepenseForm(null)} style={{ padding: "9px 16px", borderRadius: 8, border: "1.5px solid var(--border)", background: "var(--surface2)", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>Annuler</button>
             <button onClick={ajouterDepense} style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
@@ -13292,10 +13402,23 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   stat(138, "MONTANT TOTAL", fmt(colisRoute.reduce((s, c) => s + c.prix, 0), cur), true);
   y += 26;
 
-  const head = ["N° de suivi", "Destinataire", "Téléphone", "Mode", "Poids", "Statut", `Montant (${cur})`];
+  /*
+   * Le mode d'acheminement ne figure plus colonne par colonne : un bordereau ne mélange pas les
+   * modes, il est déjà annoncé par la route en en-tête, et répéter « Aérien » dix fois volait la
+   * place au chiffre que l'on cherche vraiment. À la place, le nombre d'articles — ce que l'on
+   * compte à la main devant le transporteur — et, derrière chaque montant, son règlement : payé,
+   * partiellement payé, ou pas payé du tout. C'est la question posée à chaque remise.
+   */
+  const reglementDuColis = (c) => {
+    const paye = Number(c.paye) || 0;
+    if (paye <= 0.005) return { libelle: "Non payé", teinte: [200, 45, 60] };
+    if ((Number(c.reste) || 0) <= 0.005) return { libelle: "Payé", teinte: [40, 140, 90] };
+    return { libelle: `Partiel\n${fmt(paye, cur)}`, teinte: [180, 120, 20] };
+  };
+  const head = ["N° de suivi", "Destinataire", "Téléphone", "Articles", "Poids", "Statut", `Montant (${cur})`, "Règlement"];
   const body = colisRoute.map((c) => [
-    c.tracking, c.destinataire, c.telephone, c.mode === "air" ? "Aérien" : "Maritime",
-    `${c.poids} kg`, c.status, fmt(c.prix, cur),
+    c.tracking, c.destinataire, c.telephone, String(nombreArticles(c)),
+    `${c.poids} kg`, c.status, fmt(c.prix, cur), reglementDuColis(c).libelle,
   ]);
 
   const hasAutoTable = await ensureAutoTable();
@@ -13312,35 +13435,73 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
      */
     doc.autoTable({
       startY: y, head: [head], body,
-      headStyles: { fillColor: [10, 38, 71], fontSize: 8.5 },
-      bodyStyles: { fontSize: 8.5, textColor: [30, 40, 55], overflow: "linebreak" },
+      headStyles: { fillColor: [10, 38, 71], fontSize: 8, halign: "left" },
+      bodyStyles: { fontSize: 8, textColor: [30, 40, 55], overflow: "linebreak", cellPadding: 1.6 },
       alternateRowStyles: { fillColor: [238, 243, 250] },
+      /*
+       * Les montants étaient tronqués à l'impression : un « 1 868 976 GNF » est séparé par des
+       * espaces insécables, sur lesquelles autoTable ne peut pas revenir à la ligne — le texte
+       * sortait donc de sa cellule au lieu d'y tenir. La colonne du montant est élargie et calée
+       * à droite, et la somme des largeurs fait exactement les 182 mm utiles d'une page A4.
+       */
       columnStyles: {
-        0: { cellWidth: 26 },  // N° de suivi
-        1: { cellWidth: 34 },  // Destinataire
-        2: { cellWidth: 26 },  // Téléphone
-        3: { cellWidth: 18 },  // Mode
-        4: { cellWidth: 14 },  // Poids
-        5: { cellWidth: 34 },  // Statut
-        6: { cellWidth: 30 },  // Montant
+        0: { cellWidth: 24 },  // N° de suivi
+        1: { cellWidth: 30 },  // Destinataire
+        2: { cellWidth: 24 },  // Téléphone
+        3: { cellWidth: 14, halign: "center" },  // Articles
+        4: { cellWidth: 13 },  // Poids
+        5: { cellWidth: 19 },  // Statut
+        6: { cellWidth: 32, halign: "right", fontStyle: "bold" },  // Montant
+        7: { cellWidth: 26 },  // Règlement
+      },
+      // Le règlement se lit à la couleur avant de se lire au mot.
+      didParseCell: (donnees) => {
+        if (donnees.section !== "body" || donnees.column.index !== 7) return;
+        const c = colisRoute[donnees.row.index];
+        if (c) { donnees.cell.styles.textColor = reglementDuColis(c).teinte; donnees.cell.styles.fontStyle = "bold"; }
       },
       margin: { left: 14, right: 14 },
     });
     finalY = doc.lastAutoTable.finalY || y + 8;
   } else {
-    // manual fallback table if the autoTable plugin could not be loaded
-    const colX = [14, 55, 90, 125, 148, 168, 185];
-    doc.setFontSize(8); doc.setTextColor(255, 255, 255); doc.setFillColor(10, 38, 71);
-    doc.rect(14, finalY, 182, 7, "F");
-    head.forEach((h, i) => doc.text(h, colX[i] + 1, finalY + 5));
-    finalY += 9;
-    doc.setTextColor(30, 40, 55);
+    /*
+     * Tableau de repli, dessiné à la main quand le greffon n'a pas pu être chargé — c'est lui qui
+     * imprime réellement dès que les CDN sont hors d'atteinte. L'ancienne version coupait chaque
+     * cellule à seize caractères et posait la première ligne par-dessus la bande d'en-tête : sur
+     * un vrai bordereau, les montants sortaient de la feuille. On redessine ici un vrai tableau,
+     * aux mêmes largeurs que le tableau principal, avec retour à la ligne, montants calés à droite
+     * et changement de page propre.
+     */
+    const largeurs = [24, 30, 24, 14, 13, 19, 32, 26];
+    const colX = largeurs.reduce((acc, l) => [...acc, acc[acc.length - 1] + l], [14]);
+    const enTete = (yh) => {
+      doc.setFillColor(10, 38, 71); doc.rect(14, yh, 182, 7, "F");
+      doc.setFont(undefined, "bold"); doc.setFontSize(7.5); doc.setTextColor(255, 255, 255);
+      head.forEach((h, i) => (i === 6
+        ? doc.text(h, colX[i] + largeurs[i] - 1.5, yh + 4.8, { align: "right" })
+        : doc.text(h, colX[i] + 1.5, yh + 4.8)));
+      return yh + 7;
+    };
+    finalY = enTete(finalY);
+    doc.setFontSize(7.5);
     body.forEach((row, i) => {
-      if (finalY > 275) { doc.addPage(); finalY = 20; }
-      if (i % 2 === 1) { doc.setFillColor(238, 243, 250); doc.rect(14, finalY - 4.5, 182, 6.5, "F"); }
-      row.forEach((cell, j) => doc.text(String(cell).slice(0, 16), colX[j] + 1, finalY));
-      finalY += 6.5;
+      const lignes = row.map((cell, j) => doc.splitTextToSize(String(cell), largeurs[j] - 3));
+      const hauteur = Math.max(...lignes.map((l) => l.length)) * 3.4 + 2.6;
+      if (finalY + hauteur > 272) { doc.addPage(); finalY = enTete(20); }
+      if (i % 2 === 1) { doc.setFillColor(238, 243, 250); doc.rect(14, finalY, 182, hauteur, "F"); }
+      lignes.forEach((cellules, j) => {
+        doc.setTextColor(...(j === 7 ? reglementDuColis(colisRoute[i]).teinte : [30, 40, 55]));
+        doc.setFont(undefined, j === 6 || j === 7 ? "bold" : "normal");
+        cellules.forEach((ligne, k) => {
+          const yl = finalY + 4 + k * 3.4;
+          if (j === 6) doc.text(ligne, colX[j] + largeurs[j] - 1.5, yl, { align: "right" });
+          else if (j === 3) doc.text(ligne, colX[j] + largeurs[j] / 2, yl, { align: "center" });
+          else doc.text(ligne, colX[j] + 1.5, yl);
+        });
+      });
+      finalY += hauteur;
     });
+    doc.setFont(undefined, "normal"); doc.setTextColor(30, 40, 55);
     finalY += 6;
   }
 
@@ -13359,11 +13520,13 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   const totalRestant = colisRoute.reduce((s, c) => s + c.reste, 0);
   doc.setFillColor(245, 247, 251); doc.rect(14, finalY + 5, 182, 12, "F");
   doc.setFontSize(9); doc.setFont(undefined, "bold"); doc.setTextColor(10, 38, 71);
+  // Le reste à percevoir est calé sur le bord droit du panneau : en francs guinéens, la ligne est
+  // longue, et posée à une abscisse fixe elle sortait de la feuille.
   doc.text(`Facturé : ${fmt(totalFacture, cur)}`, 18, finalY + 12.5);
   doc.setTextColor(62, 160, 90);
-  doc.text(`Encaissé : ${fmt(totalEncaisse, cur)}`, 85, finalY + 12.5);
+  doc.text(`Encaissé : ${fmt(totalEncaisse, cur)}`, 105, finalY + 12.5, { align: "center" });
   doc.setTextColor(226, 63, 82);
-  doc.text(`Reste à percevoir : ${fmt(totalRestant, cur)}`, 150, finalY + 12.5);
+  doc.text(`Reste à percevoir : ${fmt(totalRestant, cur)}`, 192, finalY + 12.5, { align: "right" });
 
   const sigY = finalY + 30;
   doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(90, 100, 120);
@@ -14021,7 +14184,13 @@ async function downloadRecu(colis, paiement) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a5" }));
   const W = 148, H = 210, M = 10;
-  const qrData = await generateQRDataUrl(`${colis.tracking}-${paiement.id}`, 200).catch(() => null);
+  /*
+   * Le QR du reçu ne contenait que « BDE220805-p1787… » : un téléphone qui le scannait affichait
+   * ce texte et s'arrêtait là — rien à ouvrir, rien à vérifier. Un QR sur un reçu ne sert que s'il
+   * mène quelque part. Il porte donc l'adresse de suivi du colis, comme celui de l'étiquette, avec
+   * le numéro du reçu en plus : le client scanne et voit l'état de son colis.
+   */
+  const qrData = await generateQRDataUrl(`${trackingUrlFor(colis.tracking)}&recu=${encodeURIComponent(paiement.id)}`, 240).catch(() => null);
 
   /*
    * Positions FIXES, comme pour l'étiquette. Auparavant chaque ligne d'information poussait la
@@ -17105,6 +17274,84 @@ const DONNEES_REFERENCE = {
   },
 };
 
+/* =========================================================================================
+ * SEGMENTATION DE LA BASE CLIENTS PAR PAYS
+ * =========================================================================================
+ * Le pays d'un client, on ne l'a nulle part — mais on a son numéro, et un numéro international
+ * porte son pays devant lui. « +33 » c'est la France, « +224 » la Guinée. C'est la seule donnée
+ * fiable dont on dispose sur toute la base : elle a été saisie pour appeler les gens.
+ *
+ * Deux précautions.
+ *
+ * L'indicatif le plus long l'emporte : « +1868 » est la Trinité, pas les États-Unis. Sans ce tri,
+ * une poignée de clients seraient rangés dans le mauvais pays.
+ *
+ * Et « +1 » ne se départage pas. Les États-Unis et le Canada partagent le même indicatif ; seuls
+ * les trois chiffres suivants les distinguent, et cette table-là n'existe pas ici. Plutôt que de
+ * ranger des Canadiens chez les Américains, on nomme le segment pour ce qu'il est.
+ */
+const INDICATIFS_DU_PLUS_LONG = [...DIAL_CODES].sort((a, b) => b.dial.length - a.dial.length);
+const SEGMENT_SANS_INDICATIF = "sans-indicatif";
+
+function paysDuNumero(telephone) {
+  const brut = String(telephone || "").replace(/[\s.\-()]/g, "");
+  if (!brut.startsWith("+")) return null;
+  const chiffres = brut.slice(1).replace(/\D/g, "");
+  const trouve = INDICATIFS_DU_PLUS_LONG.find((c) => chiffres.startsWith(c.dial));
+  if (!trouve) return null;
+  if (trouve.dial === "1") return { dial: "1", nom: "États-Unis / Canada", drapeau: "🇺🇸" };
+  return { dial: trouve.dial, nom: trouve.name, drapeau: trouve.flag };
+}
+
+/** Deux numéros désignent la même personne dès qu'ils ont les mêmes chiffres. */
+function clefTelephone(telephone) {
+  return String(telephone || "").replace(/\D/g, "");
+}
+
+/**
+ * L'audience commerciale : une personne, un numéro, un pays.
+ *
+ * Elle réunit l'annuaire tiré des colis et les comptes de l'Espace Client — le même client peut
+ * exister des deux côtés, on ne l'écrit qu'une fois. Les clients des partenaires n'y sont pas :
+ * buildClientDirectory les écarte déjà, et un compte de l'Espace Client appartient toujours à
+ * l'entreprise. Un partenaire garde son fichier ; nous ne démarchons pas ses clients.
+ */
+function audienceMarketing(data) {
+  const parNumero = new Map();
+  const poser = (entree) => {
+    const clef = clefTelephone(entree.telephone);
+    if (!clef) return;
+    const existant = parNumero.get(clef);
+    if (existant) {
+      // L'e-mail et le nom le plus complet gagnent : on ne perd jamais une adresse déjà connue.
+      if (!existant.email && entree.email) existant.email = entree.email;
+      if (entree.nom && entree.nom.length > (existant.nom || "").length) existant.nom = entree.nom;
+      if (entree.compte) existant.compte = true;
+      return;
+    }
+    parNumero.set(clef, { ...entree });
+  };
+  buildClientDirectory(data.colis || [], data.repertoire).forEach((c) => poser({
+    telephone: c.telephone, nom: (c.nomComplet || "").trim(), email: (c.email || "").trim(),
+    envois: c.count || 0, compte: false,
+  }));
+  (data.clientAccounts || []).forEach((c) => poser({
+    telephone: c.telephone, nom: `${c.prenom || ""} ${c.nom || ""}`.trim(),
+    email: (c.email || "").trim(), envois: 0, compte: true,
+  }));
+  const desabonnes = new Set((data.desabonnesMarketing || []).map(clefTelephone).filter(Boolean));
+  return [...parNumero.values()].map((c) => {
+    const pays = paysDuNumero(c.telephone);
+    return {
+      ...c,
+      segment: pays ? pays.dial : SEGMENT_SANS_INDICATIF,
+      paysNom: pays ? pays.nom : "Numéro sans indicatif",
+      drapeau: pays ? pays.drapeau : "❓",
+      desabonne: desabonnes.has(clefTelephone(c.telephone)),
+    };
+  });
+}
+
 function buildClientDirectory(colisList, repertoireEnBase = null) {
   const map = {};
   colisList.forEach((c) => {
@@ -17341,6 +17588,378 @@ function Clients({ data }) {
 
 
 Clients = memo(Clients);
+
+/**
+ * Campagnes — écrire à la base clients, pays par pays.
+ *
+ * Trois choses rendent cet écran différent d'un simple champ de texte.
+ *
+ * LE PAYS. Une promotion n'a de sens que là où elle s'applique : un client de Conakry n'a que
+ * faire d'un tarif Paris → Conakry, et une remise en euros ne parle pas à quelqu'un qui paie en
+ * francs guinéens. Le pays se lit sur l'indicatif du numéro (voir paysDuNumero) — la seule donnée
+ * dont on dispose sur toute la base.
+ *
+ * LA SORTIE. Un client qui ne veut plus d'offres doit pouvoir le dire une fois et être entendu
+ * pour toujours. Sa désinscription est gardée dans les données, et elle prime sur tout choix de
+ * segment : on ne peut pas le réinclure par inadvertance en cochant son pays.
+ *
+ * CE QUE WHATSAPP AUTORISE. Une offre commerciale exige un modèle de catégorie MARKETING approuvé
+ * par Meta à l'avance. Tant qu'il n'existe pas, l'écran le dit et propose la voie qui, elle,
+ * fonctionne tout de suite : l'e-mail. Faire semblant d'envoyer serait pire que de ne rien
+ * envoyer — on croirait la base prévenue.
+ */
+function CampagnesPage({ data, persist, session, notify }) {
+  const audience = useMemo(() => audienceMarketing(data), [data.colis, data.repertoire, data.clientAccounts, data.desabonnesMarketing]);
+  const campagnes = data.campagnes || [];
+
+  const segments = useMemo(() => {
+    const par = new Map();
+    audience.forEach((c) => {
+      if (!par.has(c.segment)) par.set(c.segment, { cle: c.segment, nom: c.paysNom, drapeau: c.drapeau, total: 0, avecEmail: 0, desabonnes: 0 });
+      const s = par.get(c.segment);
+      s.total += 1;
+      if (c.email) s.avecEmail += 1;
+      if (c.desabonne) s.desabonnes += 1;
+    });
+    return [...par.values()].sort((a, b) => {
+      if (a.cle === SEGMENT_SANS_INDICATIF) return 1;
+      if (b.cle === SEGMENT_SANS_INDICATIF) return -1;
+      return b.total - a.total;
+    });
+  }, [audience]);
+
+  const [choisis, setChoisis] = useState([]);
+  const [canal, setCanal] = useState("email");
+  const [objet, setObjet] = useState("Une offre Ba-Diaby Express pour vous");
+  const [offre, setOffre] = useState("");
+  const [echeance, setEcheance] = useState("");
+  const [lien, setLien] = useState(() => (typeof window !== "undefined" && window.location?.origin && !window.location.origin.startsWith("file")
+    ? window.location.origin : "https://badiabyexpress.com"));
+  const [confirmation, setConfirmation] = useState(null);
+  const [envoi, setEnvoi] = useState(null);           // { total, faits, envoyes, echecs, arret }
+  const [bilan, setBilan] = useState(null);
+  const arretRef = useRef(false);
+  const [numeroADesabonner, setNumeroADesabonner] = useState("");
+
+  function basculerSegment(cle) {
+    setChoisis((l) => (l.includes(cle) ? l.filter((x) => x !== cle) : [...l, cle]));
+  }
+
+  /*
+   * Les destinataires réellement joignables.
+   *
+   * Un désabonné n'y est jamais, quel que soit le segment coché. Un numéro sans indicatif non
+   * plus : WhatsApp ne saurait pas où l'envoyer, et l'écrire quand même ferait échouer l'envoi
+   * une fois par client. Pour l'e-mail seul, une adresse suffit — l'indicatif n'y sert à rien.
+   */
+  const destinataires = useMemo(() => audience.filter((c) => {
+    if (c.desabonne) return false;
+    if (!choisis.includes(c.segment)) return false;
+    if (canal === "email") return !!c.email;
+    if (c.segment === SEGMENT_SANS_INDICATIF) return false;
+    return canal === "whatsapp" ? true : true;
+  }), [audience, choisis, canal]);
+
+  const avecEmail = destinataires.filter((c) => c.email).length;
+  const desabonnesTotal = audience.filter((c) => c.desabonne).length;
+
+  const messagePourEmail = (nom) => [
+    `<p>Bonjour ${nom || "cher client"},</p>`,
+    `<p>${(offre || "").replace(/\n/g, "<br>")}</p>`,
+    echeance ? `<p>Offre valable jusqu’au ${echeance}.</p>` : "",
+    `<p><a href="${lien}" style="background:#D6273F;color:#fff;padding:11px 20px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">Voir l’offre</a></p>`,
+    `<p style="color:#777;font-size:12px">Vous recevez ce message parce que vous êtes client de Ba-Diaby Express. Répondez « STOP » pour ne plus recevoir nos offres.</p>`,
+  ].filter(Boolean).join("\n");
+
+  const pret = choisis.length > 0 && offre.trim().length > 0 && destinataires.length > 0;
+
+  /*
+   * L'envoi, un destinataire après l'autre.
+   *
+   * Pas de parallélisme : WhatsApp et Resend comptent les messages par seconde, et une campagne
+   * qui part trop vite se fait couper au milieu — la moitié de la base prévenue, l'autre pas, et
+   * aucun moyen de savoir où l'on s'est arrêté. Un à la fois, avec un compteur visible et un
+   * bouton pour arrêter : c'est plus lent, et c'est reprenable.
+   */
+  async function lancer() {
+    setConfirmation(null);
+    setBilan(null);
+    arretRef.current = false;
+    const liste = destinataires;
+    let envoyes = 0, echecs = 0;
+    const raisons = new Map();
+    setEnvoi({ total: liste.length, faits: 0, envoyes: 0, echecs: 0 });
+    for (let i = 0; i < liste.length; i++) {
+      if (arretRef.current) break;
+      const c = liste[i];
+      let unEnvoi = false;
+      if ((canal === "email" || canal === "les_deux") && c.email) {
+        const r = await envoyerEmail(c.email, objet, messagePourEmail(c.nom));
+        if (r.envoye) unEnvoi = true;
+        else if (r.raison) raisons.set(r.raison, (raisons.get(r.raison) || 0) + 1);
+      }
+      if ((canal === "whatsapp" || canal === "les_deux") && c.segment !== SEGMENT_SANS_INDICATIF) {
+        const r = await envoyerWhatsApp(c.telephone, `${offre}\n${lien}`, null, {
+          nom: MODELE_PROMO_WHATSAPP.nom,
+          variables: [c.nom || "cher client", offre.trim(), echeance || "la fin du mois"],
+          boutonUrl: lien,
+        });
+        if (r.envoye) unEnvoi = true;
+        else if (r.raison) raisons.set(r.raison, (raisons.get(r.raison) || 0) + 1);
+      }
+      if (unEnvoi) envoyes += 1; else echecs += 1;
+      setEnvoi({ total: liste.length, faits: i + 1, envoyes, echecs });
+    }
+    const campagne = {
+      id: `camp${Date.now()}`,
+      date: new Date().toISOString(),
+      par: `${session?.prenom || ""} ${session?.nom || ""}`.trim(),
+      canal, segments: choisis, objet, offre: offre.trim(), echeance, lien,
+      destinataires: liste.length, envoyes, echecs,
+      interrompue: arretRef.current,
+    };
+    persist({
+      ...data,
+      campagnes: [campagne, ...campagnes].slice(0, 100),
+      activityLog: pushActivity(data, session, "Campagne envoyée",
+        `${envoyes}/${liste.length} messages — ${choisis.join(", ")}`),
+    });
+    setEnvoi(null);
+    setBilan({ ...campagne, raisons: [...raisons.entries()].sort((a, b) => b[1] - a[1]) });
+    notify?.(`Campagne terminée — ${envoyes} message(s) envoyé(s)`);
+  }
+
+  function desabonner(telephone) {
+    const clef = String(telephone || "").trim();
+    if (!clef) return;
+    const deja = data.desabonnesMarketing || [];
+    if (deja.some((t) => clefTelephone(t) === clefTelephone(clef))) { notify?.("Ce numéro est déjà désabonné"); return; }
+    persist({ ...data, desabonnesMarketing: [clef, ...deja] });
+    setNumeroADesabonner("");
+    notify?.("Numéro retiré des campagnes");
+  }
+  function reabonner(telephone) {
+    persist({ ...data, desabonnesMarketing: (data.desabonnesMarketing || []).filter((t) => clefTelephone(t) !== clefTelephone(telephone)) });
+  }
+
+  async function exporterSegment() {
+    const XLSX = await loadXLSXLib();
+    const entetes = ["Nom", "Téléphone", "Pays", "E-mail", "Envois"];
+    const rangs = destinataires.map((c) => [c.nom, c.telephone, c.paysNom, c.email, c.envois]);
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.aoa_to_sheet([["BA-DIABY EXPRESS — Segment de campagne"], [`Généré le ${new Date().toLocaleDateString("fr-FR")}`], [], entetes, ...rangs]);
+    ws["!cols"] = entetes.map(() => ({ wch: 24 }));
+    XLSX.utils.book_append_sheet(wb, ws, "Segment");
+    XLSX.writeFile(wb, `campagne-segment-${new Date().toISOString().slice(0, 10)}.xlsx`);
+  }
+
+  const carteStyle = { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 18, marginBottom: 16 };
+
+  return (
+    <div>
+      <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 16px", marginBottom: 16, fontSize: 12.5, color: "var(--text)" }}>
+        Une campagne part vers de vraies personnes et se facture à chaque message. Les clients de vos
+        partenaires n’y figurent jamais — leur fichier reste le leur. Un client désabonné est exclu
+        même si son pays est coché.
+        <br /><br />
+        <strong>WhatsApp</strong> exige un modèle promotionnel approuvé par Meta ({MODELE_PROMO_WHATSAPP.nom},
+        catégorie {MODELE_PROMO_WHATSAPP.categorie}) : tant qu’il n’est pas validé, les envois échoueront
+        et l’écran vous le dira. L’<strong>e-mail</strong>, lui, fonctionne dès maintenant.
+      </div>
+
+      <div style={carteStyle}>
+        <div style={{ fontWeight: 700, fontSize: 14, color: "var(--text)", marginBottom: 4 }}>1. À qui écrivez-vous ?</div>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>
+          {audience.length} client(s) dans la base, répartis par indicatif téléphonique.
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(210px,1fr))", gap: 10 }}>
+          {segments.map((s) => {
+            const actif = choisis.includes(s.cle);
+            return (
+              <button key={s.cle} onClick={() => basculerSegment(s.cle)} aria-pressed={actif}
+                style={{ textAlign: "left", padding: "11px 13px", borderRadius: 11, cursor: "pointer",
+                         border: "1.5px solid " + (actif ? "var(--brand-solid)" : "var(--border)"),
+                         background: actif ? "var(--brand-soft, var(--surface2))" : "var(--surface2)" }}>
+                <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{s.drapeau} {s.nom}</div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
+                  {s.total} client{s.total > 1 ? "s" : ""} · {s.avecEmail} avec e-mail
+                  {s.desabonnes > 0 ? ` · ${s.desabonnes} désabonné(s)` : ""}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+        {segments.some((s) => s.cle === SEGMENT_SANS_INDICATIF) && (
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 10 }}>
+            Les numéros sans indicatif ne peuvent pas être joints sur WhatsApp — seul l’e-mail leur parvient.
+          </div>
+        )}
+      </div>
+
+      <div style={carteStyle}>
+        <div style={{ fontWeight: 700, fontSize: 14, color: "var(--text)", marginBottom: 10 }}>2. Par quel canal ?</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {[["email", "E-mail"], ["whatsapp", "WhatsApp"], ["les_deux", "Les deux"]].map(([k, label]) => (
+            <button key={k} onClick={() => setCanal(k)}
+              style={{ padding: "8px 16px", borderRadius: 20, cursor: "pointer", fontSize: 13, fontWeight: 700,
+                       border: "1.5px solid " + (canal === k ? "var(--brand-solid)" : "var(--border)"),
+                       background: canal === k ? "var(--brand-solid)" : "var(--surface)",
+                       color: canal === k ? "#fff" : "var(--muted)" }}>{label}</button>
+          ))}
+        </div>
+      </div>
+
+      {(canal === "whatsapp" || canal === "les_deux") && (
+        <div style={{ ...carteStyle, borderColor: "var(--warn-border)", background: "var(--warn-bg)" }}>
+          <div style={{ fontWeight: 700, fontSize: 13.5, color: "var(--text)", marginBottom: 6 }}>
+            Le modèle à déposer chez Meta, une fois pour toutes
+          </div>
+          <div style={{ fontSize: 12, color: "var(--text)", marginBottom: 10, lineHeight: 1.55 }}>
+            Gestionnaire WhatsApp → Modèles de message → Créer. Nom exact&nbsp;: <strong>{MODELE_PROMO_WHATSAPP.nom}</strong>,
+            catégorie <strong>{MODELE_PROMO_WHATSAPP.categorie}</strong>, langue <strong>Français</strong>.
+            Recopiez le corps tel quel — les trois variables sont remplies par cet écran (nom du client,
+            votre offre, l’échéance). Ajoutez un bouton « {MODELE_PROMO_WHATSAPP.bouton} » de type URL
+            pointant vers {lien}.
+          </div>
+          <pre style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: 12, fontSize: 12, color: "var(--text)", whiteSpace: "pre-wrap", margin: 0, fontFamily: "ui-monospace, monospace" }}>
+{MODELE_PROMO_WHATSAPP.corps}
+          </pre>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8 }}>
+            Pied de page du modèle : « {MODELE_PROMO_WHATSAPP.pied} »
+          </div>
+        </div>
+      )}
+
+      <div style={carteStyle}>
+        <div style={{ fontWeight: 700, fontSize: 14, color: "var(--text)", marginBottom: 10 }}>3. Votre message</div>
+        {(canal === "email" || canal === "les_deux") && (
+          <Field label="Objet de l’e-mail"><input value={objet} onChange={(e) => setObjet(e.target.value)} style={inputStyle} /></Field>
+        )}
+        <Field label="L’offre, en quelques lignes">
+          <textarea value={offre} onChange={(e) => setOffre(e.target.value)} rows={4}
+            placeholder="ex : -20 % sur tous les envois Paris → Conakry jusqu’à la fin du mois."
+            style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }} />
+        </Field>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+          <Field label="Valable jusqu’au"><input value={echeance} onChange={(e) => setEcheance(e.target.value)} placeholder="ex : 30 septembre" style={inputStyle} /></Field>
+          <Field label="Lien du site"><input value={lien} onChange={(e) => setLien(e.target.value)} style={inputStyle} /></Field>
+        </div>
+        <div style={{ background: "var(--surface2)", borderRadius: 10, padding: 14, marginTop: 6 }}>
+          <div style={{ fontSize: 11.5, fontWeight: 700, color: "var(--muted)", marginBottom: 8 }}>APERÇU</div>
+          <div style={{ fontSize: 13, color: "var(--text)", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>
+            {`Bonjour ${destinataires[0]?.nom || "Fatoumata Bah"},\n\n${offre || "…"}\n\nOffre valable jusqu’au ${echeance || "…"}. Passez en agence ou écrivez-nous, nous nous occupons du reste.\n${lien}`}
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8 }}>{MODELE_PROMO_WHATSAPP.pied}</div>
+        </div>
+      </div>
+
+      <div style={carteStyle}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: 19, fontWeight: 700, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif" }}>
+              {destinataires.length} destinataire{destinataires.length > 1 ? "s" : ""}
+            </div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>
+              dont {avecEmail} avec une adresse e-mail
+              {desabonnesTotal > 0 ? ` · ${desabonnesTotal} désabonné(s) exclu(s)` : ""}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <button onClick={exporterSegment} disabled={destinataires.length === 0}
+              style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "10px 15px", fontSize: 13, fontWeight: 700, cursor: destinataires.length ? "pointer" : "not-allowed" }}>
+              <Download size={15} /> Exporter la liste
+            </button>
+            <button onClick={() => setConfirmation(true)} disabled={!pret || !!envoi}
+              style={{ display: "flex", alignItems: "center", gap: 6, background: pret && !envoi ? "var(--brand-solid)" : "var(--surface2)", color: pret && !envoi ? "#fff" : "var(--muted)", border: "none", borderRadius: 9, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: pret && !envoi ? "pointer" : "not-allowed" }}>
+              <MessageCircle size={15} /> Envoyer la campagne
+            </button>
+          </div>
+        </div>
+
+        {envoi && (
+          <div style={{ marginTop: 16 }}>
+            <div style={{ height: 8, borderRadius: 8, background: "var(--surface2)", overflow: "hidden" }}>
+              <div style={{ height: "100%", width: `${Math.round((envoi.faits / Math.max(envoi.total, 1)) * 100)}%`, background: "var(--brand-solid)", transition: "width .2s" }} />
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 8 }}>
+              <span style={{ fontSize: 12.5, color: "var(--muted)" }}>
+                {envoi.faits} / {envoi.total} — {envoi.envoyes} envoyé(s), {envoi.echecs} échec(s)
+              </span>
+              <button onClick={() => { arretRef.current = true; }}
+                style={{ background: "none", border: "1px solid var(--danger-border, var(--border))", color: "var(--danger-fg)", borderRadius: 8, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                Arrêter
+              </button>
+            </div>
+          </div>
+        )}
+
+        {bilan && (
+          <div style={{ marginTop: 16, background: bilan.echecs > 0 ? "var(--warn-bg)" : "var(--ok-bg)", borderRadius: 10, padding: 14 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>
+              {bilan.envoyes} message(s) envoyé(s) sur {bilan.destinataires}{bilan.interrompue ? " — campagne interrompue" : ""}
+            </div>
+            {bilan.raisons.length > 0 && (
+              <ul style={{ margin: "8px 0 0", paddingLeft: 18, fontSize: 12, color: "var(--muted)" }}>
+                {bilan.raisons.map(([raison, n]) => <li key={raison}>{raison} ({n})</li>)}
+              </ul>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div style={carteStyle}>
+        <div style={{ fontWeight: 700, fontSize: 14, color: "var(--text)", marginBottom: 4 }}>Désinscriptions</div>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>
+          Un client qui demande à ne plus recevoir d’offres — par WhatsApp, par mail ou au comptoir —
+          se retire ici. Il restera exclu de toutes les campagnes, quel que soit le pays coché.
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+          <input value={numeroADesabonner} onChange={(e) => setNumeroADesabonner(e.target.value)}
+            placeholder="+224620000000" style={{ ...inputStyle, marginBottom: 0, maxWidth: 240 }} />
+          <button onClick={() => desabonner(numeroADesabonner)}
+            style={{ background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 9, padding: "10px 15px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+            Désabonner
+          </button>
+        </div>
+        {(data.desabonnesMarketing || []).length === 0
+          ? <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Personne n’est désabonné pour l’instant.</div>
+          : (data.desabonnesMarketing || []).map((t) => (
+            <div key={t} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 0", borderTop: "1px solid var(--border)" }}>
+              <span style={{ fontSize: 13, color: "var(--text)" }}>{t}</span>
+              <button onClick={() => reabonner(t)} style={{ background: "none", border: "none", color: "var(--info-fg)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>Réinscrire</button>
+            </div>
+          ))}
+      </div>
+
+      {campagnes.length > 0 && (
+        <div style={carteStyle}>
+          <div style={{ fontWeight: 700, fontSize: 14, color: "var(--text)", marginBottom: 10 }}>Campagnes précédentes</div>
+          {campagnes.slice(0, 10).map((c) => (
+            <div key={c.id} style={{ padding: "9px 0", borderTop: "1px solid var(--border)" }}>
+              <div style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>{c.objet || c.offre?.slice(0, 60)}</div>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                {new Date(c.date).toLocaleString("fr-FR")} · {c.canal} · {c.envoyes}/{c.destinataires} envoyés
+                {c.echecs > 0 ? ` · ${c.echecs} échec(s)` : ""} · par {c.par}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {confirmation && (
+        <ConfirmerAction
+          titre={`Envoyer à ${destinataires.length} client(s) ?`}
+          message={`${canal === "email" ? "Par e-mail" : canal === "whatsapp" ? "Par WhatsApp" : "Par e-mail et WhatsApp"} — segments : ${choisis.join(", ")}.`}
+          consequence="Chaque message est facturé et ne peut pas être rappelé une fois parti. Vous pourrez arrêter l’envoi en cours de route, mais pas revenir sur ceux déjà partis."
+          libelleAction="Envoyer"
+          onConfirmer={lancer}
+          onAnnuler={() => setConfirmation(null)}
+        />
+      )}
+    </div>
+  );
+}
+
 function PaiementsPage({ data, notify }) {
   const [filter, setFilter] = useState("tous");
   /*
@@ -17542,7 +18161,15 @@ function genNumeroRemise(remisesExistantes, rang) {
  * dans la devise des billets. Le repli manuel (sans autoTable) est là pour la même raison que
  * sur les autres documents : le plugin vient d'un CDN et peut ne pas se charger.
  */
-function dessinerBonRemise(doc, remise, lignes, hasAutoTable) {
+/*
+ * Le bon de remise en caisse, en UNE devise.
+ *
+ * Il portait auparavant chaque encaissement dans la monnaie où il avait été reçu, puis un total
+ * à plusieurs têtes (« 300 000 GNF · 58,00 EUR ») et enfin un équivalent en euro : trois chiffres
+ * pour une seule somme, que ni l'agent ni le comptable ne pouvaient pointer. Tout est désormais
+ * converti dans la devise choisie à l'écran, et le taux appliqué est écrit sur le bon.
+ */
+function dessinerBonRemise(doc, remise, lignes, hasAutoTable, devise = "GNF") {
   const INK = [26, 30, 38], MUTED = [122, 130, 142], RED = [214, 39, 63], NAVY = [10, 38, 71];
   let y = 20;
   doc.addImage(DEFAULT_LOGO, "PNG", 14, y - 6, 16, 16);
@@ -17576,10 +18203,10 @@ function dessinerBonRemise(doc, remise, lignes, hasAutoTable) {
   });
   y += 6;
 
-  const head = ["Date", "N° de suivi", "Client", "Site", "Montant"];
+  const head = ["Date", "N° de suivi", "Client", "Site", `Montant (${devise})`];
   const body = lignes.map((l) => [
     new Date(l.date).toLocaleDateString("fr-FR"), l.tracking, l.client, l.site,
-    formaterDevises({ [l.deviseSaisie]: l.montantSaisi }),
+    fmt(l.montant, devise),
   ]);
   if (hasAutoTable && doc.autoTable && body.length > 0) {
     doc.autoTable({
@@ -17613,10 +18240,12 @@ function dessinerBonRemise(doc, remise, lignes, hasAutoTable) {
   doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, 16, "F");
   doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(...NAVY);
   doc.text("Montant remis en espèces", 18, y + 10);
-  doc.text(formaterDevises(remise.devises), 192, y + 10, { align: "right" });
+  doc.text(fmt(remise.totalEUR, devise), 192, y + 10, { align: "right" });
   y += 24;
   doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
-  doc.text(`Équivalent : ${fmt(remise.totalEUR, "EUR")} — seules les espèces figurent sur ce bon.`, 14, y);
+  const taux = LIVE_RATES[devise] || CURRENCIES[devise] || 1;
+  const mention = devise === "EUR" ? "" : ` (1 EUR = ${taux.toLocaleString("fr-FR")} ${devise})`;
+  doc.text(`Montants convertis en ${devise}${mention} — seules les espèces figurent sur ce bon.`, 14, y);
   y += 16;
 
   doc.setFontSize(9); doc.setTextColor(90, 100, 120);
@@ -17671,6 +18300,13 @@ function CaissePage({ data, persist, session, notify }) {
   const [remiseAAnnuler, setRemiseAAnnuler] = useState(null);
   // Encaissement dont on corrige le destinataire ({ ligne, nom }), et son motif.
   const [aReattribuer, setAReattribuer] = useState(null);
+  /*
+   * La devise dans laquelle les bons de remise sont ÉDITÉS. L'écran continue d'afficher les
+   * devises réellement encaissées — l'agent rend des billets. Mais la feuille A4 qui se signe,
+   * elle, ne porte qu'un seul total : deux monnaies côte à côte sur un bon, cela ne se pointe pas.
+   * Le franc guinéen par défaut, c'est la caisse de Conakry.
+   */
+  const [deviseBon, setDeviseBon] = useState("GNF");
 
   const agentActif = voitTousLesAgents ? agentFiltre : (monNom || "Non renseigné");
   const remises = data.remisesCaisse || [];
@@ -17835,7 +18471,7 @@ function CaissePage({ data, persist, session, notify }) {
       const hasAutoTable = await ensureAutoTable();
       listeRemises.forEach((r, i) => {
         if (i > 0) doc.addPage();
-        dessinerBonRemise(doc, r, r.lignesPdf || lignesDeRemise(r), hasAutoTable);
+        dessinerBonRemise(doc, r, r.lignesPdf || lignesDeRemise(r), hasAutoTable, deviseBon);
       });
       openPdf(doc, `bon-remise-${listeRemises.map((r) => r.numero).join("-")}-${new Date().toISOString().slice(0, 10)}.pdf`);
     } catch (e) {
@@ -18044,6 +18680,18 @@ function CaissePage({ data, persist, session, notify }) {
           <div>
             <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Rechercher</div>
             <input value={recherche} onChange={(e) => setRecherche(e.target.value)} placeholder="N° de suivi, client, référence" style={inputStyle} />
+          </div>
+          {/*
+            * Un bon de remise portait autant de totaux que de devises encaissées — « 300 000 GNF ·
+            * 58,00 EUR », plus un équivalent en euro en bas de page. Trois chiffres pour une seule
+            * somme d'argent : impossible à pointer. Le bon s'édite désormais dans UNE devise, celle
+            * que choisit ici l'agent ou le comptable ; tout y est converti au taux du jour.
+            */}
+          <div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: "var(--muted)", marginBottom: 5 }}>Éditer les bons en</div>
+            <select value={deviseBon} onChange={(e) => setDeviseBon(e.target.value)} style={inputStyle}>
+              {Object.keys(CURRENCIES).map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
           </div>
         </div>
       </div>
@@ -18492,13 +19140,13 @@ function encaissementsParAgent(colisInclus, users, remises) {
       const pays = paysDuPaiement(p, c, users);
       const cle = `${agent}@${pays || "?"}`;
       if (!groupes.has(cle)) {
-        groupes.set(cle, { agent, pays, lieu: villeDuPays(pays), totalEUR: 0, devises: {}, verse: {}, aVerser: {}, aVerserEUR: 0 });
+        groupes.set(cle, { agent, pays, lieu: villeDuPays(pays), totalEUR: 0, devises: {}, verse: {}, aVerser: {}, aVerserEUR: 0, verseEUR: 0 });
       }
       const g = groupes.get(cle);
       g.totalEUR += Number(p.montant) || 0;
       ajouterDevise(g.devises, devise, montantSaisi);
       if ((p.mode || MODE_ESPECES) === MODE_ESPECES) {
-        if (remis.has(clePaiement(c.tracking, p, i))) ajouterDevise(g.verse, devise, montantSaisi);
+        if (remis.has(clePaiement(c.tracking, p, i))) { ajouterDevise(g.verse, devise, montantSaisi); g.verseEUR += Number(p.montant) || 0; }
         else { ajouterDevise(g.aVerser, devise, montantSaisi); g.aVerserEUR += Number(p.montant) || 0; }
       }
     });
@@ -18510,9 +19158,11 @@ function encaissementsParAgent(colisInclus, users, remises) {
   const parLieu = new Map();
   lignes.forEach((l) => {
     const cle = l.pays || "?";
-    if (!parLieu.has(cle)) parLieu.set(cle, { pays: l.pays, lieu: l.lieu, totalEUR: 0, devises: {}, aVerser: {} });
+    if (!parLieu.has(cle)) parLieu.set(cle, { pays: l.pays, lieu: l.lieu, totalEUR: 0, devises: {}, aVerser: {}, aVerserEUR: 0, verseEUR: 0 });
     const g = parLieu.get(cle);
     g.totalEUR += l.totalEUR;
+    g.aVerserEUR += l.aVerserEUR;
+    g.verseEUR += l.verseEUR;
     Object.entries(l.devises).forEach(([d, v]) => ajouterDevise(g.devises, d, v));
     Object.entries(l.aVerser).forEach(([d, v]) => ajouterDevise(g.aVerser, d, v));
   });
@@ -18573,8 +19223,21 @@ function statutPaiementColis(c) {
  * Elle reprend les colis embarqués, les dépenses engagées et le résultat, avec une ligne de
  * signature : c'est ce document qu'on valide, et à partir duquel les colis sortent du pool des
  * voyages à venir.
+ *
+ * UNE SEULE DEVISE, UNE SEULE FEUILLE
+ * ----------------------------------
+ * La fiche mélangeait auparavant trois monnaies dans la même page : le tableau des colis en
+ * euros, les encaissements dans la devise réellement reçue (« 300 000 GNF · 58,00 EUR »), les
+ * dépenses en francs, et une phrase de bas de page qui reconvertissait le tout en GNF. Quatre
+ * chiffres pour une même somme, qu'aucun comptable ne peut rapprocher. Tout est désormais
+ * converti dans la devise choisie à l'écran — GNF, EUR, USD… — et le taux appliqué est écrit
+ * dessus.
+ *
+ * Et elle débordait sur une seconde page dès une dizaine de colis : le panneau de résultat et la
+ * signature, qui ne se coupent pas, basculaient seuls au verso. Les espacements ont été resserrés
+ * pour qu'une rotation ordinaire — jusqu'à une vingtaine de colis — tienne sur une seule A4.
  */
-function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data) {
+function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data, devise = "GNF") {
   const INK = [26, 30, 38], MUTED = [122, 130, 142], RED = [214, 39, 63], NAVY = [10, 38, 71];
   const t = totauxVoyage(colisInclus, voyage.depenses, data?.users, data?.remisesCaisse);
   let y = 20;
@@ -18589,66 +19252,79 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data) {
     doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...RED);
     doc.text("BROUILLON", 196, y + 6, { align: "right" });
   }
-  y += 20;
+  y += 18;
   doc.setDrawColor(...RED); doc.setLineWidth(0.6); doc.line(14, y, 196, y);
-  y += 10;
+  y += 8;
 
   const infos = [
     ["Route", libelleVoyage(voyage.pays, voyage.direction)],
     ["Départ", voyage.dateDepart ? new Date(`${voyage.dateDepart}T00:00:00`).toLocaleDateString("fr-FR") : "—"],
     ["Colis embarqués", `${t.nbColis} · ${t.poids.toFixed(1)} kg · ${t.nbPayes} payés, ${t.nbPartiels} partiels, ${t.nbImpayes} impayés${t.nbPartenaires > 0 ? `, ${t.nbPartenaires} partenaire${t.nbPartenaires > 1 ? "s" : ""}` : ""}`],
   ];
-  doc.setFontSize(10);
+  doc.setFontSize(9.5);
   infos.forEach(([label, valeur]) => {
     doc.setFont(undefined, "bold"); doc.setTextColor(...INK); doc.text(label, 14, y);
     doc.setFont(undefined, "normal"); doc.text(String(valeur), 196, y, { align: "right" });
-    y += 6;
+    y += 5.5;
   });
-  y += 4;
+  y += 3;
 
-  const head = ["N° de suivi", "Destinataire", "Sens", "Poids", "Facturé", "Payé", "Reste"];
+  const head = ["N° de suivi", "Destinataire", "Sens", "Poids", `Facturé (${devise})`, `Payé (${devise})`, "Reste"];
   const body = colisInclus.map((c) => [
     c.tracking, c.destinataire || "—",
     (c.direction || "export") === "export" ? "Aller" : "Retour",
     `${(Number(c.poids) || 0).toFixed(1)} kg`,
     // Un colis partenaire n'a ni prix ni règlement chez nous : la fiche le dit, plutôt que
     // d'afficher des zéros qui se liraient comme un colis soldé.
-    estColisPartenaire(c) ? "—" : fmt(c.prix, "EUR"),
-    estColisPartenaire(c) ? "—" : fmt(c.paye, "EUR"),
-    estColisPartenaire(c) ? "Partenaire" : ((Number(c.reste) || 0) > 0 ? fmt(c.reste, "EUR") : "Payé"),
+    estColisPartenaire(c) ? "—" : fmt(c.prix, devise),
+    estColisPartenaire(c) ? "—" : fmt(c.paye, devise),
+    estColisPartenaire(c) ? "Partenaire" : ((Number(c.reste) || 0) > 0 ? fmt(c.reste, devise) : "Payé"),
   ]);
   if (hasAutoTable && doc.autoTable && body.length > 0) {
     doc.autoTable({
       startY: y, head: [head], body,
-      theme: "grid", headStyles: { fillColor: NAVY, textColor: 255, fontSize: 8 },
-      styles: { fontSize: 8, textColor: [40, 40, 40], overflow: "linebreak" },
-      columnStyles: { 0: { cellWidth: 26 }, 1: { cellWidth: 44 }, 2: { cellWidth: 16 }, 3: { cellWidth: 18 }, 4: { cellWidth: 26 }, 5: { cellWidth: 26 }, 6: { cellWidth: 26 } },
+      theme: "grid", headStyles: { fillColor: NAVY, textColor: 255, fontSize: 7.5 },
+      styles: { fontSize: 7.5, textColor: [40, 40, 40], overflow: "linebreak", cellPadding: 1.3 },
+      // Les trois colonnes d'argent sont calées à droite : c'est ainsi qu'on additionne de tête.
+      columnStyles: { 0: { cellWidth: 24 }, 1: { cellWidth: 42 }, 2: { cellWidth: 14 }, 3: { cellWidth: 16 },
+                      4: { cellWidth: 30, halign: "right" }, 5: { cellWidth: 28, halign: "right" }, 6: { cellWidth: 28, halign: "right" } },
       margin: { left: 14, right: 14 },
     });
-    y = doc.lastAutoTable.finalY + 8;
+    y = doc.lastAutoTable.finalY + 7;
   } else {
-    const colX = [14, 40, 84, 100, 118, 144, 170];
-    doc.setFontSize(8); doc.setTextColor(255, 255, 255); doc.setFillColor(...NAVY);
-    doc.rect(14, y, 182, 7, "F");
-    head.forEach((h, i) => doc.text(h, colX[i] + 1, y + 5));
-    y += 9;
-    doc.setTextColor(40, 40, 40);
+    /*
+     * Repli sans le greffon — celui qui imprime vraiment quand le CDN est hors d'atteinte.
+     * L'ancienne version posait la première ligne par-dessus la bande d'en-tête et coupait chaque
+     * cellule à vingt-deux caractères, ce qui décapitait les montants.
+     */
+    const largeurs = [24, 42, 14, 16, 30, 28, 28];
+    const colX = largeurs.reduce((acc, l) => [...acc, acc[acc.length - 1] + l], [14]);
+    doc.setFont(undefined, "bold"); doc.setFontSize(7.5); doc.setTextColor(255, 255, 255); doc.setFillColor(...NAVY);
+    doc.rect(14, y, 182, 6.5, "F");
+    head.forEach((h, i) => (i >= 4
+      ? doc.text(h, colX[i] + largeurs[i] - 1.5, y + 4.5, { align: "right" })
+      : doc.text(h, colX[i] + 1.5, y + 4.5)));
+    y += 6.5;
+    doc.setFont(undefined, "normal"); doc.setTextColor(40, 40, 40);
     body.forEach((row, i) => {
-      if (y > 250) { doc.addPage(); y = 20; }
-      if (i % 2 === 1) { doc.setFillColor(238, 243, 250); doc.rect(14, y - 4.5, 182, 6.5, "F"); }
-      doc.setFontSize(7.5);
-      row.forEach((cell, j) => doc.text(String(cell).slice(0, 22), colX[j] + 1, y));
-      y += 6.5;
+      const lignes = row.map((cell, j) => doc.splitTextToSize(String(cell), largeurs[j] - 3));
+      const hauteur = Math.max(...lignes.map((l) => l.length)) * 3.2 + 2.4;
+      if (y + hauteur > 272) { doc.addPage(); y = 20; }
+      if (i % 2 === 1) { doc.setFillColor(238, 243, 250); doc.rect(14, y, 182, hauteur, "F"); }
+      lignes.forEach((cellules, j) => cellules.forEach((ligne, k) => (j >= 4
+        ? doc.text(ligne, colX[j] + largeurs[j] - 1.5, y + 3.8 + k * 3.2, { align: "right" })
+        : doc.text(ligne, colX[j] + 1.5, y + 3.8 + k * 3.2))));
+      y += hauteur;
     });
-    y += 10;
+    y += 7;
   }
 
   // Où l'argent est réellement entré — le comptoir de Conakry et celui de l'escale n'ont pas la
   // même caisse, et sur un aller-retour les deux ont encaissé.
   if (y > 240) { doc.addPage(); y = 20; }
-  doc.setFont(undefined, "bold"); doc.setFontSize(10.5); doc.setTextColor(...INK);
+  doc.setFont(undefined, "bold"); doc.setFontSize(10); doc.setTextColor(...INK);
   doc.text("Encaissements — qui a reçu l’argent, qui doit verser", 14, y);
-  y += 7;
+  y += 6;
   // Une seule section : le total de chaque caisse, et sous chacune les agents qui l'ont alimentée
   // avec ce qu'ils doivent encore verser. C'est la partie qu'on relit avec chacun pour solder.
   const sauterSiBesoin = () => { if (y > 268) { doc.addPage(); y = 20; } };
@@ -18656,80 +19332,89 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data) {
     sauterSiBesoin();
     doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...INK);
     doc.text(`Encaissé à ${lieu.lieu}`, 16, y);
-    doc.text(formaterDevises(lieu.devises), 196, y, { align: "right" });
-    y += 6;
+    doc.text(fmt(lieu.totalEUR, devise), 196, y, { align: "right" });
+    y += 5.5;
     doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(90, 100, 115);
     t.encaissements.lignes.filter((l) => (l.pays || "?") === (lieu.pays || "?")).forEach((l) => {
       sauterSiBesoin();
-      const du = Object.values(l.aVerser).some((v) => Math.abs(v) >= 0.005) ? `à verser ${formaterDevises(l.aVerser)}` : "rien à verser";
-      const dejaVerse = Object.values(l.verse).some((v) => Math.abs(v) >= 0.005) ? ` · déjà versé ${formaterDevises(l.verse)}` : "";
+      const du = l.aVerserEUR > 0.005 ? `à verser ${fmt(l.aVerserEUR, devise)}` : "rien à verser";
+      const dejaVerse = l.verseEUR > 0.005 ? ` · déjà versé ${fmt(l.verseEUR, devise)}` : "";
       doc.text(`   ${l.agent}`, 16, y);
-      doc.text(`${formaterDevises(l.devises)} · ${du}${dejaVerse}`, 196, y, { align: "right" });
-      y += 5.5;
+      doc.text(`${fmt(l.totalEUR, devise)} · ${du}${dejaVerse}`, 196, y, { align: "right" });
+      y += 5;
     });
-    y += 2;
+    y += 1.5;
   });
   doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(60, 66, 78);
   if (t.encaissements.nonVentileEUR > 0.005) {
     sauterSiBesoin();
     doc.text("Sans détail de paiement", 16, y);
-    doc.text(fmt(t.encaissements.nonVentileEUR, "EUR"), 196, y, { align: "right" });
-    y += 6;
+    doc.text(fmt(t.encaissements.nonVentileEUR, devise), 196, y, { align: "right" });
+    y += 5.5;
   }
   sauterSiBesoin();
   doc.text("Reste à encaisser auprès des clients", 16, y);
-  doc.text(fmt(t.resteAEncaisser, "EUR"), 196, y, { align: "right" });
-  y += 10;
+  doc.text(fmt(t.resteAEncaisser, devise), 196, y, { align: "right" });
+  y += 8;
 
   if ((voyage.depenses || []).length > 0) {
     if (y > 235) { doc.addPage(); y = 20; }
-    doc.setFont(undefined, "bold"); doc.setFontSize(10.5); doc.setTextColor(...INK);
+    doc.setFont(undefined, "bold"); doc.setFontSize(10); doc.setTextColor(...INK);
     doc.text("Dépenses du voyage", 14, y);
-    y += 6;
+    y += 5.5;
     doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(60, 66, 78);
     voyage.depenses.forEach((d) => {
       if (y > 268) { doc.addPage(); y = 20; }
       doc.text(d.libelle || "Dépense", 16, y);
-      doc.text(`${fmt(versEUR(d.montant, d.devise), d.devise)}`, 196, y, { align: "right" });
-      y += 6;
+      // La dépense est ramenée à la devise de la fiche, comme tout le reste : une ligne en francs
+      // au milieu d'un document en euros ne s'additionne pas.
+      doc.text(fmt(versEUR(d.montant, d.devise), devise), 196, y, { align: "right" });
+      y += 5.5;
     });
-    y += 4;
+    y += 3;
   }
 
   // Le panneau de résultat et la signature ont besoin d'environ 58 mm : on ne les laisse jamais
   // déborder sous le pied de page.
   // Le panneau de résultat (34 mm), sa ligne d'explication et le bloc signature demandent environ
   // 80 mm : en dessous de cette marge ils passeraient sous le pied de page, invisibles à l'impression.
-  if (y > 205) { doc.addPage(); y = 20; }
-  doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, 34, "F");
+  /*
+   * Le panneau de résultat (32 mm), sa ligne d'explication et le bloc signature demandent environ
+   * 62 mm, pied de page compris. Au-delà de 224 mm, ils ne tiennent plus : c'est le seul endroit
+   * où l'on accepte une seconde page, et une rotation ordinaire n'y arrive pas.
+   */
+  if (y > 224) { doc.addPage(); y = 20; }
+  doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, 32, "F");
   doc.setFontSize(10); doc.setTextColor(...NAVY); doc.setFont(undefined, "bold");
-  doc.text("Recettes (chiffre d’affaires)", 18, y + 8);
-  doc.text(fmt(t.facture, "EUR"), 192, y + 8, { align: "right" });
+  doc.text("Recettes (chiffre d’affaires)", 18, y + 7.5);
+  doc.text(fmt(t.facture, devise), 192, y + 7.5, { align: "right" });
   doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
-  doc.text("Dépenses du voyage", 18, y + 15);
-  doc.text(`- ${fmt(t.depensesEUR, "EUR")}`, 192, y + 15, { align: "right" });
+  doc.text("Dépenses du voyage", 18, y + 14);
+  doc.text(`- ${fmt(t.depensesEUR, devise)}`, 192, y + 14, { align: "right" });
   doc.setFont(undefined, "bold"); doc.setFontSize(10.5);
   doc.setTextColor(...(t.resultat >= 0 ? [22, 161, 99] : [214, 39, 63]));
-  doc.text("Résultat sur le facturé", 18, y + 23);
-  doc.text(fmt(t.resultat, "EUR"), 192, y + 23, { align: "right" });
+  doc.text("Résultat sur le facturé", 18, y + 21.5);
+  doc.text(fmt(t.resultat, devise), 192, y + 21.5, { align: "right" });
   doc.setFontSize(12);
   doc.setTextColor(...(t.tresorerie >= 0 ? [22, 161, 99] : [214, 39, 63]));
-  doc.text("Bilan final (argent rentré)", 18, y + 31);
-  doc.text(fmt(t.tresorerie, "EUR"), 192, y + 31, { align: "right" });
-  y += 40;
+  doc.text("Bilan final (argent rentré)", 18, y + 29.5);
+  doc.text(fmt(t.tresorerie, devise), 192, y + 29.5, { align: "right" });
+  y += 37;
 
+  const tauxFiche = LIVE_RATES[devise] || CURRENCIES[devise] || 1;
   doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
-  doc.text(`Bilan final = encaissé ${fmt(t.encaisse, "EUR")} - dépenses ${fmt(t.depensesEUR, "EUR")}, soit ${fmtGNF(t.tresorerie * (LIVE_RATES.GNF || CURRENCIES.GNF))}.`, 14, y);
-  y += 14;
+  doc.text(`Bilan final = encaissé ${fmt(t.encaisse, devise)} - dépenses ${fmt(t.depensesEUR, devise)}.`
+    + (devise === "EUR" ? "" : ` Tous les montants sont en ${devise} (1 EUR = ${tauxFiche.toLocaleString("fr-FR")} ${devise}).`), 14, y);
+  y += 11;
   // Le pied de page est à 288 mm : la ligne de signature doit rester au-dessus.
-  if (y > 260) { doc.addPage(); y = 20; }
+  if (y > 262) { doc.addPage(); y = 20; }
   doc.setFontSize(9); doc.setTextColor(90, 100, 120);
   doc.text(voyage.valideeLe
     ? `Validée le ${new Date(voyage.valideeLe).toLocaleString("fr-FR")}${voyage.valideePar ? ` par ${voyage.valideePar}` : ""}`
     : "Fiche non encore validée", 14, y);
-  y += 8;
+  y += 7;
   doc.text("Signature du responsable :", 14, y);
-  doc.setDrawColor(180); doc.line(14, y + 12, 85, y + 12);
+  doc.setDrawColor(180); doc.line(14, y + 11, 85, y + 11);
 
   doc.setFontSize(7.3); doc.setTextColor(150, 150, 150);
   doc.text(`Édité le ${new Date().toLocaleString("fr-FR")} — Ba-Diaby Express`, 14, 288);
@@ -18758,6 +19443,12 @@ function VoyagesPage({ data, persist, session, notify }) {
   const [depLibelle, setDepLibelle] = useState("");
   const [depMontant, setDepMontant] = useState("");
   const [depDevise, setDepDevise] = useState("GNF");
+  /*
+   * La devise dans laquelle la fiche de voyage est ÉDITÉE. La saisie, elle, garde sa monnaie
+   * d'origine — une dépense payée en francs se saisit en francs. C'est le document imprimé qui
+   * doit parler d'une seule voix, pour qu'on puisse additionner ses colonnes.
+   */
+  const [deviseFiche, setDeviseFiche] = useState("GNF");
   const [recherche, setRecherche] = useState("");
   const [confirmation, setConfirmation] = useState(null);
   const [voyageASupprimer, setVoyageASupprimer] = useState(null);
@@ -18921,7 +19612,7 @@ function VoyagesPage({ data, persist, session, notify }) {
       const doc = preparerDocPdf(new jspdf.jsPDF());
       const hasAutoTable = await ensureAutoTable();
       const set = new Set(voyage.trackings || []);
-      dessinerFicheVoyage(doc, voyage, data.colis.filter((c) => set.has(c.tracking)), hasAutoTable, data);
+      dessinerFicheVoyage(doc, voyage, data.colis.filter((c) => set.has(c.tracking)), hasAutoTable, data, deviseFiche);
       openPdf(doc, `fiche-voyage-${voyage.numero}.pdf`);
     } catch (e) {
       console.error(e);
@@ -19318,6 +20009,21 @@ function VoyagesPage({ data, persist, session, notify }) {
         </div>
       )}
 
+      {/*
+        * La devise du document imprimé. Elle ne touche pas aux saisies — une dépense payée en
+        * francs reste saisie en francs — mais la fiche, elle, ne parlera que d'une seule monnaie.
+        */}
+      <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 12, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 12.5, color: "var(--muted)" }}>Éditer la fiche en :</span>
+        <select value={deviseFiche} onChange={(e) => setDeviseFiche(e.target.value)}
+          aria-label="Devise de la fiche de voyage" style={{ ...inputStyle, width: 110, marginBottom: 0 }}>
+          {Object.keys(CURRENCIES).map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <span style={{ fontSize: 11.5, color: "var(--muted)" }}>
+          Tous les montants du PDF — colis, encaissements, dépenses et bilan — seront convertis dans cette devise.
+        </span>
+      </div>
+
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 20 }}>
         {!enLecture ? (
           <>
@@ -19442,11 +20148,33 @@ function ComptabilitePage({ data, persist, session, notify }) {
     };
   }, [data.colis, depenses, data.sites, data.users, data.commissionConfig, data.categories, periode]);
 
-  function addDepense() {
-    if (!form.nom.trim() || !form.montant) return;
-    const entry = { id: `dep${Date.now()}`, type: form.type, nom: form.nom.trim(), montant: Number(form.montant) || 0, date: form.date || new Date().toISOString() };
-    persist({ ...data, depenses: [entry, ...depenses], activityLog: pushActivity(data, session, `${form.type} ajouté${form.type === "Dépense" ? "e" : ""}`, `${entry.nom} — ${fmtGNF(entry.montant)}`) });
-    notify?.(`${form.type} enregistré${form.type === "Dépense" ? "e" : ""}`);
+  /*
+   * Une écriture s'enregistre ET se corrige. Elle ne s'enregistre jamais à zéro en silence :
+   * un montant illisible arrête la saisie et se dit, au lieu de laisser une dépense réelle
+   * figurer dans les comptes pour 0 GNF.
+   */
+  const montantDuFormulaire = form ? montantSaisi(form.montant) : null;
+  function enregistrerDepense() {
+    const nom = (form.nom || "").trim();
+    if (!nom) { setForm({ ...form, erreur: "Donnez un libellé à cette écriture." }); return; }
+    if (montantDuFormulaire === null) { setForm({ ...form, erreur: "Montant illisible. Tapez le nombre, par exemple 500 000." }); return; }
+    if (montantDuFormulaire <= 0) { setForm({ ...form, erreur: "Le montant doit être supérieur à zéro." }); return; }
+    const montant = Math.round(montantDuFormulaire);
+    const date = form.date || new Date().toISOString();
+    if (form.id) {
+      const avant = depenses.find((d) => d.id === form.id);
+      persist({
+        ...data,
+        depenses: depenses.map((d) => (d.id === form.id ? { ...d, type: form.type, nom, montant, date } : d)),
+        activityLog: pushActivity(data, session, "Écriture corrigée",
+          `${nom} — ${fmtGNF(avant?.montant || 0)} → ${fmtGNF(montant)}`),
+      });
+      notify?.("Écriture corrigée");
+    } else {
+      const entry = { id: `dep${Date.now()}`, type: form.type, nom, montant, date };
+      persist({ ...data, depenses: [entry, ...depenses], activityLog: pushActivity(data, session, `${form.type} ajouté${form.type === "Dépense" ? "e" : ""}`, `${entry.nom} — ${fmtGNF(entry.montant)}`) });
+      notify?.(`${form.type} enregistré${form.type === "Dépense" ? "e" : ""}`);
+    }
     setForm(null);
   }
   const [depenseASupprimer, setDepenseASupprimer] = useState(null);
@@ -19669,9 +20397,15 @@ function ComptabilitePage({ data, persist, session, notify }) {
               <tr key={d.id} style={{ borderTop: "1px solid var(--border)" }}>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, whiteSpace: "nowrap" }}><span style={{ background: "var(--surface2)", color: "var(--text)", padding: "3px 10px", borderRadius: 20, fontWeight: 600 }}>{d.type}</span></td>
                 <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--text)", whiteSpace: "nowrap" }}>{d.nom}</td>
-                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" }}>{fmtGNF(d.montant)}</td>
+                {/* Une écriture à zéro est presque toujours une saisie perdue : on la signale au lieu de la ranger sagement. */}
+                <td style={{ padding: "12px 16px", fontSize: 13, color: d.montant > 0 ? "var(--muted)" : "var(--danger-fg)", fontWeight: d.montant > 0 ? 400 : 700, whiteSpace: "nowrap" }}>
+                  {fmtGNF(d.montant)}{d.montant > 0 ? "" : " — à corriger"}
+                </td>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{new Date(d.date).toLocaleDateString("fr-FR")}</td>
-                <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>{effectivePermission(session, "compta.gerer_depenses") && <button onClick={() => setDepenseASupprimer(d)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={14} /></button>}</td>
+                <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>{effectivePermission(session, "compta.gerer_depenses") && <>
+                  <button onClick={() => setForm({ id: d.id, type: d.type, nom: d.nom || "", montant: String(d.montant ?? ""), date: String(d.date || "").slice(0, 10), erreur: "" })} title="Modifier cette écriture" aria-label="Modifier cette écriture" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginRight: 6 }}><PenTool size={14} /></button>
+                  <button onClick={() => setDepenseASupprimer(d)} title="Supprimer cette écriture" aria-label="Supprimer cette écriture" style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={14} /></button>
+                </>}</td>
               </tr>
             ))}
             {depensesPeriode.length === 0 && <tr><td colSpan={5} style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucune dépense, salaire ou commission sur cette période.</td></tr>}
@@ -19681,7 +20415,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
       </div>
 
       {form && (
-        <Modal onClose={() => setForm(null)} title="Ajouter une écriture">
+        <Modal onClose={() => setForm(null)} title={form.id ? "Modifier l’écriture" : "Ajouter une écriture"}>
           <Field label="Type">
             <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })} style={inputStyle}>
               <option value="Dépense">Dépense</option>
@@ -19690,11 +20424,20 @@ function ComptabilitePage({ data, persist, session, notify }) {
             </select>
           </Field>
           <Field label="Libellé"><input value={form.nom} onChange={(e) => setForm({ ...form, nom: e.target.value })} style={inputStyle} placeholder="ex: Carburant, Salaire Ibrahima, Commission agent Paris" /></Field>
-          <Field label="Montant (GNF)"><input value={form.montant} onChange={(e) => setForm({ ...form, montant: e.target.value })} style={inputStyle} /></Field>
+          <Field label="Montant (GNF)">
+            <input value={form.montant} inputMode="numeric" onChange={(e) => setForm({ ...form, montant: e.target.value, erreur: "" })} style={inputStyle} placeholder="ex : 500 000" />
+            {/* On relit le montant à voix haute pendant la frappe : plus personne n'enregistre 0 sans le voir. */}
+            <div style={{ fontSize: 12, marginTop: 5, color: montantDuFormulaire > 0 ? "var(--ok-fg)" : "var(--muted)", fontWeight: montantDuFormulaire > 0 ? 700 : 500 }}>
+              {form.montant.trim() === "" ? "Espaces et points acceptés : 500 000, 500.000…"
+                : montantDuFormulaire === null ? "Montant illisible — tapez seulement le nombre."
+                : fmtGNF(montantDuFormulaire)}
+            </div>
+          </Field>
           <Field label="Date"><input type="date" value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} style={inputStyle} /></Field>
+          {form.erreur && <div style={{ background: "var(--danger-bg)", color: "var(--danger-fg)", borderRadius: 8, padding: "9px 12px", fontSize: 12.5, fontWeight: 600 }}>{form.erreur}</div>}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 8 }}>
             <button onClick={() => setForm(null)} style={{ padding: "9px 16px", borderRadius: 8, border: "1.5px solid var(--border)", background: "var(--surface2)", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>Annuler</button>
-            <button onClick={addDepense} style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
+            <button onClick={enregistrerDepense} style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
           </div>
         </Modal>
       )}
@@ -21967,6 +22710,498 @@ function ParametresSystemePage({ data, persist, notify, onBack, offline }) {
  * agrégé nulle part. Complète aussi qui a encaissé chaque paiement (paiements[].par), déjà
  * enregistré mais non plus jamais résumé par personne.
  */
+/* =============================================================================================
+ * LA FICHE DE POINTAGE
+ *
+ * Qui était là, quel jour, à quelles heures. C'est une pièce sociale : elle justifie un salaire,
+ * elle tranche une contestation, et elle peut être demandée.
+ *
+ * Elle est tenue À LA MAIN par le responsable, et c'est un choix. Un pointage que l'employé
+ * déclare lui-même depuis son téléphone ne prouve rien — il peut le faire depuis chez lui — et
+ * transforme chaque erreur de saisie en désaccord entre deux personnes. Ici, une seule personne
+ * écrit, et ce qu'elle écrit engage l'entreprise.
+ *
+ * L'écran est donc pensé pour que remplir un mois ne prenne pas une heure : on pré-remplit les
+ * jours ouvrés d'un geste, puis on ne corrige que les exceptions. C'est l'inverse de l'ordre
+ * naturel, et c'est ce qui rend la chose tenable — sur vingt-six jours ouvrés, les exceptions se
+ * comptent sur les doigts d'une main.
+ *
+ * POIDS : une journée pèse environ 140 octets. Cinq employés sur un mois complet, c'est une
+ * vingtaine de kilo-octets ; une année, environ deux cents. C'est peu au regard des images qu'on
+ * a sorties du document, mais ce n'est pas rien — d'où l'écran qui l'annonce, plutôt que de le
+ * laisser grossir en silence.
+ * ========================================================================================== */
+
+const STATUTS_POINTAGE = [
+  { cle: "present", label: "Présent", court: "P", bg: "var(--ok-bg)", fg: "var(--ok-fg)", heures: true },
+  { cle: "retard", label: "Retard", court: "R", bg: "var(--warn-bg)", fg: "var(--warn-fg)", heures: true },
+  { cle: "absent", label: "Absent", court: "A", bg: "var(--danger-bg)", fg: "var(--danger-fg)", heures: false, justifiable: true },
+  { cle: "conge", label: "Congé", court: "C", bg: "var(--info-bg)", fg: "var(--info-fg)", heures: false },
+  { cle: "maladie", label: "Maladie", court: "M", bg: "var(--surface2)", fg: "var(--muted)", heures: false },
+];
+const STATUT_POINTAGE = Object.fromEntries(STATUTS_POINTAGE.map((s) => [s.cle, s]));
+
+/*
+ * UNE ABSENCE EST NON JUSTIFIÉE TANT QU'ELLE N'A PAS ÉTÉ JUSTIFIÉE
+ *
+ * C'est la distinction qui compte sur une fiche de paie, et elle ne se devine pas : le défaut doit
+ * être « non justifiée ». Cocher une case pour justifier est un geste ; l'oublier ne doit pas
+ * transformer une absence sèche en absence excusée. L'ordre inverse serait confortable et faux.
+ *
+ * Congé et maladie sont justifiés par nature — ce sont d'autres états, pas des absences.
+ */
+function absenceJustifiee(entree) {
+  return entree?.statut === "absent" && entree.justifiee === true;
+}
+/** La lettre portée par la case : A pour une absence sèche, J quand elle est justifiée. */
+function lettrePointage(entree) {
+  if (!entree) return "";
+  if (entree.statut === "absent") return absenceJustifiee(entree) ? "J" : "A";
+  return STATUT_POINTAGE[entree.statut]?.court || "";
+}
+/** Les couleurs de la case. Une absence justifiée s'écarte du rouge : elle n'appelle pas la même suite. */
+function couleursPointage(entree) {
+  const s = STATUT_POINTAGE[entree?.statut];
+  if (!s) return null;
+  if (absenceJustifiee(entree)) return { bg: "var(--warn-bg)", fg: "var(--warn-fg)" };
+  return { bg: s.bg, fg: s.fg };
+}
+function libellePointage(entree) {
+  if (!entree) return "";
+  if (entree.statut === "absent") return absenceJustifiee(entree) ? "Absence justifiée" : "Absence NON justifiée";
+  return STATUT_POINTAGE[entree.statut]?.label || "";
+}
+
+/** L'horaire de référence, celui du pré-remplissage. Modifiable, et conservé avec la fiche. */
+const HORAIRE_POINTAGE_DEFAUT = { arrivee: "08:00", depart: "18:00" };
+
+/*
+ * Qui figure sur la fiche : l'équipe salariée.
+ *
+ * Les partenaires en sont exclus — ce sont des entreprises tierces, pas des employés, et leurs
+ * propres accès relèvent de leur contrat, pas du nôtre.
+ */
+function equipeSalariee(data) {
+  return (data?.users || [])
+    .filter((u) => u && u.role !== "Partenaire")
+    .sort((a, b) => `${a.prenom} ${a.nom}`.localeCompare(`${b.prenom} ${b.nom}`, "fr"));
+}
+
+function nomComplet(u) {
+  return `${u?.prenom || ""} ${u?.nom || ""}`.trim() || u?.identifiant || "Sans nom";
+}
+
+const MOIS_FR = ["janvier", "février", "mars", "avril", "mai", "juin",
+  "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
+
+function cleJour(annee, mois, jour) {
+  return `${annee}-${String(mois).padStart(2, "0")}-${String(jour).padStart(2, "0")}`;
+}
+function joursDuMois(annee, mois) {
+  return Array.from({ length: new Date(annee, mois, 0).getDate() }, (_, i) => i + 1);
+}
+/** 0 = dimanche. La semaine de travail va du lundi au samedi, comme les horaires des agences. */
+function estJourOuvre(date) {
+  return new Date(`${date}T12:00:00`).getDay() !== 0;
+}
+function minutesDe(heure) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(heure || "").trim());
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+}
+/**
+ * Les minutes travaillées dans une journée.
+ *
+ * Un départ antérieur à l'arrivée n'est pas une journée négative : c'est une saisie inversée, ou
+ * une équipe de nuit. On compte alors jusqu'au lendemain plutôt que de retrancher des heures.
+ */
+function minutesTravaillees(entree) {
+  if (!entree || !STATUT_POINTAGE[entree.statut]?.heures) return 0;
+  const debut = minutesDe(entree.arrivee);
+  const fin = minutesDe(entree.depart);
+  if (debut === null || fin === null) return 0;
+  return fin >= debut ? fin - debut : fin + 1440 - debut;
+}
+function formatHeures(minutes) {
+  if (!minutes) return "—";
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m ? `${h} h ${String(m).padStart(2, "0")}` : `${h} h`;
+}
+
+/** Le total d'un employé sur le mois : ce qui se reporte sur une fiche de paie. */
+function totalPointage(entrees) {
+  const total = { jours: 0, retards: 0, absences: 0, absencesJustifiees: 0, conges: 0, maladies: 0, minutes: 0 };
+  entrees.forEach((e) => {
+    if (e.statut === "present" || e.statut === "retard") total.jours++;
+    if (e.statut === "retard") total.retards++;
+    if (e.statut === "absent") { if (absenceJustifiee(e)) total.absencesJustifiees++; else total.absences++; }
+    if (e.statut === "conge") total.conges++;
+    if (e.statut === "maladie") total.maladies++;
+    total.minutes += minutesTravaillees(e);
+  });
+  return total;
+}
+
+function PointagePage({ data, persist, notify, onBack }) {
+  const maintenant = new Date();
+  const [mois, setMois] = useState(() => `${maintenant.getFullYear()}-${String(maintenant.getMonth() + 1).padStart(2, "0")}`);
+  const [cellule, setCellule] = useState(null);
+  const [horaireOuvert, setHoraireOuvert] = useState(false);
+
+  const [annee, moisNum] = mois.split("-").map(Number);
+  const jours = joursDuMois(annee, moisNum);
+  const equipe = equipeSalariee(data);
+  const entrees = data.pointages || [];
+  const horaire = data.pointageHoraire || HORAIRE_POINTAGE_DEFAUT;
+  const isoAujourdhui = cleJour(maintenant.getFullYear(), maintenant.getMonth() + 1, maintenant.getDate());
+
+  const parCle = new Map();
+  entrees.forEach((e) => { if (e && e.userId && e.date) parCle.set(`${e.userId}|${e.date}`, e); });
+  const entreeDe = (userId, date) => parCle.get(`${userId}|${date}`) || null;
+  const duMois = (userId) => entrees.filter((e) => e.userId === userId && String(e.date || "").startsWith(mois));
+
+  function changerMois(pas) {
+    const d = new Date(annee, moisNum - 1 + pas, 1);
+    setMois(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+  }
+
+  /*
+   * Une journée s'écrit sous une clé stable — l'employé et la date. Elle sert d'identité pour la
+   * fusion hors ligne, et empêche par construction deux lignes pour le même jour.
+   */
+  function poserJournee(userId, date, patch) {
+    const autres = entrees.filter((e) => !(e.userId === userId && e.date === date));
+    if (!patch) {
+      persist({ ...data, pointages: autres });
+      notify?.("Journée effacée");
+      return;
+    }
+    const ancienne = entreeDe(userId, date) || {};
+    const journee = { ...ancienne, ...patch, id: `${userId}-${date}`, userId, date };
+    if (!STATUT_POINTAGE[journee.statut]?.heures) { delete journee.arrivee; delete journee.depart; }
+    // Quitter l'absence emporte sa justification : elle ne veut plus rien dire ailleurs.
+    if (journee.statut !== "absent") delete journee.justifiee;
+    persist({ ...data, pointages: [...autres, journee] });
+  }
+
+  /*
+   * Le pré-remplissage : tous les jours ouvrés du mois, présents à l'horaire de référence.
+   *
+   * Il ne remplace JAMAIS une journée déjà saisie — sans quoi une seconde pression effacerait les
+   * corrections qu'on vient de faire — et ne va pas au-delà d'aujourd'hui : personne ne peut
+   * constater une présence qui n'a pas encore eu lieu.
+   */
+  function preRemplir() {
+    const ajouts = [];
+    equipe.forEach((u) => {
+      jours.forEach((j) => {
+        const date = cleJour(annee, moisNum, j);
+        if (date > isoAujourdhui || !estJourOuvre(date) || entreeDe(u.id, date)) return;
+        ajouts.push({ id: `${u.id}-${date}`, userId: u.id, date, statut: "present",
+          arrivee: horaire.arrivee, depart: horaire.depart });
+      });
+    });
+    if (!ajouts.length) { notify?.("Rien à pré-remplir : ces journées sont déjà saisies."); return; }
+    persist({ ...data, pointages: [...entrees, ...ajouts] });
+    notify?.(`${ajouts.length} journée(s) pré-remplie(s) — corrigez les exceptions`);
+  }
+
+  function effacerLeMois() {
+    const restantes = entrees.filter((e) => !String(e.date || "").startsWith(mois));
+    persist({ ...data, pointages: restantes });
+    notify?.(`Pointage de ${MOIS_FR[moisNum - 1]} ${annee} effacé`);
+  }
+
+  async function exporterPdf() {
+    try {
+      const jspdf = await loadJsPDF();
+      await ensureAutoTable();
+      const doc = preparerDocPdf(new jspdf.jsPDF({ orientation: "landscape" }));
+      if (!doc.autoTable) { notify?.("Le tableau PDF n’a pas pu être chargé — réessayez avec une connexion."); return; }
+      const marque = data.branding?.nom || "Ba-Diaby Express";
+      doc.setFontSize(15); doc.text(`Fiche de pointage — ${MOIS_FR[moisNum - 1]} ${annee}`, 14, 16);
+      doc.setFontSize(10); doc.setTextColor(110);
+      doc.text(marque, 14, 22);
+      doc.text("P présent · R retard · A absence non justifiée · J absence justifiée · C congé · M maladie", 14, 27);
+      doc.setTextColor(0);
+      doc.autoTable({
+        startY: 32,
+        head: [["Employé", ...jours.map(String), "Jours", "Heures", "Abs. NJ"]],
+        body: equipe.map((u) => {
+          const t = totalPointage(duMois(u.id));
+          return [
+            nomComplet(u),
+            ...jours.map((j) => lettrePointage(entreeDe(u.id, cleJour(annee, moisNum, j)))),
+            String(t.jours),
+            formatHeures(t.minutes).replace("—", ""),
+            t.absences ? String(t.absences) : "",
+          ];
+        }),
+        styles: { fontSize: 6.5, cellPadding: 1, halign: "center" },
+        headStyles: { fillColor: [10, 38, 71], fontSize: 6.5 },
+        columnStyles: { 0: { cellWidth: 42, halign: "left" } },
+        margin: { left: 14, right: 14 },
+      });
+      const y = (doc.lastAutoTable?.finalY || 120) + 14;
+      doc.setFontSize(9); doc.setTextColor(110);
+      doc.text("Signature du responsable :", 14, y);
+      doc.text("Signature de l’employé :", 150, y);
+      doc.setDrawColor(180);
+      doc.line(60, y, 130, y); doc.line(196, y, 266, y);
+      openPdf(doc, `pointage-${mois}.pdf`);
+    } catch (e) {
+      console.error(e);
+      notify?.("La fiche PDF n’a pas pu être produite.");
+    }
+  }
+
+  const poidsFiche = new Blob([JSON.stringify(entrees)]).size;
+  const saisiesDuMois = entrees.filter((e) => String(e.date || "").startsWith(mois)).length;
+
+  const celluleStatut = cellule ? entreeDe(cellule.userId, cellule.date) : null;
+
+  return (
+    <div>
+      <ConfigPageHeader title="Fiche de pointage"
+        desc="Qui était là, quel jour, à quelles heures. Remplie par vous, imprimable et signable."
+        onBack={onBack} />
+
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
+        <button onClick={() => changerMois(-1)} title="Mois précédent" aria-label="Mois précédent" style={{ ...smallBtn, padding: "9px 12px" }}><ChevronLeft size={15} /></button>
+        <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", minWidth: 150, textAlign: "center" }}>
+          {MOIS_FR[moisNum - 1]} {annee}
+        </div>
+        <button onClick={() => changerMois(1)} title="Mois suivant" aria-label="Mois suivant" style={{ ...smallBtn, padding: "9px 12px" }}><ChevronRight size={15} /></button>
+        <div style={{ flex: 1 }} />
+        <button onClick={preRemplir} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+          <Check size={15} /> Pré-remplir les jours ouvrés
+        </button>
+        <button onClick={exporterPdf} style={{ ...smallBtn, display: "flex", alignItems: "center", gap: 6, padding: "10px 16px" }}>
+          <Printer size={15} /> Fiche PDF
+        </button>
+      </div>
+
+      <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 16px", marginBottom: 16, fontSize: 12.5, color: "var(--muted)", lineHeight: 1.55 }}>
+        Appuyez sur <b>Pré-remplir</b> : tous les jours ouvrés jusqu’à aujourd’hui passent à « présent »
+        de {horaire.arrivee} à {horaire.depart}. Il ne vous reste qu’à corriger les exceptions — une journée
+        déjà saisie n’est jamais écrasée. Cliquez sur n’importe quelle case pour la modifier.
+        <div style={{ marginTop: 8, fontSize: 12 }}>
+          <b>P</b> présent · <b>R</b> retard · <b style={{ color: "var(--danger-fg)" }}>A</b> absence
+          non justifiée · <b style={{ color: "var(--warn-fg)" }}>J</b> absence justifiée ·
+          <b> C</b> congé · <b>M</b> maladie
+        </div>
+        <button onClick={() => setHoraireOuvert(true)} style={{ background: "none", border: "none", color: "var(--info-fg)", fontSize: 12.5, fontWeight: 700, cursor: "pointer", padding: "0 0 0 4px", textDecoration: "underline" }}>
+          Changer l’horaire de référence
+        </button>
+      </div>
+
+      {equipe.length === 0 ? (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>
+          Aucun employé enregistré. Créez les accès de votre équipe dans Configuration → Gestion Utilisateurs.
+        </div>
+      ) : (
+        <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden" }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ borderCollapse: "collapse", minWidth: 900 }}>
+              <thead>
+                <tr style={{ background: "var(--surface2)" }}>
+                  <th style={{ padding: "10px 14px", fontSize: 11, color: "var(--muted)", fontWeight: 700, textAlign: "left", position: "sticky", left: 0, background: "var(--surface2)", whiteSpace: "nowrap", zIndex: 1, borderRight: "1px solid var(--border)" }}>Employé · total du mois</th>
+                  {jours.map((j) => {
+                    const date = cleJour(annee, moisNum, j);
+                    const dimanche = !estJourOuvre(date);
+                    return (
+                      <th key={j} title={date} style={{ padding: "10px 0", width: 26, fontSize: 10.5, fontWeight: 700, color: dimanche ? "var(--danger-fg)" : "var(--muted)" }}>{j}</th>
+                    );
+                  })}
+                  {["Retards", "Absences NON justifiées", "Absences justifiées", "Congés", "Maladie"].map((h) => (
+                    <th key={h} style={{ padding: "10px 12px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {equipe.map((u) => {
+                  const t = totalPointage(duMois(u.id));
+                  return (
+                    <tr key={u.id} style={{ borderTop: "1px solid var(--surface2)" }}>
+                      {/*
+                        * Le total voyage avec le nom, dans la colonne fixe.
+                        *
+                        * Trente et une colonnes de jours poussent tout le reste hors de l'écran, et
+                        * personne ne pense à faire défiler un tableau horizontalement : le chiffre
+                        * qu'on vient chercher — combien de jours, combien d'heures — se retrouvait
+                        * précisément là où on ne le voyait pas.
+                        */}
+                      <td style={{ padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap", position: "sticky", left: 0, background: "var(--surface)", zIndex: 1, borderRight: "1px solid var(--border)" }}>
+                        {nomComplet(u)}
+                        <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 500 }}>{u.role}{u.agence ? ` · ${u.agence}` : ""}</div>
+                        <div style={{ fontSize: 12, color: "var(--text)", fontWeight: 700, marginTop: 3 }}>
+                          {t.jours} j · {formatHeures(t.minutes)}
+                        </div>
+                        {/*
+                          * L'absence non justifiée remonte ici, avec le total. C'est le seul chiffre
+                          * de la fiche qui appelle une décision — une retenue, une explication à
+                          * demander — et le laisser au bout de trente et une colonnes revenait à ne
+                          * pas l'afficher.
+                          */}
+                        {t.absences > 0 && (
+                          <div style={{ fontSize: 11.5, color: "var(--danger-fg)", fontWeight: 700, marginTop: 2 }}>
+                            {t.absences} absence{t.absences > 1 ? "s" : ""} non justifiée{t.absences > 1 ? "s" : ""}
+                          </div>
+                        )}
+                      </td>
+                      {jours.map((j) => {
+                        const date = cleJour(annee, moisNum, j);
+                        const e = entreeDe(u.id, date);
+                        const s = couleursPointage(e);
+                        return (
+                          <td key={j} style={{ padding: 2, textAlign: "center" }}>
+                            <button onClick={() => setCellule({ userId: u.id, date })}
+                              title={`${nomComplet(u)} — ${date}${e ? ` : ${libellePointage(e)}${e.note ? ` (${e.note})` : ""}` : ""}`}
+                              style={{ width: 22, height: 22, borderRadius: 5, cursor: "pointer", fontSize: 10.5, fontWeight: 700,
+                                border: `1px solid ${s ? "transparent" : "var(--border)"}`,
+                                background: s ? s.bg : (estJourOuvre(date) ? "transparent" : "var(--surface2)"),
+                                color: s ? s.fg : "var(--muted)" }}>
+                              {lettrePointage(e)}
+                            </button>
+                          </td>
+                        );
+                      })}
+                      <td style={{ padding: "8px 12px", fontSize: 13, color: t.retards ? "var(--warn-fg)" : "var(--muted)", textAlign: "center" }}>{t.retards || "—"}</td>
+                      <td style={{ padding: "8px 12px", fontSize: 13, fontWeight: t.absences ? 700 : 400, color: t.absences ? "var(--danger-fg)" : "var(--muted)", textAlign: "center" }}>{t.absences || "—"}</td>
+                      <td style={{ padding: "8px 12px", fontSize: 13, color: t.absencesJustifiees ? "var(--warn-fg)" : "var(--muted)", textAlign: "center" }}>{t.absencesJustifiees || "—"}</td>
+                      <td style={{ padding: "8px 12px", fontSize: 13, color: "var(--muted)", textAlign: "center" }}>{t.conges || "—"}</td>
+                      <td style={{ padding: "8px 12px", fontSize: 13, color: "var(--muted)", textAlign: "center" }}>{t.maladies || "—"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", marginTop: 14 }}>
+        <div style={{ fontSize: 11.5, color: "var(--muted)" }}>
+          {saisiesDuMois} journée(s) saisie(s) ce mois-ci · la fiche complète pèse {(poidsFiche / 1024).toFixed(0)} ko
+        </div>
+        {saisiesDuMois > 0 && (
+          <button onClick={effacerLeMois} style={{ background: "none", border: "none", color: "var(--danger-fg)", fontSize: 12, cursor: "pointer", textDecoration: "underline" }}>
+            Effacer tout le mois de {MOIS_FR[moisNum - 1]}
+          </button>
+        )}
+      </div>
+
+      {cellule && (
+        <Modal onClose={() => setCellule(null)}
+          title={`${nomComplet(equipe.find((u) => u.id === cellule.userId))} — ${new Date(`${cellule.date}T12:00:00`).toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" })}`}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
+            {STATUTS_POINTAGE.map((s) => (
+              <button key={s.cle} onClick={() => poserJournee(cellule.userId, cellule.date, {
+                statut: s.cle,
+                ...(s.heures ? { arrivee: celluleStatut?.arrivee || horaire.arrivee, depart: celluleStatut?.depart || horaire.depart } : {}),
+              })}
+                style={{ padding: "10px 16px", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer",
+                  border: `1.5px solid ${celluleStatut?.statut === s.cle ? s.fg : "var(--border)"}`,
+                  background: celluleStatut?.statut === s.cle ? s.bg : "var(--surface2)",
+                  color: celluleStatut?.statut === s.cle ? s.fg : "var(--muted)" }}>
+                {s.label}
+              </button>
+            ))}
+          </div>
+
+          {/*
+            * Une absence est non justifiée tant qu'elle n'a pas été justifiée. Le défaut est donc
+            * le rouge, et justifier demande un geste : l'oubli ne doit pas transformer une absence
+            * sèche en absence excusée.
+            */}
+          {celluleStatut?.statut === "absent" && (
+            <div style={{ background: "var(--surface2)", borderRadius: 10, padding: "12px 14px", marginBottom: 16 }}>
+              <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10 }}>
+                Cette absence est-elle justifiée ? Sans justification, elle reste comptée comme
+                non justifiée — c’est cette colonne qui sert au moment de la paie.
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {[[false, "Non justifiée", "var(--danger-bg)", "var(--danger-fg)"],
+                  [true, "Justifiée", "var(--warn-bg)", "var(--warn-fg)"]].map(([valeur, label, bg, fg]) => (
+                  <button key={String(valeur)}
+                    onClick={() => poserJournee(cellule.userId, cellule.date, { justifiee: valeur })}
+                    style={{ padding: "9px 16px", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer",
+                      border: `1.5px solid ${absenceJustifiee(celluleStatut) === valeur ? fg : "var(--border)"}`,
+                      background: absenceJustifiee(celluleStatut) === valeur ? bg : "var(--surface)",
+                      color: absenceJustifiee(celluleStatut) === valeur ? fg : "var(--muted)" }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {STATUT_POINTAGE[celluleStatut?.statut]?.heures && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <Field label="Arrivée">
+                <input type="time" value={celluleStatut?.arrivee || ""} style={inputStyle}
+                  onChange={(e) => poserJournee(cellule.userId, cellule.date, { arrivee: e.target.value })} />
+              </Field>
+              <Field label="Départ">
+                <input type="time" value={celluleStatut?.depart || ""} style={inputStyle}
+                  onChange={(e) => poserJournee(cellule.userId, cellule.date, { depart: e.target.value })} />
+              </Field>
+            </div>
+          )}
+          {celluleStatut && (
+            <>
+              <Field label={absenceJustifiee(celluleStatut) ? "Motif de la justification" : "Note (facultatif)"}>
+                <input value={celluleStatut.note || ""} style={inputStyle}
+                  placeholder={absenceJustifiee(celluleStatut) ? "Ex : certificat médical remis le 12" : "Ex : parti plus tôt, autorisé"}
+                  onChange={(e) => poserJournee(cellule.userId, cellule.date, { note: e.target.value })} />
+              </Field>
+              {STATUT_POINTAGE[celluleStatut.statut]?.heures && (
+                <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>
+                  Journée comptée : <b style={{ color: "var(--text)" }}>{formatHeures(minutesTravaillees(celluleStatut))}</b>
+                </div>
+              )}
+            </>
+          )}
+
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 8, flexWrap: "wrap" }}>
+            {celluleStatut ? (
+              <button onClick={() => { poserJournee(cellule.userId, cellule.date, null); setCellule(null); }}
+                style={{ background: "none", border: "1.5px solid var(--danger-border)", color: "var(--danger-fg)", borderRadius: 9, padding: "9px 16px", fontSize: 13, cursor: "pointer" }}>
+                Effacer cette journée
+              </button>
+            ) : <span style={{ fontSize: 12.5, color: "var(--muted)", alignSelf: "center" }}>Choisissez un état pour enregistrer cette journée.</span>}
+            <button onClick={() => setCellule(null)} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+              Terminé
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {horaireOuvert && (
+        <Modal onClose={() => setHoraireOuvert(false)} title="Horaire de référence">
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 16, lineHeight: 1.55 }}>
+            C’est l’horaire posé par le pré-remplissage. Le changer ne modifie aucune journée déjà
+            saisie : une fiche de pointage constate ce qui a eu lieu, elle ne se recalcule pas.
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <Field label="Arrivée">
+              <input type="time" value={horaire.arrivee} style={inputStyle}
+                onChange={(e) => persist({ ...data, pointageHoraire: { ...horaire, arrivee: e.target.value } })} />
+            </Field>
+            <Field label="Départ">
+              <input type="time" value={horaire.depart} style={inputStyle}
+                onChange={(e) => persist({ ...data, pointageHoraire: { ...horaire, depart: e.target.value } })} />
+            </Field>
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+            <button onClick={() => setHoraireOuvert(false)} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Terminé</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
 function PerformanceAgentsPage({ data, onBack }) {
   const [periode, setPeriode] = useState("mois");
   const colis = data.colis.filter((c) => c.status !== "Annulé");

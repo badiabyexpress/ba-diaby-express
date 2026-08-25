@@ -53,6 +53,12 @@ export const PERMISSIONS_SCHEMA = [
   ]},
   { group: "CLIENTS", permissions: [
     { key: "clients.consulter", label: "Consulter les clients" },
+    /*
+     * Écrire à toute la base d'un coup n'est pas une consultation : c'est un geste commercial qui
+     * engage la marque, coûte de l'argent à chaque message, et qu'on ne peut pas rattraper une
+     * fois parti. Il reste donc à l'administrateur, sauf désignation expresse.
+     */
+    { key: "clients.campagnes", label: "Envoyer des campagnes marketing aux clients" },
   ]},
   /*
    * L'Espace Client est un circuit à part : commandes annoncées, réception et pesée, messages,
@@ -78,6 +84,15 @@ export const PERMISSIONS_SCHEMA = [
     { key: "config.acceder", label: "Accéder à la configuration" },
     { key: "config.tarifs", label: "Modifier les tarifs, devises et commissions" },
     { key: "config.categories", label: "Gérer les catégories de produits" },
+  ]},
+  { group: "ÉQUIPE", permissions: [
+    /*
+     * La fiche de pointage est tenue par le responsable, à la main : elle dit qui était là, et à
+     * quelles heures. C'est une pièce sociale — elle justifie un salaire, et elle peut être
+     * demandée. Elle n'est donc pas ouverte à tous par défaut : un agent n'a pas à savoir qui de
+     * ses collègues était absent, ni à corriger sa propre journée.
+     */
+    { key: "equipe.pointage", label: "Tenir la fiche de pointage" },
   ]},
   { group: "UTILISATEURS", permissions: [
     { key: "users.consulter", label: "Consulter les utilisateurs" },

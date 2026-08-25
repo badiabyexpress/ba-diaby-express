@@ -418,6 +418,48 @@ Ils sont corrigés, mais méritent d'être notés — les deux premiers étaient
 
 ---
 
+## Une porte publique de plus : la réception WhatsApp (26/08/2026)
+
+`api/whatsapp-entrant.js` est la seule fonction du serveur qui doit être appelable **sans
+session**, et c'est intentionnel : c'est Meta qui l'appelle, depuis ses propres serveurs, pour
+livrer les messages que les clients écrivent au numéro de l'entreprise. Depuis que ce numéro est
+inscrit sur l'API Cloud, il a quitté l'application WhatsApp Business : aucun téléphone ne le
+reçoit plus, et si personne n'écoute à cette adresse, le message du client est perdu.
+
+Une adresse publique qui écrit dans la base est exactement ce que le reste de ce document
+s'emploie à supprimer. Trois précautions la rendent acceptable.
+
+- **Deux preuves d'origine, l'une ou l'autre.** L'adresse déclarée chez Meta porte un jeton en
+  fin d'adresse (`?jeton=…`), que lui seul connaît et qu'il renvoie à chaque appel. Et si
+  `WHATSAPP_APP_SECRET` est renseigné, la signature `x-hub-signature-256` est vérifiée sur le
+  corps. Un appel qui ne porte ni l'un ni l'autre est refusé en 401 : sans cela, n'importe qui
+  pourrait faire apparaître dans le Centre clients une conversation qui n'a jamais eu lieu.
+- **Elle n'écrit qu'une chose.** Un message entrant est ajouté à `messagesWhatsApp`, avec son
+  identifiant Meta comme clé — un même message renvoyé deux fois n'apparaît pas en double. Elle
+  ne touche à rien d'autre du document, ne lit aucune autre section, et n'appelle aucun service.
+- **Elle acquitte toujours.** Meta désactive un webhook qui échoue trop souvent ; on perdrait
+  alors tous les messages suivants, pas seulement celui-ci. Une base momentanément indisponible
+  est donc tracée dans les journaux du serveur, mais l'accusé de réception part quand même.
+
+Côté fusion, `messagesWhatsApp` rejoint le journal d'activité parmi les listes qu'une écriture
+d'agent ne peut pas réécrire : un message arrivé pendant qu'une page était ouverte serait sinon
+effacé par le prochain enregistrement de cet agent — le client aurait écrit, et son message aurait
+disparu avant d'être lu.
+
+Le webhook reçoit aussi les ACCUSÉS de ce que nous avons envoyé — parti, remis, lu, échoué. Ils
+sont rangés à part, sous `statutsWhatsApp`, indexés par l'identifiant que Meta donne au message :
+ils arrivent souvent avant que l'application ait fini d'enregistrer le message correspondant, et
+les ranger dans la liste des messages supposerait de retrouver une ligne qui n'existe pas encore.
+Comme `messagesWhatsApp`, cette table est protégée à la fusion : une écriture d'agent ne peut pas
+l'effacer.
+
+Variables à poser dans Vercel : `WHATSAPP_VERIFY_TOKEN` (obligatoire, choisie par vous et
+recopiée chez Meta), `WHATSAPP_APP_SECRET` (facultative, secret de l'application Meta) et
+`WHATSAPP_APP_ID` (nécessaire seulement pour changer la photo de profil depuis l'application :
+Meta exige un dépôt de fichier préalable, qui passe par l'identifiant de l'application).
+
+---
+
 ## À garder en tête
 
 - **Le mode hors ligne** conserve une copie locale des données : elle reste lisible sur l'appareil.

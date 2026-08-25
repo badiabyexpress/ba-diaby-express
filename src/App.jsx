@@ -569,7 +569,8 @@ function fmtRaw(n, cur) {
  * millions de fois le taux — une facture réglée mille fois son montant.
  */
 function versBase(valeur, cur) {
-  const v = Number(String(valeur).replace(",", ".")) || 0;
+  // La lecture passe par montantSaisi : « 1 200 » et « 12,5 » sont des saisies normales.
+  const v = montantSaisi(valeur) ?? 0;
   return +(v / (LIVE_RATES[cur] || CURRENCIES[cur] || 1)).toFixed(6);
 }
 /*
@@ -626,7 +627,8 @@ function paysAutorisePourCategorie(cat, pays) {
 /** Calcule en direct l’équivalent GNF d’une catégorie à partir du taux de change actuel — se met à jour automatiquement si le taux change. */
 function catPriceGNF(cat) {
   if (!cat) return 0;
-  const montant = Number(cat.montant ?? cat.prixGNF ?? 0);
+  // Le montant peut arriver tel qu'il a été tapé (aperçu de saisie) : « 12 000 » doit se lire.
+  const montant = montantSaisi(cat.montant ?? cat.prixGNF ?? 0) ?? 0;
   const devise = cat.deviseSaisie || "GNF";
   if (devise === "GNF") return montant;
   const eurBase = montant / (LIVE_RATES[devise] || CURRENCIES[devise] || 1);
@@ -842,7 +844,7 @@ function depotsAnnonces(data, partenaireId) {
 }
 /** Poids annoncé d'un dépôt : la somme de ce que le partenaire a estimé, à vérifier à la balance. */
 function poidsAnnonce(preAlerte) {
-  return (preAlerte?.articles || []).reduce((s, a) => s + (Number(a.poids) || 0), 0);
+  return (preAlerte?.articles || []).reduce((s, a) => s + (montantSaisi(a.poids) ?? 0), 0);
 }
 
 /*
@@ -978,7 +980,7 @@ function normaliserDestinationPartenaire(d) {
     agentResponsable: d?.agentResponsable
       ? { id: d.agentResponsable.id || "", nom: d.agentResponsable.nom || "" }
       : null,
-    fraisPoste: Number(d?.fraisPoste) || 0,
+    fraisPoste: montantSaisi(d?.fraisPoste) ?? 0,
     /*
      * Catégories tarifaires propres à ce partenaire, sur cette destination.
      *
@@ -990,7 +992,7 @@ function normaliserDestinationPartenaire(d) {
       id: cat?.id || `cp${i}${Math.random().toString(36).slice(2, 6)}`,
       nom: cat?.nom || "",
       type: cat?.type === "kg" ? "kg" : "unite",
-      montant: Number(cat?.montant) || 0,
+      montant: montantSaisi(cat?.montant) ?? 0,
       /*
        * L'icône, comme sur les catégories de nos propres colis. Une liste de dix lignes de texte
        * se lit mal au comptoir ; l'agent reconnaît « 👕 » avant d'avoir lu « vêtements », et il
@@ -1007,8 +1009,9 @@ function libelleCategoriePartenaire(cat, devise) {
 }
 /** Prix d'un article : celui de sa catégorie si elle est choisie, sinon le tarif général du pays. */
 function prixArticlePartenaire(article, tarif) {
-  const quantite = Number(article?.quantite) || 1;
-  const poids = Number(article?.poids) || 0;
+  // Quantité et poids sont tapés à la main : « 12,5 » doit valoir douze kilos et demi, pas zéro.
+  const quantite = montantSaisi(article?.quantite) || 1;
+  const poids = montantSaisi(article?.poids) ?? 0;
   const cat = (tarif?.categories || []).find((c) => c.id === article?.categoriePartenaire);
   if (cat) return cat.type === "unite" ? cat.montant * quantite : cat.montant * poids;
   return article?.tarification === "unite" ? (tarif?.parUnite || 0) * quantite : (tarif?.parKg || 0) * poids;
@@ -1309,7 +1312,7 @@ function detailPrixPartenaire(colis, user) {
   const tarif = tarifPartenairePourPays(user, colis?.pays);
   const articles = colis?.produits || [];
   const transport = articles.length === 0
-    ? (Number(colis?.poids) || 0) * tarif.parKg
+    ? (montantSaisi(colis?.poids) ?? 0) * tarif.parKg
     : articles.reduce((s, a) => s + prixArticlePartenaire(a, tarif), 0);
   /*
    * Les frais de poste ne sont pas une marge : c'est un timbre que l'entreprise achète pour le
@@ -1317,7 +1320,7 @@ function detailPrixPartenaire(colis, user) {
    * refacturés tels quels, et affichés à part partout pour qu'on ne les confonde pas avec le prix
    * du transport.
    */
-  const fraisPoste = tarif.acheminement === "poste" ? (Number(tarif.fraisPoste) || 0) : 0;
+  const fraisPoste = tarif.acheminement === "poste" ? (montantSaisi(tarif.fraisPoste) ?? 0) : 0;
   return { tarif, transport: +transport.toFixed(2), fraisPoste, total: +(transport + fraisPoste).toFixed(2) };
 }
 function calcPrixPartenaire(colis, user) {
@@ -2035,25 +2038,36 @@ function modeleWhatsAppPourEtape(evenement, colis, data) {
 
 async function notifierEvenement(data, evenement, colis, message) {
   const prefs = (data?.notifWhatsApp || {})[evenement];
-  if (!prefs) return { envoyes: 0 };
+  if (!prefs) return { envoyes: 0, traces: [] };
   let envoyes = 0;
+  /*
+   * Ce qui part est consigné.
+   *
+   * Un envoi automatique ne laissait aucune trace : quand un client affirmait n'avoir rien reçu,
+   * personne ne pouvait dire si le message était parti, s'il avait échoué, ni pourquoi. Chaque
+   * envoi est désormais inscrit avec son identifiant Meta, que l'accusé viendra compléter.
+   */
+  const traces = [];
 
   /*
-   * Le ticket d'envoi, aux deux seuls moments où le client en a besoin.
+   * La facture, aux deux seuls moments où le client en a besoin.
    *
-   * À l'enregistrement, c'est sa preuve de dépôt. À la modification, c'est sa correction : le
-   * poids ou le montant a changé, et le ticket qu'il a en main annonce autre chose que ce qu'il
-   * devra régler. Aux étapes suivantes — parti, arrivé, disponible — rien n'a changé sur le
-   * ticket, et le renvoyer chaque fois n'apprendrait rien à personne.
+   * À l'enregistrement, c'est sa preuve de dépôt et le montant qu'il devra régler. À la
+   * modification, c'est sa correction : le poids ou le prix a changé, et le document qu'il a en
+   * main annonce autre chose que ce qu'il devra payer. Aux étapes suivantes — parti, arrivé,
+   * disponible — rien n'a changé sur la facture, et la renvoyer chaque fois n'apprendrait rien.
+   *
+   * C'était l'étiquette qui partait, celle qu'on colle sur le carton. Le client la recevait sur
+   * son téléphone sans rien pouvoir en faire.
    *
    * Il part par deux voies distinctes, et c'est voulu :
    *
    * — En-tête « document » du modèle Meta (`ticket`) : ces deux modèles ont été validés AVEC un
    *   en-tête document, et un modèle se remplit exactement comme il a été validé. Laisser cet
-   *   en-tête vide ferait refuser l'envoi entier — le client ne recevrait rien du tout. Le ticket
-   *   est donc préparé à chaque fois, sans dépendre d'un réglage.
+   *   en-tête vide ferait refuser l'envoi entier — le client ne recevrait rien du tout. La facture
+   *   est donc préparée à chaque fois, sans dépendre d'un réglage.
    * — Pièce jointe Twilio (`mediaUrl`) : là, rien n'est figé d'avance, et le réglage « Joindre
-   *   l'étiquette PDF » garde tout son sens.
+   *   la facture PDF » garde tout son sens.
    *
    * Un échec de génération ou de dépôt ne doit jamais empêcher le message de partir : on continue
    * sans le ticket, et l'agent voit le refus éventuel de Meta plutôt que de croire le client
@@ -2062,7 +2076,7 @@ async function notifierEvenement(data, evenement, colis, message) {
   let ticket = null;
   let mediaUrl = null;
   if (ETAPES_AVEC_TICKET.includes(evenement)) {
-    try { ticket = await genererUrlEtiquette(colis, data); } catch (e) { /* le message texte part quand même */ }
+    try { ticket = await genererUrlFacture(colis, data); } catch (e) { /* le message texte part quand même */ }
     if (data?.notificationSettings?.joindreEtiquette) mediaUrl = ticket;
   }
 
@@ -2103,8 +2117,9 @@ async function notifierEvenement(data, evenement, colis, message) {
   if (parWhatsApp && prefs.expediteur && colis.expediteurTelephone) destinations.push(colis.expediteurTelephone);
   for (const tel of destinations) {
     try {
-      const { envoye } = await envoyerWhatsApp(tel, message, mediaUrl, gabaritComplet);
-      if (envoye) envoyes++;
+      const resultat = await envoyerWhatsApp(tel, message, mediaUrl, gabaritComplet);
+      traces.push(traceEnvoiWhatsApp({ telephone: tel, texte: message, resultat, evenement, tracking: colis?.tracking }));
+      if (resultat.envoye) envoyes++;
     } catch (e) { /* une notification ne doit jamais bloquer l'action en cours */ }
   }
 
@@ -2123,8 +2138,9 @@ async function notifierEvenement(data, evenement, colis, message) {
     const tel = p ? reglagesPartenaire(p).telephone : "";
     if (messagePartenaire && tel) {
       try {
-        const { envoye } = await envoyerWhatsApp(tel, messagePartenaire);
-        if (envoye) envoyes++;
+        const resultat = await envoyerWhatsApp(tel, messagePartenaire);
+        traces.push(traceEnvoiWhatsApp({ telephone: tel, texte: messagePartenaire, resultat, evenement, tracking: colis?.tracking }));
+        if (resultat.envoye) envoyes++;
       } catch (e) { /* une notification ne doit jamais bloquer l'action en cours */ }
     }
   }
@@ -2160,7 +2176,7 @@ async function notifierEvenement(data, evenement, colis, message) {
     }
   }
 
-  return { envoyes };
+  return { envoyes, traces };
 }
 
 /**
@@ -2226,6 +2242,33 @@ async function envoyerEmail(adresseBrute, sujet, message, piecesJointes = []) {
   }
 }
 
+/**
+ * La trace d'un message que NOUS avons envoyé.
+ *
+ * Elle prend place dans la même liste que les messages reçus, marquée « sortant ». C'est ce qui
+ * permet de lire une conversation dans l'ordre, et — l'identifiant Meta aidant — de dire plus tard
+ * si le client l'a reçu, s'il l'a lu, ou si l'envoi a échoué et pourquoi.
+ */
+function traceEnvoiWhatsApp({ telephone, texte, resultat, evenement, par, tracking }) {
+  return {
+    id: `wa-out-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    de: telephone, texte: String(texte || "").slice(0, 4096), type: "text",
+    date: new Date().toISOString(), lu: true, sens: "sortant",
+    wamid: resultat?.id || null,
+    statut: resultat?.envoye ? "envoye" : "echec",
+    ...(resultat?.raison ? { erreur: resultat.raison } : {}),
+    ...(evenement ? { evenement } : {}),
+    ...(par ? { par } : {}),
+    ...(tracking ? { tracking } : {}),
+  };
+}
+
+/** Ajoute des traces à la liste, sans jamais la laisser enfler indéfiniment. */
+function avecTraces(data, traces) {
+  if (!traces || traces.length === 0) return data.messagesWhatsApp || [];
+  return [...traces, ...(data.messagesWhatsApp || [])].slice(0, 300);
+}
+
 async function envoyerWhatsApp(telephone, message, mediaUrl, gabarit) {
   try {
     const reponse = await appelServeurQuiDepense("/api/whatsapp", {
@@ -2244,8 +2287,13 @@ async function envoyerWhatsApp(telephone, message, mediaUrl, gabarit) {
         } : {}),
       }),
     });
-    if (reponse.ok) return { envoye: true };
     const data = await reponse.json().catch(() => ({}));
+    /*
+     * L'identifiant que Meta donne au message revient avec la réponse. C'est la seule clé qui
+     * permettra de rattacher plus tard son accusé — parti, remis, lu, échoué. Sans lui, on saurait
+     * qu'un message est parti sans jamais savoir s'il est arrivé.
+     */
+    if (reponse.ok) return { envoye: true, id: data?.id || null };
     // 501 = Twilio pas encore configuré : cas normal, on ne parle pas d'erreur à l'agent.
     if (reponse.status === 501) return { envoye: false, raison: null };
     return { envoye: false, raison: data.error || "L’envoi automatique a échoué." };
@@ -3184,7 +3232,23 @@ function App() {
    * l'enregistrement a vraiment été confirmé par le serveur ou seulement mis en file d'attente
    * locale — cas où fermer l'onglet ferait perdre la donnée pour de bon.
    */
-  const persist = useCallback((next) => {
+  /*
+   * LE DOCUMENT LE PLUS FRAIS, MÊME AVANT QUE REACT AIT REDESSINÉ
+   *
+   * Un enregistrement part d'une copie du document. Quand deux enregistrements s'enchaînent dans
+   * le même instant — on enregistre un colis, puis la notification partie pour ce colis vient
+   * inscrire sa trace — le second travaille encore sur la copie d'avant, et efface le premier.
+   * Le colis disparaissait ainsi entre deux clics, sans le moindre message.
+   *
+   * On garde donc le dernier document enregistré dans une référence, mise à jour AVANT que React
+   * ne redessine. Un appelant qui doit s'ajouter à ce qui vient d'être écrit passe une fonction
+   * plutôt qu'un document : elle reçoit l'état réel, jamais une copie périmée.
+   */
+  const documentCourant = useRef(data);
+  useEffect(() => { documentCourant.current = data; }, [data]);
+  const persist = useCallback((suivant) => {
+    const next = typeof suivant === "function" ? suivant(documentCourant.current) : suivant;
+    documentCourant.current = next;
     setData(next);
     if (next.exchangeRates) LIVE_RATES = { ...CURRENCIES, ...next.exchangeRates };
     /*
@@ -3380,6 +3444,15 @@ function App() {
     { key: "voyages", label: "Voyages", icon: Plane, show: perm("compta.consulter") },
     { key: "comptabilite", label: "Comptabilité", icon: DollarSign, show: perm("compta.consulter") },
     { key: "ia", label: t.ia, icon: Sparkles, show: perm("ia.utiliser") },
+    /*
+     * « Ma fiche » — la fiche de pointage de celui qui est connecté.
+     *
+     * Elle n'apparaît que pour ceux qui ne tiennent pas la fiche de l'équipe : les autres y
+     * accèdent depuis la Configuration, avec toute l'équipe. Un employé, lui, n'entre pas dans
+     * la Configuration — et c'est pourtant la pièce qui justifie sa paie. Elle a donc sa place
+     * dans le menu, à côté de son travail.
+     */
+    { key: "mapointage", label: "Ma fiche", icon: Clock, show: !perm("equipe.pointage") },
     { key: "admin", label: t.admin, icon: Settings, show: perm("config.acceder") },
   ].filter((n) => n.show);
 
@@ -3504,6 +3577,7 @@ function App() {
             {view === "voyages" && perm("compta.consulter") && <VoyagesPage data={data} persist={persist} session={session} notify={notify} />}
             {view === "comptabilite" && <ComptabilitePage data={data} persist={persist} session={session} notify={notify} />}
             {view === "ia" && <AiAssistant data={data} />}
+            {view === "mapointage" && <PointagePage data={data} persist={persist} notify={notify} session={session} onBack={() => setView("dashboard")} />}
             {view === "admin" && perm("config.acceder") && <ConfigurationHub key={adminResetKey} data={data} persist={persist} session={session} notify={notify} onNavigateApp={setView} offline={offline} />}
           </main>
         </div>
@@ -7986,7 +8060,7 @@ function AnnoncerDepotModal({ partenaire, onClose, onAnnoncer }) {
       return;
     }
     const propres = articles
-      .map((a) => ({ nom: a.nom.trim(), quantite: Math.max(1, Number(a.quantite) || 1), poids: Number(String(a.poids).replace(",", ".")) || 0 }))
+      .map((a) => ({ nom: a.nom.trim(), quantite: Math.max(1, montantSaisi(a.quantite) || 1), poids: montantSaisi(a.poids) ?? 0 }))
       .filter((a) => a.nom);
     if (propres.length === 0) { setErr("Décrivez au moins un article."); return; }
     if (propres.some((a) => a.poids < 0)) { setErr("Les poids annoncés doivent être positifs."); return; }
@@ -8838,7 +8912,7 @@ function calcPrice(countryCode, poids, volume, mode) {
   const c = COUNTRIES.find((x) => x.code === countryCode);
   if (!c) return 0;
   const rate = mode === "air" ? c.air : c.sea;
-  const volKg = Math.max(Number(poids) || 0, (Number(volume) || 0) * 167);
+  const volKg = Math.max(montantSaisi(poids) ?? 0, (montantSaisi(volume) ?? 0) * 167);
   return +(5 + volKg * rate).toFixed(2);
 }
 
@@ -8859,7 +8933,7 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
   if (sub === "paiement") return <PaiementConfigPage data={data} persist={persist} notify={notify} onBack={back} />;
   if (sub === "users") return <UtilisateursPage data={data} persist={persist} notify={notify} onBack={back} session={session} />;
   if (sub === "performance") return <PerformanceAgentsPage data={data} onBack={back} />;
-  if (sub === "pointage") return <PointagePage data={data} persist={persist} notify={notify} onBack={back} />;
+  if (sub === "pointage") return <PointagePage data={data} persist={persist} notify={notify} onBack={back} session={session} />;
   if (sub === "systeme") return <ParametresSystemePage data={data} persist={persist} notify={notify} onBack={back} offline={offline} />;
   if (sub === "journal") return <JournalActivitePage data={data} onBack={back} />;
 
@@ -8920,9 +8994,18 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14, marginBottom: 26 }}>
         <Card icon={Users} tint="#6366F1" title="Gestion Utilisateurs" desc="Accès, rôles et permissions de l’équipe." onClick={() => setSub("users")} />
         <Card icon={LayoutDashboard} tint="#3D63FF" title="Performance des agents" desc="Colis enregistrés, chiffre d’affaires et paiements encaissés, par agent." onClick={() => setSub("performance")} />
-        {effectivePermission(session, "equipe.pointage") && (
-          <Card icon={Clock} tint="#E0794E" title="Fiche de pointage" desc="Qui était là, quel jour, à quelles heures — remplie par vous, imprimable et signable." onClick={() => setSub("pointage")} />
-        )}
+        {/*
+          * La carte est ouverte à tous, mais pas au même écran : celui qui tient la fiche voit
+          * toute l'équipe et corrige ; les autres n'ont accès qu'à la leur, en lecture. Un employé
+          * a le droit de savoir ce qui est écrit sur sa propre fiche — c'est elle qui justifie sa
+          * paie — sans pour autant consulter les absences de ses collègues.
+          */}
+        <Card icon={Clock} tint="#E0794E"
+          title={effectivePermission(session, "equipe.pointage") ? "Fiche de pointage" : "Ma fiche de pointage"}
+          desc={effectivePermission(session, "equipe.pointage")
+            ? "Qui était là, quel jour, à quelles heures — remplie par vous, imprimable et signable."
+            : "Vos journées du mois, vos heures et votre total — en lecture seule."}
+          onClick={() => setSub("pointage")} />
       </div>
 
       <SectionLabel>SUIVI &amp; MAINTENANCE</SectionLabel>
@@ -9615,7 +9698,8 @@ function CategoriesProduitsPage({ data, persist, session, notify, onBack }) {
   }
 
   function confirmPrix() {
-    if (isNaN(Number(form.prix)) || Number(form.prix) < 0) return;
+    // Le tarif d'une catégorie se tape comme un prix : « 12 000 », « 12,5 ».
+    if ((montantSaisi(form.prix) ?? -1) < 0) return;
     setSaved(true);
     notify?.(`Montant confirmé : ${form.prix} ${form.devise} — équivalent actuel ${fmtGNF(catPriceGNF({ montant: form.prix, deviseSaisie: form.devise }))}, se recalculera automatiquement si le taux change`);
   }
@@ -9624,7 +9708,7 @@ function CategoriesProduitsPage({ data, persist, session, notify, onBack }) {
     if (!form.nom.trim()) return;
     const motsCles = motsClesText.split(",").map((k) => k.trim()).filter(Boolean);
     const exists = categories.some((c) => c.id === form.id);
-    const payload = { ...form, montant: Number(form.prix) || 0, deviseSaisie: form.devise, motsCles };
+    const payload = { ...form, montant: montantSaisi(form.prix) ?? 0, deviseSaisie: form.devise, motsCles };
     delete payload.prix; delete payload.devise; delete payload.prixGNF;
     const next = exists ? categories.map((c) => (c.id === form.id ? payload : c)) : [...categories, payload];
     persist({ ...data, categories: next });
@@ -9823,7 +9907,7 @@ function SimulateurCoutPartenaire({ reglages }) {
 
   const categorie = (dest?.categories || []).find((c) => c.id === categorieId) || null;
   const article = {
-    poids: Number(String(poids).replace(",", ".")) || 0,
+    poids: montantSaisi(poids) ?? 0,
     quantite: Number(quantite) || 1,
     categoriePartenaire: categorieId,
     tarification: "kg",
@@ -10115,7 +10199,7 @@ function TraiterPreAlerteModal({ preAlerte, client, tarifs, onValider, onClose }
   const [paysOrigine, setPaysOrigine] = useState("FR");
   const [erreur, setErreur] = useState("");
 
-  const poidsNum = Number(poids) || 0;
+  const poidsNum = montantSaisi(poids) ?? 0;
   const calcul = poidsNum > 0 ? calcReceptionFee(poidsNum, tarifs) : null;
 
   function valider() {
@@ -10178,6 +10262,361 @@ function TraiterPreAlerteModal({ preAlerte, client, tarifs, onValider, onClose }
         Un colis sera créé au nom du client et apparaîtra aussitôt dans son espace.
       </div>
     </Modal>
+  );
+}
+
+/**
+ * Les messages WhatsApp reçus sur le numéro de l'entreprise.
+ *
+ * DEPUIS QUE LE NUMÉRO EST SUR L'API, PLUS AUCUN TÉLÉPHONE NE SONNE
+ * ----------------------------------------------------------------
+ * L'inscription du numéro sur l'API Cloud l'a sorti de l'application WhatsApp Business. Ce qui
+ * arrive n'est plus reçu par un appareil mais poussé par Meta vers une adresse du serveur
+ * (api/whatsapp-entrant.js), qui le range dans la base. Cet écran est le seul endroit où l'on
+ * peut désormais lire ce qu'un client a écrit — s'il n'est pas ouvert, personne ne le lit.
+ *
+ * LA FENÊTRE DE VINGT-QUATRE HEURES
+ * ---------------------------------
+ * Elle change tout, et dans le bon sens pour une fois. Pendant les 24 h qui suivent le dernier
+ * message d'un client, WhatsApp autorise à lui répondre librement — pas de modèle, pas
+ * d'approbation, la vraie conversation. Passé ce délai, seul un modèle validé peut repartir.
+ * L'écran affiche donc le temps restant sur chaque conversation, et refuse d'ouvrir la zone de
+ * réponse quand la fenêtre est close, plutôt que de laisser écrire un message qui sera rejeté.
+ */
+/*
+ * L'état d'un message que nous avons envoyé, tel que Meta le rapporte.
+ *
+ * Il n'arrive pas avec le message : il arrive après, par le webhook, et se range à part sous
+ * `statutsWhatsApp` (voir api/whatsapp-entrant.js). On les réunit ici, au moment de l'affichage.
+ */
+const ETATS_WHATSAPP = {
+  envoye: { libelle: "Envoyé", court: "✓", couleur: "var(--muted)" },
+  delivre: { libelle: "Remis", court: "✓✓", couleur: "var(--muted)" },
+  lu: { libelle: "Lu", court: "✓✓", couleur: "#34B7F1" },
+  echec: { libelle: "Échec", court: "✕", couleur: "var(--danger-fg)" },
+};
+
+function MessagesWhatsAppPage({ data, persist, session, notify }) {
+  const messages = data.messagesWhatsApp || [];
+  const accuses = data.statutsWhatsApp || {};
+  /** L'état le plus récent connu d'un message sortant : l'accusé de Meta prime sur le nôtre. */
+  const etatDe = (m) => {
+    if (m.sens !== "sortant") return null;
+    const accuse = m.wamid ? accuses[m.wamid] : null;
+    const clef = accuse?.statut || m.statut || "envoye";
+    return { ...(ETATS_WHATSAPP[clef] || ETATS_WHATSAPP.envoye), clef, erreur: accuse?.erreur || m.erreur || null };
+  };
+  const [ouvert, setOuvert] = useState(null);
+  const [vue, setVue] = useState("conversations");
+  const [reponse, setReponse] = useState("");
+  const [envoiEnCours, setEnvoiEnCours] = useState(false);
+
+  /*
+   * Une conversation par numéro. Le nom vient de trois sources possibles, dans cet ordre : ce que
+   * le client a mis dans son profil WhatsApp, notre annuaire, un compte de l'Espace Client. Un
+   * numéro sans nom reste un numéro — mieux vaut cela qu'un nom inventé.
+   */
+  const conversations = useMemo(() => {
+    const annuaire = new Map();
+    buildClientDirectory(data.colis || [], data.repertoire).forEach((c) => {
+      if (c.telephone) annuaire.set(clefTelephone(c.telephone), c.nomComplet);
+    });
+    (data.clientAccounts || []).forEach((c) => {
+      if (c.telephone) annuaire.set(clefTelephone(c.telephone), `${c.prenom || ""} ${c.nom || ""}`.trim());
+    });
+    const par = new Map();
+    [...messages].sort((a, b) => new Date(a.date) - new Date(b.date)).forEach((m) => {
+      const clef = clefTelephone(m.de);
+      if (!par.has(clef)) par.set(clef, { clef, numero: m.de, nom: "", lignes: [], nonLus: 0, dernier: null });
+      const c = par.get(clef);
+      c.lignes.push(m);
+      c.dernier = m;
+      if (!m.lu && m.sens !== "sortant") c.nonLus += 1;
+      if (!c.nom) c.nom = m.nom || annuaire.get(clef) || "";
+    });
+    return [...par.values()].sort((a, b) => new Date(b.dernier.date) - new Date(a.dernier.date));
+  }, [messages, data.colis, data.repertoire, data.clientAccounts]);
+
+  const conversation = conversations.find((c) => c.clef === ouvert) || null;
+
+  /** Le dernier message VENU DU CLIENT : c'est lui qui ouvre la fenêtre, pas nos réponses. */
+  function fenetre(conv) {
+    const dernierEntrant = [...(conv?.lignes || [])].reverse().find((m) => m.sens !== "sortant");
+    if (!dernierEntrant) return { ouverte: false, reste: 0 };
+    const restant = 24 * 3600 * 1000 - (Date.now() - new Date(dernierEntrant.date).getTime());
+    return { ouverte: restant > 0, reste: restant };
+  }
+  function resteLisible(ms) {
+    const h = Math.floor(ms / 3600000);
+    const m = Math.floor((ms % 3600000) / 60000);
+    return h > 0 ? `${h} h ${String(m).padStart(2, "0")}` : `${m} min`;
+  }
+
+  function marquerLus(conv) {
+    const clefs = new Set(conv.lignes.filter((m) => !m.lu).map((m) => m.id));
+    if (clefs.size === 0) return;
+    persist({ ...data, messagesWhatsApp: messages.map((m) => (clefs.has(m.id) ? { ...m, lu: true } : m)) });
+  }
+
+  function ouvrirConversation(conv) {
+    setOuvert(conv.clef);
+    setReponse("");
+    marquerLus(conv);
+  }
+
+  async function repondre() {
+    const texte = reponse.trim();
+    if (!texte || !conversation) return;
+    setEnvoiEnCours(true);
+    const r = await envoyerWhatsApp(conversation.numero, texte);
+    setEnvoiEnCours(false);
+    if (!r.envoye) {
+      notify?.(r.raison || "La réponse n’a pas pu partir.");
+      return;
+    }
+    /*
+     * La réponse est rangée dans la même conversation, marquée « sortant ». Elle n'ouvre pas de
+     * nouvelle fenêtre — seul un message du client le fait — et ne compte pas comme non lue.
+     */
+    const sortant = {
+      ...traceEnvoiWhatsApp({
+        telephone: conversation.numero, texte, resultat: r,
+        par: `${session?.prenom || ""} ${session?.nom || ""}`.trim(),
+      }),
+      nom: conversation.nom,
+    };
+    persist({
+      ...data,
+      messagesWhatsApp: [sortant, ...messages].slice(0, 300),
+      activityLog: pushActivity(data, session, "Réponse WhatsApp", `${conversation.numero} — ${texte.slice(0, 60)}`),
+    });
+    setReponse("");
+    notify?.("Réponse envoyée");
+  }
+
+  const carte = { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14 };
+
+  if (messages.length === 0) {
+    return (
+      <div style={{ ...carte, padding: 26 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>
+          Aucun message reçu pour l’instant
+        </div>
+        <div style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.6 }}>
+          Depuis que votre numéro est inscrit sur l’API, les messages de vos clients n’arrivent plus
+          sur un téléphone : Meta les pousse vers votre serveur, et ils s’affichent ici. Pour que cela
+          fonctionne, l’adresse <code>/api/whatsapp-entrant</code> doit être déclarée comme webhook
+          dans votre tableau de bord Meta, abonnée au champ <strong>messages</strong>.
+          <br /><br />
+          Tant qu’elle ne l’est pas, un client qui écrit croit vous avoir joint — et personne ne lit
+          son message. C’est la seule chose à vérifier ici.
+        </div>
+      </div>
+    );
+  }
+
+  /*
+   * L'HISTORIQUE — tout ce qui est parti, et ce qu'il en est advenu.
+   *
+   * Les conversations répondent à « que m'a-t-on écrit ». L'historique répond à l'autre question,
+   * celle qui se pose un mois plus tard : « le client a-t-il vraiment reçu son message ? ». Les
+   * notifications automatiques y figurent au même titre que les réponses écrites à la main —
+   * c'est le même numéro, la même facture chez Meta.
+   */
+  if (vue === "historique") {
+    const sortants = messages.filter((m) => m.sens === "sortant");
+    const compte = { envoye: 0, delivre: 0, lu: 0, echec: 0 };
+    sortants.forEach((m) => { const e = etatDe(m); compte[e.clef] = (compte[e.clef] || 0) + 1; });
+    return (
+      <div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+          {[["conversations", "Conversations"], ["historique", "Historique des envois"]].map(([k, label]) => (
+            <button key={k} onClick={() => setVue(k)} style={{ padding: "7px 14px", borderRadius: 20, cursor: "pointer", fontSize: 12.5, fontWeight: 600,
+              border: "1.5px solid " + (vue === k ? "var(--brand-solid)" : "var(--border)"),
+              background: vue === k ? "var(--brand-solid)" : "var(--surface)", color: vue === k ? "#fff" : "var(--muted)" }}>{label}</button>
+          ))}
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(130px,1fr))", gap: 12, marginBottom: 16 }}>
+          {[["Envoyés", sortants.length, "var(--text)"], ["Remis", compte.delivre + compte.lu, "var(--text)"],
+            ["Lus", compte.lu, "#34B7F1"], ["Échecs", compte.echec, compte.echec ? "var(--danger-fg)" : "var(--muted)"]].map(([label, valeur, couleur]) => (
+            <div key={label} style={{ ...carte, padding: 14 }}>
+              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 600 }}>{label}</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: couleur, fontFamily: "'Space Grotesk',sans-serif", marginTop: 4 }}>{valeur}</div>
+            </div>
+          ))}
+        </div>
+        {sortants.length === 0 ? (
+          <div style={{ ...carte, padding: 24, fontSize: 13, color: "var(--muted)" }}>
+            Aucun message envoyé depuis l’application pour l’instant.
+          </div>
+        ) : (
+          <div style={{ ...carte, overflow: "hidden" }}>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", minWidth: 700, borderCollapse: "collapse" }}>
+                <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>
+                  {["Date", "Destinataire", "Message", "Déclencheur", "État"].map((h) => (
+                    <th key={h} style={{ padding: "10px 14px", fontSize: 11, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>
+                  ))}
+                </tr></thead>
+                <tbody>
+                  {sortants.slice(0, 200).map((m) => {
+                    const e = etatDe(m);
+                    return (
+                      <tr key={m.id} style={{ borderTop: "1px solid var(--border)" }}>
+                        <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>{new Date(m.date).toLocaleString("fr-FR")}</td>
+                        <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{m.de}</td>
+                        <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", maxWidth: 320, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={m.texte}>{m.texte}</td>
+                        <td style={{ padding: "9px 14px", fontSize: 11.5, color: "var(--muted)", whiteSpace: "nowrap" }}>
+                          {m.evenement || (m.par ? "réponse" : "—")}{m.tracking ? ` · ${m.tracking}` : ""}
+                        </td>
+                        <td style={{ padding: "9px 14px", fontSize: 12, fontWeight: 700, color: e.couleur, whiteSpace: "nowrap" }} title={e.erreur || ""}>
+                          {e.court} {e.libelle}
+                          {e.erreur && <div style={{ fontSize: 10.5, fontWeight: 400, color: "var(--danger-fg)", maxWidth: 220, whiteSpace: "normal" }}>{e.erreur}</div>}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 10, lineHeight: 1.5 }}>
+          Les états « Remis » et « Lu » viennent de Meta, par le webhook. Tant qu’il n’est pas
+          déclaré, un message reste à « Envoyé » : c’est vrai — il est parti — mais on ne sait pas
+          s’il est arrivé.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+        {[["conversations", "Conversations"], ["historique", "Historique des envois"]].map(([k, label]) => (
+          <button key={k} onClick={() => setVue(k)} style={{ padding: "7px 14px", borderRadius: 20, cursor: "pointer", fontSize: 12.5, fontWeight: 600,
+            border: "1.5px solid " + (vue === k ? "var(--brand-solid)" : "var(--border)"),
+            background: vue === k ? "var(--brand-solid)" : "var(--surface)", color: vue === k ? "#fff" : "var(--muted)" }}>{label}</button>
+        ))}
+      </div>
+    <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-start" }}>
+      <div style={{ ...carte, flex: "1 1 280px", minWidth: 250, overflow: "hidden" }}>
+        {conversations.map((c) => {
+          const f = fenetre(c);
+          return (
+            <button key={c.clef} onClick={() => ouvrirConversation(c)}
+              style={{ display: "block", width: "100%", textAlign: "start", cursor: "pointer",
+                background: ouvert === c.clef ? "var(--surface2)" : "none", border: "none",
+                borderBottom: "1px solid var(--border)", padding: "12px 14px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 13, fontWeight: c.nonLus ? 700 : 600, color: "var(--text)" }}>
+                  {c.nom || c.numero}
+                </span>
+                {c.nonLus > 0 && (
+                  <span style={{ background: "var(--brand-solid)", color: "#fff", borderRadius: 20, fontSize: 10.5, fontWeight: 700, padding: "1px 7px" }}>{c.nonLus}</span>
+                )}
+              </div>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {c.dernier.sens === "sortant" ? "Vous : " : ""}{c.dernier.texte}
+              </div>
+              <div style={{ fontSize: 10.5, color: f.ouverte ? "var(--ok-fg)" : "var(--muted)", marginTop: 3, fontWeight: 600 }}>
+                {new Date(c.dernier.date).toLocaleString("fr-FR")}
+                {f.ouverte ? ` · réponse libre encore ${resteLisible(f.reste)}` : " · fenêtre fermée"}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      <div style={{ ...carte, flex: "2 1 420px", minWidth: 300, padding: 16 }}>
+        {!conversation ? (
+          <div style={{ fontSize: 13, color: "var(--muted)", padding: 20, textAlign: "center" }}>
+            Choisissez une conversation à gauche.
+          </div>
+        ) : (
+          <>
+            <div style={{ borderBottom: "1px solid var(--border)", paddingBottom: 10, marginBottom: 12 }}>
+              <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{conversation.nom || "Numéro inconnu"}</div>
+              <div style={{ fontSize: 12, color: "var(--muted)" }}>{conversation.numero}</div>
+              {/*
+                * LE NUMÉRO RATTACHÉ À SES COLIS.
+                *
+                * « Où est mon colis ? » est la question posée neuf fois sur dix. Sans cela, l'agent
+                * lit le message ici, ouvre un autre écran, cherche le numéro, revient. Les colis de
+                * ce numéro sont donc affichés à côté de la conversation, avec leur état du moment.
+                */}
+              {(() => {
+                const clef = clefTelephone(conversation.numero);
+                const siens = (data.colis || [])
+                  .filter((c) => clefTelephone(c.telephone) === clef || clefTelephone(c.expediteurTelephone) === clef)
+                  .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
+                  .slice(0, 4);
+                if (siens.length === 0) {
+                  return <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6, fontStyle: "italic" }}>Aucun colis à ce numéro.</div>;
+                }
+                return (
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+                    {siens.map((c) => (
+                      <span key={c.tracking} title={`${c.destinataire || ""} · ${c.poids || 0} kg`}
+                        style={{ background: "var(--surface2)", borderRadius: 20, padding: "3px 10px", fontSize: 11.5, color: "var(--text)", fontWeight: 600 }}>
+                        {c.tracking} · <span style={{ color: "var(--muted)", fontWeight: 500 }}>{c.status}</span>
+                      </span>
+                    ))}
+                  </div>
+                );
+              })()}
+            </div>
+            <div style={{ maxHeight: 380, overflowY: "auto", marginBottom: 14 }}>
+              {conversation.lignes.map((m) => (
+                <div key={m.id} style={{ display: "flex", justifyContent: m.sens === "sortant" ? "flex-end" : "flex-start", marginBottom: 8 }}>
+                  <div style={{ maxWidth: "78%", background: m.sens === "sortant" ? "var(--brand-solid)" : "var(--surface2)",
+                    color: m.sens === "sortant" ? "#fff" : "var(--text)", borderRadius: 12, padding: "9px 12px" }}>
+                    <div style={{ fontSize: 13, whiteSpace: "pre-wrap", lineHeight: 1.45 }}>{m.texte}</div>
+                    <div style={{ fontSize: 10, opacity: 0.75, marginTop: 4 }}>
+                      {new Date(m.date).toLocaleString("fr-FR")}{m.par ? ` · ${m.par}` : ""}
+                      {(() => {
+                        const e = etatDe(m);
+                        return e ? <span title={e.erreur || e.libelle} style={{ marginInlineStart: 6, fontWeight: 700 }}>{e.court} {e.libelle}</span> : null;
+                      })()}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            {(() => {
+              const f = fenetre(conversation);
+              if (!f.ouverte) {
+                return (
+                  <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 10, padding: "12px 14px", fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
+                    Plus de vingt-quatre heures se sont écoulées depuis le dernier message de ce client :
+                    WhatsApp n’autorise plus le texte libre. Seul un modèle validé peut repartir — ou
+                    attendez qu’il vous réécrive, ce qui rouvrira la fenêtre pour une journée.
+                  </div>
+                );
+              }
+              return (
+                <div>
+                  <div style={{ fontSize: 11.5, color: "var(--ok-fg)", fontWeight: 600, marginBottom: 6 }}>
+                    Réponse libre possible encore {resteLisible(f.reste)}.
+                  </div>
+                  <textarea value={reponse} onChange={(e) => setReponse(e.target.value)} rows={3}
+                    placeholder="Votre réponse…" style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }} />
+                  <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                    <button onClick={repondre} disabled={!reponse.trim() || envoiEnCours}
+                      style={{ background: reponse.trim() && !envoiEnCours ? "var(--brand-solid)" : "var(--surface2)",
+                        color: reponse.trim() && !envoiEnCours ? "#fff" : "var(--muted)", border: "none", borderRadius: 9,
+                        padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: reponse.trim() && !envoiEnCours ? "pointer" : "not-allowed" }}>
+                      {envoiEnCours ? "Envoi…" : "Répondre"}
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
+          </>
+        )}
+      </div>
+    </div>
+    </div>
   );
 }
 
@@ -10271,7 +10710,7 @@ function CentreClientsPage({ data, persist, notify, session }) {
   function deciderExpress(colis, accepte) {
     const maintenant = new Date().toISOString();
     const dejaFacture = !!colis.demandeExpress?.facture;
-    const montant = Number(colis.demandeExpress?.montant) || 0;
+    const montant = montantSaisi(colis.demandeExpress?.montant) ?? 0;
     // On n'ajoute le supplément qu'une seule fois, même si l'agent clique deux fois.
     const ajout = accepte && !dejaFacture ? montant : 0;
     const retrait = !accepte && dejaFacture ? montant : 0;
@@ -10417,6 +10856,9 @@ function CentreClientsPage({ data, persist, notify, session }) {
     return true;
   }).sort((a, b) => new Date(b.dateCreation) - new Date(a.dateCreation));
 
+  // Les messages WhatsApp entrants n'appartiennent à aucun compte : ils arrivent d'un numéro.
+  const messagesWhatsAppNonLus = (data.messagesWhatsApp || []).filter((m) => !m.lu).length;
+
   const onglets = [
     ["messages", "Messages", messagesNonLus],
     ["prealertes", "Pré-alertes", preAlertesEnAttente],
@@ -10426,6 +10868,7 @@ function CentreClientsPage({ data, persist, notify, session }) {
     ["comptes", "Comptes inscrits", (data.clientAccounts || []).length],
     // Écrire à la base est un geste commercial, pas une réponse à une demande : l'onglet n'apparaît
     // qu'à qui en a le droit.
+    ["whatsapp", "WhatsApp", messagesWhatsAppNonLus],
     ...(effectivePermission(session, "clients.campagnes") ? [["campagnes", "Campagnes", 0]] : []),
   ];
 
@@ -10446,6 +10889,10 @@ function CentreClientsPage({ data, persist, notify, session }) {
           </button>
         ))}
       </div>
+
+      {ongletActif === "whatsapp" && (
+        <MessagesWhatsAppPage data={data} persist={persist} session={session} notify={notify} />
+      )}
 
       {ongletActif === "campagnes" && effectivePermission(session, "clients.campagnes") && (
         <CampagnesPage data={data} persist={persist} session={session} notify={notify} />
@@ -10915,6 +11362,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     setRelanceEnCours({ total: aRelancer.length, faits: 0, envoyes: 0, echecs: [] });
     let envoyes = 0;
     const echecs = [];
+    const tracesRelance = [];
     for (let i = 0; i < aRelancer.length; i++) {
       const c = aRelancer[i];
       const ag = siteRetraitPourColis(c, data);
@@ -10924,12 +11372,14 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
         + du + " Merci de venir le récupérer.";
       if (!c.telephone && !c.expediteurTelephone) echecs.push({ tracking: c.tracking, raison: "pas de numéro" });
       else {
-        const { envoyes: n } = await notifierEvenement(data, "relanceRetrait", c, message);
+        const { envoyes: n, traces } = await notifierEvenement(data, "relanceRetrait", c, message);
+        tracesRelance.push(...(traces || []));
         if (n > 0) envoyes++;
         else echecs.push({ tracking: c.tracking, raison: "envoi automatique indisponible" });
       }
       setRelanceEnCours({ total: aRelancer.length, faits: i + 1, envoyes, echecs: [...echecs] });
     }
+    if (tracesRelance.length) persist((courant) => ({ ...courant, messagesWhatsApp: avecTraces(courant, tracesRelance) }));
     if (envoyes === 0 && echecs.every((e) => e.raison === "envoi automatique indisponible")) {
       setRelanceEnCours(null);
       notify("Envoi automatique indisponible — contactez les clients depuis leur fiche");
@@ -11014,7 +11464,9 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
     // Ba-Diaby Express : il a commandé chez le partenaire et ne nous connaît pas.
     notifierEvenement(data, "enregistrement", colis,
       `Bonjour ${colis.destinataire}, votre colis ${nomExpediteurPourClient(data, colis)} ${colis.tracking} a bien été enregistré`
-      + `${colis.poids ? ` (${colis.poids} kg)` : ""}. Suivez-le à tout moment sur notre plateforme.`);
+      + `${colis.poids ? ` (${colis.poids} kg)` : ""}. Suivez-le à tout moment sur notre plateforme.`)
+      .then(({ traces }) => { if (traces?.length) persist((courant) => ({ ...courant, messagesWhatsApp: avecTraces(courant, traces) })); })
+      .catch(() => { /* une notification ne bloque jamais l'enregistrement */ });
     setShowForm(false);
   }
   function importerColisMany(nouveaux) {
@@ -11573,7 +12025,7 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
         onClose={() => setRemiseEnCours(null)} />}
       {showEncaisseGroupe && <EncaisserGroupeModal data={data} session={session} onEncaisser={encaisserGroupe} onClose={() => setShowEncaisseGroupe(false)} />}
       {showReception && <ReceptionBordereauModal onClose={() => setShowReception(false)} data={data} persist={persist} notify={notify} session={session} />}
-      {selected && <ColisDetail colis={selected} onClose={() => setSelected(null)} onAdvance={() => advance(selected.tracking)} onDelete={() => remove(selected.tracking)} onCancel={(motif) => annuler(selected.tracking, motif)} onRefuser={(motif) => refuser(selected.tracking, motif)} onDeclarerLitige={(t, d) => declarerLitige(selected.tracking, t, d)} onResoudreLitige={(r, i) => resoudreLitige(selected.tracking, r, i)} onMajRetour={(statutRetour) => majRetour(selected.tracking, statutRetour)} onUpdate={(patch) => updateColis(selected.tracking, patch)} onEncaisser={(montant, mode, montantSaisi, deviseSaisie, details, declarationId) => encaisser(selected.tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId)} canManage={!isChauffeur} isAdmin={session.role === "Administrateur"} isChauffeur={isChauffeur} data={data} session={session} notify={notify} />}
+      {selected && <ColisDetail colis={selected} onClose={() => setSelected(null)} onAdvance={() => advance(selected.tracking)} onDelete={() => remove(selected.tracking)} onCancel={(motif) => annuler(selected.tracking, motif)} onRefuser={(motif) => refuser(selected.tracking, motif)} onDeclarerLitige={(t, d) => declarerLitige(selected.tracking, t, d)} onResoudreLitige={(r, i) => resoudreLitige(selected.tracking, r, i)} onMajRetour={(statutRetour) => majRetour(selected.tracking, statutRetour)} onUpdate={(patch) => updateColis(selected.tracking, patch)} onEncaisser={(montant, mode, montantSaisi, deviseSaisie, details, declarationId) => encaisser(selected.tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId)} onTrace={(trace) => persist((courant) => ({ ...courant, messagesWhatsApp: avecTraces(courant, [trace]) }))} canManage={!isChauffeur} isAdmin={session.role === "Administrateur"} isChauffeur={isChauffeur} data={data} session={session} notify={notify} />}
     </div>
   );
 }
@@ -11923,6 +12375,7 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
     setEnvoiWa({ total: colisConcernes.length, faits: 0, envoyes: 0, echecs: [] });
     let envoyes = 0;
     const echecs = [];
+    const toutesTraces = [];
     for (let i = 0; i < colisConcernes.length; i++) {
       const c = colisConcernes[i];
       // On passe par notifierEvenement pour que les réglages (Configuration → Notifications
@@ -11931,12 +12384,15 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
       const evt = { "En transit": "expedie", "Arrivé": "arrivee", "Disponible au retrait": "retrait" }[etape.cle] || "arrivee";
       if (!c.telephone && !c.expediteurTelephone) { echecs.push({ tracking: c.tracking, raison: "pas de numéro" }); }
       else {
-        const { envoyes: n } = await notifierEvenement(data, evt, c, messagePourEtape(c, etape));
+        const { envoyes: n, traces } = await notifierEvenement(data, evt, c, messagePourEtape(c, etape));
+        toutesTraces.push(...(traces || []));
         if (n > 0) envoyes++;
         else echecs.push({ tracking: c.tracking, raison: "envoi automatique indisponible" });
       }
       setEnvoiWa({ total: colisConcernes.length, faits: i + 1, envoyes, echecs: [...echecs] });
     }
+    // Ce qui est parti est consigné, avec son identifiant Meta : l'accusé viendra s'y rattacher.
+    if (toutesTraces.length) persist((courant) => ({ ...courant, messagesWhatsApp: avecTraces(courant, toutesTraces) }));
     return { envoyes, echecs };
   }
 
@@ -12273,9 +12729,14 @@ function remiseVolumePourcent(poidsTotal, config) {
 }
 
 function produitValeurGNF(p, categories) {
-  const qty = Number(p.quantite) || 1;
+  /*
+   * Poids, quantité et montant sont tapés à la main, et l'on écrit « 12,5 » pour douze kilos et
+   * demi. Number() rend NaN sur cette forme : le produit était alors valorisé à zéro, et le colis
+   * facturé zéro sans que rien ne le signale. montantSaisi lit la virgule comme les espaces.
+   */
+  const qty = montantSaisi(p.quantite) || 1;
   if (p.personnalise) {
-    const montant = Number(p.montant) || 0;
+    const montant = montantSaisi(p.montant) ?? 0;
     const devise = p.devise || "GNF";
     const montantGNF = devise === "GNF" ? montant : (montant / (LIVE_RATES[devise] || CURRENCIES[devise] || 1)) * (LIVE_RATES.GNF || CURRENCIES.GNF);
     return p.typePrix === "total" ? montantGNF : montantGNF * qty;
@@ -12283,7 +12744,7 @@ function produitValeurGNF(p, categories) {
   const cat = (categories || []).find((c) => c.nom === p.categorie);
   if (!cat) return 0;
   const rate = catPriceGNF(cat);
-  return cat.type === "kg" ? rate * (Number(p.poids) || 0) : rate * qty;
+  return cat.type === "kg" ? rate * (montantSaisi(p.poids) ?? 0) : rate * qty;
 }
 function emptyProduit() { return { id: `p${Date.now()}${Math.random().toString(36).slice(2, 6)}`, nom: "", quantite: "1", poids: "", categorie: "", personnalise: false, montant: "", devise: "GNF", typePrix: "unitaire" }; }
 
@@ -13822,10 +14283,20 @@ async function downloadLabel(colis, data) {
  * réécrit à chaque appel (upsert) : il n'y a pas besoin d'historiser les étiquettes, seule la
  * dernière version compte. Lève une erreur si l'upload échoue — à l'appelant de décider quoi faire.
  */
-async function genererUrlEtiquette(colis, data) {
-  const doc = await construireEtiquetteDoc(colis, data);
-  const blob = doc.output("blob");
-  const chemin = `etiquettes/${colis.tracking}.pdf`;
+/**
+ * Le document joint aux messages du client : SA FACTURE.
+ *
+ * C'était l'étiquette — celle qu'on colle sur le carton, avec son code-barres et son QR. Elle ne
+ * sert à personne d'autre qu'à l'agent qui manipule le colis : le client, lui, la reçoit sur son
+ * téléphone sans rien pouvoir en faire. Ce qu'il attend, c'est ce qu'il doit, ce qu'il a déjà
+ * réglé, et le détail de ce qu'il envoie — c'est-à-dire la facture.
+ *
+ * L'étiquette n'a pas disparu pour autant : elle continue de s'imprimer depuis la fiche du colis,
+ * là où elle a un sens.
+ */
+async function genererUrlFacture(colis, data) {
+  const blob = await downloadInvoice(colis, data, { blob: true });
+  const chemin = `factures/${colis.tracking}.pdf`;
   const { error: erreurUpload } = await clientSupabase().storage
     .from("colis-documents")
     .upload(chemin, blob, { contentType: "application/pdf", upsert: true });
@@ -13834,21 +14305,21 @@ async function genererUrlEtiquette(colis, data) {
   return publicUrl;
 }
 
-/** Envoi manuel de l'étiquette au destinataire sur WhatsApp (bouton "Ticket d'envoi" de la fiche colis). */
-async function envoyerEtiquetteWhatsApp(colis, data) {
+/** Envoi manuel de la facture au destinataire sur WhatsApp, depuis la fiche du colis. */
+async function envoyerFactureWhatsApp(colis, data) {
   let publicUrl;
-  try { publicUrl = await genererUrlEtiquette(colis, data); }
+  try { publicUrl = await genererUrlFacture(colis, data); }
   catch (e) { return { envoye: false, raison: "Échec de l’envoi du PDF vers le stockage." }; }
   // Sous la marque d'un partenaire, le message ne doit pas nommer Ba-Diaby Express : son client
   // ne nous connaît pas.
   const marque = marquePartenaire(data, colis);
-  const message = `Bonjour ${colis.destinataire}, voici l’étiquette de votre colis ${nomExpediteurPourClient(data, colis)} (${colis.tracking}).`;
+  const message = `Bonjour ${colis.destinataire}, voici la facture de votre colis ${nomExpediteurPourClient(data, colis)} (${colis.tracking}).`;
   const resultat = await envoyerWhatsApp(colis.telephone, message, publicUrl);
   // Contrairement à notifierWhatsApp() (message texte), il n'existe pas de brouillon WhatsApp de
   // secours pour une pièce jointe — wa.me ne sait pré-remplir que du texte. Sans Twilio configuré,
   // il n'y a donc rien à faire automatiquement : on le dit clairement plutôt que de rester muet.
   if (!resultat.envoye && !resultat.raison) {
-    return { envoye: false, raison: "Envoi automatique non configuré — téléchargez l’étiquette et envoyez-la manuellement." };
+    return { envoye: false, raison: "Envoi automatique non configuré — téléchargez la facture et envoyez-la manuellement." };
   }
   return resultat;
 }
@@ -14627,6 +15098,7 @@ async function downloadInvoice(colis, data, options = {}) {
   doc.text("BA-DIABY EXPRESS · badiabyexpress.bde@gmail.com", M, Z.pied + 1.5);
   doc.text("Page 1 / 1", W - M, Z.pied + 1.5, { align: "right" });
 
+  if (options.blob) return doc.output("blob");
   if (options.retourner) {
     return { nom: `facture-${colis.tracking}.pdf`, contenu: doc.output("datauristring").split(",")[1] };
   }
@@ -15271,7 +15743,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   // total, exactement comme à la création.
   const valeurProduits = produits.reduce((somme, prod) => somme + produitValeurGNF(prod, categories || []), 0);
   const prixBrut = auxPaliers
-    ? +(calcReceptionFee(Number(poids) || 0, tarifsReception).total / (LIVE_RATES.GNF || CURRENCIES.GNF)).toFixed(2)
+    ? +(calcReceptionFee(montantSaisi(poids) ?? 0, tarifsReception).total / (LIVE_RATES.GNF || CURRENCIES.GNF)).toFixed(2)
     : valeurProduits > 0
       ? +(valeurProduits / (LIVE_RATES.GNF || CURRENCIES.GNF)).toFixed(2)
       : calcPrice(pays, poids, volume, mode);
@@ -15365,7 +15837,9 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
     }
     // Un colis de 0 kg n'existe pas : on refuse l'enregistrement plutôt que de créer une
     // ligne qui faussera ensuite les totaux de poids, le chiffre d'affaires et les commissions.
-    if (!(Number(poids) > 0)) { setErr("Le poids doit être supérieur à 0 kg."); return; }
+    // « 12,5 » est la façon normale d'écrire douze kilos et demi : Number() y voit NaN, et le
+    // colis se refusait avec un message parlant d'un poids nul que l'agent venait pourtant de saisir.
+    if (!((montantSaisi(poids) ?? 0) > 0)) { setErr("Le poids doit être supérieur à 0 kg — écrivez par exemple 12,5."); return; }
     // Mêmes règles que sur l'encaissement d'un colis : on n'enregistre jamais plus que ce qui est
     // dû (le surplus est de la monnaie à rendre, pas une recette), et une somme retirée de la
     // caisse d'un agent doit être justifiée.
@@ -15381,7 +15855,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
       destinataireAdresse, destinataireVille, destinataireCodePostal,
       pays, direction,
       destinatairePays: direction === "import" ? "GN" : pays, mode,
-      poids: Number(poids) || 0, volume: Number(volume) || 0,
+      poids: montantSaisi(poids) ?? 0, volume: montantSaisi(volume) ?? 0,
       produits, valeurDeclaree: produits.length ? valeurProduits : (colis.valeurDeclaree || 0),
       /*
        * Sur un colis partenaire, les montants de l'entreprise restent tels quels — à zéro — et
@@ -15403,7 +15877,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
       }),
       ...(estPartenaire
         ? {
-            prixPartenaire: detailPrixPartenaire({ produits, poids: Number(poids) || 0, pays }, partenaire).total,
+            prixPartenaire: detailPrixPartenaire({ produits, poids: montantSaisi(poids) ?? 0, pays }, partenaire).total,
             devisePartenaire: contratPartenaire.devise,
             /*
              * Un repère saisi rend le colis « sous repère », et le vide : un colis dont on vient
@@ -15829,7 +16303,7 @@ function ImpressionDirecteModal({ colis, onClose, data }) {
   );
 }
 
-function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser, onDeclarerLitige, onResoudreLitige, onMajRetour, onUpdate, onEncaisser, canManage, isAdmin, isChauffeur, data, session, notify }) {
+function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser, onDeclarerLitige, onResoudreLitige, onMajRetour, onUpdate, onEncaisser, canManage, isAdmin, isChauffeur, data, session, notify, onTrace }) {
   const [cancelling, setCancelling] = useState(false);
   const [refusing, setRefusing] = useState(false);
   const [motifRefus, setMotifRefus] = useState("");
@@ -15884,7 +16358,15 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
     // Écrire au client d'un partenaire, c'est se servir de son contact : le registre le dit.
     if (colisPartenaire) onUpdate({ accesContacts: inscrireAccesContact(colis, session, "Message de suivi envoyé au client") });
     setWaErreur(""); setWaState("envoi");
-    const { envoye, raison } = await envoyerWhatsApp(colis.telephone, message);
+    const resultat = await envoyerWhatsApp(colis.telephone, message);
+    const { envoye, raison } = resultat;
+    // Un envoi à la main se consigne comme un envoi automatique : c'est le même client, la même
+    // conversation, et la même question un mois plus tard — « l'a-t-il reçu ? ».
+    onTrace?.(traceEnvoiWhatsApp({
+      telephone: colis.telephone, texte: message, resultat,
+      evenement: "message manuel", par: `${session?.prenom || ""} ${session?.nom || ""}`.trim(),
+      tracking: colis.tracking,
+    }));
     if (envoye) { setWaState("envoye"); return; }
     if (raison) setWaErreur(raison);
     setWaState("brouillon");
@@ -15893,10 +16375,10 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
   const [etiquetteWaState, setEtiquetteWaState] = useState("idle");
   const [etiquetteWaErreur, setEtiquetteWaErreur] = useState("");
   async function handleEnvoyerEtiquetteWhatsApp() {
-    if (colisPartenaire) onUpdate({ accesContacts: inscrireAccesContact(colis, session, "Étiquette envoyée au client par WhatsApp") });
+    if (colisPartenaire) onUpdate({ accesContacts: inscrireAccesContact(colis, session, "Facture envoyée au client par WhatsApp") });
     setEtiquetteWaErreur(""); setEtiquetteWaState("envoi");
     try {
-      const { envoye, raison } = await envoyerEtiquetteWhatsApp(colis, data);
+      const { envoye, raison } = await envoyerFactureWhatsApp(colis, data);
       if (envoye) { setEtiquetteWaState("envoye"); return; }
       setEtiquetteWaErreur(raison || "Échec de l’envoi.");
       setEtiquetteWaState("idle");
@@ -16010,8 +16492,8 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
     catch (e) { console.error(e); setRecuState("error"); }
   }
   function validerEncaissement() {
-    const n = Number(String(montantPaye).replace(",", "."));
-    if (isNaN(n) || n <= 0) return;
+    const n = montantSaisi(montantPaye);
+    if (n === null || n <= 0) return;
     // convertit le montant saisi (dans devisePaiement) vers l’équivalent EUR, notre unité de référence interne
     const montantEUR = +(n / (LIVE_RATES[devisePaiement] || CURRENCIES[devisePaiement] || 1)).toFixed(2);
     const recu = percuPar === "__autre" ? percuAutre.trim() : percuPar;
@@ -16092,8 +16574,8 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
           <div style={{ fontSize: 12.5, color: "var(--warn-fg)" }}>⚡ Livraison express demandée par le client — {fmt(colis.demandeExpress.montant, "EUR")} · statut : <strong>{colis.demandeExpress.statut}</strong></div>
           {canManage && colis.demandeExpress.statut === "En attente" && (
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={() => onUpdate((() => { const m = Number(colis.demandeExpress?.montant) || 0; const deja = !!colis.demandeExpress?.facture; const ajout = m && !deja ? m : 0; const retrait = 0; const prix = Math.max(+((colis.prix || 0) + ajout - retrait).toFixed(2), 0); return { prix, reste: Math.max(+(prix - (colis.paye || 0)).toFixed(2), 0), demandeExpress: { ...colis.demandeExpress, statut: "Confirmée", dateDecision: new Date().toISOString(), traitePar: `${session.prenom} ${session.nom}`.trim(), facture: true } }; })())} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Confirmer</button>
-              <button onClick={() => onUpdate((() => { const m = Number(colis.demandeExpress?.montant) || 0; const deja = !!colis.demandeExpress?.facture; const ajout = 0; const retrait = deja ? m : 0; const prix = Math.max(+((colis.prix || 0) + ajout - retrait).toFixed(2), 0); return { prix, reste: Math.max(+(prix - (colis.paye || 0)).toFixed(2), 0), demandeExpress: { ...colis.demandeExpress, statut: "Refusée", dateDecision: new Date().toISOString(), traitePar: `${session.prenom} ${session.nom}`.trim(), facture: false } }; })())} style={{ background: "none", border: "1px solid var(--warn-border)", color: "var(--warn-fg)", borderRadius: 6, padding: "5px 12px", fontSize: 11.5, cursor: "pointer" }}>Refuser</button>
+              <button onClick={() => onUpdate((() => { const m = montantSaisi(colis.demandeExpress?.montant) ?? 0; const deja = !!colis.demandeExpress?.facture; const ajout = m && !deja ? m : 0; const retrait = 0; const prix = Math.max(+((colis.prix || 0) + ajout - retrait).toFixed(2), 0); return { prix, reste: Math.max(+(prix - (colis.paye || 0)).toFixed(2), 0), demandeExpress: { ...colis.demandeExpress, statut: "Confirmée", dateDecision: new Date().toISOString(), traitePar: `${session.prenom} ${session.nom}`.trim(), facture: true } }; })())} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Confirmer</button>
+              <button onClick={() => onUpdate((() => { const m = montantSaisi(colis.demandeExpress?.montant) ?? 0; const deja = !!colis.demandeExpress?.facture; const ajout = 0; const retrait = deja ? m : 0; const prix = Math.max(+((colis.prix || 0) + ajout - retrait).toFixed(2), 0); return { prix, reste: Math.max(+(prix - (colis.paye || 0)).toFixed(2), 0), demandeExpress: { ...colis.demandeExpress, statut: "Refusée", dateDecision: new Date().toISOString(), traitePar: `${session.prenom} ${session.nom}`.trim(), facture: false } }; })())} style={{ background: "none", border: "1px solid var(--warn-border)", color: "var(--warn-fg)", borderRadius: 6, padding: "5px 12px", fontSize: 11.5, cursor: "pointer" }}>Refuser</button>
             </div>
           )}
         </div>
@@ -16183,7 +16665,7 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
                   <button onClick={() => { setShowImpressionDirecte(true); setShowDocMenu(false); }} style={menuItemStyle}>Imprimer l’étiquette (imprimante connectée)</button>
                   {colis.telephone && (
                     <button onClick={handleEnvoyerEtiquetteWhatsApp} disabled={etiquetteWaState === "envoi"} style={menuItemStyle}>
-                      {etiquetteWaState === "envoi" ? "Envoi…" : etiquetteWaState === "envoye" ? "Étiquette envoyée" : "Envoyer l’étiquette par WhatsApp"}
+                      {etiquetteWaState === "envoi" ? "Envoi…" : etiquetteWaState === "envoye" ? "Facture envoyée" : "Envoyer la facture par WhatsApp"}
                       {etiquetteWaErreur && <span style={{ ...menuItemHint, color: "var(--warn-fg)" }}>{etiquetteWaErreur}</span>}
                     </button>
                   )}
@@ -20083,6 +20565,16 @@ VoyagesPage = memo(VoyagesPage);
 
 function ComptabilitePage({ data, persist, session, notify }) {
   const [periode, setPeriode] = useState("mois");
+  /*
+   * UNE SEULE DEVISE À L'ÉCRAN COMME SUR LE PAPIER
+   *
+   * Cet écran affichait les recettes en euros et les dépenses en francs, côte à côte, et le
+   * récapitulatif PDF reprenait ce mélange ligne à ligne. Un comptable ne peut rien en faire :
+   * additionner « 745,31 EUR » et « 250 000 GNF » n'a aucun sens, et le lecteur ne sait même pas
+   * lequel des deux chiffres est le plus gros. Les dépenses restent SAISIES en francs — c'est ce
+   * qu'on paie — mais tout ce qui s'affiche est ramené à la devise choisie ici.
+   */
+  const [devise, setDevise] = useState("GNF");
   const [form, setForm] = useState(null);
   const depenses = data.depenses || [];
 
@@ -20193,9 +20685,11 @@ function ComptabilitePage({ data, persist, session, notify }) {
     />
   );
   function exportRapport() {
-    const headers = ["Type", "Nom", "Montant_GNF", "Date"];
-    const rows = depensesPeriode.map((d) => [d.type, d.nom, d.montant, new Date(d.date).toLocaleDateString("fr-FR")]);
-    rows.push(["Recette", "Total encaissé (période)", recettes, ""]);
+    // Le fichier suit la devise affichée : un tableur qui mélange deux monnaies dans la même
+    // colonne ne s'additionne pas non plus.
+    const headers = ["Type", "Nom", `Montant_${devise}`, "Date"];
+    const rows = depensesPeriode.map((d) => [d.type, d.nom, fmtRaw((d.montant || 0) / gnfRate, devise), new Date(d.date).toLocaleDateString("fr-FR")]);
+    rows.push(["Recette", "Total encaissé (période)", fmtRaw(recettes, devise), ""]);
     const csv = [headers, ...rows].map((r) => r.map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
     const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -20219,21 +20713,26 @@ function ComptabilitePage({ data, persist, session, notify }) {
       doc.text("BA-DIABY EXPRESS", 34, y);
       doc.setFont(undefined, "normal"); doc.setFontSize(10); doc.setTextColor(...MUTED);
       doc.text(`Récapitulatif financier — ${periodeLabels[periode]}`, 34, y + 6);
+      doc.setFontSize(8.5);
+      doc.text(`Tous les montants en ${devise}${devise === "EUR" ? "" : ` · 1 EUR = ${gnfRate.toLocaleString("fr-FR")} GNF`}`, 34, y + 11);
       y += 20;
       doc.setDrawColor(...RED); doc.setLineWidth(0.6); doc.line(14, y, 196, y);
       y += 10;
 
+      /*
+       * Tout dans la devise choisie à l'écran. « Reste à encaisser » figurait deux fois, sous deux
+       * calculs qui donnaient le même chiffre : une seule ligne suffit.
+       */
       const kpis = [
         ["Colis enregistrés", `${colisPeriode.length}`],
-        ["Chiffre d’affaires facturé", fmt(facture, "EUR")],
-        ["Recettes encaissées", fmt(recettes, "EUR")],
-        ["Reste à encaisser", fmt(facture - recettes, "EUR")],
-        ["Dépenses", fmtGNF(totalDepenses)],
-        ["Salaires", fmtGNF(totalSalaires)],
-        ["Commissions", fmt(totalCommissions, "EUR")],
-        ["Résultat de la période (sur le facturé)", fmt(benefice, "EUR")],
-        ["Reste à encaisser", fmt(resteAEncaisser, "EUR")],
-        ["Indemnités de litige", fmt(totalIndemnites, "EUR")],
+        ["Chiffre d’affaires facturé", fmt(facture, devise)],
+        ["Recettes encaissées", fmt(recettes, devise)],
+        ["Reste à encaisser", fmt(resteAEncaisser, devise)],
+        ["Dépenses", fmt(totalDepenses / gnfRate, devise)],
+        ["Salaires", fmt(totalSalaires / gnfRate, devise)],
+        ["Commissions", fmt(totalCommissions, devise)],
+        ["Indemnités de litige", fmt(totalIndemnites, devise)],
+        ["Résultat de la période (sur le facturé)", fmt(benefice, devise)],
       ];
       const hasAutoTable = await ensureAutoTable();
       if (hasAutoTable && doc.autoTable) {
@@ -20259,10 +20758,10 @@ function ComptabilitePage({ data, persist, session, notify }) {
       doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(...INK);
       doc.text("Détail des colis de la période", 14, y);
       y += 4;
-      const rows = colisPeriode.map((c) => [c.tracking, c.destinataire, routeLabel(c.pays, c.direction), fmt(c.prix, "EUR"), c.reste > 0 ? fmt(c.reste, "EUR") : "Payé"]);
+      const rows = colisPeriode.map((c) => [c.tracking, c.destinataire, routeLabel(c.pays, c.direction), fmt(c.prix, devise), c.reste > 0 ? fmt(c.reste, devise) : "Payé"]);
       if (hasAutoTable && doc.autoTable && rows.length > 0) {
         doc.autoTable({
-          startY: y + 4, head: [["N° de suivi", "Destinataire", "Route", "Montant", "Solde"]], body: rows,
+          startY: y + 4, head: [["N° de suivi", "Destinataire", "Route", `Montant (${devise})`, "Solde"]], body: rows,
           theme: "grid", headStyles: { fillColor: [10, 38, 71], textColor: 255, fontSize: 8.5 }, styles: { fontSize: 8.5, textColor: [40, 40, 40], overflow: "linebreak" },
           // Largeurs fixes (somme = 182 mm), même raison que sur le bordereau d'expédition et le
           // bordereau de réception : éviter qu'autoTable ne laisse une colonne empiéter sur la suivante.
@@ -20329,25 +20828,37 @@ function ComptabilitePage({ data, persist, session, notify }) {
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap", alignItems: "center" }}>
         {[["jour", "Aujourd’hui"], ["semaine", "Cette semaine"], ["mois", "Ce mois"], ["tout", "Tout"]].map(([k, label]) => (
           <button key={k} onClick={() => setPeriode(k)} style={{ padding: "7px 14px", borderRadius: 20, border: "1.5px solid " + (periode === k ? "var(--brand-solid)" : "var(--border)"), background: periode === k ? "var(--brand-solid)" : "var(--surface)", color: periode === k ? "#fff" : "var(--muted)", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>{label}</button>
         ))}
+        <div style={{ flex: 1 }} />
+        <span style={{ fontSize: 12, color: "var(--muted)" }}>Afficher les montants en :</span>
+        <select value={devise} onChange={(e) => setDevise(e.target.value)} aria-label="Devise d’affichage de la comptabilité"
+          style={{ ...inputStyle, width: 110, marginBottom: 0 }}>
+          {Object.keys(CURRENCIES).map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
       </div>
+      {devise !== "GNF" && (
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -10, marginBottom: 14 }}>
+          Les dépenses et salaires sont saisis en francs guinéens ; ils sont convertis ici au taux du
+          jour (1 EUR = {gnfRate.toLocaleString("fr-FR")} GNF).
+        </div>
+      )}
 
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 20 }}>
-        <StatCard label="Recettes encaissées" value={fmt(recettes, "EUR")} icon={CheckCircle2} tint="#16A163" trend={`Facturé : ${fmt(facture, "EUR")}`} trendColor="var(--muted)" />
-        <StatCard label="Dépenses" value={fmtGNF(totalDepenses)} icon={Receipt} tint="#E23F52" />
-        <StatCard label="Salaires" value={fmtGNF(totalSalaires)} icon={Users} tint="#B8801C" />
-        <StatCard label="Commissions" value={fmt(totalCommissions, "EUR")} icon={DollarSign} tint="#8B5CF6" trend={`dont auto : ${fmt(commissionsAuto, "EUR")}`} trendColor="var(--muted)" />
+        <StatCard label="Recettes encaissées" value={fmt(recettes, devise)} icon={CheckCircle2} tint="#16A163" trend={`Facturé : ${fmt(facture, devise)}`} trendColor="var(--muted)" />
+        <StatCard label="Dépenses" value={fmt(totalDepenses / gnfRate, devise)} icon={Receipt} tint="#E23F52" />
+        <StatCard label="Salaires" value={fmt(totalSalaires / gnfRate, devise)} icon={Users} tint="#B8801C" />
+        <StatCard label="Commissions" value={fmt(totalCommissions, devise)} icon={DollarSign} tint="#8B5CF6" trend={`dont auto : ${fmt(commissionsAuto, devise)}`} trendColor="var(--muted)" />
       </div>
 
       <div style={{ background: benefice >= 0 ? "var(--ok-bg)" : "var(--danger-bg)", borderRadius: 14, padding: 20, marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div>
           <div style={{ fontSize: 13, color: "var(--text)", fontWeight: 700 }}>Résultat de la période</div>
-          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3 }}>Sur le chiffre d’affaires facturé, charges, commissions{totalIndemnites > 0.005 ? " et indemnités de litige" : ""} déduites{resteAEncaisser > 0.005 ? ` · ${fmt(resteAEncaisser, "EUR")} encore à encaisser` : ""}</div>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3 }}>Sur le chiffre d’affaires facturé, charges, commissions{totalIndemnites > 0.005 ? " et indemnités de litige" : ""} déduites{resteAEncaisser > 0.005 ? ` · ${fmt(resteAEncaisser, devise)} encore à encaisser` : ""}</div>
         </div>
-        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 22, fontWeight: 700, color: benefice >= 0 ? "var(--ok-fg)" : "var(--danger-fg)" }}>{fmt(benefice, "EUR")}</div>
+        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 22, fontWeight: 700, color: benefice >= 0 ? "var(--ok-fg)" : "var(--danger-fg)" }}>{fmt(benefice, devise)}</div>
       </div>
 
       {paiementsPeriode.length > 0 && (
@@ -20357,7 +20868,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
             {Object.entries(parMode).sort((a, b) => b[1] - a[1]).map(([mode, montant]) => (
               <div key={mode} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderTop: "1px solid var(--border)" }}>
                 <span style={{ fontSize: 13, color: "var(--text)" }}>{mode}</span>
-                <span style={{ fontSize: 13, fontWeight: 700, color: "var(--ok-fg)" }}>{fmt(montant, "EUR")}</span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: "var(--ok-fg)" }}>{fmt(montant, devise)}</span>
               </div>
             ))}
           </div>
@@ -20366,7 +20877,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
             {joursTries.map(([jour, montant]) => (
               <div key={jour} style={{ display: "flex", justifyContent: "space-between", padding: "8px 0", borderTop: "1px solid var(--border)" }}>
                 <span style={{ fontSize: 13, color: "var(--text)" }}>{jour}</span>
-                <span style={{ fontSize: 13, fontWeight: 700, color: "var(--ok-fg)" }}>{fmt(montant, "EUR")}</span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: "var(--ok-fg)" }}>{fmt(montant, devise)}</span>
               </div>
             ))}
           </div>
@@ -20381,7 +20892,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
             {commissionsParAgence.map((a) => (
               <div key={a.nom} style={{ background: "var(--surface2)", borderRadius: 12, padding: 14 }}>
                 <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{a.nom}</div>
-                <div style={{ fontSize: 18, fontWeight: 700, color: "var(--ok-fg)", fontFamily: "'Space Grotesk',sans-serif", marginTop: 4 }}>{fmt(a.montant, "EUR")}</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: "var(--ok-fg)", fontFamily: "'Space Grotesk',sans-serif", marginTop: 4 }}>{fmt(a.montant, devise)}</div>
               </div>
             ))}
           </div>
@@ -20391,7 +20902,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
       <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden" }}>
         <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", minWidth: 520, borderCollapse: "collapse" }}>
-          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["Type", "Libellé", "Montant", "Date", ""].map((h) => <th key={h} style={{ padding: "12px 16px", fontSize: 11.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
+          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["Type", "Libellé", `Montant (${devise})`, "Date", ""].map((h) => <th key={h} style={{ padding: "12px 16px", fontSize: 11.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
           <tbody>
             {depensesPeriode.map((d) => (
               <tr key={d.id} style={{ borderTop: "1px solid var(--border)" }}>
@@ -20399,7 +20910,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
                 <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--text)", whiteSpace: "nowrap" }}>{d.nom}</td>
                 {/* Une écriture à zéro est presque toujours une saisie perdue : on la signale au lieu de la ranger sagement. */}
                 <td style={{ padding: "12px 16px", fontSize: 13, color: d.montant > 0 ? "var(--muted)" : "var(--danger-fg)", fontWeight: d.montant > 0 ? 400 : 700, whiteSpace: "nowrap" }}>
-                  {fmtGNF(d.montant)}{d.montant > 0 ? "" : " — à corriger"}
+                  {fmt((d.montant || 0) / gnfRate, devise)}{d.montant > 0 ? "" : " — à corriger"}
                 </td>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{new Date(d.date).toLocaleDateString("fr-FR")}</td>
                 <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>{effectivePermission(session, "compta.gerer_depenses") && <>
@@ -20661,7 +21172,7 @@ function ImportExcelModal({ onClose, onImportMany, data, session }) {
           telephone: getVal(row, "Destinataire Telephone", "Destinataire Téléphone"),
           destinataireAdresse: getVal(row, "Destinataire Adresse"),
           destinatairePays: valid ? destPays : "",
-          poids: Number(getVal(row, "Poids (kg)", "Poids")) || 0,
+          poids: montantSaisi(getVal(row, "Poids (kg)", "Poids")) ?? 0,
           produit: getVal(row, "Produit") || "Colis",
           prixEur: getVal(row, "Prix EUR (optionnel)", "Prix EUR") ? Number(getVal(row, "Prix EUR (optionnel)", "Prix EUR")) : null,
         };
@@ -21212,6 +21723,78 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
    * l'envoi renvoie le même refus. Sans cette liste, on cherche une erreur de nom là où il n'y a
    * qu'à patienter — et l'on ne sait pas non plus lequel des huit a été refusé.
    */
+  /*
+   * LE PROFIL DE L'ENTREPRISE — la photo, la description, l'adresse.
+   *
+   * C'est la première chose qu'un client voit : avant même de lire le message, il regarde qui
+   * écrit. Depuis que le numéro est sur l'API, l'application WhatsApp Business ne l'ouvre plus,
+   * et ces champs ne se changeaient donc plus nulle part — sauf à traverser le gestionnaire de
+   * Meta. Ils se modifient ici.
+   */
+  const [profil, setProfil] = useState(null);
+  const [profilBrouillon, setProfilBrouillon] = useState(null);
+  const [profilEnCours, setProfilEnCours] = useState(false);
+  const [profilResultat, setProfilResultat] = useState(null);
+  function relireProfil() {
+    return appelServeurQuiDepense("/api/whatsapp?profil=1")
+      .then((r) => r.json().then((corps) => ({ ok: r.ok, corps })))
+      .then(({ ok, corps }) => {
+        setProfil(ok ? corps.profil : { erreur: corps?.error || "indisponible" });
+        if (ok) {
+          setProfilBrouillon({
+            about: corps.profil?.about || "", description: corps.profil?.description || "",
+            address: corps.profil?.address || "", email: corps.profil?.email || "",
+            websites: (corps.profil?.websites || []).join(", "),
+          });
+        }
+      })
+      .catch(() => setProfil({ erreur: "indisponible" }));
+  }
+  useEffect(() => { relireProfil(); }, []);
+
+  /*
+   * La photo passe par la même compression que celles des colis : Meta plafonne à 5 Mo, et une
+   * photo prise au téléphone en pèse trois fois plus. 640 px suffisent largement pour une pastille
+   * ronde de quarante pixels sur l'écran d'un client.
+   */
+  async function choisirPhotoProfil(fichier) {
+    if (!fichier) return;
+    setProfilResultat(null);
+    setProfilEnCours(true);
+    try {
+      const compressee = await resizeImageToDataUrl(fichier, 640, 0.85);
+      const reponse = await appelServeurQuiDepense("/api/whatsapp?profil=1", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ photo: { contenu: compressee, type: "image/jpeg" } }),
+      });
+      const corps = await reponse.json().catch(() => ({}));
+      if (reponse.ok) { setProfilResultat({ ok: true, quoi: "photo" }); await relireProfil(); }
+      else setProfilResultat({ erreur: corps?.error || "Meta a refusé la photo." });
+    } catch (e) {
+      setProfilResultat({ erreur: "La photo n’a pas pu être envoyée." });
+    } finally { setProfilEnCours(false); }
+  }
+
+  async function enregistrerProfil() {
+    setProfilResultat(null);
+    setProfilEnCours(true);
+    try {
+      const reponse = await appelServeurQuiDepense("/api/whatsapp?profil=1", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ champs: {
+          about: profilBrouillon.about, description: profilBrouillon.description,
+          address: profilBrouillon.address, email: profilBrouillon.email,
+          websites: profilBrouillon.websites.split(",").map((x) => x.trim()).filter(Boolean),
+        } }),
+      });
+      const corps = await reponse.json().catch(() => ({}));
+      if (reponse.ok) { setProfilResultat({ ok: true, quoi: "profil" }); await relireProfil(); }
+      else setProfilResultat({ erreur: corps?.error || "Meta a refusé la modification." });
+    } catch (e) {
+      setProfilResultat({ erreur: "Impossible de joindre le serveur." });
+    } finally { setProfilEnCours(false); }
+  }
+
   const [modeles, setModeles] = useState(null);
   function relireModeles() {
     return appelServeurQuiDepense("/api/whatsapp?modeles=1")
@@ -21358,6 +21941,85 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
           reçoit un message signé de la marque du partenaire.
         </div>
       </div>
+
+      {/*
+        LE PROFIL QUE VOIENT LES CLIENTS
+
+        Avant de lire le message, le client regarde qui écrit : une pastille ronde, un nom, une
+        ligne de description. Ces champs vivaient dans l'application WhatsApp Business, qui ne
+        s'ouvre plus sur ce numéro depuis son inscription sur l'API. Ils sont ici.
+      */}
+      {profil && !profil.erreur && (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "15px 16px", marginBottom: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>
+            Profil WhatsApp de l’entreprise
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 }}>
+            C’est ce que voit un client quand il reçoit un message de vous. Le numéro étant sur
+            l’API, ces champs ne se modifient plus depuis l’application WhatsApp Business.
+          </div>
+
+          <div style={{ display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap", marginBottom: 14 }}>
+            <div style={{ textAlign: "center" }}>
+              {profil.profile_picture_url ? (
+                <img src={profil.profile_picture_url} alt="Photo de profil WhatsApp"
+                  style={{ width: 84, height: 84, borderRadius: "50%", objectFit: "cover", border: "2px solid var(--border)" }} />
+              ) : (
+                <div style={{ width: 84, height: 84, borderRadius: "50%", background: "var(--surface2)", border: "2px dashed var(--border)", display: "grid", placeItems: "center", color: "var(--muted)", fontSize: 11 }}>
+                  aucune
+                </div>
+              )}
+              <label style={{ display: "block", marginTop: 8, fontSize: 12, fontWeight: 700, color: "var(--info-fg)", cursor: profilEnCours ? "wait" : "pointer" }}>
+                {profilEnCours ? "Envoi…" : "Changer la photo"}
+                <input type="file" accept="image/*" disabled={profilEnCours} style={{ display: "none" }}
+                  onChange={(e) => choisirPhotoProfil(e.target.files?.[0])} />
+              </label>
+            </div>
+            <div style={{ flex: 1, minWidth: 240 }}>
+              <Field label="Message d’accueil (« à propos »)">
+                <input value={profilBrouillon?.about || ""} maxLength={139}
+                  onChange={(e) => setProfilBrouillon({ ...profilBrouillon, about: e.target.value })}
+                  placeholder="Transport de colis Conakry ↔ Monde" style={inputStyle} />
+              </Field>
+              <Field label="Description">
+                <textarea value={profilBrouillon?.description || ""} maxLength={512} rows={2}
+                  onChange={(e) => setProfilBrouillon({ ...profilBrouillon, description: e.target.value })}
+                  style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }} />
+              </Field>
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 10 }}>
+            <Field label="Adresse">
+              <input value={profilBrouillon?.address || ""} maxLength={256}
+                onChange={(e) => setProfilBrouillon({ ...profilBrouillon, address: e.target.value })} style={inputStyle} />
+            </Field>
+            <Field label="Adresse e-mail">
+              <input value={profilBrouillon?.email || ""} maxLength={128}
+                onChange={(e) => setProfilBrouillon({ ...profilBrouillon, email: e.target.value })} style={inputStyle} />
+            </Field>
+            <Field label="Site web (deux au plus, séparés par une virgule)">
+              <input value={profilBrouillon?.websites || ""}
+                onChange={(e) => setProfilBrouillon({ ...profilBrouillon, websites: e.target.value })} style={inputStyle} />
+            </Field>
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <button onClick={enregistrerProfil} disabled={profilEnCours}
+              style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: profilEnCours ? "wait" : "pointer" }}>
+              {profilEnCours ? "Enregistrement…" : "Enregistrer le profil"}
+            </button>
+            {profilResultat?.ok && (
+              <span style={{ fontSize: 12.5, color: "var(--ok-fg)", fontWeight: 600 }}>
+                {profilResultat.quoi === "photo" ? "Photo mise à jour chez Meta." : "Profil mis à jour chez Meta."}
+              </span>
+            )}
+            {profilResultat?.erreur && (
+              <span style={{ fontSize: 12.5, color: "var(--danger-fg)", fontWeight: 600 }}>{profilResultat.erreur}</span>
+            )}
+          </div>
+        </div>
+      )}
 
       {/*
         Ce que Meta autorise encore.
@@ -21701,11 +22363,15 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
       <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: "16px 18px", marginTop: 16 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
           <div style={{ flex: 1, minWidth: 220 }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Joindre l’étiquette PDF à l’enregistrement</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Joindre la facture PDF à l’enregistrement</div>
             <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 }}>
-              Concerne l’envoi par Twilio : l’étiquette part alors en pièce jointe du message d’enregistrement.
-              Avec WhatsApp Business (Meta), le ticket accompagne toujours ce message — le modèle validé
-              « bde_enregistrement » le porte en en-tête, et ce réglage n’y change rien.
+              Le document envoyé au client est sa <strong>facture</strong> : ce qu’il doit, ce qu’il a
+              déjà réglé, le détail de ce qu’il envoie. L’étiquette — celle qu’on colle sur le carton —
+              n’a d’usage que pour l’agence ; elle s’imprime depuis la fiche du colis.
+              <br />
+              Ce réglage concerne l’envoi par Twilio. Avec WhatsApp Business (Meta), la facture accompagne
+              toujours ce message : le modèle validé « bde_enregistrement » la porte en en-tête, et ce
+              réglage n’y change rien.
             </div>
           </div>
           <Interrupteur
@@ -22842,11 +23508,110 @@ function totalPointage(entrees) {
   return total;
 }
 
-function PointagePage({ data, persist, notify, onBack }) {
+/** Le jour de la semaine et le quantième, comme on les lit sur une fiche : « lun. 25 ». */
+function libelleJourCourt(date) {
+  return new Date(`${date}T12:00:00`).toLocaleDateString("fr-FR", { weekday: "short", day: "numeric" });
+}
+
+/**
+ * La fiche individuelle en PDF — celle qu'on remet à l'employé en fin de mois.
+ *
+ * Elle tient sur une seule page, quel que soit le mois : les jours sont posés sur deux colonnes,
+ * seize à gauche et le reste à droite, plutôt qu'en une liste qui déborderait. En bas, le total
+ * qui se reporte sur la paie, et deux signatures — celle du responsable et celle de l'employé,
+ * parce qu'une fiche que l'employé n'a pas contresignée ne vaut rien le jour d'un désaccord.
+ */
+function dessinerFicheIndividuelle(doc, employe, annee, moisNum, entreesDuMois, marque) {
+  const INK = [26, 30, 38], MUTED = [122, 130, 142], RED = [214, 39, 63], NAVY = [10, 38, 71];
+  const parDate = new Map(entreesDuMois.map((e) => [e.date, e]));
+  const jours = joursDuMois(annee, moisNum);
+  const t = totalPointage(entreesDuMois);
+
+  doc.addImage(DEFAULT_LOGO, "PNG", 14, 12, 16, 16);
+  doc.setFont(undefined, "bold"); doc.setFontSize(15); doc.setTextColor(...INK);
+  doc.text((marque || "BA-DIABY EXPRESS").toUpperCase(), 34, 19);
+  doc.setFont(undefined, "normal"); doc.setFontSize(10); doc.setTextColor(...MUTED);
+  doc.text(`Fiche de pointage individuelle — ${MOIS_FR[moisNum - 1]} ${annee}`, 34, 25);
+  doc.setDrawColor(...RED); doc.setLineWidth(0.6); doc.line(14, 32, 196, 32);
+
+  doc.setFont(undefined, "bold"); doc.setFontSize(13); doc.setTextColor(...INK);
+  doc.text(nomComplet(employe), 14, 41);
+  doc.setFont(undefined, "normal"); doc.setFontSize(9.5); doc.setTextColor(...MUTED);
+  doc.text(`${employe.role || ""}${employe.agence ? ` · ${employe.agence}` : ""}`, 14, 46.5);
+
+  // Deux colonnes de jours : seize à gauche, le reste à droite.
+  const moitie = Math.ceil(jours.length / 2);
+  const colonnes = [{ x: 14, jours: jours.slice(0, moitie) }, { x: 108, jours: jours.slice(moitie) }];
+  const LARGEURS = [18, 26, 16, 28];
+  colonnes.forEach(({ x, jours: liste }) => {
+    let y = 54;
+    doc.setFillColor(...NAVY); doc.rect(x, y, 88, 6, "F");
+    doc.setFont(undefined, "bold"); doc.setFontSize(7.5); doc.setTextColor(255, 255, 255);
+    ["Jour", "État", "Heures", "Note"].reduce((cx, titre, i) => {
+      doc.text(titre, cx + 1.5, y + 4.2);
+      return cx + LARGEURS[i];
+    }, x);
+    y += 6;
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.5);
+    liste.forEach((j, i) => {
+      const date = cleJour(annee, moisNum, j);
+      const e = parDate.get(date);
+      const dimanche = !estJourOuvre(date);
+      if (i % 2 === 1) { doc.setFillColor(240, 243, 249); doc.rect(x, y, 88, 5.4, "F"); }
+      const cellules = [
+        libelleJourCourt(date),
+        e ? libellePointage(e).replace("Absence NON justifiée", "Absence non justifiée") : (dimanche ? "Repos" : "—"),
+        e && minutesTravaillees(e) ? formatHeures(minutesTravaillees(e)) : "",
+        (e?.note || "").slice(0, 22),
+      ];
+      doc.setTextColor(...(e?.statut === "absent" && !absenceJustifiee(e) ? RED : (dimanche ? MUTED : INK)));
+      cellules.reduce((cx, texte, k) => {
+        doc.text(String(texte), cx + 1.5, y + 3.8);
+        return cx + LARGEURS[k];
+      }, x);
+      y += 5.4;
+    });
+  });
+
+  const yTotal = 54 + 6 + moitie * 5.4 + 8;
+  doc.setFillColor(245, 247, 251); doc.rect(14, yTotal, 182, 26, "F");
+  doc.setFont(undefined, "bold"); doc.setFontSize(10); doc.setTextColor(...NAVY);
+  doc.text("Total du mois", 18, yTotal + 8);
+  doc.setFontSize(12);
+  doc.text(`${t.jours} jour${t.jours > 1 ? "s" : ""} · ${formatHeures(t.minutes)}`, 192, yTotal + 8, { align: "right" });
+  doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(...MUTED);
+  doc.text(`Retards : ${t.retards} · Absences justifiées : ${t.absencesJustifiees} · Congés : ${t.conges} · Maladie : ${t.maladies}`,
+    18, yTotal + 16.5);
+  doc.setFont(undefined, "bold");
+  doc.setTextColor(...(t.absences > 0 ? RED : [22, 161, 99]));
+  doc.text(`Absences non justifiées : ${t.absences}`, 18, yTotal + 22.5);
+
+  const ySign = yTotal + 42;
+  doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(90, 100, 120);
+  doc.text("Signature du responsable :", 14, ySign);
+  doc.setDrawColor(180); doc.line(14, ySign + 14, 90, ySign + 14);
+  doc.text("Signature de l’employé :", 110, ySign);
+  doc.line(110, ySign + 14, 186, ySign + 14);
+  doc.setFontSize(7.3); doc.setTextColor(150, 150, 150);
+  doc.text(`Édité le ${new Date().toLocaleString("fr-FR")} — ${marque || "Ba-Diaby Express"}`, 14, 288);
+}
+
+function PointagePage({ data, persist, notify, onBack, session }) {
   const maintenant = new Date();
   const [mois, setMois] = useState(() => `${maintenant.getFullYear()}-${String(maintenant.getMonth() + 1).padStart(2, "0")}`);
   const [cellule, setCellule] = useState(null);
   const [horaireOuvert, setHoraireOuvert] = useState(false);
+  /*
+   * Qui tient la fiche, et qui la consulte.
+   *
+   * Celui qui a la permission voit toute l'équipe et corrige. Les autres n'ont accès qu'à la
+   * leur, en lecture seule : un employé a le droit de savoir ce qui est écrit sur sa propre fiche
+   * — c'est elle qui justifie sa paie — sans consulter pour autant les absences de ses collègues.
+   */
+  const peutTenir = effectivePermission(session, "equipe.pointage");
+  const [employeOuvert, setEmployeOuvert] = useState(() => (peutTenir ? null : (session?.id || null)));
+  const grilleRef = useRef(null);
+  const ligneDuJourRef = useRef(null);
 
   const [annee, moisNum] = mois.split("-").map(Number);
   const jours = joursDuMois(annee, moisNum);
@@ -22955,10 +23720,232 @@ function PointagePage({ data, persist, notify, onBack }) {
     }
   }
 
+  /** La fiche d'un seul employé, en PDF — celle qu'on lui remet en fin de mois. */
+  async function exporterFicheIndividuelle(employe) {
+    try {
+      const jspdf = await loadJsPDF();
+      const doc = preparerDocPdf(new jspdf.jsPDF());
+      dessinerFicheIndividuelle(doc, employe, annee, moisNum, duMois(employe.id), data.branding?.nom);
+      openPdf(doc, `pointage-${nomComplet(employe).replace(/\s+/g, "-").toLowerCase()}-${mois}.pdf`);
+    } catch (e) {
+      console.error(e);
+      notify?.("La fiche PDF n’a pas pu être produite.");
+    }
+  }
+
   const poidsFiche = new Blob([JSON.stringify(entrees)]).size;
   const saisiesDuMois = entrees.filter((e) => String(e.date || "").startsWith(mois)).length;
 
   const celluleStatut = cellule ? entreeDe(cellule.userId, cellule.date) : null;
+
+  /*
+   * La fenêtre d'une journée sert aux deux écrans : la grille de l'équipe et la fiche d'un seul
+   * employé. Elle est donc décrite une fois, et posée là où l'on en a besoin.
+   */
+  const ficheDuJour = cellule ? (
+      <Modal onClose={() => setCellule(null)}
+        title={`${nomComplet(equipe.find((u) => u.id === cellule.userId))} — ${new Date(`${cellule.date}T12:00:00`).toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" })}`}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
+          {STATUTS_POINTAGE.map((s) => (
+            <button key={s.cle} onClick={() => poserJournee(cellule.userId, cellule.date, {
+              statut: s.cle,
+              ...(s.heures ? { arrivee: celluleStatut?.arrivee || horaire.arrivee, depart: celluleStatut?.depart || horaire.depart } : {}),
+            })}
+              style={{ padding: "10px 16px", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer",
+                border: `1.5px solid ${celluleStatut?.statut === s.cle ? s.fg : "var(--border)"}`,
+                background: celluleStatut?.statut === s.cle ? s.bg : "var(--surface2)",
+                color: celluleStatut?.statut === s.cle ? s.fg : "var(--muted)" }}>
+              {s.label}
+            </button>
+          ))}
+        </div>
+
+        {/*
+          * Une absence est non justifiée tant qu'elle n'a pas été justifiée. Le défaut est donc
+          * le rouge, et justifier demande un geste : l'oubli ne doit pas transformer une absence
+          * sèche en absence excusée.
+          */}
+        {celluleStatut?.statut === "absent" && (
+          <div style={{ background: "var(--surface2)", borderRadius: 10, padding: "12px 14px", marginBottom: 16 }}>
+            <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10 }}>
+              Cette absence est-elle justifiée ? Sans justification, elle reste comptée comme
+              non justifiée — c’est cette colonne qui sert au moment de la paie.
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {[[false, "Non justifiée", "var(--danger-bg)", "var(--danger-fg)"],
+                [true, "Justifiée", "var(--warn-bg)", "var(--warn-fg)"]].map(([valeur, label, bg, fg]) => (
+                <button key={String(valeur)}
+                  onClick={() => poserJournee(cellule.userId, cellule.date, { justifiee: valeur })}
+                  style={{ padding: "9px 16px", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer",
+                    border: `1.5px solid ${absenceJustifiee(celluleStatut) === valeur ? fg : "var(--border)"}`,
+                    background: absenceJustifiee(celluleStatut) === valeur ? bg : "var(--surface)",
+                    color: absenceJustifiee(celluleStatut) === valeur ? fg : "var(--muted)" }}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {STATUT_POINTAGE[celluleStatut?.statut]?.heures && (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <Field label="Arrivée">
+              <input type="time" value={celluleStatut?.arrivee || ""} style={inputStyle}
+                onChange={(e) => poserJournee(cellule.userId, cellule.date, { arrivee: e.target.value })} />
+            </Field>
+            <Field label="Départ">
+              <input type="time" value={celluleStatut?.depart || ""} style={inputStyle}
+                onChange={(e) => poserJournee(cellule.userId, cellule.date, { depart: e.target.value })} />
+            </Field>
+          </div>
+        )}
+        {celluleStatut && (
+          <>
+            <Field label={absenceJustifiee(celluleStatut) ? "Motif de la justification" : "Note (facultatif)"}>
+              <input value={celluleStatut.note || ""} style={inputStyle}
+                placeholder={absenceJustifiee(celluleStatut) ? "Ex : certificat médical remis le 12" : "Ex : parti plus tôt, autorisé"}
+                onChange={(e) => poserJournee(cellule.userId, cellule.date, { note: e.target.value })} />
+            </Field>
+            {STATUT_POINTAGE[celluleStatut.statut]?.heures && (
+              <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>
+                Journée comptée : <b style={{ color: "var(--text)" }}>{formatHeures(minutesTravaillees(celluleStatut))}</b>
+              </div>
+            )}
+          </>
+        )}
+
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 8, flexWrap: "wrap" }}>
+          {celluleStatut ? (
+            <button onClick={() => { poserJournee(cellule.userId, cellule.date, null); setCellule(null); }}
+              style={{ background: "none", border: "1.5px solid var(--danger-border)", color: "var(--danger-fg)", borderRadius: 9, padding: "9px 16px", fontSize: 13, cursor: "pointer" }}>
+              Effacer cette journée
+            </button>
+          ) : <span style={{ fontSize: 12.5, color: "var(--muted)", alignSelf: "center" }}>Choisissez un état pour enregistrer cette journée.</span>}
+          <button onClick={() => setCellule(null)} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+            Terminé
+          </button>
+        </div>
+      </Modal>
+  ) : null;
+
+  /*
+   * On se cale sur le jour exact.
+   *
+   * Le 25 du mois, ce qu'on vient chercher est la colonne du 25 — pas celle du 1er, qui est la
+   * seule visible quand un tableau de trente et une colonnes s'ouvre. La grille défile donc
+   * d'elle-même jusqu'à aujourd'hui, et la fiche individuelle amène la ligne du jour sous les yeux.
+   */
+  useEffect(() => {
+    const cible = ligneDuJourRef.current;
+    if (!cible) return;
+    if (employeOuvert) { cible.scrollIntoView({ block: "center" }); return; }
+    const grille = grilleRef.current;
+    if (grille) grille.scrollLeft = Math.max(0, cible.offsetLeft - grille.clientWidth / 2);
+  }, [employeOuvert, mois, equipe.length]);
+
+  /* ── LA FICHE D'UN SEUL EMPLOYÉ ──────────────────────────────────────────── */
+  const employe = employeOuvert ? equipe.find((u) => u.id === employeOuvert) : null;
+  if (employeOuvert && !employe) {
+    return (
+      <div>
+        <ConfigPageHeader title="Ma fiche de pointage" desc="Vos journées du mois, vos heures et votre total." onBack={onBack} />
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>
+          Aucune fiche à votre nom. Votre responsable la remplit depuis Configuration → Fiche de pointage.
+        </div>
+      </div>
+    );
+  }
+  if (employe) {
+    const mesJournees = duMois(employe.id);
+    const t = totalPointage(mesJournees);
+    const totaux = [
+      ["Jours travaillés", String(t.jours), "var(--text)"],
+      ["Heures", formatHeures(t.minutes), "var(--text)"],
+      ["Retards", String(t.retards), t.retards ? "var(--warn-fg)" : "var(--muted)"],
+      ["Absences NON justifiées", String(t.absences), t.absences ? "var(--danger-fg)" : "var(--muted)"],
+      ["Absences justifiées", String(t.absencesJustifiees), "var(--warn-fg)"],
+      ["Congés", String(t.conges), "var(--muted)"],
+      ["Maladie", String(t.maladies), "var(--muted)"],
+    ];
+    return (
+      <div>
+        <ConfigPageHeader
+          title={peutTenir ? `Fiche de ${nomComplet(employe)}` : "Ma fiche de pointage"}
+          desc={peutTenir
+            ? "Le mois jour par jour, avec le total à reporter sur la paie."
+            : "Vos journées du mois, telles que votre responsable les a constatées. En lecture seule."}
+          onBack={peutTenir ? () => setEmployeOuvert(null) : onBack} />
+
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
+          <button onClick={() => changerMois(-1)} title="Mois précédent" aria-label="Mois précédent" style={{ ...smallBtn, padding: "9px 12px" }}><ChevronLeft size={15} /></button>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", minWidth: 150, textAlign: "center" }}>
+            {MOIS_FR[moisNum - 1]} {annee}
+          </div>
+          <button onClick={() => changerMois(1)} title="Mois suivant" aria-label="Mois suivant" style={{ ...smallBtn, padding: "9px 12px" }}><ChevronRight size={15} /></button>
+          <div style={{ flex: 1 }} />
+          <button onClick={() => exporterFicheIndividuelle(employe)} style={{ ...smallBtn, display: "flex", alignItems: "center", gap: 6, padding: "10px 16px" }}>
+            <Printer size={15} /> Fiche PDF
+          </button>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 12, marginBottom: 18 }}>
+          {totaux.map(([label, valeur, couleur]) => (
+            <div key={label} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 14 }}>
+              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 600 }}>{label}</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: couleur, fontFamily: "'Space Grotesk',sans-serif", marginTop: 4 }}>{valeur}</div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden" }}>
+          {jours.map((j) => {
+            const date = cleJour(annee, moisNum, j);
+            const e = entreeDe(employe.id, date);
+            const s = couleursPointage(e);
+            const cejour = date === isoAujourdhui;
+            const dimanche = !estJourOuvre(date);
+            return (
+              <div key={j} ref={cejour ? ligneDuJourRef : null}
+                onClick={peutTenir ? () => setCellule({ userId: employe.id, date }) : undefined}
+                style={{ display: "flex", alignItems: "center", gap: 12, padding: "9px 14px",
+                  borderTop: "1px solid var(--border)", cursor: peutTenir ? "pointer" : "default",
+                  borderLeft: cejour ? "3px solid var(--brand-solid)" : "3px solid transparent",
+                  background: cejour ? "var(--surface2)" : "transparent" }}>
+                <div style={{ width: 92, fontSize: 13, fontWeight: cejour ? 700 : 500, color: dimanche ? "var(--muted)" : "var(--text)" }}>
+                  {libelleJourCourt(date)}
+                  {cejour && <span style={{ fontSize: 10, color: "var(--brand-solid)", fontWeight: 700, marginLeft: 6 }}>aujourd’hui</span>}
+                </div>
+                <div style={{ minWidth: 150 }}>
+                  {e ? (
+                    <span style={{ background: s.bg, color: s.fg, padding: "3px 10px", borderRadius: 20, fontSize: 12, fontWeight: 700 }}>
+                      {libellePointage(e)}
+                    </span>
+                  ) : (
+                    <span style={{ fontSize: 12.5, color: "var(--muted)" }}>{dimanche ? "Repos" : "—"}</span>
+                  )}
+                </div>
+                <div style={{ fontSize: 12.5, color: "var(--muted)", minWidth: 110 }}>
+                  {e?.arrivee ? `${e.arrivee} → ${e.depart}` : ""}
+                </div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", minWidth: 60 }}>
+                  {minutesTravaillees(e) ? formatHeures(minutesTravaillees(e)) : ""}
+                </div>
+                <div style={{ fontSize: 12, color: "var(--muted)", flex: 1 }}>{e?.note || ""}</div>
+              </div>
+            );
+          })}
+        </div>
+
+        {!peutTenir && (
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 12 }}>
+            Une erreur sur une journée ? Signalez-la à votre responsable : lui seul peut corriger la fiche.
+          </div>
+        )}
+
+        {cellule && ficheDuJour}
+      </div>
+    );
+  }
 
   return (
     <div>
@@ -22984,7 +23971,9 @@ function PointagePage({ data, persist, notify, onBack }) {
       <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 16px", marginBottom: 16, fontSize: 12.5, color: "var(--muted)", lineHeight: 1.55 }}>
         Appuyez sur <b>Pré-remplir</b> : tous les jours ouvrés jusqu’à aujourd’hui passent à « présent »
         de {horaire.arrivee} à {horaire.depart}. Il ne vous reste qu’à corriger les exceptions — une journée
-        déjà saisie n’est jamais écrasée. Cliquez sur n’importe quelle case pour la modifier.
+        déjà saisie n’est jamais écrasée. Cliquez sur n’importe quelle case pour la modifier, ou sur
+        le <b>nom d’un employé</b> pour ouvrir sa fiche à lui — celle qu’on lui remet en fin de mois,
+        avec son total et sa ligne de signature. La colonne du jour est surlignée.
         <div style={{ marginTop: 8, fontSize: 12 }}>
           <b>P</b> présent · <b>R</b> retard · <b style={{ color: "var(--danger-fg)" }}>A</b> absence
           non justifiée · <b style={{ color: "var(--warn-fg)" }}>J</b> absence justifiée ·
@@ -23001,7 +23990,7 @@ function PointagePage({ data, persist, notify, onBack }) {
         </div>
       ) : (
         <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden" }}>
-          <div style={{ overflowX: "auto" }}>
+          <div ref={grilleRef} style={{ overflowX: "auto" }}>
             <table style={{ borderCollapse: "collapse", minWidth: 900 }}>
               <thead>
                 <tr style={{ background: "var(--surface2)" }}>
@@ -23009,8 +23998,16 @@ function PointagePage({ data, persist, notify, onBack }) {
                   {jours.map((j) => {
                     const date = cleJour(annee, moisNum, j);
                     const dimanche = !estJourOuvre(date);
+                    // La colonne du jour se repère d'un coup d'œil, et c'est vers elle que la
+                    // grille défile à l'ouverture : le 25, on vient voir le 25.
+                    const cejour = date === isoAujourdhui;
                     return (
-                      <th key={j} title={date} style={{ padding: "10px 0", width: 26, fontSize: 10.5, fontWeight: 700, color: dimanche ? "var(--danger-fg)" : "var(--muted)" }}>{j}</th>
+                      <th key={j} ref={cejour ? ligneDuJourRef : null}
+                        title={cejour ? `${date} — aujourd’hui` : date}
+                        style={{ padding: "10px 0", width: 26, fontSize: 10.5, fontWeight: 700,
+                          color: cejour ? "#fff" : (dimanche ? "var(--danger-fg)" : "var(--muted)"),
+                          background: cejour ? "var(--brand-solid)" : "transparent",
+                          borderRadius: cejour ? "6px 6px 0 0" : 0 }}>{j}</th>
                     );
                   })}
                   {["Retards", "Absences NON justifiées", "Absences justifiées", "Congés", "Maladie"].map((h) => (
@@ -23032,7 +24029,15 @@ function PointagePage({ data, persist, notify, onBack }) {
                         * précisément là où on ne le voyait pas.
                         */}
                       <td style={{ padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap", position: "sticky", left: 0, background: "var(--surface)", zIndex: 1, borderRight: "1px solid var(--border)" }}>
-                        {nomComplet(u)}
+                        {/*
+                          * Le nom ouvre la fiche de cet employé seul. C'est elle qu'on lui remet en
+                          * fin de mois, signée : sur la grille de l'équipe il ne verrait pas que la
+                          * sienne, et un total de paie se relit ligne à ligne.
+                          */}
+                        <button onClick={() => setEmployeOuvert(u.id)} title={`Ouvrir la fiche de ${nomComplet(u)}`}
+                          style={{ background: "none", border: "none", padding: 0, font: "inherit", color: "var(--text)", fontWeight: 700, cursor: "pointer", textAlign: "left", textDecoration: "underline", textDecorationColor: "var(--border)" }}>
+                          {nomComplet(u)}
+                        </button>
                         <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 500 }}>{u.role}{u.agence ? ` · ${u.agence}` : ""}</div>
                         <div style={{ fontSize: 12, color: "var(--text)", fontWeight: 700, marginTop: 3 }}>
                           {t.jours} j · {formatHeures(t.minutes)}
@@ -23053,8 +24058,9 @@ function PointagePage({ data, persist, notify, onBack }) {
                         const date = cleJour(annee, moisNum, j);
                         const e = entreeDe(u.id, date);
                         const s = couleursPointage(e);
+                        const cejour = date === isoAujourdhui;
                         return (
-                          <td key={j} style={{ padding: 2, textAlign: "center" }}>
+                          <td key={j} style={{ padding: 2, textAlign: "center", background: cejour ? "var(--surface2)" : "transparent" }}>
                             <button onClick={() => setCellule({ userId: u.id, date })}
                               title={`${nomComplet(u)} — ${date}${e ? ` : ${libellePointage(e)}${e.note ? ` (${e.note})` : ""}` : ""}`}
                               style={{ width: 22, height: 22, borderRadius: 5, cursor: "pointer", fontSize: 10.5, fontWeight: 700,
@@ -23091,91 +24097,7 @@ function PointagePage({ data, persist, notify, onBack }) {
         )}
       </div>
 
-      {cellule && (
-        <Modal onClose={() => setCellule(null)}
-          title={`${nomComplet(equipe.find((u) => u.id === cellule.userId))} — ${new Date(`${cellule.date}T12:00:00`).toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" })}`}>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
-            {STATUTS_POINTAGE.map((s) => (
-              <button key={s.cle} onClick={() => poserJournee(cellule.userId, cellule.date, {
-                statut: s.cle,
-                ...(s.heures ? { arrivee: celluleStatut?.arrivee || horaire.arrivee, depart: celluleStatut?.depart || horaire.depart } : {}),
-              })}
-                style={{ padding: "10px 16px", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer",
-                  border: `1.5px solid ${celluleStatut?.statut === s.cle ? s.fg : "var(--border)"}`,
-                  background: celluleStatut?.statut === s.cle ? s.bg : "var(--surface2)",
-                  color: celluleStatut?.statut === s.cle ? s.fg : "var(--muted)" }}>
-                {s.label}
-              </button>
-            ))}
-          </div>
-
-          {/*
-            * Une absence est non justifiée tant qu'elle n'a pas été justifiée. Le défaut est donc
-            * le rouge, et justifier demande un geste : l'oubli ne doit pas transformer une absence
-            * sèche en absence excusée.
-            */}
-          {celluleStatut?.statut === "absent" && (
-            <div style={{ background: "var(--surface2)", borderRadius: 10, padding: "12px 14px", marginBottom: 16 }}>
-              <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10 }}>
-                Cette absence est-elle justifiée ? Sans justification, elle reste comptée comme
-                non justifiée — c’est cette colonne qui sert au moment de la paie.
-              </div>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                {[[false, "Non justifiée", "var(--danger-bg)", "var(--danger-fg)"],
-                  [true, "Justifiée", "var(--warn-bg)", "var(--warn-fg)"]].map(([valeur, label, bg, fg]) => (
-                  <button key={String(valeur)}
-                    onClick={() => poserJournee(cellule.userId, cellule.date, { justifiee: valeur })}
-                    style={{ padding: "9px 16px", borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: "pointer",
-                      border: `1.5px solid ${absenceJustifiee(celluleStatut) === valeur ? fg : "var(--border)"}`,
-                      background: absenceJustifiee(celluleStatut) === valeur ? bg : "var(--surface)",
-                      color: absenceJustifiee(celluleStatut) === valeur ? fg : "var(--muted)" }}>
-                    {label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {STATUT_POINTAGE[celluleStatut?.statut]?.heures && (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-              <Field label="Arrivée">
-                <input type="time" value={celluleStatut?.arrivee || ""} style={inputStyle}
-                  onChange={(e) => poserJournee(cellule.userId, cellule.date, { arrivee: e.target.value })} />
-              </Field>
-              <Field label="Départ">
-                <input type="time" value={celluleStatut?.depart || ""} style={inputStyle}
-                  onChange={(e) => poserJournee(cellule.userId, cellule.date, { depart: e.target.value })} />
-              </Field>
-            </div>
-          )}
-          {celluleStatut && (
-            <>
-              <Field label={absenceJustifiee(celluleStatut) ? "Motif de la justification" : "Note (facultatif)"}>
-                <input value={celluleStatut.note || ""} style={inputStyle}
-                  placeholder={absenceJustifiee(celluleStatut) ? "Ex : certificat médical remis le 12" : "Ex : parti plus tôt, autorisé"}
-                  onChange={(e) => poserJournee(cellule.userId, cellule.date, { note: e.target.value })} />
-              </Field>
-              {STATUT_POINTAGE[celluleStatut.statut]?.heures && (
-                <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>
-                  Journée comptée : <b style={{ color: "var(--text)" }}>{formatHeures(minutesTravaillees(celluleStatut))}</b>
-                </div>
-              )}
-            </>
-          )}
-
-          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 8, flexWrap: "wrap" }}>
-            {celluleStatut ? (
-              <button onClick={() => { poserJournee(cellule.userId, cellule.date, null); setCellule(null); }}
-                style={{ background: "none", border: "1.5px solid var(--danger-border)", color: "var(--danger-fg)", borderRadius: 9, padding: "9px 16px", fontSize: 13, cursor: "pointer" }}>
-                Effacer cette journée
-              </button>
-            ) : <span style={{ fontSize: 12.5, color: "var(--muted)", alignSelf: "center" }}>Choisissez un état pour enregistrer cette journée.</span>}
-            <button onClick={() => setCellule(null)} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
-              Terminé
-            </button>
-          </div>
-        </Modal>
-      )}
+      {ficheDuJour}
 
       {horaireOuvert && (
         <Modal onClose={() => setHoraireOuvert(false)} title="Horaire de référence">
@@ -25324,9 +26246,37 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
   const [showForm, setShowForm] = useState(false);
   const [editingUser, setEditingUser] = useState(null);
   function addUser(u) { persist({ ...data, users: [...data.users, u], activityLog: pushActivity(data, session, "Compte créé", `${u.prenom} ${u.nom} (${u.role})`) }); notify(`Compte créé pour ${u.prenom} ${u.nom}`); setShowForm(false); }
+  /*
+   * Supprimer un compte.
+   *
+   * Ce qui disparaît, c'est L'ACCÈS — jamais le travail. Les colis enregistrés par cet agent, les
+   * encaissements qu'il a faits, les colis déposés par ce partenaire restent où ils sont : une
+   * suppression de compte ne doit pas effacer une vente ni une trace comptable. Le journal garde
+   * qui a supprimé qui.
+   */
+  const [utilisateurASupprimer, setUtilisateurASupprimer] = useState(null);
   function removeUser(id) {
     const u = data.users.find((x) => x.id === id);
-    persist({ ...data, users: data.users.filter((u) => u.id !== id), activityLog: pushActivity(data, session, "Compte supprimé", u ? `${u.prenom} ${u.nom}` : id) });
+    const nom = u ? (u.role === "Partenaire" ? nomPartenaire(u) : `${u.prenom} ${u.nom}`.trim()) : id;
+    persist({ ...data, users: data.users.filter((u) => u.id !== id), activityLog: pushActivity(data, session, "Compte supprimé", `${nom}${u ? ` (${u.role})` : ""}`) });
+    notify?.(`Compte de ${nom} supprimé`);
+  }
+  /*
+   * QUI PEUT ÊTRE SUPPRIMÉ
+   *
+   * La règle voulue a toujours été « on ne supprime pas le dernier administrateur » — sans quoi
+   * personne ne pourrait plus rien administrer. Mais la condition portait sur TOUS les comptes :
+   * avec un seul administrateur, plus aucun agent ni partenaire n'était supprimable, et rien ne
+   * l'expliquait puisque le bouton disparaissait purement et simplement. Elle ne vise désormais
+   * que les administrateurs, et un compte non supprimable dit pourquoi au lieu de s'effacer.
+   */
+  const nbAdministrateurs = (data.users || []).filter((x) => x.role === "Administrateur").length;
+  function raisonDeNePasSupprimer(u) {
+    if (u.id === session?.id) return "Vous ne pouvez pas supprimer votre propre compte.";
+    if (u.role === "Administrateur" && nbAdministrateurs <= 1) {
+      return "C’est le dernier administrateur : le supprimer laisserait l’application sans personne pour l’administrer.";
+    }
+    return null;
   }
   function saveUser(updated) {
     persist({ ...data, users: data.users.map((u) => (u.id === updated.id ? updated : u)), activityLog: pushActivity(data, session, "Profil utilisateur modifié", `${updated.prenom} ${updated.nom}`) });
@@ -25387,13 +26337,36 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
                 </td>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{u.role === "Administrateur" ? "Tous les pays" : (u.paysAutorises?.length ? u.paysAutorises.map((c) => FLAGS[c]).join(" ") : "Tous les pays")}</td>
                 <td style={{ padding: "12px 16px", fontSize: 13, whiteSpace: "nowrap" }}>{u.twoFA ? <ShieldCheck size={15} color="var(--ok-fg)" /> : "—"}</td>
-                <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>{effectivePermission(session, "users.gerer") && <button onClick={() => setUtilisateurAReinit(u)} title="Réinitialiser le mot de passe" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><Key size={15} /></button>}{u.id !== session?.id && (data.users || []).filter((x) => x.role === "Administrateur").length > 1 && effectivePermission(session, "users.gerer") && <button onClick={() => removeUser(u.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={15} /></button>}</td>
+                <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>{effectivePermission(session, "users.gerer") && <button onClick={() => setUtilisateurAReinit(u)} title="Réinitialiser le mot de passe" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><Key size={15} /></button>}{effectivePermission(session, "users.gerer") && (() => {
+                  const raison = raisonDeNePasSupprimer(u);
+                  return (
+                    <button onClick={() => (raison ? notify?.(raison) : setUtilisateurASupprimer(u))}
+                      title={raison || `Supprimer le compte de ${u.role === "Partenaire" ? nomPartenaire(u) : `${u.prenom} ${u.nom}`.trim()}`}
+                      aria-label="Supprimer ce compte"
+                      style={{ background: "none", border: "none", color: raison ? "var(--muted)" : "var(--danger-fg)", cursor: raison ? "not-allowed" : "pointer", opacity: raison ? 0.5 : 1 }}>
+                      <Trash2 size={15} />
+                    </button>
+                  );
+                })()}</td>
               </tr>
             ))}
           </tbody>
         </table>
         </div>
       </div>
+      {utilisateurASupprimer && (
+        <ConfirmerAction
+          titre={utilisateurASupprimer.role === "Partenaire" ? "Supprimer ce partenaire ?" : "Supprimer ce compte ?"}
+          message={`${utilisateurASupprimer.role === "Partenaire" ? nomPartenaire(utilisateurASupprimer) : `${utilisateurASupprimer.prenom} ${utilisateurASupprimer.nom}`.trim()} (${utilisateurASupprimer.identifiant}) ne pourra plus se connecter.`}
+          consequence={utilisateurASupprimer.role === "Partenaire"
+            ? "Ses colis, ses factures et son historique restent dans l’application : seul son accès est retiré. Il ne verra plus son espace et ne pourra plus annoncer de dépôt."
+            : "Les colis qu’il a enregistrés, les encaissements qu’il a faits et son pointage restent dans l’application : seul son accès est retiré."}
+          libelleAction="Supprimer le compte"
+          onConfirmer={() => { removeUser(utilisateurASupprimer.id); setUtilisateurASupprimer(null); }}
+          onAnnuler={() => setUtilisateurASupprimer(null)}
+        />
+      )}
+
       {utilisateurAReinit && (
         <ConfirmerAction
           titre="Réinitialiser ce mot de passe ?"

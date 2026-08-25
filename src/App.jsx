@@ -25863,9 +25863,37 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
   const [showForm, setShowForm] = useState(false);
   const [editingUser, setEditingUser] = useState(null);
   function addUser(u) { persist({ ...data, users: [...data.users, u], activityLog: pushActivity(data, session, "Compte créé", `${u.prenom} ${u.nom} (${u.role})`) }); notify(`Compte créé pour ${u.prenom} ${u.nom}`); setShowForm(false); }
+  /*
+   * Supprimer un compte.
+   *
+   * Ce qui disparaît, c'est L'ACCÈS — jamais le travail. Les colis enregistrés par cet agent, les
+   * encaissements qu'il a faits, les colis déposés par ce partenaire restent où ils sont : une
+   * suppression de compte ne doit pas effacer une vente ni une trace comptable. Le journal garde
+   * qui a supprimé qui.
+   */
+  const [utilisateurASupprimer, setUtilisateurASupprimer] = useState(null);
   function removeUser(id) {
     const u = data.users.find((x) => x.id === id);
-    persist({ ...data, users: data.users.filter((u) => u.id !== id), activityLog: pushActivity(data, session, "Compte supprimé", u ? `${u.prenom} ${u.nom}` : id) });
+    const nom = u ? (u.role === "Partenaire" ? nomPartenaire(u) : `${u.prenom} ${u.nom}`.trim()) : id;
+    persist({ ...data, users: data.users.filter((u) => u.id !== id), activityLog: pushActivity(data, session, "Compte supprimé", `${nom}${u ? ` (${u.role})` : ""}`) });
+    notify?.(`Compte de ${nom} supprimé`);
+  }
+  /*
+   * QUI PEUT ÊTRE SUPPRIMÉ
+   *
+   * La règle voulue a toujours été « on ne supprime pas le dernier administrateur » — sans quoi
+   * personne ne pourrait plus rien administrer. Mais la condition portait sur TOUS les comptes :
+   * avec un seul administrateur, plus aucun agent ni partenaire n'était supprimable, et rien ne
+   * l'expliquait puisque le bouton disparaissait purement et simplement. Elle ne vise désormais
+   * que les administrateurs, et un compte non supprimable dit pourquoi au lieu de s'effacer.
+   */
+  const nbAdministrateurs = (data.users || []).filter((x) => x.role === "Administrateur").length;
+  function raisonDeNePasSupprimer(u) {
+    if (u.id === session?.id) return "Vous ne pouvez pas supprimer votre propre compte.";
+    if (u.role === "Administrateur" && nbAdministrateurs <= 1) {
+      return "C’est le dernier administrateur : le supprimer laisserait l’application sans personne pour l’administrer.";
+    }
+    return null;
   }
   function saveUser(updated) {
     persist({ ...data, users: data.users.map((u) => (u.id === updated.id ? updated : u)), activityLog: pushActivity(data, session, "Profil utilisateur modifié", `${updated.prenom} ${updated.nom}`) });
@@ -25926,13 +25954,36 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
                 </td>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{u.role === "Administrateur" ? "Tous les pays" : (u.paysAutorises?.length ? u.paysAutorises.map((c) => FLAGS[c]).join(" ") : "Tous les pays")}</td>
                 <td style={{ padding: "12px 16px", fontSize: 13, whiteSpace: "nowrap" }}>{u.twoFA ? <ShieldCheck size={15} color="var(--ok-fg)" /> : "—"}</td>
-                <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>{effectivePermission(session, "users.gerer") && <button onClick={() => setUtilisateurAReinit(u)} title="Réinitialiser le mot de passe" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><Key size={15} /></button>}{u.id !== session?.id && (data.users || []).filter((x) => x.role === "Administrateur").length > 1 && effectivePermission(session, "users.gerer") && <button onClick={() => removeUser(u.id)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={15} /></button>}</td>
+                <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>{effectivePermission(session, "users.gerer") && <button onClick={() => setUtilisateurAReinit(u)} title="Réinitialiser le mot de passe" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><Key size={15} /></button>}{effectivePermission(session, "users.gerer") && (() => {
+                  const raison = raisonDeNePasSupprimer(u);
+                  return (
+                    <button onClick={() => (raison ? notify?.(raison) : setUtilisateurASupprimer(u))}
+                      title={raison || `Supprimer le compte de ${u.role === "Partenaire" ? nomPartenaire(u) : `${u.prenom} ${u.nom}`.trim()}`}
+                      aria-label="Supprimer ce compte"
+                      style={{ background: "none", border: "none", color: raison ? "var(--muted)" : "var(--danger-fg)", cursor: raison ? "not-allowed" : "pointer", opacity: raison ? 0.5 : 1 }}>
+                      <Trash2 size={15} />
+                    </button>
+                  );
+                })()}</td>
               </tr>
             ))}
           </tbody>
         </table>
         </div>
       </div>
+      {utilisateurASupprimer && (
+        <ConfirmerAction
+          titre={utilisateurASupprimer.role === "Partenaire" ? "Supprimer ce partenaire ?" : "Supprimer ce compte ?"}
+          message={`${utilisateurASupprimer.role === "Partenaire" ? nomPartenaire(utilisateurASupprimer) : `${utilisateurASupprimer.prenom} ${utilisateurASupprimer.nom}`.trim()} (${utilisateurASupprimer.identifiant}) ne pourra plus se connecter.`}
+          consequence={utilisateurASupprimer.role === "Partenaire"
+            ? "Ses colis, ses factures et son historique restent dans l’application : seul son accès est retiré. Il ne verra plus son espace et ne pourra plus annoncer de dépôt."
+            : "Les colis qu’il a enregistrés, les encaissements qu’il a faits et son pointage restent dans l’application : seul son accès est retiré."}
+          libelleAction="Supprimer le compte"
+          onConfirmer={() => { removeUser(utilisateurASupprimer.id); setUtilisateurASupprimer(null); }}
+          onAnnuler={() => setUtilisateurASupprimer(null)}
+        />
+      )}
+
       {utilisateurAReinit && (
         <ConfirmerAction
           titre="Réinitialiser ce mot de passe ?"

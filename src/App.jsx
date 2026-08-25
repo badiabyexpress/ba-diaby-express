@@ -21999,8 +21999,12 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
                 onChange={(e) => setProfilBrouillon({ ...profilBrouillon, email: e.target.value })} style={inputStyle} />
             </Field>
             <Field label="Site web (deux au plus, séparés par une virgule)">
-              <input value={profilBrouillon?.websites || ""}
+              <input value={profilBrouillon?.websites || ""} placeholder="https://badiabyexpress.com"
                 onChange={(e) => setProfilBrouillon({ ...profilBrouillon, websites: e.target.value })} style={inputStyle} />
+              {/* Meta refuse une adresse nue, et son refus ne dit pas pourquoi : on le dit ici. */}
+              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
+                Meta exige l’adresse complète. Sans « https:// », le protocole est ajouté pour vous.
+              </div>
             </Field>
           </div>
 

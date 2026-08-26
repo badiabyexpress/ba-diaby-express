@@ -936,6 +936,19 @@ function identiteClientRequise(acheminement) {
 function colisSousRepere(colis) {
   return !!colis?.repereSeul;
 }
+/**
+ * La route du colis, dans le sens où il voyage.
+ *
+ * Elle s'écrivait `GN-<pays>` en toutes circonstances, comme si tout partait de Conakry. Sur un
+ * colis Paris → Conakry, l'étiquette annonçait donc « GN-FR » — la route à l'envers, sur la seule
+ * ligne qui la donne, et juste au-dessus d'un destinataire qui, lui, est bien en Guinée. Les deux
+ * bouts sont écrits sur le colis : il suffit de les lire dans l'ordre.
+ */
+function routeDuColis(colis) {
+  const depart = colis?.expediteurPays || "GN";
+  const arrivee = colis?.destinatairePays || colis?.pays || "GN";
+  return `${depart}-${arrivee}`;
+}
 /*
  * Le repère d'un colis, quand il en porte un.
  *
@@ -8796,18 +8809,26 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
   /*
    * LES DEUX BOUTS DE LA ROUTE, ET QUI SE TIENT À CHACUN.
    *
-   * Le sens de l'envoi ne changeait que le tarif : les deux blocs du formulaire gardaient leurs
-   * indicatifs, l'expéditeur en Guinée et le destinataire à l'étranger. Sur « Paris → Conakry »,
-   * ils étaient donc à l'envers — on proposait +224 à quelqu'un qui est à Paris et +33 à celui qui
-   * réceptionne à Conakry. Un numéro saisi sous le mauvais indicatif ne sonne nulle part, et rien
-   * ne le disait : ni l'écran, ni l'étiquette, ni la facture.
+   * Un colis de partenaire a toujours les mêmes deux parties : le partenaire — ou son
+   * correspondant — se tient EN GUINÉE, et son client se tient AU PAYS DE LA ROUTE. Ça, le sens
+   * de l'envoi n'y change rien : ce sont les mêmes personnes, aux mêmes endroits, avec les mêmes
+   * numéros. Les deux blocs de saisie sont donc fixes, et leurs indicatifs avec eux.
    *
-   * Le colis quitte Conakry : l'expéditeur est en Guinée, le destinataire au pays de la route.
-   * Le colis quitte le pays de la route : c'est l'inverse. Les documents lisent ensuite
-   * `expediteurPays` et `destinatairePays`, donc les quatre suivent d'eux-mêmes.
+   * CE QUE LE SENS CHANGE, C'EST LE RÔLE QUE CHACUN TIENT.
+   *
+   *   Conakry → Paris : la partie guinéenne EXPÉDIE, le client à Paris RÉCEPTIONNE.
+   *   Paris → Conakry : le client à Paris EXPÉDIE, la partie guinéenne RÉCEPTIONNE.
+   *
+   * On avait d'abord fait tourner les blocs eux-mêmes — l'indicatif du premier bloc passait de
+   * +224 à +33 selon le sens. C'était l'erreur : on demandait à celui qui saisit d'échanger les
+   * deux personnes de place à chaque changement de sens, alors qu'elles n'ont pas bougé. Le colis
+   * enregistré s'en ressentait — un numéro français sous la mention « Guinée », l'entreprise
+   * annoncée comme expéditrice d'un colis qu'elle reçoit. C'est l'inverse qu'il fallait faire :
+   * laisser les personnes où elles sont, et faire tourner les rôles autour d'elles.
    */
-  const paysExpediteur = sens === "export" ? "GN" : destPays;
-  const paysDestinataire = sens === "export" ? destPays : "GN";
+  const versLaGuinee = sens !== "export";
+  const roleCoteGuinee = versLaGuinee ? "Destinataire" : "Expéditeur";
+  const roleCoteClient = versLaGuinee ? "Expéditeur" : "Destinataire";
   const nomDuPays = (code) => COUNTRIES.find((p) => p.code === code)?.name || "";
   const indicatifDe = (code) => DIAL_CODES.find((c) => c.name === nomDuPays(code))?.dial;
   const annoncesDuPartenaire = (annonces || []).filter((a) => !partenaireId || a.partenaireId === partenaireId);
@@ -8954,11 +8975,24 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
     // Le premier appui a lancé l'écriture ; les suivants ne doivent rien faire du tout.
     if (enregistrement) return;
     if (!partenaireId) { setErr("Choisissez le partenaire pour le compte duquel ce colis est enregistré."); return; }
-    if (!expNom.trim()) { setErr("Indiquez le nom de l’expéditeur — la personne qui remet le colis."); return; }
+    /*
+     * Les messages nomment le rôle que le sens donne à chaque bloc. Réclamer « l'expéditeur » en
+     * désignant le bloc de celui qui réceptionne fait chercher l'erreur au mauvais endroit.
+     */
+    if (!expNom.trim()) {
+      setErr(versLaGuinee
+        ? "Indiquez le nom du destinataire en Guinée — la personne ou l’entreprise qui réceptionne le colis."
+        : "Indiquez le nom de l’expéditeur en Guinée — la personne qui remet le colis.");
+      return;
+    }
     if (!clientNom.trim()) {
       setErr(identiteRequise
-        ? "Indiquez le nom du destinataire — c’est lui qui identifie le colis à l’arrivée."
-        : "Indiquez qui réceptionne le lot — le correspondant du partenaire, repris de son contrat.");
+        ? (versLaGuinee
+          ? "Indiquez le nom de l’expéditeur — la personne qui remet le colis au départ."
+          : "Indiquez le nom du destinataire — c’est lui qui identifie le colis à l’arrivée.")
+        : (versLaGuinee
+          ? "Indiquez qui remet le lot — le correspondant du partenaire, repris de son contrat."
+          : "Indiquez qui réceptionne le lot — le correspondant du partenaire, repris de son contrat."));
       return;
     }
     if (!identiteRequise && !repere.trim()) {
@@ -8986,21 +9020,31 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
       // Colis expédié sous la marque du partenaire : son numéro de suivi porte son préfixe, pas
       // celui de l'entreprise — son client n'a jamais entendu parler de Ba-Diaby Express.
       tracking: genTracking((existingColis || []).map((c) => c.tracking), null, reglages.prefixeTracking || undefined),
-      expediteur: `${expPrenom} ${expNom}`.trim(), expediteurTelephone: expTelephone, expediteurEmail: "", expediteurAdresse: "",
+      /*
+       * Chacun est écrit dans le rôle que le sens lui donne, sans avoir bougé de sa place.
+       *
+       * La partie guinéenne (premier bloc) expédie quand le colis quitte Conakry, et réceptionne
+       * quand il y arrive ; le client (second bloc) fait l'inverse. Écrire les deux toujours dans
+       * le même champ mettait l'entreprise en expéditrice d'un colis qu'elle reçoit — et son
+       * numéro guinéen sous la mention du pays de la route.
+       */
+      expediteur: (versLaGuinee ? `${clientPrenom} ${clientNom}` : `${expPrenom} ${expNom}`).trim(),
+      expediteurTelephone: versLaGuinee ? clientTelephone : expTelephone,
+      expediteurEmail: "", expediteurAdresse: "",
       // À l'export le colis part de Guinée ; à l'import il part du pays de la route.
-      expediteurPays: sens === "export" ? "GN" : destPays,
+      expediteurPays: versLaGuinee ? destPays : "GN",
       /*
        * Sous repère, le champ « destinataire » porte le repère et le téléphone reste vide : tous
        * les écrans, étiquettes et documents continuent d'afficher quelque chose d'utile, sans
        * qu'aucun d'eux ait à connaître la règle. `repereSeul` dit à ceux qui doivent le savoir
        * qu'il ne s'agit pas d'un nom de personne.
        */
-      destinataire: `${clientPrenom} ${clientNom}`.trim(),
-      telephone: clientTelephone,
+      destinataire: (versLaGuinee ? `${expPrenom} ${expNom}` : `${clientPrenom} ${clientNom}`).trim(),
+      telephone: versLaGuinee ? expTelephone : clientTelephone,
       repereSeul: !identiteRequise,
       repere: identiteRequise ? "" : repere.trim(),
       destinataireEmail: "", destinataireAdresse: "",
-      destinataireVille: "", destinataireCodePostal: "", destinatairePays: sens === "export" ? destPays : "GN",
+      destinataireVille: "", destinataireCodePostal: "", destinatairePays: versLaGuinee ? "GN" : destPays,
       pays: paysRoute, direction, mode,
       produits,
       poids: +poidsTotal.toFixed(2), volume: 0,
@@ -9108,17 +9152,21 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
           </div>
         )}
 
-        {/* Le pays est écrit dans le titre : c'est ce qui empêche de remplir les deux bouts à l'envers. */}
+        {/*
+          Le pays reste écrit dans le titre — c'est ce qui empêche de remplir les deux bouts à
+          l'envers — mais c'est le RÔLE qui change avec le sens, pas le pays : les personnes ne se
+          déplacent pas d'un colis à l'autre.
+        */}
         <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "4px 0 10px" }}>
-          Expéditeur · {FLAGS[paysExpediteur] || ""} {nomDuPays(paysExpediteur)}
+          {roleCoteGuinee} · {FLAGS.GN || ""} {nomDuPays("GN")}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
           <Field label="Prénom"><input value={expPrenom} onChange={(e) => setExpPrenom(e.target.value)} style={inputStyle} /></Field>
           <Field label="Nom *"><input value={expNom} onChange={(e) => { setErr(""); setExpNom(e.target.value); }} style={inputStyle} /></Field>
         </div>
         <Field label="Téléphone (facultatif)">
-          <PhoneInput key={`exp-${paysExpediteur}`} value={expTelephone} onChange={setExpTelephone}
-            defaultDial={indicatifDe(paysExpediteur)} />
+          <PhoneInput key="exp-GN" value={expTelephone} onChange={setExpTelephone}
+            defaultDial={indicatifDe("GN")} />
         </Field>
 
         {/*
@@ -9131,25 +9179,32 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
         {identiteRequise ? (
           <>
             <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>
-              Destinataire · {FLAGS[paysDestinataire] || ""} {nomDuPays(paysDestinataire)}
+              {roleCoteClient} · {FLAGS[destPays] || ""} {nomDuPays(destPays)}
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
               <Field label="Prénom"><input value={clientPrenom} onChange={(e) => setClientPrenom(e.target.value)} style={inputStyle} /></Field>
               <Field label="Nom *"><input value={clientNom} onChange={(e) => { setErr(""); setClientNom(e.target.value); }} style={inputStyle} /></Field>
             </div>
-            {/* Indicatif calé sur le pays où se tient le destinataire — qui change avec le sens :
-                un destinataire à Conakry n'a pas un numéro français, et le champ le refuserait. */}
+            {/* Indicatif calé sur le pays de la route : c'est là que se tient le client du
+                partenaire, quel que soit le sens de l'envoi. */}
             <Field label="Téléphone (facultatif)">
-              <PhoneInput key={`dest-${paysDestinataire}`} value={clientTelephone} onChange={setClientTelephone}
-                defaultDial={indicatifDe(paysDestinataire)} />
+              <PhoneInput key={`dest-${destPays}`} value={clientTelephone} onChange={setClientTelephone}
+                defaultDial={indicatifDe(destPays)} />
             </Field>
           </>
         ) : (
           <>
-            <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>Remis à</div>
+            {/*
+              Le correspondant du partenaire se tient au pays de la route. Selon le sens, c'est lui
+              qui remet le lot ou lui qui le reçoit : dire « remis à » sur un colis qu'il expédie
+              ferait chercher à l'arrivée quelqu'un qui se tient au départ.
+            */}
+            <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>
+              {versLaGuinee ? "Remis par" : "Remis à"} · {FLAGS[destPays] || ""} {nomDuPays(destPays)}
+            </div>
             <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 10, padding: "11px 13px", marginBottom: 12 }}>
               <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
-                Sur cette route, le lot est remis au correspondant du partenaire — repris de son
+                Sur cette route, le lot est {versLaGuinee ? "remis par" : "remis au"} correspondant du partenaire — repris de son
                 contrat, il n’y a rien à saisir. Le client final n’apparaît pas : c’est le repère,
                 ci-dessous, qui dira à qui ce colis revient.
               </div>
@@ -9159,8 +9214,8 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
               <Field label="Nom *"><input value={clientNom} onChange={(e) => { setErr(""); setClientNom(e.target.value); }} style={inputStyle} /></Field>
             </div>
             <Field label="Téléphone (facultatif)">
-              <PhoneInput key={`remis-${paysDestinataire}`} value={clientTelephone} onChange={setClientTelephone}
-                defaultDial={indicatifDe(paysDestinataire)} />
+              <PhoneInput key={`remis-${destPays}`} value={clientTelephone} onChange={setClientTelephone}
+                defaultDial={indicatifDe(destPays)} />
             </Field>
             <Field label="Repère du colis *">
               <input value={repere} onChange={(e) => { setErr(""); setRepere(e.target.value); }} style={inputStyle}
@@ -14643,7 +14698,7 @@ async function construireEtiquetteDoc(colis, data) {
   doc.setTextColor(255, 255, 255);
   doc.text(pastille, M + pW / 2, Z.statut, { align: "center" });
   doc.setFont(undefined, "bold"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
-  doc.text(`GN-${colis.pays}`, W - M, Z.statut, { align: "right" });
+  doc.text(routeDuColis(colis), W - M, Z.statut, { align: "right" });
 
   // ── Destinataire (zone fixe : le texte s'adapte, la zone ne bouge pas) ─────
   // Fond teinté sur toute la zone réservée (jamais sur le texte débordant, elle est bornée par
@@ -14946,7 +15001,7 @@ async function renderLabelCanvas(colis, largeurDots, data) {
   ctx.fillText(pastille, M + pW / 2, 27.8 * s);
   ctx.restore();
   ctx.textAlign = "right";
-  ctx.fillText(`GN-${colis.pays}`, W - M, 27.8 * s);
+  ctx.fillText(routeDuColis(colis), W - M, 27.8 * s);
   ctx.textAlign = "left";
   hr(30.5 * s);
 

@@ -847,3 +847,48 @@ l'écran. Le bouton n'est pas la serrure.
 Éprouvé par `t90` (29 cas) et par deux cas de `testdonnees` qui vérifient les **deux sens** de la
 porte : l'agent ne décide pas de ce qui compte dans le bilan, l'administrateur oui — une décision
 comptable qui ne s'enregistrerait pour personne serait un bilan qu'on ne peut pas corriger.
+
+## Les rôles tournent, les personnes ne bougent pas (26/08/2026)
+
+Correction de la section précédente sur le sens de l'envoi — le remède était pris à l'envers, et
+une étiquette réelle l'a montré.
+
+Un colis de partenaire a toujours les mêmes deux parties : le partenaire — ou son correspondant —
+se tient **en Guinée**, son client se tient **au pays de la route**. Le sens de l'envoi n'y change
+rien : ce sont les mêmes personnes, aux mêmes endroits, avec les mêmes numéros. Ce que le sens
+change, c'est **le rôle que chacun tient** :
+
+| Sens | Expéditeur | Destinataire |
+| --- | --- | --- |
+| Conakry → Paris | la partie guinéenne | le client au pays de la route |
+| Paris → Conakry | le client au pays de la route | la partie guinéenne |
+
+On avait d'abord fait tourner **les blocs de saisie** : l'indicatif du premier bloc passait de +224
+à +33 selon le sens. Cela revenait à demander à celui qui saisit d'échanger deux personnes de place
+à chaque changement de sens, alors qu'elles n'ont pas bougé — et personne ne le fait. Le colis
+enregistré s'en est ressenti : l'entreprise guinéenne inscrite **expéditrice d'un colis qu'elle
+reçoit**, avec son numéro en +224 sous la mention du pays de la route, et son client français
+inscrit **« Livrer à » sous la mention GUINÉE**, avec un numéro en +33. Chaque bout se contredisait
+lui-même, et les quatre documents recopiaient la contradiction.
+
+Les blocs sont donc redevenus fixes — le bloc guinéen garde +224, le bloc du client garde
+l'indicatif de la route — et c'est **l'écriture du colis qui distribue les rôles** selon le sens.
+Les titres suivent (« Destinataire · Guinée » sur un colis qui arrive, « Remis par » au lieu de
+« Remis à » quand le correspondant expédie), ainsi que les messages d'erreur : réclamer
+« l'expéditeur » en désignant le bloc de celui qui réceptionne fait chercher l'erreur au mauvais
+endroit.
+
+**La route de l'étiquette était fausse elle aussi**, et pour la même raison : elle s'écrivait
+`GN-<pays>` en toutes circonstances, comme si tout partait de Conakry. Sur un colis Paris →
+Conakry, l'étiquette annonçait donc « GN-FR » — la route à l'envers, sur la seule ligne qui la
+donne, juste au-dessus d'un destinataire qui est bien en Guinée. `routeDuColis` lit désormais les
+deux bouts écrits sur le colis, dans l'ordre où il voyage ; les deux étiquettes (PDF et thermique)
+y passent.
+
+Le cloisonnement n'est pas touché : `buildClientDirectory` écarte le colis partenaire **avant** de
+lire l'un ou l'autre bout, donc l'échange des rôles ne peut pas faire entrer le client d'un
+partenaire dans les listes commerciales de l'entreprise. `clientDuColisPartenaire` continue de
+désigner celui qui n'est pas en Guinée, et retombe donc sur le bon nom dans les deux sens.
+
+Éprouvé par `t88` (18 cas), réécrit : les indicatifs ne s'échangent plus d'un sens à l'autre, les
+titres portent le rôle, et le colis enregistré met le client à un bout et l'entreprise à l'autre.

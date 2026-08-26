@@ -569,7 +569,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { to, message, mediaUrl, modele, variables, document, boutonUrl } = req.body || {};
+    const { to, message, mediaUrl, modele, variables, document, boutonUrl, texteLibre } = req.body || {};
     if (!to || !message) {
       return res.status(400).json({ error: "Paramètres 'to' et 'message' requis." });
     }
@@ -585,8 +585,16 @@ export default async function handler(req, res) {
         meta,
         destinataire: chiffres,
         message,
-        // Le modèle donné par l'appelant l'emporte ; à défaut celui configuré sur le serveur.
-        modele: modele || meta.modele || null,
+        /*
+         * Le modèle donné par l'appelant l'emporte ; à défaut celui configuré sur le serveur.
+         *
+         * `texteLibre` coupe court à ce repli, et il n'est pas un détail : le modèle par défaut
+         * est celui du SUIVI DE COLIS. Un appelant qui n'en demande aucun — la réinitialisation de
+         * mot de passe, par exemple — se voyait envoyer ce modèle-là, sans ses variables. Meta
+         * refusait l'envoi, ou pire, le client recevait un message de suivi à la place de son
+         * code. « Aucun modèle » doit pouvoir se dire ; sans ce drapeau, c'était impossible.
+         */
+        modele: texteLibre ? null : (modele || meta.modele || null),
         variables,
         // Le ticket d'envoi vient de la même URL publique que la pièce jointe Twilio : un seul
         // fichier déposé, servi par les deux voies.

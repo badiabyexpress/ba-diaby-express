@@ -94,6 +94,41 @@ function refDepuisUrl(url) {
   return m ? m[1] : null;
 }
 
+/** Ne garde que les chiffres : « +224 620 11 12 22 » et « 620111222 » désignent le même numéro. */
+function chiffresSeuls(valeur) {
+  return String(valeur || "").replace(/\D/g, "");
+}
+
+/*
+ * Trois façons d'entrer, pour une seule case.
+ *
+ * L'identifiant se choisit à l'inscription et s'oublie : ni le client au comptoir ni l'agent
+ * revenu de congé ne se rappellent s'ils avaient écrit « mariama », « Mariama » ou
+ * « mariama.camara ». Leur numéro et leur adresse e-mail, eux, ils les connaissent par cœur — et
+ * ils figurent déjà sur leur fiche. Rien n'obligeait à n'accepter que la troisième.
+ *
+ * L'ordre compte : un identifiant exact passe avant un contact, pour qu'un compte ne soit jamais
+ * éclipsé par l'homonymie d'un numéro. Sur le numéro, on compare les huit derniers chiffres, afin
+ * que l'indicatif ne soit pas obligatoire.
+ */
+const CANDIDATS_MAX = 5;
+export function comptesCorrespondants(liste, saisi) {
+  const bas = String(saisi || "").trim().toLowerCase();
+  if (!bas) return [];
+  const numero = chiffresSeuls(bas);
+  const parIdentifiant = [];
+  const parContact = [];
+  for (const c of liste || []) {
+    if (String(c.identifiant || "").trim().toLowerCase() === bas) { parIdentifiant.push(c); continue; }
+    if (bas.includes("@")) {
+      if (String(c.email || "").trim().toLowerCase() === bas) parContact.push(c);
+    } else if (numero.length >= 8 && chiffresSeuls(c.telephone).endsWith(numero.slice(-8))) {
+      parContact.push(c);
+    }
+  }
+  return [...parIdentifiant, ...parContact].slice(0, CANDIDATS_MAX);
+}
+
 /*
  * Ralentissement des essais répétés. Une fonction serverless peut être recréée à tout moment,
  * ce compteur n'est donc pas une protection absolue — c'est un ralentisseur, qui suffit à rendre
@@ -165,24 +200,39 @@ export default async function handler(req, res) {
     /* Les clients saisissent leur identifiant sans se soucier de la casse ; l'écran du portail a
      * toujours comparé en minuscules, et changer cela ici enfermerait dehors des comptes existants. */
     const cherche = String(identifiant).trim();
-    const compte = espaceClient
-      ? (donnees.clientAccounts || []).find((c) => String(c.identifiant || "").toLowerCase() === cherche.toLowerCase())
-      : (donnees.users || []).find((u) => u.identifiant === cherche);
+    const candidats = comptesCorrespondants(
+      espaceClient ? donnees.clientAccounts : donnees.users, cherche,
+    );
 
     /*
      * Même réponse pour un identifiant inconnu et pour un mot de passe faux : sinon, la page de
      * connexion permet de découvrir qui travaille dans l'entreprise. Le hachage est calculé même
-     * quand le compte n'existe pas, pour que la durée de réponse ne trahisse pas l'information.
+     * quand aucun compte ne correspond, pour que la durée de réponse ne trahisse pas l'information.
+     *
+     * Plusieurs comptes peuvent répondre à un même numéro — deux inscriptions au comptoir, un
+     * gérant et son agent qui partagent une ligne. Plutôt que d'en désigner un au hasard ou de
+     * refuser en disant pourquoi (ce qui révélerait l'existence des deux), c'est le mot de passe
+     * qui tranche : celui dont l'empreinte correspond est celui qui se connecte.
      */
     const echec = { status: 401, corps: { error: "Identifiant ou mot de passe incorrect." } };
-    const sel = compte?.motdepasseSalt || "sel-inexistant";
-    const attendu = compte?.motdepasseSecure || "";
-    const algo = compte?.motdepasseAlgo === "pbkdf2" || !compte ? "pbkdf2" : "sha256";
-    const calcule = algo === "pbkdf2"
-      ? hashPBKDF2(motdepasse, sel, compte?.motdepasseIter || PBKDF2_ITERATIONS)
-      : hashSHA256(motdepasse, sel);
+    const empreinteDe = (c) => {
+      const sel = c?.motdepasseSalt || "sel-inexistant";
+      const algo = c?.motdepasseAlgo === "pbkdf2" || !c ? "pbkdf2" : "sha256";
+      return algo === "pbkdf2"
+        ? hashPBKDF2(motdepasse, sel, c?.motdepasseIter || PBKDF2_ITERATIONS)
+        : hashSHA256(motdepasse, sel);
+    };
 
-    if (!compte || !attendu || !egalitéSûre(calcule, attendu)) {
+    let compte = null;
+    if (candidats.length === 0) {
+      empreinteDe(null);   // le temps de réponse ne doit pas dire « ce compte n'existe pas »
+    } else {
+      for (const c of candidats) {
+        if (c.motdepasseSecure && egalitéSûre(empreinteDe(c), c.motdepasseSecure)) { compte = c; break; }
+      }
+    }
+
+    if (!compte) {
       return res.status(echec.status).json(echec.corps);
     }
 

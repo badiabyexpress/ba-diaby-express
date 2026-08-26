@@ -10570,18 +10570,42 @@ function MessagesWhatsAppPage({ data, persist, session, notify }) {
     const quand = dejaAppele
       ? new Date(reception.dernierAppel).toLocaleString("fr-FR", { dateStyle: "long", timeStyle: "short" })
       : null;
+    /*
+     * Le troisième état, et le plus trompeur : Meta appelle, et c'est NOUS qui le renvoyons.
+     *
+     * L'adresse déclarée chez Meta doit porter son « ?jeton= » — c'est la preuve que l'appel vient
+     * bien de lui. Recopiée sans ce bout, la vérification passe quand même (elle emprunte un autre
+     * chemin), le champ « messages » s'affiche « Abonné », et pourtant chaque message est refusé.
+     * Tout paraît en ordre et rien n'arrive. Un refus plus récent que le dernier appel accepté est
+     * le signe qu'on est dans ce cas.
+     */
+    const refuses = Number(reception?.refuses) || 0;
+    const nousRefusons = refuses > 0
+      && (!dejaAppele || new Date(reception.dernierRefus || 0) > new Date(reception.dernierAppel));
+    const quandRefus = reception?.dernierRefus
+      ? new Date(reception.dernierRefus).toLocaleString("fr-FR", { dateStyle: "long", timeStyle: "short" })
+      : null;
     return (
       <div style={{ ...carte, padding: 26 }}>
         <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>
           Aucun message reçu pour l’instant
         </div>
         <div style={{
-          background: dejaAppele ? "var(--ok-bg)" : "var(--warn-bg)",
-          color: dejaAppele ? "var(--ok-fg)" : "var(--warn-fg)",
+          background: nousRefusons ? "var(--danger-bg)" : dejaAppele ? "var(--ok-bg)" : "var(--warn-bg)",
+          color: nousRefusons ? "var(--danger-fg)" : dejaAppele ? "var(--ok-fg)" : "var(--warn-fg)",
           border: "1px solid var(--border)", borderRadius: 10, padding: "12px 14px",
           fontSize: 12.5, lineHeight: 1.6, marginBottom: 14,
         }}>
-          {dejaAppele ? (
+          {nousRefusons ? (
+            <>
+              <strong>Meta appelle bien votre serveur — mais nous refusons ses appels.</strong>
+              {" "}{refuses > 1 ? `${refuses} appels refusés` : "Un appel refusé"}, le dernier le {quandRefus}.
+              {" "}L’adresse déclarée chez Meta a perdu son jeton : elle doit se terminer par
+              {" "}<code>?jeton=…</code>, la même valeur que <code>WHATSAPP_VERIFY_TOKEN</code> dans
+              Vercel. C’est ce bout d’adresse qui prouve que l’appel vient de Meta ; sans lui, chaque
+              message est renvoyé, alors que tout le reste paraît en ordre.
+            </>
+          ) : dejaAppele ? (
             <>
               <strong>La réception fonctionne.</strong> Meta a appelé votre serveur
               {reception.appels > 1 ? ` ${reception.appels} fois` : ""}, la dernière le {quand}
@@ -10596,7 +10620,19 @@ function MessagesWhatsAppPage({ data, persist, session, notify }) {
             </>
           )}
         </div>
-        {!dejaAppele && (
+        {nousRefusons && (
+          <div style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.6 }}>
+            Dans votre tableau de bord Meta, ouvrez la configuration des webhooks, modifiez
+            l’<strong>URL de rappel</strong> et remettez le jeton au bout :
+            <div style={{ fontSize: 11.5, fontFamily: "monospace", color: "var(--text)", background: "var(--surface2)", borderRadius: 8, padding: "9px 11px", marginTop: 8, overflowWrap: "anywhere" }}>
+              https://badiabyexpress.com/api/whatsapp-entrant?jeton=VOTRE_JETON
+            </div>
+            <div style={{ marginTop: 8 }}>
+              Puis enregistrez. Le prochain message d’un client s’affichera ici.
+            </div>
+          </div>
+        )}
+        {!dejaAppele && !nousRefusons && (
           <div style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.6 }}>
             Deux explications possibles, et une façon de trancher en dix secondes : dans votre
             tableau de bord Meta, en face du champ <strong>messages</strong>, appuyez sur
@@ -22006,6 +22042,36 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
   useEffect(() => { relireModeles(); }, []);
 
   /*
+   * L'ABONNEMENT DE L'APPLICATION AU COMPTE — la case qu'on ne voit nulle part.
+   *
+   * Déclarer l'adresse du webhook et cocher « messages » se fait au niveau de l'application. Encore
+   * faut-il que cette application soit abonnée au COMPTE PROFESSIONNEL qui porte le numéro : c'est
+   * une seconde opération, invisible dans l'écran des webhooks, et rien n'avertit quand elle
+   * manque. Tout paraît alors en ordre et Meta n'appelle jamais.
+   */
+  const [abonnement, setAbonnement] = useState(null);
+  const [abonnementEnCours, setAbonnementEnCours] = useState(false);
+  function relireAbonnement() {
+    return appelServeurQuiDepense("/api/whatsapp?abonnement=1")
+      .then((r) => r.json().then((corps) => ({ ok: r.ok, corps })))
+      .then(({ ok, corps }) => setAbonnement(ok ? corps : { erreur: corps?.error, manquant: corps?.manquant }))
+      .catch(() => setAbonnement({ erreur: "indisponible" }));
+  }
+  useEffect(() => { relireAbonnement(); }, []);
+  async function abonner() {
+    setAbonnementEnCours(true);
+    try {
+      const reponse = await appelServeurQuiDepense("/api/whatsapp?abonnement=1", { method: "POST" });
+      const corps = await reponse.json().catch(() => ({}));
+      // On ne se fie pas à l'accusé : on relit l'état réel chez Meta.
+      if (reponse.ok) await relireAbonnement();
+      else setAbonnement((a) => ({ ...(a || {}), erreur: corps?.error || "Meta a refusé l’abonnement." }));
+    } catch (e) {
+      setAbonnement((a) => ({ ...(a || {}), erreur: "Impossible de joindre le serveur." }));
+    } finally { setAbonnementEnCours(false); }
+  }
+
+  /*
    * L'activation du numéro, depuis l'application.
    *
    * C'est l'étape « Register » de Meta. Elle se fait normalement depuis la console développeur,
@@ -22353,6 +22419,48 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
         C'est la question qu'on se pose quand un client ne reçoit rien : sont-ils approuvés ? Elle
         se posait jusqu'ici dans la console de Meta, sur un autre écran, dans une autre langue.
       */}
+      {/*
+        Reçoit-on ce que les clients écrivent ?
+
+        Cette carte répond à la question que l'écran des webhooks ne pose jamais : l'application
+        est-elle abonnée au compte professionnel qui porte le numéro ? Sans cela, l'adresse est
+        vérifiée, le champ « messages » affiche « Abonné », et Meta n'appelle pourtant jamais.
+      */}
+      {abonnement && !abonnement.manquant && (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "13px 16px", marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Réception des messages clients</div>
+            {!abonnement.erreur && (
+              <div style={{ fontSize: 12.5, fontWeight: 700, color: abonnement.abonne ? "var(--ok-fg)" : "var(--danger-fg)" }}>
+                {abonnement.abonne ? "application abonnée" : "application NON abonnée"}
+              </div>
+            )}
+          </div>
+          {abonnement.erreur ? (
+            <div style={{ fontSize: 12, color: "var(--warn-fg)", marginTop: 6, lineHeight: 1.55 }}>{abonnement.erreur}</div>
+          ) : abonnement.abonne ? (
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 5, lineHeight: 1.55 }}>
+              Meta pousse bien les messages de vos clients vers votre serveur
+              {abonnement.applications?.[0]?.nom ? <> — application « {abonnement.applications[0].nom} »</> : null}.
+              {" "}Ils s’affichent dans <strong>Centre clients → WhatsApp</strong>.
+            </div>
+          ) : (
+            <>
+              <div style={{ fontSize: 12, color: "var(--text)", marginTop: 5, lineHeight: 1.55 }}>
+                Aucune application n’est abonnée à votre compte WhatsApp Business. Déclarer l’adresse
+                du webhook ne suffit pas : c’est cet abonnement-là qui fait que Meta appelle votre
+                serveur. Tant qu’il manque, un client qui écrit croit vous avoir joint, et personne
+                ne lit son message.
+              </div>
+              <button onClick={abonner} disabled={abonnementEnCours}
+                style={{ marginTop: 10, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+                {abonnementEnCours ? "Abonnement…" : "Abonner l’application"}
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
       {modeles && !modeles.erreur && (
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "13px 16px", marginBottom: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>

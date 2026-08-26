@@ -196,6 +196,49 @@ function numeroDeLaNotification(corps) {
   return null;
 }
 
+/*
+ * LES APPELS QUE NOUS REFUSONS — l'autre moitié du diagnostic.
+ *
+ * Un webhook silencieux a deux causes opposées, et elles se ressemblent trait pour trait :
+ * Meta n'appelle pas (l'application n'est pas abonnée au compte du numéro), ou Meta appelle et
+ * nous le renvoyons (l'adresse déclarée chez lui a perdu son « ?jeton= », et aucune signature ne
+ * peut le remplacer sans WHATSAPP_APP_SECRET). Dans les deux cas le Centre clients reste vide.
+ *
+ * Sans cette note, les deux étaient indistinguables et l'on cherchait au mauvais endroit — alors
+ * que le second se répare en recollant le jeton au bout de l'adresse.
+ *
+ * DEUX PRÉCAUTIONS, parce que cette adresse est publique et qu'écrire coûte.
+ *   — On ne note que ce qui a la FORME d'une notification Meta ; le reste est du bruit d'internet.
+ *   — Une note au plus toutes les cinq minutes par instance : sans ce frein, n'importe qui
+ *     pourrait provoquer une écriture en base à volonté.
+ */
+const INTERVALLE_NOTE_REFUS = 5 * 60 * 1000;
+let dernierRefusNote = 0;
+
+async function noterRefus(brut) {
+  let forme = null;
+  try { forme = JSON.parse(brut || "{}"); } catch (e) { return; }
+  if (forme?.object !== "whatsapp_business_account" || !Array.isArray(forme.entry)) return;
+  const maintenant = Date.now();
+  if (maintenant - dernierRefusNote < INTERVALLE_NOTE_REFUS) return;
+  dernierRefusNote = maintenant;
+  if (!baseConfiguree()) return;
+  try {
+    await modifierDocument((document) => ({
+      document: {
+        ...document,
+        receptionWhatsApp: {
+          ...(document.receptionWhatsApp || {}),
+          refuses: (Number(document.receptionWhatsApp?.refuses) || 0) + 1,
+          dernierRefus: new Date().toISOString(),
+        },
+      },
+    }));
+  } catch (e) {
+    console.error("whatsapp-entrant : refus non noté", e);
+  }
+}
+
 export default async function handler(req, res) {
   /*
    * LA VÉRIFICATION. Meta appelle une seule fois, au moment où l'on enregistre l'adresse dans
@@ -236,7 +279,13 @@ export default async function handler(req, res) {
     }
     const brut = await corpsBrut(req);
     if (!jetonUrlValide(req) && !signatureValide(brut, req.headers["x-hub-signature-256"])) {
-      // Un appel qui ne porte ni le jeton de l'adresse ni la signature de Meta n'est pas Meta.
+      /*
+       * Un appel qui ne porte ni le jeton de l'adresse ni la signature de Meta n'est pas Meta —
+       * mais il peut aussi être Meta appelant une adresse à qui l'on a oublié de recoller son
+       * jeton. On refuse dans les deux cas, et l'on garde la trace : c'est elle qui distingue
+       * « Meta n'appelle pas » de « Meta appelle et nous le renvoyons ».
+       */
+      await noterRefus(brut);
       return res.status(401).json({ error: "Appel non authentifié." });
     }
     if (!baseConfiguree()) {

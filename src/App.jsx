@@ -5039,7 +5039,7 @@ function ClientResetPasswordForm({ data, persist, onDone, onCancel, espace = "cl
  * `large` sert aux montants, qui portent une devise et se lisent mal serrés. `accent` souligne le
  * reste à payer quand il y en a un — c'est la seule ligne sur laquelle le client doit agir.
  */
-const TuileClient = memo(function TuileClient({ label, value, icon: Icon, tint, large, accent }) {
+const TuileCompacte = memo(function TuileCompacte({ label, value, icon: Icon, tint, large, accent }) {
   return (
     <div style={{
       background: "var(--surface)", borderRadius: 12, padding: "11px 13px", minWidth: 0,
@@ -6195,20 +6195,20 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
           « combien je dois » est la question qui amène le client ici. Le reste suit, en grille.
         */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(210px,1fr))", gap: 10, marginBottom: 10 }}>
-          <TuileClient label={T("Montant payé")} value={fmt(statsClient.montantPaye, deviseClient)}
+          <TuileCompacte label={T("Montant payé")} value={fmt(statsClient.montantPaye, deviseClient)}
             icon={DollarSign} tint="#16A163" large />
-          <TuileClient label={T("Reste à payer")} value={fmt(statsClient.montantRestant, deviseClient)}
+          <TuileCompacte label={T("Reste à payer")} value={fmt(statsClient.montantRestant, deviseClient)}
             icon={DollarSign} tint={statsClient.montantRestant > 0 ? "var(--brand-solid)" : "#3ECB84"}
             large accent={statsClient.montantRestant > 0} />
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(148px,1fr))", gap: 10, marginBottom: 22 }}>
-          <TuileClient label={T("Total colis")} value={statsClient.total} icon={Package} tint="#3D63FF" />
-          <TuileClient label={T("En attente")} value={statsClient.enAttente} icon={Clock} tint="#6B7A99" />
-          <TuileClient label={T("Reçus à l’entrepôt")} value={statsClient.recusEntrepot} icon={Package} tint="#5B8DEF" />
-          <TuileClient label={T("Expédiés")} value={statsClient.expedies} icon={Plane} tint="#5B8DEF" />
-          <TuileClient label={T("Arrivés en Guinée")} value={statsClient.arrivesGuinee} icon={MapPin} tint="#B8801C" />
-          <TuileClient label={T("Livrés")} value={statsClient.livres} icon={CheckCircle2} tint="#16A163" />
-          <TuileClient label={T("Poids total")} value={`${statsClient.poidsTotal.toFixed(1)} kg`} icon={FileStack} tint="#8B5CF6" />
+          <TuileCompacte label={T("Total colis")} value={statsClient.total} icon={Package} tint="#3D63FF" />
+          <TuileCompacte label={T("En attente")} value={statsClient.enAttente} icon={Clock} tint="#6B7A99" />
+          <TuileCompacte label={T("Reçus à l’entrepôt")} value={statsClient.recusEntrepot} icon={Package} tint="#5B8DEF" />
+          <TuileCompacte label={T("Expédiés")} value={statsClient.expedies} icon={Plane} tint="#5B8DEF" />
+          <TuileCompacte label={T("Arrivés en Guinée")} value={statsClient.arrivesGuinee} icon={MapPin} tint="#B8801C" />
+          <TuileCompacte label={T("Livrés")} value={statsClient.livres} icon={CheckCircle2} tint="#16A163" />
+          <TuileCompacte label={T("Poids total")} value={`${statsClient.poidsTotal.toFixed(1)} kg`} icon={FileStack} tint="#8B5CF6" />
         </div>
 
         {nonPayes.length > 0 && (
@@ -18349,10 +18349,32 @@ function buildClientDirectory(colisList, repertoireEnBase = null) {
       map[key].count = (map[key].count || 0) + 1;
       map[key].total = (map[key].total || 0) + c.prix;
     }
+    /*
+     * L'EXPÉDITEUR COMPTE AUTANT QUE LE DESTINATAIRE — il ne comptait pas du tout.
+     *
+     * Sa fiche était créée une fois, avec `count: 0`, et n'était plus jamais touchée : ni le
+     * compteur d'envois, ni le total, ni même la date ne bougeaient. Or dans ce métier, c'est
+     * souvent l'expéditeur qui EST le client : celui qui est en France, qui paie, et qui envoie
+     * tous les mois à sa famille. Il apparaissait donc éternellement à « 0 envoi, 0 GNF », ne
+     * pouvait jamais devenir « client régulier » ni entrer dans les « meilleurs clients », et
+     * l'écran affichait 0 client régulier sur une base qui en comptait.
+     *
+     * On le traite désormais comme le destinataire : même compteur, même total, et la fiche la
+     * plus récente l'emporte pour les coordonnées.
+     */
     if (c.expediteurTelephone) {
       const key = c.expediteurTelephone.trim();
-      if (!map[key]) {
-        map[key] = { telephone: c.expediteurTelephone, nomComplet: c.expediteur, prenom: "", nom: c.expediteur, email: c.expediteurEmail || "", adresse: c.expediteurAdresse || "", ville: "", codePostal: "", pays: c.expediteurPays || "GN", date: c.createdAt, count: 0, total: 0 };
+      /*
+       * Sauf s'il s'expédie à lui-même : le colis serait alors compté deux fois pour la même
+       * personne, et son total doublé.
+       */
+      if (key && key !== (c.telephone || "").trim()) {
+        const entry = { telephone: c.expediteurTelephone, nomComplet: c.expediteur, prenom: "", nom: c.expediteur, email: c.expediteurEmail || "", adresse: c.expediteurAdresse || "", ville: "", codePostal: "", pays: c.expediteurPays || "GN", date: c.createdAt, count: 0, total: 0 };
+        if (!map[key] || new Date(c.createdAt) > new Date(map[key].date)) {
+          map[key] = { ...entry, count: (map[key]?.count || 0), total: (map[key]?.total || 0) };
+        }
+        map[key].count = (map[key].count || 0) + 1;
+        map[key].total = (map[key].total || 0) + c.prix;
       }
     }
   });
@@ -18456,11 +18478,16 @@ function Clients({ data }) {
       <p style={{ color: "var(--muted)", fontSize: 14.5, marginTop: 0, marginBottom: 5 }}>{clients.length} clients · Base de données et historique d’envoi</p>
       <p style={{ color: "var(--muted)", fontSize: 12.5, marginTop: 0, marginBottom: 20 }}>Astuce : dans "Nouveau colis", tapez le numéro de téléphone d’un client existant pour remplir automatiquement ses informations.</p>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", gap: 12, marginBottom: 20 }}>
-        <StatCard label="Total clients" value={clients.length} icon={Users} tint="#3D63FF" />
-        <StatCard label="Nouveaux (30 j)" value={clients.filter((c) => c.date && new Date(c.date).getTime() > trenteJours).length} icon={Sparkles} tint="#8B5CF6" />
-        <StatCard label="Clients réguliers" value={clients.filter((c) => c.count >= 3).length} icon={CheckCircle2} tint="#16A163" />
-        <StatCard label="Doublons possibles" value={doublons.length} icon={AlertTriangle} tint={doublons.length > 0 ? "#D6A22E" : "#6B7A99"} />
+      {/*
+        Les mêmes tuiles compactes que l'Espace Client : celles de l'agence réclament 190 px et
+        respirent beaucoup, ce qui sur un téléphone remplit l'écran avec quatre nombres.
+      */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(148px,1fr))", gap: 10, marginBottom: 20 }}>
+        <TuileCompacte label="Total clients" value={clients.length} icon={Users} tint="#3D63FF" />
+        <TuileCompacte label="Nouveaux (30 j)" value={clients.filter((c) => c.date && new Date(c.date).getTime() > trenteJours).length} icon={Sparkles} tint="#8B5CF6" />
+        <TuileCompacte label="Clients réguliers" value={clients.filter((c) => c.count >= 3).length} icon={CheckCircle2} tint="#16A163" />
+        <TuileCompacte label="Doublons possibles" value={doublons.length} icon={AlertTriangle}
+          tint={doublons.length > 0 ? "#D6A22E" : "#6B7A99"} accent={doublons.length > 0} />
       </div>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>

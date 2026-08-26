@@ -2692,6 +2692,31 @@ const CLE_JETON = "bde-jeton";
  * Un mot de passe refusé (401) ou trop d'essais (429) ne sont PAS des cas de repli : les renvoyer
  * à la vérification locale annulerait le ralentissement des attaques.
  */
+/*
+ * Les trois façons d'entrer, côté navigateur — le miroir de comptesCorrespondants (api/login.js).
+ *
+ * Il ne sert qu'au repli hors ligne : en temps normal c'est le serveur qui cherche, avec la liste
+ * complète des comptes. Les deux doivent dire la même chose, sinon la connexion réussirait en
+ * ligne et échouerait dès la première coupure.
+ */
+function comptesParTroisCles(liste, saisi) {
+  const bas = String(saisi || "").trim().toLowerCase();
+  if (!bas) return [];
+  const chiffresDe = (v) => String(v || "").replace(/\D/g, "");
+  const numero = chiffresDe(bas);
+  const parIdentifiant = [];
+  const parContact = [];
+  for (const c of liste || []) {
+    if (String(c.identifiant || "").trim().toLowerCase() === bas) { parIdentifiant.push(c); continue; }
+    if (bas.includes("@")) {
+      if (String(c.email || "").trim().toLowerCase() === bas) parContact.push(c);
+    } else if (numero.length >= 8 && chiffresDe(c.telephone).endsWith(numero.slice(-8))) {
+      parContact.push(c);
+    }
+  }
+  return [...parIdentifiant, ...parContact].slice(0, 5);
+}
+
 async function connexionServeur(identifiant, motdepasse, espace) {
   let reponse;
   try {
@@ -4045,6 +4070,20 @@ const CLIENT_I18N = {
   "Mot de passe oublié ?": { en: "Forgot your password?", ar: "هل نسيت كلمة المرور؟" },
   "Saisissez votre identifiant : nous enverrons un code de vérification sur le WhatsApp associé à votre compte.": { en: "Enter your username: we will send a verification code to the WhatsApp linked to your account.", ar: "أدخل اسم المستخدم: سنرسل رمز تحقق إلى واتساب المرتبط بحسابك." },
   "Recevoir le code": { en: "Send me the code", ar: "أرسل لي الرمز" },
+  "Identifiant, e-mail ou téléphone": { en: "Username, email or phone", ar: "اسم المستخدم أو البريد أو الهاتف" },
+  "Saisissez votre identifiant : nous enverrons un code de vérification sur le WhatsApp et l’e-mail associés à votre compte.": { en: "Enter your username: we will send a verification code to the WhatsApp and email linked to your account.", ar: "أدخل اسم المستخدم: سنرسل رمز تحقق إلى واتساب والبريد الإلكتروني المرتبطين بحسابك." },
+  "J’ai aussi oublié mon identifiant": { en: "I’ve forgotten my username too", ar: "لقد نسيت اسم المستخدم أيضًا" },
+  "Identifiant oublié": { en: "Forgotten username", ar: "اسم المستخدم المنسي" },
+  "Saisissez le numéro de téléphone ou l’adresse e-mail de votre compte : nous vous y enverrons votre identifiant.": { en: "Enter the phone number or email address on your account: we will send your username there.", ar: "أدخل رقم الهاتف أو البريد الإلكتروني لحسابك: سنرسل اسم المستخدم إليه." },
+  "Téléphone ou e-mail": { en: "Phone or email", ar: "الهاتف أو البريد الإلكتروني" },
+  "Retrouver mon identifiant": { en: "Recover my username", ar: "استعادة اسم المستخدم" },
+  "Demande envoyée": { en: "Request sent", ar: "تم إرسال الطلب" },
+  "Si un compte correspond à cette adresse, son identifiant vient d’y être envoyé par e-mail.": { en: "If an account matches this address, its username has just been emailed there.", ar: "إذا كان هناك حساب بهذا العنوان، فقد أُرسل اسم المستخدم إليه بالبريد." },
+  "Si un compte correspond à ce numéro, son identifiant vient d’y être envoyé sur WhatsApp.": { en: "If an account matches this number, its username has just been sent there on WhatsApp.", ar: "إذا كان هناك حساب بهذا الرقم، فقد أُرسل اسم المستخدم إليه عبر واتساب." },
+  "Pensez à regarder vos indésirables. Rien reçu ? Contactez notre agence.": { en: "Remember to check your spam folder. Nothing received? Contact our agency.", ar: "تحقق من مجلد الرسائل غير المرغوب فيها. لم يصلك شيء؟ اتصل بوكالتنا." },
+  "Continuer": { en: "Continue", ar: "متابعة" },
+  "et par e-mail à": { en: "and by email to", ar: "وبالبريد الإلكتروني إلى" },
+  "Rien reçu ? Regardez vos indésirables, puis contactez notre agence : elle peut réinitialiser votre mot de passe après avoir vérifié votre identité.": { en: "Nothing received? Check your spam folder, then contact our agency: they can reset your password once your identity is verified.", ar: "لم يصلك شيء؟ تحقق من الرسائل غير المرغوب فيها ثم اتصل بوكالتنا: يمكنها إعادة تعيين كلمة المرور بعد التحقق من هويتك." },
   "Code de vérification": { en: "Verification code", ar: "رمز التحقق" },
   "Nous avons envoyé un code à 6 chiffres sur le WhatsApp du": { en: "We sent a 6-digit code to the WhatsApp of", ar: "أرسلنا رمزًا من 6 أرقام إلى واتساب" },
   "Il expire dans 10 minutes.": { en: "It expires in 10 minutes.", ar: "تنتهي صلاحيته خلال 10 دقائق." },
@@ -4669,7 +4708,7 @@ function ClientRegisterForm({ data, persist, onRegistered, onCancel }) {
  * la vérification se fait en confirmant l’identifiant ET le numéro de téléphone du compte.
  * Moins robuste qu’un vrai lien de réinitialisation par e-mail, mais reste self-service.
  */
-function ClientResetPasswordForm({ data, persist, onDone, onCancel }) {
+function ClientResetPasswordForm({ data, persist, onDone, onCancel, espace = "client" }) {
   /*
    * Réinitialisation en deux temps, avec un code envoyé sur WhatsApp.
    *
@@ -4685,7 +4724,7 @@ function ClientResetPasswordForm({ data, persist, onDone, onCancel }) {
    * serait contourner toute la protection. Le client est invité à contacter l'agence, qui peut
    * réinitialiser depuis le Centre clients après avoir vérifié son identité.
    */
-  const [etape, setEtape] = useState("demande");   // demande → code → succes
+  const [etape, setEtape] = useState("demande");   // demande → code → succes ; oubli → oubliEnvoye
   const [identifiant, setIdentifiant] = useState("");
   const [code, setCode] = useState("");
   const [motdepasse, setMotdepasse] = useState("");
@@ -4697,6 +4736,10 @@ function ClientResetPasswordForm({ data, persist, onDone, onCancel }) {
   const [expire, setExpire] = useState(0);
   const [essais, setEssais] = useState(0);
   const [masque, setMasque] = useState("");
+  const [masqueEmail, setMasqueEmail] = useState("");
+  /* L'identifiant se choisit librement à l'inscription : il s'oublie donc aussi. */
+  const [contact, setContact] = useState("");
+  const [contactParEmail, setContactParEmail] = useState(false);
 
   /** Affiche 62•••••99 : assez pour se reconnaître, pas assez pour deviner le numéro. */
   function masquerNumero(tel) {
@@ -4712,7 +4755,10 @@ function ClientResetPasswordForm({ data, persist, onDone, onCancel }) {
     let reponse;
     try {
       reponse = await fetch("/api/motdepasse", {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(charge),
+        method: "POST", headers: { "Content-Type": "application/json" },
+        // L'espace est respecté strictement côté serveur : un compte client et un compte
+        // d'équipe qui porteraient le même identifiant ne doivent jamais se confondre.
+        body: JSON.stringify({ ...charge, espace }),
       });
     } catch (ex) { return null; }
     if (reponse.status === 501 || reponse.status === 404) return null;
@@ -4740,6 +4786,7 @@ function ClientResetPasswordForm({ data, persist, onDone, onCancel }) {
       setCodeAttendu(null);          // le code vit sur le serveur, pas ici
       setCompte({ parLeServeur: true });
       setMasque(serveur.masque || "votre numéro");
+      setMasqueEmail(serveur.masqueEmail || "");
       setExpire(Date.now() + (serveur.minutes || 10) * 60000);
       setEssais(0);
       setEtape("code");
@@ -4748,7 +4795,8 @@ function ClientResetPasswordForm({ data, persist, onDone, onCancel }) {
 
     // Fonction absente ou injoignable : ancien chemin, entièrement local.
     if (!data) { setErr("Service indisponible pour le moment. Contactez notre agence."); return; }
-    const acc = (data.clientAccounts || []).find((c) => c.identifiant.toLowerCase() === identifiant.trim().toLowerCase());
+    const acc = ((espace === "equipe" ? data.users : data.clientAccounts) || [])
+      .find((c) => String(c.identifiant || "").toLowerCase() === identifiant.trim().toLowerCase());
     // Message identique que le compte existe ou non : sinon on révélerait quels identifiants
     // sont valides, ce qui aiderait quelqu'un à en chercher.
     if (!acc || !acc.telephone) {
@@ -4770,6 +4818,29 @@ function ClientResetPasswordForm({ data, persist, onDone, onCancel }) {
     setMasque(masquerNumero(acc.telephone));
     setEssais(0);
     setEtape("code");
+  }
+
+  /*
+   * Retrouver son identifiant.
+   *
+   * On le demande par ce qu'un client retient toujours — son numéro ou son adresse e-mail — et il
+   * lui est envoyé sur cette même voie, jamais affiché ici : cet écran peut être ouvert par
+   * n'importe qui. Le connaître ne donne d'ailleurs aucun accès, puisqu'il faut ensuite le code de
+   * réinitialisation, qui part au même endroit.
+   */
+  async function demanderIdentifiant(e) {
+    e.preventDefault();
+    setErr("");
+    setLoading(true);
+    const serveur = await appelReinit({ etape: "identifiant", contact: contact.trim() });
+    setLoading(false);
+    if (!serveur) {
+      setErr("Service indisponible pour le moment. Contactez notre agence.");
+      return;
+    }
+    if (!serveur.ok) { setErr(serveur.error || "La demande a échoué."); return; }
+    setContactParEmail(!!serveur.parEmail);
+    setEtape("oubliEnvoye");
   }
 
   async function valider(e) {
@@ -4799,7 +4870,8 @@ function ClientResetPasswordForm({ data, persist, onDone, onCancel }) {
     if (!motdepasse || motdepasse.length < 8) { setErr("Choisissez un mot de passe d’au moins 8 caractères."); return; }
     setLoading(true);
     const identifiants = await creerIdentifiantsMotDePasse(motdepasse);
-    persist({ ...data, clientAccounts: (data.clientAccounts || []).map((c) => (c.id === compte.id ? { ...c, ...identifiants } : c)) });
+    const champ = espace === "equipe" ? "users" : "clientAccounts";
+    persist({ ...data, [champ]: (data[champ] || []).map((c) => (c.id === compte.id ? { ...c, ...identifiants } : c)) });
     setLoading(false);
     setEtape("succes");
     setTimeout(onDone, 1400);
@@ -4816,12 +4888,55 @@ function ClientResetPasswordForm({ data, persist, onDone, onCancel }) {
     );
   }
 
+  if (etape === "oubliEnvoye") {
+    return (
+      <div style={{ ...cadre, textAlign: "center" }}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: "var(--ok-fg)", marginBottom: 6 }}>✓ {tcx("Demande envoyée")}</div>
+        <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>
+          {contactParEmail
+            ? tcx("Si un compte correspond à cette adresse, son identifiant vient d’y être envoyé par e-mail.")
+            : tcx("Si un compte correspond à ce numéro, son identifiant vient d’y être envoyé sur WhatsApp.")}
+          {" "}{tcx("Pensez à regarder vos indésirables. Rien reçu ? Contactez notre agence.")}
+        </div>
+        <button type="button" onClick={() => { setEtape("demande"); setErr(""); }}
+          style={{ width: "100%", background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+          {tcx("Continuer")}
+        </button>
+      </div>
+    );
+  }
+
+  if (etape === "oubli") {
+    return (
+      <form onSubmit={demanderIdentifiant} style={cadre}>
+        <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>{tcx("Identifiant oublié")}</div>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>
+          {tcx("Saisissez le numéro de téléphone ou l’adresse e-mail de votre compte : nous vous y enverrons votre identifiant.")}
+        </div>
+        <Field label={tcx("Téléphone ou e-mail")}>
+          <input value={contact} onChange={(e) => setContact(e.target.value)} autoFocus
+            placeholder="620 11 12 22" style={inputStyle} />
+        </Field>
+        {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
+        <button type="submit" disabled={loading || !contact.trim()} style={{ width: "100%", marginTop: 4, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+          {loading ? tcx("Envoi…") : tcx("Retrouver mon identifiant")}
+        </button>
+        <button type="button" onClick={() => { setEtape("demande"); setErr(""); }} style={{ width: "100%", marginTop: 8, background: "none", border: "none", color: "var(--muted)", fontSize: 12.5, cursor: "pointer" }}>
+          {tcx("Retour")}
+        </button>
+      </form>
+    );
+  }
+
   if (etape === "code") {
     return (
       <form onSubmit={valider} style={cadre}>
         <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>{tcx("Code de vérification")}</div>
-        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16 }}>
-          {tcx("Nous avons envoyé un code à 6 chiffres sur le WhatsApp du")} {masque}. {tcx("Il expire dans 10 minutes.")}
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>
+          {masqueEmail
+            ? <>{tcx("Nous avons envoyé un code à 6 chiffres sur le WhatsApp du")} {masque} {tcx("et par e-mail à")} {masqueEmail}.</>
+            : <>{tcx("Nous avons envoyé un code à 6 chiffres sur le WhatsApp du")} {masque}.</>}
+          {" "}{tcx("Il expire dans 10 minutes.")}
         </div>
         <Field label={tcx("Code reçu")}>
           <input value={code} onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
@@ -4843,6 +4958,14 @@ function ClientResetPasswordForm({ data, persist, onDone, onCancel }) {
         <button type="button" onClick={() => { setEtape("demande"); setErr(""); setCode(""); }} style={{ width: "100%", marginTop: 8, background: "none", border: "none", color: "var(--muted)", fontSize: 12.5, cursor: "pointer" }}>
           {tcx("Recommencer")}
         </button>
+        {/*
+          * L'écran ne peut pas dire « l'envoi a échoué » : ce serait révéler que le compte existe.
+          * Il dit donc à l'avance quoi faire quand rien n'arrive — sans quoi le client resterait
+          * devant un champ vide, à attendre un code qui ne viendra jamais.
+          */}
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 12, textAlign: "center", lineHeight: 1.5 }}>
+          {tcx("Rien reçu ? Regardez vos indésirables, puis contactez notre agence : elle peut réinitialiser votre mot de passe après avoir vérifié votre identité.")}
+        </div>
       </form>
     );
   }
@@ -4850,8 +4973,8 @@ function ClientResetPasswordForm({ data, persist, onDone, onCancel }) {
   return (
     <form onSubmit={envoyerCode} style={cadre}>
       <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>{tcx("Mot de passe oublié")}</div>
-      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16 }}>
-        {tcx("Saisissez votre identifiant : nous enverrons un code de vérification sur le WhatsApp associé à votre compte.")}
+      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>
+        {tcx("Saisissez votre identifiant : nous enverrons un code de vérification sur le WhatsApp et l’e-mail associés à votre compte.")}
       </div>
       <Field label={tcx("Identifiant")}>
         <input value={identifiant} onChange={(e) => setIdentifiant(e.target.value)} autoFocus style={inputStyle} />
@@ -4859,6 +4982,10 @@ function ClientResetPasswordForm({ data, persist, onDone, onCancel }) {
       {err && <div style={{ color: "var(--warn-fg)", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
       <button type="submit" disabled={loading || !identifiant.trim()} style={{ width: "100%", marginTop: 4, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
         {loading ? tcx("Envoi…") : tcx("Recevoir le code")}
+      </button>
+      {/* Sans cette porte, celui qui a oublié son identifiant ne pouvait même pas demander un code. */}
+      <button type="button" onClick={() => { setEtape("oubli"); setErr(""); }} style={{ width: "100%", marginTop: 10, background: "none", border: "none", color: "var(--brand-solid)", fontSize: 12.5, fontWeight: 600, cursor: "pointer", textDecoration: "underline" }}>
+        {tcx("J’ai aussi oublié mon identifiant")}
       </button>
       <button type="button" onClick={onCancel} style={{ width: "100%", marginTop: 8, background: "none", border: "none", color: "var(--muted)", fontSize: 12.5, cursor: "pointer" }}>
         {tcx("Retour")}
@@ -5689,7 +5816,7 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
           <ClientResetPasswordForm data={data} persist={persist} onDone={() => { setMode("login"); setErr(""); }} onCancel={() => setMode("login")} />
         ) : (
           <form onSubmit={connecter} style={{ width: "100%", maxWidth: 380, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16, padding: 26, boxShadow: "0 4px 20px rgba(10,38,71,0.08)" }}>
-            <Field label={T("Identifiant")}><input value={identifiant} onChange={(e) => setIdentifiant(e.target.value)} style={{ ...inputStyle, fontSize: 15, padding: "11px 14px" }} autoFocus /></Field>
+            <Field label={T("Identifiant, e-mail ou téléphone")}><input value={identifiant} onChange={(e) => setIdentifiant(e.target.value)} style={{ ...inputStyle, fontSize: 15, padding: "11px 14px" }} autoFocus /></Field>
             <Field label={T("Mot de passe")}>
               <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
                 <input type={showPw ? "text" : "password"} autoComplete="current-password" value={motdepasse} onChange={(e) => setMotdepasse(e.target.value)} style={{ ...inputStyle, flex: 1, fontSize: 15, padding: "11px 14px" }} />
@@ -6126,6 +6253,15 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
   const [otp, setOtp] = useState("");
   const [otpInput, setOtpInput] = useState("");
   const [showPw, setShowPw] = useState(false);
+  /*
+   * L'équipe n'avait pas de sortie de secours.
+   *
+   * Un agent qui perdait son mot de passe attendait qu'un administrateur lui en fabrique un, le
+   * lui dicte au téléphone — et le connaisse donc. Un partenaire, lui, n'a personne au-dessus :
+   * son compte est le seul de son entreprise, et sa perte l'arrêtait net. C'est la même porte que
+   * celle du client, avec la même prudence : le code part sur ses propres coordonnées.
+   */
+  const [oubli, setOubli] = useState(false);
 
   async function submit(e) {
     e.preventDefault();
@@ -6171,9 +6307,14 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
         const base = await loadData().catch(() => null);
         comptes = base?.users || [];
       }
+      /*
+       * Hors ligne, la recherche suit les mêmes trois clés qu'au serveur : sans cela, un agent
+       * habitué à entrer son numéro se verrait refuser dès que le réseau tombe — c'est-à-dire
+       * exactement quand cet écran doit encore marcher.
+       */
       const u = serveur?.userId
         ? comptes.find((x) => x.id === serveur.userId)
-        : comptes.find((x) => x.identifiant === id.trim());
+        : comptesParTroisCles(comptes, id.trim())[0];
       if (!u) { setErr("Identifiant ou mot de passe incorrect."); return; }
 
       let migratedUser = null;
@@ -6198,6 +6339,20 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
     e.preventDefault();
     if (otpInput === otp) onLogin(pending);
     else setErr("Code de vérification incorrect.");
+  }
+
+  if (oubli) {
+    /*
+     * `data` reste nul volontairement : le repli local de ce formulaire écrirait dans la base
+     * depuis un écran qui n'a pas de session pour le faire. Sans serveur de réinitialisation, il
+     * dit donc simplement de contacter l'agence — ce qui est la vérité.
+     */
+    return (
+      <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: 20, background: "linear-gradient(135deg,#0A2647 0%,#0A2647 55%,#C8102E 250%)" }}>
+        <ClientResetPasswordForm espace="equipe" data={null} persist={() => {}}
+          onDone={() => setOubli(false)} onCancel={() => setOubli(false)} />
+      </div>
+    );
   }
 
   if (pending) {
@@ -6235,10 +6390,10 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
           <div style={{ fontSize: 13.5, color: "var(--muted)", marginTop: 5 }}>Plateforme de gestion logistique</div>
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <label style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>Identifiant</label>
+          <label style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>Identifiant, e-mail ou téléphone</label>
           <div style={{ display: "flex", alignItems: "center", border: "1.5px solid var(--border)", borderRadius: 9, padding: "11px 14px", gap: 9 }}>
             <User size={16} color="var(--muted)" />
-            <input value={id} onChange={(e) => setId(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit(e)} placeholder="Votre identifiant" style={{ border: "none", outline: "none", flex: 1, fontSize: 15, background: "none", color: "var(--text)" }} />
+            <input value={id} onChange={(e) => setId(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit(e)} placeholder="Au choix : identifiant, e-mail ou numéro" style={{ border: "none", outline: "none", flex: 1, fontSize: 15, background: "none", color: "var(--text)" }} />
           </div>
           <label style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>Mot de passe</label>
           <div style={{ display: "flex", alignItems: "center", border: "1.5px solid var(--border)", borderRadius: 9, padding: "11px 14px", gap: 9 }}>
@@ -6250,6 +6405,7 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
           </div>
           {err && <div style={{ color: "var(--danger-fg)", fontSize: 13 }}>{err}</div>}
           <button type="button" onClick={submit} style={{ marginTop: 8, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "13px 0", fontWeight: 700, fontSize: 15, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}>Se connecter</button>
+          <button type="button" onClick={() => setOubli(true)} style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>Mot de passe oublié ?</button>
         </div>
         {offline && (
           <div style={{ marginTop: 16, background: "var(--danger-bg)", color: "var(--danger-fg)", borderRadius: 9, padding: "10px 14px", fontSize: 12.5, textAlign: "center", lineHeight: 1.55 }}>

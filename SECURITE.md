@@ -95,6 +95,7 @@ Trois portes, traitées une par une :
 | Connexion | `api/login.js` | le compte, sans son sel ni son empreinte, et un jeton |
 | Création d'un compte client | `api/inscription.js` | le compte créé, et un jeton — sans jeton d'entrée |
 | Mot de passe oublié | `api/motdepasse.js` | un accusé de réception, jamais le code |
+| Identifiant oublié | `api/motdepasse.js` | un accusé de réception, jamais l'identifiant |
 
 Le jeton de session est signé et vérifié par nos fonctions (`api/_session.js`), pas par Supabase :
 c'est ce qui affranchit toute la manœuvre du secret introuvable. Son secret de signature est
@@ -479,3 +480,83 @@ Meta exige un dépôt de fichier préalable, qui passe par l'identifiant de l'ap
   aux alentours de 4,5 Mo. Au rythme actuel, ce plafond sera atteint. Ce n'est pas une régression
   (l'enregistrement renvoyait déjà le document entier), mais c'est une échéance : il faudra soit
   sortir les pièces jointes du document, soit n'échanger que ce qui a changé.
+
+## Récupérer un compte perdu (26/08/2026)
+
+Trois défauts se tenaient l'un derrière l'autre dans ce qui est, pour un client, la seule sortie
+de secours.
+
+**Le code de réinitialisation ne pouvait plus arriver.** `api/motdepasse.js` appelait
+`api/whatsapp.js` sans demander de modèle. Or cette fonction retombe alors sur celui configuré par
+défaut sur le serveur — `WHATSAPP_TEMPLATE`, le modèle de **suivi de colis**. Le client recevait
+donc un message de suivi à la place de son code, ou rien du tout, Meta refusant un modèle dont les
+variables manquent. Le défaut est né du passage de Twilio à Meta : sur Twilio, tout envoi était du
+texte libre, la question du modèle ne se posait pas. Personne ne pouvait l'apprendre — l'écran
+disait « contactez notre agence », ce qui ressemble à une panne passagère.
+
+Il fallait pouvoir dire « aucun modèle » : c'est le drapeau `texteLibre`, que `api/whatsapp.js`
+honore avant tout repli. Une variable facultative, `WHATSAPP_TEMPLATE_CODE`, permet de nommer un
+modèle de catégorie `AUTHENTICATION` — sans lui, le code part en texte libre, donc seulement dans
+les vingt-quatre heures suivant le dernier message du client.
+
+**Une seule voie, et un client sans WhatsApp restait dehors.** Le code part désormais sur les deux
+voies inscrites au compte — WhatsApp *et* e-mail, le même code des deux côtés. Une seule qui
+aboutit suffit ; si aucune n'aboutit, aucune demande n'est ouverte, puisqu'il n'y a pas de code à
+valider. L'e-mail emprunte `api/email.js` avec le laissez-passer interne, comme WhatsApp : ces
+fonctions restent fermées aux inconnus.
+
+**L'identifiant, lui, ne se récupérait pas du tout.** Il se choisit librement à l'inscription,
+donc il s'oublie — et sans lui, la réinitialisation elle-même était hors d'atteinte. L'étape
+`identifiant` le renvoie sur le numéro ou l'adresse déjà inscrits au compte, jamais à l'écran. Le
+connaître ne donne d'ailleurs aucun accès : il faut ensuite le code, qui part au même endroit. La
+recherche par numéro compare les huit derniers chiffres, pour qu'un client n'ait pas à retrouver
+son indicatif.
+
+**Ce qui a changé dans les réponses.** L'échec d'envoi répondait 502 avec un renvoi vers l'agence.
+C'était juste pour le client, et un aveu pour l'inconnu : ce refus ne pouvait tomber que sur un
+compte réel, si bien qu'il suffisait de comparer un 502 à un 200 pour savoir qui est client de
+l'entreprise. Toutes les réponses de l'étape `demande` sont désormais identiques. Ce que le client
+y perd lui est rendu sur l'écran suivant, qui dit d'avance quoi faire si rien n'arrive.
+
+**Un ralentisseur, enfin.** Cette porte est ouverte à qui connaît son adresse — c'est sa nature,
+celui qui a perdu son mot de passe n'a pas de session à présenter. Mais chacun de ses appels fait
+dépenser l'entreprise : un message facturé par Meta, un courriel qui engage la réputation du
+domaine. Dix demandes par heure et par adresse, comme à l'inscription.
+
+**La même sortie pour l'équipe.** Elle n'existait que pour les clients. Un agent qui perdait son
+mot de passe attendait qu'un administrateur lui en fabrique un, le lui dicte au téléphone — et le
+connaisse donc, ce qui est précisément ce qu'un mot de passe ne doit pas être. Un partenaire, lui,
+n'a personne au-dessus : son compte est le seul de son entreprise, et sa perte l'arrêtait net.
+L'étape porte désormais un `espace` (`client` ou `equipe`) qui décide de la liste consultée et de
+celle où l'empreinte est réécrite. Il est respecté strictement, comme à la connexion : un compte
+client ne doit jamais ouvrir une session d'employé parce qu'il porte le même identifiant qu'un
+agent, ni l'inverse — et le contact d'un agent ne doit pas fuir par la porte des clients.
+
+## Trois façons d'entrer (26/08/2026)
+
+La connexion n'acceptait que l'identifiant. Il se choisit une fois, à la création du compte, et
+s'oublie — tandis que le numéro et l'adresse e-mail, déjà inscrits sur la fiche et obligatoires à
+la création, ne s'oublient jamais. `comptesCorrespondants` (`api/login.js`) accepte les trois, pour
+l'équipe comme pour les clients.
+
+Trois précautions le tiennent :
+
+- **L'identifiant exact passe avant un contact**, pour qu'un compte ne soit jamais éclipsé par
+  l'homonymie d'un numéro.
+- **Plusieurs comptes peuvent répondre à un même numéro** — deux inscriptions au comptoir, un
+  gérant et son agent qui partagent la ligne du dépôt. Désigner l'un au hasard serait imprévisible ;
+  refuser en disant pourquoi révélerait l'existence des deux. C'est donc le mot de passe qui
+  tranche : chaque candidat est éprouvé, celui dont l'empreinte correspond se connecte. Au plus
+  cinq, pour que la porte ne devienne pas un moyen de faire travailler le serveur.
+- **Le temps de réponse ne dit rien.** Quand aucun compte ne correspond, une empreinte est calculée
+  quand même : sans cela, la rapidité du refus trahirait qu'aucun compte ne porte ce numéro.
+
+L'espace reste cloisonné et le refus reste le même pour un compte inconnu et pour un mot de passe
+faux. Le repli hors ligne du navigateur (`comptesParTroisCles`) applique les mêmes règles : sans
+cela, la connexion réussirait en ligne et échouerait à la première coupure — c'est-à-dire au moment
+où cet écran doit encore marcher.
+
+Éprouvé par `testrecuperation.mjs` (52 cas, les vraies fonctions serveur avec le réseau
+intercepté), `testtroiscles.mjs` (36 cas, connexion et récupération de l'équipe), `t80` (18 cas,
+les écrans du client), `t81` (17 cas, l'écran de l'équipe et son repli hors ligne) et `testcompte`
+(55 cas).

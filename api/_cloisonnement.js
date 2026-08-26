@@ -616,7 +616,54 @@ function comptesDeLEquipe(base, envoye, moi, peut) {
       sortie.push(droitsDesAutres ? u : { ...u, role: ROLE_LE_PLUS_MODESTE, permissionsOverride: {} });
     });
   }
-  return sortie;
+
+  /*
+   * L'IDENTIFIANT EST LA CLÉ DE CONNEXION, PAS UN LIBELLÉ.
+   *
+   * Le changer, c'est décider avec quoi quelqu'un entre — et, du même coup, faire cesser de
+   * fonctionner ce qu'il tape depuis des mois. Un compte qui « gère les utilisateurs » corrige des
+   * fiches ; il n'a pas à disposer des clés d'entrée de ses collègues, ni à s'attribuer celle d'un
+   * autre. Cela reste donc à l'administrateur, et à lui seul.
+   *
+   * DEUX GARDES, ET LA SECONDE COMPTE AUTANT QUE LA PREMIÈRE.
+   *
+   * L'unicité : deux comptes portant le même identifiant rendent la connexion imprévisible — c'est
+   * le mot de passe qui départagerait, ce qui n'est pas une façon de choisir un compte. Un
+   * changement qui heurte un identifiant déjà pris est donc annulé, et l'ancien reste en place :
+   * mieux vaut un renommage qui n'a pas eu lieu qu'une entrée devenue ambiguë.
+   *
+   * On compare en minuscules, comme le fait la connexion : « MCamara » et « mcamara » sont le même
+   * identifiant, et laisser passer l'un à côté de l'autre créerait exactement l'ambiguïté qu'on
+   * cherche à éviter.
+   */
+  const avantParId = new Map();
+  liste(base.users).forEach((u) => { if (u && u.id) avantParId.set(u.id, u); });
+  const estAdministrateur = moi.role === "Administrateur";
+
+  const prisAilleurs = (id, candidat) => liste(base.users)
+    .some((u) => u && u.id !== id && String(u.identifiant || "").trim().toLowerCase() === candidat);
+
+  const dejaVus = new Set();
+  return sortie.map((u) => {
+    if (!u || !u.id) return u;
+    const avant = avantParId.get(u.id);
+    // Un compte qui vient d'être créé choisit son identifiant : il n'y a rien à préserver.
+    if (!avant) { dejaVus.add(String(u.identifiant || "").trim().toLowerCase()); return u; }
+
+    const demande = String(u.identifiant || "").trim();
+    const ancien = String(avant.identifiant || "");
+    if (demande === ancien) { dejaVus.add(ancien.toLowerCase()); return u; }
+    /*
+     * Un identifiant vidé n'est pas un renommage : c'est un compte qu'on ne pourrait plus ouvrir.
+     * On rend l'ancien plutôt que d'enfermer quelqu'un dehors sur une case effacée par mégarde.
+     */
+    if (!demande) { dejaVus.add(ancien.toLowerCase()); return { ...u, identifiant: ancien }; }
+
+    const candidat = demande.toLowerCase();
+    const refuse = !estAdministrateur || prisAilleurs(u.id, candidat) || dejaVus.has(candidat);
+    dejaVus.add((refuse ? ancien : demande).toLowerCase());
+    return refuse ? { ...u, identifiant: ancien } : u;
+  });
 }
 
 /**

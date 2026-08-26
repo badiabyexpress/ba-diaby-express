@@ -26914,8 +26914,24 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
     return null;
   }
   function saveUser(updated) {
-    persist({ ...data, users: data.users.map((u) => (u.id === updated.id ? updated : u)), activityLog: pushActivity(data, session, "Profil utilisateur modifié", `${updated.prenom} ${updated.nom}`) });
-    notify(`Profil de ${updated.prenom} ${updated.nom} mis à jour`);
+    const avant = (data.users || []).find((u) => u.id === updated.id);
+    const nomAffiche = updated.role === "Partenaire" ? nomPartenaire(updated) : `${updated.prenom} ${updated.nom}`.trim();
+    /*
+     * Un identifiant qui change ne se note pas comme une correction d'adresse : c'est la clé
+     * d'entrée de quelqu'un. Le journal doit dire laquelle a été remplacée, et par quoi — sans
+     * cela, un compte devenu inaccessible resterait sans explication dans l'historique.
+     */
+    const renomme = avant && avant.identifiant !== updated.identifiant;
+    persist({
+      ...data,
+      users: data.users.map((u) => (u.id === updated.id ? updated : u)),
+      activityLog: pushActivity(data, session,
+        renomme ? "Identifiant de connexion modifié" : "Profil utilisateur modifié",
+        renomme ? `${nomAffiche} : « ${avant.identifiant} » → « ${updated.identifiant} »` : nomAffiche),
+    });
+    notify(renomme
+      ? `Identifiant de ${nomAffiche} : « ${updated.identifiant} ». Prévenez la personne.`
+      : `Profil de ${nomAffiche} mis à jour`);
     setEditingUser(null);
   }
 
@@ -26944,7 +26960,7 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
     setMdpTemporaire({ identifiant: u.identifiant, nom: `${u.prenom} ${u.nom}`.trim(), motdepasse: provisoire });
   }
 
-  if (editingUser) return <UserProfilePage user={editingUser} onSave={saveUser} onBack={() => setEditingUser(null)} sites={data.sites} />;
+  if (editingUser) return <UserProfilePage user={editingUser} onSave={saveUser} onBack={() => setEditingUser(null)} sites={data.sites} session={session} tousLesComptes={data.users || []} />;
 
   return (
     <div>
@@ -27037,8 +27053,24 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
   );
 }
 
-function UserProfilePage({ user, onSave, onBack, sites }) {
+function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes = [] }) {
   const [tab, setTab] = useState("profil");
+  /*
+   * L'IDENTIFIANT EST LA CLÉ DE CONNEXION, PAS UN LIBELLÉ.
+   *
+   * Il se choisissait une fois, à la création du compte, et ne bougeait plus : une faute de frappe
+   * — « MCamra » pour « MCamara » — restait la clé d'entrée de la personne pour toujours, et un
+   * agent devenu partenaire gardait un identifiant qui ne disait plus ce qu'il est.
+   *
+   * Le changer fait cesser de fonctionner ce que la personne tape depuis des mois : c'est un geste
+   * qui se prévient. Il reste donc à l'administrateur — un compte qui « gère les utilisateurs »
+   * corrige des fiches, il n'a pas à disposer des clés d'entrée de ses collègues — et le serveur
+   * le vérifie de son côté (voir comptesDeLEquipe dans api/_cloisonnement.js), l'écran ne faisant
+   * que refléter la règle.
+   */
+  const peutChangerIdentifiant = session?.role === "Administrateur";
+  const [identifiant, setIdentifiant] = useState(user.identifiant || "");
+  const [errIdentifiant, setErrIdentifiant] = useState("");
   const [prenom, setPrenom] = useState(user.prenom || "");
   const [nom, setNom] = useState(user.nom || "");
   const [email, setEmail] = useState(user.email || "");
@@ -27076,7 +27108,29 @@ function UserProfilePage({ user, onSave, onBack, sites }) {
     setPermissionsOverride(next);
   }
   function save() {
-    onSave({ ...user, prenom, nom, email, telephone, role, paysOperation, agence: role === "Administrateur" || role === "Comptable" ? "" : agence, paysAutorises: isAdmin ? [] : paysAutorises, permissionsOverride: isAdmin ? {} : permissionsOverride });
+    setErrIdentifiant("");
+    const vise = identifiant.trim();
+    if (peutChangerIdentifiant && vise !== (user.identifiant || "")) {
+      if (!vise) { setErrIdentifiant("L’identifiant ne peut pas être vide."); return; }
+      /*
+       * Le doublon est refusé ici comme il l'est sur le serveur, et pour la même raison : deux
+       * comptes portant le même identifiant rendraient la connexion imprévisible. On compare en
+       * minuscules, comme le fait la connexion.
+       */
+      if (tousLesComptes.some((u) => u.id !== user.id
+        && String(u.identifiant || "").trim().toLowerCase() === vise.toLowerCase())) {
+        setErrIdentifiant("Cet identifiant est déjà pris par un autre compte.");
+        return;
+      }
+    }
+    onSave({
+      ...user,
+      ...(peutChangerIdentifiant && vise ? { identifiant: vise } : {}),
+      prenom, nom, email, telephone, role, paysOperation,
+      agence: role === "Administrateur" || role === "Comptable" ? "" : agence,
+      paysAutorises: isAdmin ? [] : paysAutorises,
+      permissionsOverride: isAdmin ? {} : permissionsOverride,
+    });
   }
 
   return (
@@ -27115,7 +27169,32 @@ function UserProfilePage({ user, onSave, onBack, sites }) {
             </>
           )}
           <Field label="Email"><input value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} /></Field>
-          <Field label="Identifiant"><input value={user.identifiant} disabled style={{ ...inputStyle, opacity: 0.6 }} /></Field>
+          {peutChangerIdentifiant ? (
+            <>
+              <Field label="Identifiant de connexion">
+                <input value={identifiant} onChange={(e) => { setIdentifiant(e.target.value); setErrIdentifiant(""); }}
+                  style={inputStyle} placeholder="ex : MCamara" />
+              </Field>
+              {identifiant.trim() !== (user.identifiant || "") && (
+                <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "10px 12px", marginTop: -6, marginBottom: 12, fontSize: 11.5, color: "var(--warn-fg)", lineHeight: 1.55 }}>
+                  <strong>« {user.identifiant} » cessera de fonctionner.</strong> C’est avec cela que
+                  cette personne se connecte aujourd’hui — prévenez-la avant d’enregistrer, sinon
+                  elle se croira bloquée. Son mot de passe, lui, ne change pas.
+                </div>
+              )}
+              {errIdentifiant && (
+                <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginTop: -6, marginBottom: 12 }}>{errIdentifiant}</div>
+              )}
+            </>
+          ) : (
+            <>
+              <Field label="Identifiant de connexion"><input value={user.identifiant} disabled style={{ ...inputStyle, opacity: 0.6 }} /></Field>
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -8, marginBottom: 10, lineHeight: 1.5 }}>
+                Seul un administrateur peut le changer : c’est la clé avec laquelle cette personne
+                se connecte.
+              </div>
+            </>
+          )}
           <Field label="Téléphone"><PhoneInput value={telephone} onChange={setTelephone} /></Field>
           <Field label="Rôle">
             <select value={role} onChange={(e) => setRole(e.target.value)} disabled={user.identifiant === "admin"} style={inputStyle}>

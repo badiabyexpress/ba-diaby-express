@@ -512,6 +512,39 @@ pas non plus en inventer un.
 
 Éprouvé par `testentrant` (53 cas) et `t82` (18 cas, les deux états de l'écran).
 
+## L'identifiant de connexion d'un agent (26/08/2026)
+
+Il se choisissait une fois, à la création du compte, et ne bougeait plus. Une faute de frappe —
+« MCamra » pour « MCamara » — restait la clé d'entrée de la personne pour toujours, et un agent
+devenu partenaire gardait un identifiant qui ne disait plus ce qu'il est.
+
+Il est désormais modifiable, mais **par l'administrateur seul**. Ce n'est pas un libellé : c'est la
+clé de connexion, et la changer fait cesser de fonctionner ce que la personne tape depuis des mois.
+Un compte qui « gère les utilisateurs » corrige des fiches ; il n'a pas à disposer des clés
+d'entrée de ses collègues, ni à s'attribuer celle d'un autre. La règle est tenue par le serveur —
+`comptesDeLEquipe` dans `api/_cloisonnement.js` — l'écran ne faisant que la refléter : un champ
+fermé côté navigateur ne protège rien de celui qui ouvre les outils de développement.
+
+Trois gardes, toutes du même côté :
+
+- **Seul le rôle Administrateur** renomme un compte. Toute autre demande rend l'ancien identifiant.
+- **L'unicité.** Deux comptes portant le même identifiant rendent la connexion imprévisible : c'est
+  le mot de passe qui départagerait, ce qui n'est pas une façon de choisir un compte. Un changement
+  qui heurte un identifiant déjà pris est annulé, et l'ancien reste — mieux vaut un renommage qui
+  n'a pas eu lieu qu'une entrée devenue ambiguë. La comparaison se fait en minuscules, comme à la
+  connexion : « MCamara » et « mcamara » sont le même identifiant. Deux comptes renommés d'un coup
+  vers le même nom ne passent pas tous les deux non plus.
+- **Un identifiant vidé n'est pas un renommage** : c'est un compte qu'on ne pourrait plus ouvrir.
+  L'ancien est rendu, plutôt que d'enfermer quelqu'un dehors sur une case effacée par mégarde.
+
+L'écran, lui, dit ce que le geste casse — « *« MCamra » cessera de fonctionner* », avec l'invitation
+à prévenir la personne et le rappel que son mot de passe ne change pas. Le journal d'activité range
+l'acte sous son propre nom, avec les deux identifiants : sans cela, un compte devenu inaccessible
+resterait sans explication dans l'historique.
+
+Éprouvé par `testdonnees` (227 cas, dont le gestionnaire qui ne renomme pas un collègue, le doublon,
+la casse, le double renommage et l'identifiant vidé) et `t86` (20 cas, les deux écrans).
+
 ## Le numéro d'un client ne se tape plus : il se prouve (26/08/2026)
 
 Le téléphone se saisissait comme une adresse — on tapait ce qu'on voulait, et l'application le

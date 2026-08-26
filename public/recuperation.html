@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Récupération des données — Ba-Diaby Express</title>
+<!--
+  PAGE DE RÉCUPÉRATION — 26 août 2026
+
+  Elle existe pour une raison précise : le 26 août au soir, un appareil a enregistré par-dessus la
+  base une copie vide, et cinq colis de la journée n'existaient dans aucune sauvegarde du serveur.
+  Ils vivaient encore, en revanche, dans le cache du navigateur des appareils qui les avaient
+  enregistrés.
+
+  Cette page est un fichier statique, PAS l'application. Elle ne charge pas React, n'appelle pas le
+  serveur, et surtout N'ÉCRIT RIEN dans le stockage du navigateur — elle se contente de lire. C'est
+  tout l'intérêt : ouvrir l'application aurait remplacé le cache par l'état actuel du serveur, et
+  détruit précisément ce qu'on vient chercher.
+-->
+<style>
+  :root {
+    --fond: #0B1522; --carte: #132133; --trait: #22364E; --texte: #E8EEF6;
+    --doux: #93A6BC; --or: #F0B429; --vert: #3ECB84; --rouge: #E23F52; --bleu: #5B8DEF;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px 16px 60px; background: var(--fond); color: var(--texte);
+    font-family: -apple-system, "Segoe UI", Roboto, system-ui, sans-serif;
+    font-size: 17px; line-height: 1.6; -webkit-font-smoothing: antialiased;
+  }
+  .enveloppe { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 25px; margin: 0 0 6px; line-height: 1.2; }
+  .sous { color: var(--doux); font-size: 15px; margin: 0 0 26px; }
+  .carte {
+    background: var(--carte); border: 1px solid var(--trait); border-radius: 14px;
+    padding: 18px 18px 20px; margin-bottom: 16px;
+  }
+  .carte.trouve { border-color: var(--vert); }
+  .cle { font-family: ui-monospace, monospace; font-size: 12.5px; color: var(--doux); word-break: break-all; }
+  .chiffres { display: flex; flex-wrap: wrap; gap: 18px; margin: 14px 0 4px; }
+  .chiffre b { display: block; font-size: 27px; line-height: 1.1; }
+  .chiffre span { font-size: 12.5px; color: var(--doux); }
+  .verdict { border-radius: 10px; padding: 12px 14px; margin: 14px 0; font-size: 15.5px; line-height: 1.5; }
+  .verdict.oui { background: rgba(62,203,132,.13); border: 1px solid rgba(62,203,132,.45); color: #A8F0CB; }
+  .verdict.non { background: rgba(147,166,188,.10); border: 1px solid var(--trait); color: var(--doux); }
+  .pastilles { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+  .pastille {
+    font-family: ui-monospace, monospace; font-size: 12.5px; padding: 4px 9px; border-radius: 20px;
+    background: rgba(91,141,239,.15); color: #BBD2F7; border: 1px solid rgba(91,141,239,.35);
+  }
+  .pastille.manque { background: rgba(226,63,82,.12); color: #F3AAB3; border-color: rgba(226,63,82,.4); }
+  button {
+    width: 100%; margin-top: 14px; background: var(--vert); color: #06231A; border: none;
+    border-radius: 10px; padding: 15px; font-size: 16.5px; font-weight: 700; cursor: pointer;
+    font-family: inherit;
+  }
+  button.discret { background: var(--carte); color: var(--texte); border: 1px solid var(--trait); }
+  .avert {
+    background: rgba(240,180,41,.11); border: 1px solid rgba(240,180,41,.4); color: #F7D98D;
+    border-radius: 12px; padding: 14px 16px; margin-bottom: 22px; font-size: 15.5px; line-height: 1.55;
+  }
+  .rien { color: var(--doux); }
+  code { font-family: ui-monospace, monospace; background: rgba(255,255,255,.06); padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<div class="enveloppe">
+  <h1>Récupération des données</h1>
+  <p class="sous">Cette page lit ce que cet appareil a gardé en mémoire. Elle n’écrit rien et ne
+    lance pas l’application.</p>
+
+  <div class="avert">
+    <strong>N’ouvrez pas l’application sur cet appareil</strong> avant d’avoir téléchargé le fichier
+    ci-dessous. L’ouvrir remplacerait cette copie par l’état actuel du serveur.
+  </div>
+
+  <div id="resultats"><p class="rien">Lecture en cours…</p></div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  /* Les colis perdus le 26 août : leur présence dit tout de suite si cet appareil est le bon. */
+  var RECHERCHES = ["BDE260801", "BDE260802", "BDE260803", "BDE260804", "BDE260805"];
+  var sortie = document.getElementById("resultats");
+
+  function lireTout() {
+    var trouvailles = [];
+    var n;
+    try { n = window.localStorage.length; } catch (e) { return null; }
+    for (var i = 0; i < n; i++) {
+      var cle;
+      try { cle = window.localStorage.key(i); } catch (e) { continue; }
+      if (!cle || cle.indexOf("bde-") !== 0) continue;
+      var brut;
+      try { brut = window.localStorage.getItem(cle); } catch (e) { continue; }
+      /*
+       * On ne filtre presque pas sur la taille : c'est la FORME qui dit si c'est un document de
+       * l'entreprise, pas son poids. Un premier essai exigeait 200 caractères et écartait donc
+       * une copie petite mais bien réelle — exactement le genre d'oubli qui fait rater le seul
+       * appareil qui portait encore la réponse.
+       */
+      if (!brut || brut.length < 40) continue;
+      var doc = null;
+      try { doc = JSON.parse(brut); } catch (e) { continue; }
+      /* La file d'attente hors ligne est un tableau d'écritures ; le cache est un document. */
+      if (Array.isArray(doc)) {
+        /*
+         * La file d'attente hors ligne. On la lit mais on NE S'ARRÊTE PAS LÀ : un premier essai
+         * rendait la main ici, et l'appareil qui portait à la fois une file et le cache complet
+         * ne montrait que la file — c'est-à-dire le moins des deux.
+         */
+        doc.forEach(function (ecriture, k) {
+          var v = ecriture && ecriture.value;
+          if (typeof v === "string") { try { v = JSON.parse(v); } catch (e2) { v = null; } }
+          if (v && Array.isArray(v.colis)) {
+            trouvailles.push({ cle: cle + " [en attente " + (k + 1) + "]", doc: v, taille: brut.length });
+          }
+        });
+        continue;
+      }
+      if (doc && typeof doc === "object" && Array.isArray(doc.colis)) {
+        trouvailles.push({ cle: cle, doc: doc, taille: brut.length });
+      }
+    }
+    return trouvailles;
+  }
+
+  function texte(x) { return String(x == null ? "" : x); }
+
+  function carte(t) {
+    var d = t.doc;
+    var colis = d.colis || [];
+    var suivis = {};
+    colis.forEach(function (c) { if (c && c.tracking) suivis[String(c.tracking).toUpperCase()] = true; });
+    var presents = RECHERCHES.filter(function (r) { return suivis[r]; });
+    var absents = RECHERCHES.filter(function (r) { return !suivis[r]; });
+    var bon = presents.length > 0;
+
+    var dates = colis.map(function (c) { return c && c.createdAt; }).filter(Boolean).sort();
+    var dernier = dates.length ? new Date(dates[dates.length - 1]) : null;
+
+    var el = document.createElement("div");
+    el.className = "carte" + (bon ? " trouve" : "");
+    var html = "";
+    html += '<div class="cle">' + texte(t.cle) + "</div>";
+    html += '<div class="chiffres">';
+    html += '<div class="chiffre"><b>' + colis.length + "</b><span>colis</span></div>";
+    html += '<div class="chiffre"><b>' + ((d.clientAccounts || []).length) + "</b><span>comptes clients</span></div>";
+    html += '<div class="chiffre"><b>' + ((d.repertoire || []).length) + "</b><span>contacts</span></div>";
+    html += '<div class="chiffre"><b>' + ((d.depenses || []).length) + "</b><span>dépenses</span></div>";
+    html += '<div class="chiffre"><b>' + Math.round(t.taille / 1024) + "</b><span>Ko</span></div>";
+    html += "</div>";
+    if (dernier) {
+      html += '<div class="cle">Colis le plus récent : ' + dernier.toLocaleString("fr-FR") + "</div>";
+    }
+    if (bon) {
+      html += '<div class="verdict oui"><strong>C’est le bon appareil.</strong> ' + presents.length
+        + " des colis perdus sont ici. Téléchargez le fichier et envoyez-le.</div>";
+    } else {
+      html += '<div class="verdict non">Aucun des colis perdus n’est dans cette copie. '
+        + "Essayez un autre appareil — celui qui a servi entre 15 h et 16 h 30.</div>";
+    }
+    html += '<div class="pastilles">';
+    presents.forEach(function (r) { html += '<span class="pastille">' + r + "</span>"; });
+    absents.forEach(function (r) { html += '<span class="pastille manque">' + r + "</span>"; });
+    html += "</div>";
+    el.innerHTML = html;
+
+    var b = document.createElement("button");
+    if (!bon) b.className = "discret";
+    b.textContent = "Télécharger cette copie";
+    b.onclick = function () {
+      var nom = "recuperation-" + t.cle.replace(/[^a-z0-9]+/gi, "-") + "-"
+        + new Date().toISOString().slice(0, 16).replace(/[:T]/g, "") + ".json";
+      var lien = document.createElement("a");
+      var blob = new Blob([JSON.stringify(d)], { type: "application/json" });
+      lien.href = URL.createObjectURL(blob);
+      lien.download = nom;
+      document.body.appendChild(lien);
+      lien.click();
+      document.body.removeChild(lien);
+      setTimeout(function () { URL.revokeObjectURL(lien.href); }, 4000);
+      b.textContent = "Téléchargé — envoyez le fichier";
+    };
+    el.appendChild(b);
+    return el;
+  }
+
+  var trouvailles = lireTout();
+  sortie.innerHTML = "";
+  if (trouvailles === null) {
+    sortie.innerHTML = '<div class="carte"><p class="rien">Ce navigateur ne donne pas accès à sa '
+      + "mémoire (navigation privée, ou stockage bloqué). Essayez sans le mode privé.</p></div>";
+    return;
+  }
+  if (!trouvailles.length) {
+    sortie.innerHTML = '<div class="carte"><p class="rien">Cet appareil n’a gardé aucune copie des '
+      + "données. Essayez celui qui a servi à enregistrer les colis dans l’après-midi.</p></div>";
+    return;
+  }
+  /* La copie la plus fournie d'abord : c'est presque toujours celle qu'on cherche. */
+  trouvailles.sort(function (a, b) { return (b.doc.colis || []).length - (a.doc.colis || []).length; });
+  trouvailles.forEach(function (t) { sortie.appendChild(carte(t)); });
+})();
+</script>
+</body>
+</html>

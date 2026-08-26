@@ -64,8 +64,21 @@ export default async function handler(req, res) {
     const prenom = propre(corps.prenom);
     const telephone = propre(corps.telephone, 30);
 
-    if (!identifiant || !motdepasse || !nom || !prenom || !telephone) {
-      return res.status(400).json({ error: "Nom, prénom, identifiant, mot de passe et téléphone sont obligatoires." });
+    const email = propre(corps.email, 120);
+    if (!identifiant || !motdepasse || !nom || !prenom || !telephone || !email) {
+      return res.status(400).json({ error: "Nom, prénom, identifiant, mot de passe, téléphone et e-mail sont obligatoires." });
+    }
+    /*
+     * L'e-mail devient obligatoire, et ce n'est pas une formalité administrative.
+     *
+     * C'est la seconde voie par laquelle un client peut récupérer son compte : le code de
+     * réinitialisation part sur son WhatsApp ET sur son adresse (voir api/motdepasse.js). Un
+     * compte sans adresse ne tient donc qu'à un numéro — celui-là même qui change, se perd, ou
+     * tombe hors de la fenêtre de vingt-quatre heures de WhatsApp. Il n'a alors plus aucune sortie
+     * de secours, et il faut appeler l'agence.
+     */
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: "Cette adresse e-mail n’a pas une forme valide." });
     }
     if (motdepasse.length < LONGUEUR_MOT_DE_PASSE) {
       return res.status(400).json({ error: `Choisissez un mot de passe d’au moins ${LONGUEUR_MOT_DE_PASSE} caractères.` });
@@ -88,7 +101,7 @@ export default async function handler(req, res) {
         nom, prenom, identifiant,
         telephone,
         adresse: propre(corps.adresse, 200),
-        email: propre(corps.email, 120),
+        email,
         createdAt: new Date().toISOString(),
         ...identifiantsMotDePasse(motdepasse),
       };

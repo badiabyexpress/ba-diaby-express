@@ -96,6 +96,7 @@ Trois portes, traitées une par une :
 | Création d'un compte client | `api/inscription.js` | le compte créé, et un jeton — sans jeton d'entrée |
 | Mot de passe oublié | `api/motdepasse.js` | un accusé de réception, jamais le code |
 | Identifiant oublié | `api/motdepasse.js` | un accusé de réception, jamais l'identifiant |
+| Vérification d'un numéro | `api/numero.js` | un accusé de réception, jamais le code — session exigée |
 
 Le jeton de session est signé et vérifié par nos fonctions (`api/_session.js`), pas par Supabase :
 c'est ce qui affranchit toute la manœuvre du secret introuvable. Son secret de signature est
@@ -510,6 +511,83 @@ qu'il n'a jamais rien reçu — en effaçant précisément la preuve du contrair
 pas non plus en inventer un.
 
 Éprouvé par `testentrant` (53 cas) et `t82` (18 cas, les deux états de l'écran).
+
+## L'identifiant de connexion d'un agent (26/08/2026)
+
+Il se choisissait une fois, à la création du compte, et ne bougeait plus. Une faute de frappe —
+« MCamra » pour « MCamara » — restait la clé d'entrée de la personne pour toujours, et un agent
+devenu partenaire gardait un identifiant qui ne disait plus ce qu'il est.
+
+Il est désormais modifiable, mais **par l'administrateur seul**. Ce n'est pas un libellé : c'est la
+clé de connexion, et la changer fait cesser de fonctionner ce que la personne tape depuis des mois.
+Un compte qui « gère les utilisateurs » corrige des fiches ; il n'a pas à disposer des clés
+d'entrée de ses collègues, ni à s'attribuer celle d'un autre. La règle est tenue par le serveur —
+`comptesDeLEquipe` dans `api/_cloisonnement.js` — l'écran ne faisant que la refléter : un champ
+fermé côté navigateur ne protège rien de celui qui ouvre les outils de développement.
+
+Trois gardes, toutes du même côté :
+
+- **Seul le rôle Administrateur** renomme un compte. Toute autre demande rend l'ancien identifiant.
+- **L'unicité.** Deux comptes portant le même identifiant rendent la connexion imprévisible : c'est
+  le mot de passe qui départagerait, ce qui n'est pas une façon de choisir un compte. Un changement
+  qui heurte un identifiant déjà pris est annulé, et l'ancien reste — mieux vaut un renommage qui
+  n'a pas eu lieu qu'une entrée devenue ambiguë. La comparaison se fait en minuscules, comme à la
+  connexion : « MCamara » et « mcamara » sont le même identifiant. Deux comptes renommés d'un coup
+  vers le même nom ne passent pas tous les deux non plus.
+- **Un identifiant vidé n'est pas un renommage** : c'est un compte qu'on ne pourrait plus ouvrir.
+  L'ancien est rendu, plutôt que d'enfermer quelqu'un dehors sur une case effacée par mégarde.
+
+L'écran, lui, dit ce que le geste casse — « *« MCamra » cessera de fonctionner* », avec l'invitation
+à prévenir la personne et le rappel que son mot de passe ne change pas. Le journal d'activité range
+l'acte sous son propre nom, avec les deux identifiants : sans cela, un compte devenu inaccessible
+resterait sans explication dans l'historique.
+
+Éprouvé par `testdonnees` (227 cas, dont le gestionnaire qui ne renomme pas un collègue, le doublon,
+la casse, le double renommage et l'identifiant vidé) et `t86` (20 cas, les deux écrans).
+
+## Le numéro d'un client ne se tape plus : il se prouve (26/08/2026)
+
+Le téléphone se saisissait comme une adresse — on tapait ce qu'on voulait, et l'application le
+croyait. Ce n'est pourtant pas un champ de plus sur une fiche : c'est là que partent le ticket
+d'envoi, l'annonce de l'arrivée du colis, et le code qui rendrait le mot de passe.
+
+Deux dégâts en sortaient, tous deux silencieux :
+
+- **une faute de frappe** — un chiffre de travers, et le client cesse d'être prévenu sans que
+  personne ne l'apprenne. Il croit qu'on l'oublie, l'entreprise croit l'avoir prévenu, et l'on ne
+  s'en aperçoit qu'au comptoir des semaines plus tard ;
+- **le numéro d'un autre** — rien n'empêchait d'inscrire celui du voisin, qui recevrait alors les
+  références de colis et les montants dus de quelqu'un d'autre.
+
+`telephone` a donc été **retiré de `CHAMPS_COMPTE_MODIFIABLES`** : le portail ne peut plus l'écrire.
+Il passe par `api/numero.js`, qui envoie un code sur le numéro **proposé** — seul celui qui a ce
+téléphone en main va au bout — et ne l'inscrit qu'ensuite, avec la clé de service.
+
+Ce qui tient la preuve debout :
+
+- **La session décide du compte, jamais le corps de la requête.** Accepter un identifiant envoyé
+  par le navigateur laisserait un client connecté changer le numéro d'un autre, et détourner ses
+  notifications. Le jeton nomme le compte sous `sub`, comme partout ailleurs.
+- **La demande retient le numéro visé.** Sans cela, un code reçu pour un numéro servirait à en
+  faire valider un autre, et la preuve ne prouverait rien.
+- **Le code est haché** sous une clé à part, `bde-verif-numero` — que `api/donnees.js` refuse déjà,
+  puisqu'il n'ouvre que `bde-data` et ses sauvegardes.
+- **Le ralentisseur ne compte que les demandes d'envoi**, celles qui font partir un message facturé.
+  L'appliquer aux validations aurait répondu « Trop de demandes, réessayez dans une heure » à un
+  client qui se trompe de chiffre — un refus qui parle d'autre chose que ce qu'il vient de faire.
+  La saisie du code est bornée à part, par cinq essais.
+
+`nom` et `prenom` entrent au contraire dans les champs modifiables : c'est son état civil, et une
+faute de saisie au comptoir le suivait jusque sur ses factures.
+
+**L'adresse e-mail devient obligatoire**, à l'inscription comme au profil. C'est la seconde voie
+par laquelle un compte se récupère : le code de réinitialisation part sur le WhatsApp *et* sur
+l'adresse. Sans elle, un compte ne tient qu'à un numéro — celui-là même qui change, se perd, ou
+tombe hors de la fenêtre de vingt-quatre heures de WhatsApp.
+
+Éprouvé par `testnumero.mjs` (42 cas, dont le code d'un numéro rejoué sur un autre et le compte
+d'un voisin), `testcompte` (59 cas), `testdonnees` (220 cas, dont le téléphone devenu non
+modifiable depuis le portail) et `t85` (30 cas, l'écran du client sur un téléphone).
 
 ## Un modèle modifié n'est plus le même modèle (26/08/2026)
 

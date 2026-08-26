@@ -10553,20 +10553,65 @@ function MessagesWhatsAppPage({ data, persist, session, notify }) {
   const carte = { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14 };
 
   if (messages.length === 0) {
+    /*
+     * Un écran vide posait une question sans réponse.
+     *
+     * « Aucun message » peut vouloir dire deux choses opposées : personne n'a encore écrit — et
+     * tout va bien — ou Meta n'appelle pas cette adresse, et les messages des clients se perdent
+     * depuis des jours. Les deux se ressemblaient trait pour trait, et l'écran renvoyait dans les
+     * deux cas à la même liste de vérifications, sans dire laquelle s'appliquait.
+     *
+     * Le serveur note désormais chaque appel du webhook, même vide (voir api/whatsapp-entrant.js).
+     * Il n'y a plus à deviner : soit Meta a déjà appelé, soit il n'a jamais appelé, et ce ne sont
+     * pas les mêmes gestes qui suivent.
+     */
+    const reception = data?.receptionWhatsApp || null;
+    const dejaAppele = !!reception?.dernierAppel;
+    const quand = dejaAppele
+      ? new Date(reception.dernierAppel).toLocaleString("fr-FR", { dateStyle: "long", timeStyle: "short" })
+      : null;
     return (
       <div style={{ ...carte, padding: 26 }}>
         <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>
           Aucun message reçu pour l’instant
         </div>
-        <div style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.6 }}>
-          Depuis que votre numéro est inscrit sur l’API, les messages de vos clients n’arrivent plus
-          sur un téléphone : Meta les pousse vers votre serveur, et ils s’affichent ici. Pour que cela
-          fonctionne, l’adresse <code>/api/whatsapp-entrant</code> doit être déclarée comme webhook
-          dans votre tableau de bord Meta, abonnée au champ <strong>messages</strong>.
-          <br /><br />
-          Tant qu’elle ne l’est pas, un client qui écrit croit vous avoir joint — et personne ne lit
-          son message. C’est la seule chose à vérifier ici.
+        <div style={{
+          background: dejaAppele ? "var(--ok-bg)" : "var(--warn-bg)",
+          color: dejaAppele ? "var(--ok-fg)" : "var(--warn-fg)",
+          border: "1px solid var(--border)", borderRadius: 10, padding: "12px 14px",
+          fontSize: 12.5, lineHeight: 1.6, marginBottom: 14,
+        }}>
+          {dejaAppele ? (
+            <>
+              <strong>La réception fonctionne.</strong> Meta a appelé votre serveur
+              {reception.appels > 1 ? ` ${reception.appels} fois` : ""}, la dernière le {quand}
+              {reception.numero ? <> pour le numéro <strong>{reception.numero}</strong></> : null}.
+              {" "}Il ne manque donc plus qu’un client qui écrive — les messages s’afficheront ici
+              sans que vous ayez rien à faire.
+            </>
+          ) : (
+            <>
+              <strong>Meta n’a jamais appelé votre serveur.</strong> Tant que c’est le cas, un client
+              qui écrit croit vous avoir joint, et personne ne lit son message.
+            </>
+          )}
         </div>
+        {!dejaAppele && (
+          <div style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.6 }}>
+            Deux explications possibles, et une façon de trancher en dix secondes : dans votre
+            tableau de bord Meta, en face du champ <strong>messages</strong>, appuyez sur
+            {" "}<strong>Tester</strong>. Meta envoie alors un appel d’essai.
+            <br /><br />
+            <strong>S’il apparaît ici</strong> (rechargez la page), la plomberie est bonne : personne
+            n’avait simplement encore écrit.
+            <br />
+            <strong>S’il n’apparaît pas</strong>, l’abonnement n’est pas effectif. Vérifiez que
+            l’adresse déclarée est bien <code>/api/whatsapp-entrant</code> avec son jeton, que le
+            champ <strong>messages</strong> est sur « Abonné », et que l’application Meta est passée
+            en mode <strong>Live</strong> — en mode Développement, elle ne reçoit rien des numéros
+            ordinaires.
+          </div>
+        )}
       </div>
     );
   }

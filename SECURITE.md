@@ -481,6 +481,36 @@ Meta exige un dépôt de fichier préalable, qui passe par l'identifiant de l'ap
   (l'enregistrement renvoyait déjà le document entier), mais c'est une échéance : il faudra soit
   sortir les pièces jointes du document, soit n'échanger que ce qui a changé.
 
+## Savoir si Meta appelle vraiment (26/08/2026)
+
+`api/whatsapp-entrant.js` rangeait les messages et les accusés, et ne gardait aucune trace des
+appels qui n'en portaient pas. Le Centre clients affichait alors « Aucun message reçu » — une
+phrase qui recouvre deux situations opposées :
+
+- personne n'a encore écrit, et tout va bien ;
+- Meta n'appelle pas cette adresse, et **les messages des clients se perdent depuis des jours**.
+
+Les deux se ressemblaient trait pour trait, et l'écran renvoyait dans les deux cas à la même liste
+de vérifications sans dire laquelle s'appliquait. On ne pouvait trancher qu'en allant lire les
+journaux de l'hébergeur.
+
+Chaque appel authentifié laisse désormais un relevé — `receptionWhatsApp` : date du dernier appel,
+nombre d'appels, nature du dernier contenu (`message`, `accuse`, `vide`) et **numéro servi**. Ce
+dernier compte : si les appels arrivent mais portent une autre ligne, c'est un autre compte qu'on
+écoute, et aucun message de nos clients n'arrivera jamais.
+
+Les appels vides sont gardés exprès : le bouton **Tester** du tableau de bord Meta en envoie un, et
+il suffit à prouver que la plomberie tient sans attendre qu'un client écrive. Un appel non
+authentifié, lui, ne compte pas — sinon n'importe qui pourrait faire croire que la réception
+fonctionne.
+
+Le relevé appartient au serveur seul : `fusionnerEcritureEquipe` le reprend toujours du document
+réel. Une page ouverte avant le premier appel le renverrait absent, et l'écran se remettrait à dire
+qu'il n'a jamais rien reçu — en effaçant précisément la preuve du contraire ; et une page ne peut
+pas non plus en inventer un.
+
+Éprouvé par `testentrant` (53 cas) et `t82` (18 cas, les deux états de l'écran).
+
 ## Récupérer un compte perdu (26/08/2026)
 
 Trois défauts se tenaient l'un derrière l'autre dans ce qui est, pour un client, la seule sortie

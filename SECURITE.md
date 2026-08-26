@@ -512,6 +512,30 @@ pas non plus en inventer un.
 
 Éprouvé par `testentrant` (53 cas) et `t82` (18 cas, les deux états de l'écran).
 
+## L'expéditeur qui ne comptait pas (26/08/2026)
+
+`buildClientDirectory` créait la fiche d'un expéditeur une fois, avec `count: 0`, et n'y revenait
+plus jamais : ni le compteur d'envois, ni le total, ni même la date ne bougeaient. Le destinataire,
+lui, était compté normalement.
+
+Or dans ce métier c'est souvent l'expéditeur qui EST le client : celui qui est en France, qui paie,
+et qui envoie tous les mois à sa famille. Trois conséquences, toutes silencieuses :
+
+- il apparaissait éternellement à « 0 envoi, 0 GNF » dans la liste des clients ;
+- il ne pouvait jamais devenir « client régulier » ni entrer dans les « meilleurs clients » — d'où
+  un écran annonçant **0 client régulier** sur une base qui en comptait ;
+- et comme ce compteur pilote la remise de fidélité, **il n'y avait jamais droit**.
+
+L'expéditeur est désormais traité comme le destinataire : même compteur, même total, et la fiche la
+plus récente l'emporte pour les coordonnées. Une garde s'ajoute — s'il s'expédie à lui-même, le
+colis ne compte qu'une fois, sinon son total serait doublé.
+
+Vérifié sur les données réelles avant de conclure : 18 colis, 18 destinataires distincts, 17
+expéditeurs distincts — donc au moins un expéditeur qui a envoyé deux fois sans que rien ne le
+compte.
+
+Éprouvé par `t87` (13 cas), qui vérifie aussi que le comptage des destinataires n'a pas bougé.
+
 ## L'identifiant de connexion d'un agent (26/08/2026)
 
 Il se choisissait une fois, à la création du compte, et ne bougeait plus. Une faute de frappe —

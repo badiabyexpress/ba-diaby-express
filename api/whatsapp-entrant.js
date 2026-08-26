@@ -180,6 +180,22 @@ function messagesDeLaNotification(corps) {
   return sortie;
 }
 
+/**
+ * Le numéro que Meta déclare servir dans cette notification.
+ *
+ * Il vaut une confirmation : si les appels arrivent mais portent un autre numéro, on écoute la
+ * ligne d'un autre compte, et aucun message de nos clients n'arrivera jamais ici.
+ */
+function numeroDeLaNotification(corps) {
+  for (const entree of corps?.entry || []) {
+    for (const changement of entree?.changes || []) {
+      const n = changement?.value?.metadata?.display_phone_number;
+      if (n) return String(n).slice(0, 30);
+    }
+  }
+  return null;
+}
+
 export default async function handler(req, res) {
   /*
    * LA VÉRIFICATION. Meta appelle une seule fois, au moment où l'on enregistre l'adresse dans
@@ -233,7 +249,7 @@ export default async function handler(req, res) {
 
     const messages = messagesDeLaNotification(corps);
     const statuts = statutsDeLaNotification(corps);
-    if (messages.length === 0 && statuts.length === 0) return res.status(200).json({ recu: true });
+    const numeroServi = numeroDeLaNotification(corps);
 
     await modifierDocument((document) => {
       const existants = Array.isArray(document.messagesWhatsApp) ? document.messagesWhatsApp : [];
@@ -265,10 +281,29 @@ export default async function handler(req, res) {
             .slice(0, MAX_STATUTS).map((k) => [k, majStatuts[k]]))
         : majStatuts;
 
-      if (nouveaux.length === 0 && statuts.length === 0) return null;
+      /*
+       * La trace de l'appel lui-même — et c'est elle qui manquait le plus.
+       *
+       * Devant un Centre clients vide, rien ne permettait de distinguer « aucun client n'a encore
+       * écrit » de « Meta n'appelle pas cette adresse ». Les deux se ressemblent trait pour trait,
+       * et la seconde veut dire que les messages des clients se perdent depuis des jours. On ne
+       * pouvait trancher qu'en allant lire les journaux de l'hébergeur.
+       *
+       * On note donc chaque appel authentifié, y compris ceux qui ne portent rien à ranger : le
+       * bouton « Tester » du tableau de bord Meta en envoie un, et il suffit alors à prouver que
+       * la plomberie tient. Le numéro servi vient avec : si les appels arrivent mais portent une
+       * autre ligne, c'est un autre compte qu'on écoute.
+       */
+      const reception = {
+        dernierAppel: new Date().toISOString(),
+        appels: (Number(document.receptionWhatsApp?.appels) || 0) + 1,
+        dernierContenu: messages.length ? "message" : (statuts.length ? "accuse" : "vide"),
+        ...(numeroServi ? { numero: numeroServi } : {}),
+      };
       return {
         document: {
           ...document,
+          receptionWhatsApp: reception,
           ...(nouveaux.length ? { messagesWhatsApp: [...nouveaux, ...existants].slice(0, MAX_MESSAGES) } : {}),
           ...(statuts.length ? { statutsWhatsApp: tailles } : {}),
         },

@@ -675,5 +675,15 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId) {
   const accusesEnvoyes = envoye.statutsWhatsApp && typeof envoye.statutsWhatsApp === "object" ? envoye.statutsWhatsApp : null;
   if (accusesBase || accusesEnvoyes) sortie.statutsWhatsApp = { ...accusesEnvoyes, ...accusesBase };
 
+  /*
+   * Le relevé des appels du webhook appartient au serveur seul.
+   *
+   * C'est lui qui répond à « Meta appelle-t-il vraiment cette adresse ? ». Une page ouverte avant
+   * le premier appel le renverrait absent, et le Centre clients se remettrait à dire qu'il n'a
+   * jamais rien reçu — en effaçant précisément la preuve du contraire.
+   */
+  if (base.receptionWhatsApp !== undefined) sortie.receptionWhatsApp = base.receptionWhatsApp;
+  else delete sortie.receptionWhatsApp;
+
   return sortie;
 }

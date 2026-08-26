@@ -4082,6 +4082,23 @@ const CLIENT_I18N = {
   "Si un compte correspond à ce numéro, son identifiant vient d’y être envoyé sur WhatsApp.": { en: "If an account matches this number, its username has just been sent there on WhatsApp.", ar: "إذا كان هناك حساب بهذا الرقم، فقد أُرسل اسم المستخدم إليه عبر واتساب." },
   "Pensez à regarder vos indésirables. Rien reçu ? Contactez notre agence.": { en: "Remember to check your spam folder. Nothing received? Contact our agency.", ar: "تحقق من مجلد الرسائل غير المرغوب فيها. لم يصلك شيء؟ اتصل بوكالتنا." },
   "Continuer": { en: "Continue", ar: "متابعة" },
+  "Prénom": { en: "First name", ar: "الاسم" },
+  "Nom": { en: "Last name", ar: "اللقب" },
+  "C’est par elle que vous récupérerez votre compte si vous perdez votre mot de passe.": { en: "This is how you will recover your account if you lose your password.", ar: "من خلاله ستستعيد حسابك إذا فقدت كلمة المرور." },
+  "Votre nom et votre prénom sont nécessaires : ils figurent sur vos factures.": { en: "Your first and last name are required: they appear on your invoices.", ar: "الاسم واللقب مطلوبان: يظهران على فواتيرك." },
+  "Une adresse e-mail est nécessaire : c’est par elle que vous pourrez récupérer votre compte si vous perdez votre mot de passe.": { en: "An email address is required: it is how you can recover your account if you lose your password.", ar: "البريد الإلكتروني مطلوب: به تستعيد حسابك إذا فقدت كلمة المرور." },
+  "Profil mis à jour": { en: "Profile updated", ar: "تم تحديث الملف" },
+  "Téléphone WhatsApp": { en: "WhatsApp number", ar: "رقم واتساب" },
+  "confirmé": { en: "confirmed", ar: "مؤكَّد" },
+  "Aucun numéro": { en: "No number", ar: "لا يوجد رقم" },
+  "C’est sur ce numéro que partent votre ticket, l’annonce d’arrivée de votre colis et vos codes. Le changer demande une confirmation par WhatsApp.": { en: "Your ticket, the arrival notice for your parcel and your codes are all sent to this number. Changing it requires a WhatsApp confirmation.", ar: "تُرسل تذكرتك وإشعار وصول شحنتك ورموزك إلى هذا الرقم. تغييره يتطلب تأكيدًا عبر واتساب." },
+  "Changer mon numéro": { en: "Change my number", ar: "تغيير رقمي" },
+  "Ajouter mon numéro": { en: "Add my number", ar: "إضافة رقمي" },
+  "Nouveau numéro": { en: "New number", ar: "الرقم الجديد" },
+  "Nous enverrons un code à 6 chiffres sur ce numéro. Il doit être sur WhatsApp.": { en: "We will send a 6-digit code to this number. It must be on WhatsApp.", ar: "سنرسل رمزًا من 6 أرقام إلى هذا الرقم. يجب أن يكون على واتساب." },
+  "Nous avons envoyé un code à 6 chiffres sur WhatsApp au": { en: "We sent a 6-digit code on WhatsApp to", ar: "أرسلنا رمزًا من 6 أرقام عبر واتساب إلى" },
+  "Confirmer mon numéro": { en: "Confirm my number", ar: "تأكيد رقمي" },
+  "Vérification…": { en: "Checking…", ar: "جارٍ التحقق…" },
   "et par e-mail à": { en: "and by email to", ar: "وبالبريد الإلكتروني إلى" },
   "Rien reçu ? Regardez vos indésirables, puis contactez notre agence : elle peut réinitialiser votre mot de passe après avoir vérifié votre identité.": { en: "Nothing received? Check your spam folder, then contact our agency: they can reset your password once your identity is verified.", ar: "لم يصلك شيء؟ تحقق من الرسائل غير المرغوب فيها ثم اتصل بوكالتنا: يمكنها إعادة تعيين كلمة المرور بعد التحقق من هويتك." },
   "Code de vérification": { en: "Verification code", ar: "رمز التحقق" },
@@ -4628,6 +4645,16 @@ function ClientRegisterForm({ data, persist, onRegistered, onCancel }) {
     setErr("");
     if (isSpam()) { setErr("La soumission a été bloquée. Réessayez."); return; }
     if (!nom || !prenom || !identifiant || !motdepasse || !telephone) { setErr("Merci de renseigner au moins le nom, prénom, identifiant, mot de passe et téléphone."); return; }
+    /*
+     * L'adresse e-mail est exigée ici comme elle l'est sur le serveur (api/inscription.js).
+     *
+     * C'est la seconde voie par laquelle un compte se récupère : le code de réinitialisation part
+     * sur le WhatsApp ET sur l'adresse. Sans elle, le compte ne tient qu'à un numéro — celui-là
+     * même qui change, se perd, ou tombe hors de la fenêtre de vingt-quatre heures de WhatsApp.
+     * La refuser dès ici évite un aller-retour au serveur pour un refus qu'on peut déjà nommer.
+     */
+    if (!email.trim()) { setErr("Une adresse e-mail est nécessaire : c’est par elle que vous pourrez récupérer votre compte si vous perdez votre mot de passe."); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) { setErr("Cette adresse e-mail n’a pas une forme valide."); return; }
     setLoading(true);
     try {
       /*
@@ -4684,7 +4711,12 @@ function ClientRegisterForm({ data, persist, onRegistered, onCancel }) {
         </Field>
         <Field label={tcx("Téléphone *")}><PhoneInput value={telephone} onChange={setTelephone} /></Field>
         <Field label={tcx("Adresse (optionnel)")}><input value={adresse} onChange={(e) => setAdresse(e.target.value)} style={inputStyle} /></Field>
-        <Field label={tcx("E-mail (optionnel)")}><input value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} /></Field>
+        <Field label={`${tcx("E-mail")} *`}>
+          <input value={email} onChange={(e) => setEmail(e.target.value)} inputMode="email" style={inputStyle} />
+        </Field>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -6, marginBottom: 12, lineHeight: 1.5 }}>
+          {tcx("C’est par elle que vous récupérerez votre compte si vous perdez votre mot de passe.")}
+        </div>
         {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
         <button type="submit" disabled={loading} style={{ width: "100%", marginTop: 4, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>{loading ? "Création…" : "Créer mon compte"}</button>
         <button type="button" onClick={onCancel} style={{ width: "100%", marginTop: 8, background: "none", border: "none", color: "var(--muted)", fontSize: 12.5, cursor: "pointer" }}>{tcx("J’ai déjà un compte — me connecter")}</button>
@@ -4995,11 +5027,114 @@ function ClientResetPasswordForm({ data, persist, onDone, onCancel, espace = "cl
 }
 
 /** Modale pour qu’un client modifie ses propres coordonnées (téléphone, adresse, e-mail). */
+/**
+ * Une tuile de chiffre pour l'Espace Client — compacte, faite pour un téléphone.
+ *
+ * `StatCard`, sa grande sœur, réclame 190 px et respire beaucoup : c'est juste sur l'écran d'une
+ * agence, c'est trop sur un téléphone, où elle transforme neuf nombres en un long défilement.
+ * Celle-ci pose l'icône et l'intitulé sur une ligne, le chiffre en dessous, et tient dans un tiers
+ * de la hauteur. `minWidth: 0` est indispensable : sans lui, une tuile refuse de se rétrécir sous
+ * la largeur de son contenu et déborde de sa colonne.
+ *
+ * `large` sert aux montants, qui portent une devise et se lisent mal serrés. `accent` souligne le
+ * reste à payer quand il y en a un — c'est la seule ligne sur laquelle le client doit agir.
+ */
+const TuileClient = memo(function TuileClient({ label, value, icon: Icon, tint, large, accent }) {
+  return (
+    <div style={{
+      background: "var(--surface)", borderRadius: 12, padding: "11px 13px", minWidth: 0,
+      border: `1px solid ${accent ? "var(--danger-border)" : "var(--border)"}`,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+        <div style={{ width: 24, height: 24, borderRadius: 7, background: tint, display: "grid", placeItems: "center", flexShrink: 0 }}>
+          <Icon size={13} color="#fff" />
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", fontWeight: 600, minWidth: 0, overflowWrap: "anywhere" }}>{label}</div>
+      </div>
+      <div style={{
+        fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, marginTop: 6,
+        fontSize: large ? 19 : 22, color: accent ? "var(--danger-fg)" : "var(--text)",
+        overflowWrap: "anywhere",
+      }}>{value}</div>
+    </div>
+  );
+});
+
 function ClientProfilModal({ compte, onSave, onClose }) {
-  const [telephone, setTelephone] = useState(compte.telephone || "");
+  const [nom, setNom] = useState(compte.nom || "");
+  const [prenom, setPrenom] = useState(compte.prenom || "");
   const [adresse, setAdresse] = useState(compte.adresse || "");
   const [email, setEmail] = useState(compte.email || "");
   const [saved, setSaved] = useState(false);
+  const [errProfil, setErrProfil] = useState("");
+
+  /*
+   * LE NUMÉRO NE SE TAPE PLUS : IL SE PROUVE.
+   *
+   * Il ne s'écrit plus avec le reste — il a été retiré des champs que le portail peut modifier
+   * (api/_cloisonnement.js). Ce n'est pas un champ comme un autre : c'est là que partent le ticket,
+   * l'annonce d'arrivée du colis, et le code qui rendrait le mot de passe. Un chiffre de travers
+   * privait le client de tout sans que personne ne l'apprenne — il croyait qu'on l'oubliait,
+   * l'entreprise croyait l'avoir prévenu — et rien n'empêchait d'inscrire le numéro d'un voisin,
+   * qui recevait alors des références et des montants qui ne le regardaient pas.
+   *
+   * Un code envoyé sur le numéro PROPOSÉ règle les deux : seul celui qui a ce téléphone en main
+   * peut aller au bout.
+   */
+  const [etapeNum, setEtapeNum] = useState("repos");   // repos → saisie → code
+  const [nouveauNum, setNouveauNum] = useState(compte.telephone || "");
+  const [codeNum, setCodeNum] = useState("");
+  const [masqueNum, setMasqueNum] = useState("");
+  const [errNum, setErrNum] = useState("");
+  const [occupeNum, setOccupeNum] = useState(false);
+  const [numeroVerifie, setNumeroVerifie] = useState(compte.telephone || "");
+
+  async function appelNumero(charge) {
+    let reponse;
+    try {
+      reponse = await appelServeurQuiDepense("/api/numero", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(charge),
+      });
+    } catch (ex) { return null; }
+    const corps = await reponse.json().catch(() => ({}));
+    return { ok: reponse.ok, statut: reponse.status, ...corps };
+  }
+
+  async function envoyerCodeNumero() {
+    setErrNum("");
+    setOccupeNum(true);
+    const r = await appelNumero({ etape: "demande", telephone: nouveauNum });
+    setOccupeNum(false);
+    if (!r) { setErrNum("Service indisponible pour le moment."); return; }
+    if (r.statut === 501 || r.statut === 404) {
+      setErrNum("La confirmation par WhatsApp n’est pas encore configurée. Contactez notre agence.");
+      return;
+    }
+    if (!r.ok) { setErrNum(r.error || "L’envoi a échoué."); return; }
+    setMasqueNum(r.masque || "ce numéro");
+    setCodeNum("");
+    setEtapeNum("code");
+  }
+
+  async function confirmerNumero() {
+    setErrNum("");
+    setOccupeNum(true);
+    const r = await appelNumero({ etape: "valider", telephone: nouveauNum, code: codeNum.trim() });
+    setOccupeNum(false);
+    if (!r) { setErrNum("Service indisponible pour le moment."); return; }
+    if (!r.ok) {
+      setErrNum(r.error || "Code incorrect.");
+      if (r.recommencer) setEtapeNum("saisie");
+      return;
+    }
+    /*
+     * Le serveur vient d'inscrire le numéro lui-même. On le recopie ici pour que l'écran suive
+     * sans attendre un rechargement — la fiche en base porte déjà la même valeur.
+     */
+    setNumeroVerifie(r.telephone || nouveauNum);
+    onSave({ telephone: r.telephone || nouveauNum });
+    setEtapeNum("repos");
+  }
 
   /*
    * Changer son mot de passe soi-même.
@@ -5020,7 +5155,27 @@ function ClientProfilModal({ compte, onSave, onClose }) {
 
   function submit(e) {
     e.preventDefault();
-    onSave({ telephone, adresse, email });
+    setErrProfil("");
+    if (!nom.trim() || !prenom.trim()) {
+      setErrProfil(tcx("Votre nom et votre prénom sont nécessaires : ils figurent sur vos factures."));
+      return;
+    }
+    /*
+     * L'adresse e-mail est obligatoire, et ce n'est pas une formalité.
+     *
+     * C'est la seconde voie par laquelle un compte se récupère : le code de réinitialisation part
+     * sur le WhatsApp ET sur l'adresse. Sans elle, le compte ne tient qu'à un numéro — celui-là
+     * même qui change, se perd, ou tombe hors de la fenêtre de vingt-quatre heures de WhatsApp.
+     */
+    if (!email.trim()) {
+      setErrProfil(tcx("Une adresse e-mail est nécessaire : c’est par elle que vous pourrez récupérer votre compte si vous perdez votre mot de passe."));
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+      setErrProfil(tcx("Cette adresse e-mail n’a pas une forme valide."));
+      return;
+    }
+    onSave({ nom: nom.trim(), prenom: prenom.trim(), adresse, email: email.trim() });
     setSaved(true);
     setTimeout(onClose, 900);
   }
@@ -5052,12 +5207,93 @@ function ClientProfilModal({ compte, onSave, onClose }) {
   return (
     <Modal onClose={onClose} title={tcx("Mon profil")}>
       <form onSubmit={submit}>
-        <Field label={tcx("Téléphone")}><PhoneInput value={telephone} onChange={setTelephone} /></Field>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 10 }}>
+          <Field label={tcx("Prénom")}><input value={prenom} onChange={(e) => setPrenom(e.target.value)} style={inputStyle} /></Field>
+          <Field label={tcx("Nom")}><input value={nom} onChange={(e) => setNom(e.target.value)} style={inputStyle} /></Field>
+        </div>
         <Field label={tcx("Adresse")}><input value={adresse} onChange={(e) => setAdresse(e.target.value)} style={inputStyle} /></Field>
-        <Field label={tcx("E-mail")}><input value={email} onChange={(e) => setEmail(e.target.value)} style={inputStyle} /></Field>
-        {saved && <div style={{ color: "var(--ok-fg)", fontSize: 12.5, marginBottom: 10 }}>✓ Profil mis à jour</div>}
+        <Field label={`${tcx("E-mail")} *`}>
+          <input value={email} onChange={(e) => setEmail(e.target.value)} inputMode="email" style={inputStyle} />
+        </Field>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -6, marginBottom: 12, lineHeight: 1.5 }}>
+          {tcx("C’est par elle que vous récupérerez votre compte si vous perdez votre mot de passe.")}
+        </div>
+        {errProfil && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10, lineHeight: 1.5 }}>{errProfil}</div>}
+        {saved && <div style={{ color: "var(--ok-fg)", fontSize: 12.5, marginBottom: 10 }}>✓ {tcx("Profil mis à jour")}</div>}
         <button type="submit" style={{ width: "100%", background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 14, fontWeight: 700, cursor: "pointer" }}>{tcx("Enregistrer")}</button>
       </form>
+
+      {/*
+        Le numéro, à part du reste — parce qu'il ne s'enregistre pas, il se prouve.
+        Voir api/numero.js : un code part sur le numéro proposé, et lui seul l'inscrit.
+      */}
+      <div style={{ borderTop: "1px solid var(--border)", marginTop: 18, paddingTop: 14 }}>
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{tcx("Téléphone WhatsApp")}</div>
+          {compte.telephoneVerifieLe && etapeNum === "repos" && (
+            <div style={{ fontSize: 11.5, fontWeight: 700, color: "var(--ok-fg)" }}>✓ {tcx("confirmé")}</div>
+          )}
+        </div>
+
+        {etapeNum === "repos" && (
+          <>
+            <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>
+              {numeroVerifie || tcx("Aucun numéro")}
+            </div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 10, lineHeight: 1.5 }}>
+              {tcx("C’est sur ce numéro que partent votre ticket, l’annonce d’arrivée de votre colis et vos codes. Le changer demande une confirmation par WhatsApp.")}
+            </div>
+            <button type="button" onClick={() => { setNouveauNum(numeroVerifie || ""); setErrNum(""); setEtapeNum("saisie"); }}
+              style={{ width: "100%", background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 0", fontSize: 13, fontWeight: 600, color: "var(--text)", cursor: "pointer" }}>
+              {numeroVerifie ? tcx("Changer mon numéro") : tcx("Ajouter mon numéro")}
+            </button>
+          </>
+        )}
+
+        {etapeNum === "saisie" && (
+          <>
+            <Field label={tcx("Nouveau numéro")}><PhoneInput value={nouveauNum} onChange={setNouveauNum} /></Field>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 10, lineHeight: 1.5 }}>
+              {tcx("Nous enverrons un code à 6 chiffres sur ce numéro. Il doit être sur WhatsApp.")}
+            </div>
+            {errNum && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10, lineHeight: 1.5 }}>{errNum}</div>}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button type="button" onClick={envoyerCodeNumero} disabled={occupeNum || nouveauNum.replace(/\D/g, "").length < 8}
+                style={{ flex: 1, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 0", fontSize: 13, fontWeight: 700, cursor: occupeNum ? "wait" : "pointer", opacity: occupeNum || nouveauNum.replace(/\D/g, "").length < 8 ? 0.6 : 1 }}>
+                {occupeNum ? tcx("Envoi…") : tcx("Recevoir le code")}
+              </button>
+              <button type="button" onClick={() => { setEtapeNum("repos"); setErrNum(""); }}
+                style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "10px 16px", fontSize: 13, cursor: "pointer" }}>
+                {tcx("Annuler")}
+              </button>
+            </div>
+          </>
+        )}
+
+        {etapeNum === "code" && (
+          <>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 10, lineHeight: 1.5 }}>
+              {tcx("Nous avons envoyé un code à 6 chiffres sur WhatsApp au")} {masqueNum}. {tcx("Il expire dans 10 minutes.")}
+            </div>
+            <Field label={tcx("Code reçu")}>
+              <input value={codeNum} onChange={(e) => setCodeNum(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                inputMode="numeric" autoFocus placeholder="000000"
+                style={{ ...inputStyle, letterSpacing: 6, fontSize: 18, fontWeight: 700, textAlign: "center" }} />
+            </Field>
+            {errNum && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10, lineHeight: 1.5 }}>{errNum}</div>}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button type="button" onClick={confirmerNumero} disabled={occupeNum || codeNum.length < 6}
+                style={{ flex: 1, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "10px 0", fontSize: 13, fontWeight: 700, cursor: occupeNum ? "wait" : "pointer", opacity: occupeNum || codeNum.length < 6 ? 0.6 : 1 }}>
+                {occupeNum ? tcx("Vérification…") : tcx("Confirmer mon numéro")}
+              </button>
+              <button type="button" onClick={() => { setEtapeNum("saisie"); setErrNum(""); }}
+                style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "10px 16px", fontSize: 13, cursor: "pointer" }}>
+                {tcx("Retour")}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
 
       <div style={{ borderTop: "1px solid var(--border)", marginTop: 18, paddingTop: 14 }}>
         {!ouvrirMdp ? (
@@ -5945,16 +6181,34 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
           </div>
         )}
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 12, marginBottom: 22 }}>
-          <StatCard label={T("Total colis")} value={statsClient.total} icon={Package} tint="#3D63FF" />
-          <StatCard label={T("En attente")} value={statsClient.enAttente} icon={Clock} tint="#6B7A99" />
-          <StatCard label={T("Reçus à l’entrepôt")} value={statsClient.recusEntrepot} icon={Package} tint="#5B8DEF" />
-          <StatCard label={T("Expédiés")} value={statsClient.expedies} icon={Plane} tint="#5B8DEF" />
-          <StatCard label={T("Arrivés en Guinée")} value={statsClient.arrivesGuinee} icon={MapPin} tint="#B8801C" />
-          <StatCard label={T("Livrés")} value={statsClient.livres} icon={CheckCircle2} tint="#16A163" />
-          <StatCard label={T("Poids total")} value={`${statsClient.poidsTotal.toFixed(1)} kg`} icon={FileStack} tint="#8B5CF6" />
-          <StatCard label={T("Montant payé")} value={fmt(statsClient.montantPaye, deviseClient)} icon={DollarSign} tint="#16A163" />
-          <StatCard label={T("Reste à payer")} value={fmt(statsClient.montantRestant, deviseClient)} icon={DollarSign} tint={statsClient.montantRestant > 0 ? "var(--brand-solid)" : "#3ECB84"} />
+        {/*
+          Les chiffres du client, sur un téléphone.
+
+          Les tuiles de l'application ont été dessinées pour un écran d'agence : 190 px de large au
+          minimum, 20 px de marge, un chiffre de 29 px. Sur un téléphone tenu en main, deux d'entre
+          elles remplissent la largeur et l'écran entier ne montre plus que quatre nombres — il
+          fallait faire défiler longuement pour voir ce qu'on doit, qui est la seule chose qu'on
+          vient chercher.
+
+          Ces tuiles-ci tiennent la même information dans un tiers de la hauteur. Et l'ordre a été
+          revu : les deux montants passent DEVANT l'état des colis, en pleine largeur, parce que
+          « combien je dois » est la question qui amène le client ici. Le reste suit, en grille.
+        */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(210px,1fr))", gap: 10, marginBottom: 10 }}>
+          <TuileClient label={T("Montant payé")} value={fmt(statsClient.montantPaye, deviseClient)}
+            icon={DollarSign} tint="#16A163" large />
+          <TuileClient label={T("Reste à payer")} value={fmt(statsClient.montantRestant, deviseClient)}
+            icon={DollarSign} tint={statsClient.montantRestant > 0 ? "var(--brand-solid)" : "#3ECB84"}
+            large accent={statsClient.montantRestant > 0} />
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(148px,1fr))", gap: 10, marginBottom: 22 }}>
+          <TuileClient label={T("Total colis")} value={statsClient.total} icon={Package} tint="#3D63FF" />
+          <TuileClient label={T("En attente")} value={statsClient.enAttente} icon={Clock} tint="#6B7A99" />
+          <TuileClient label={T("Reçus à l’entrepôt")} value={statsClient.recusEntrepot} icon={Package} tint="#5B8DEF" />
+          <TuileClient label={T("Expédiés")} value={statsClient.expedies} icon={Plane} tint="#5B8DEF" />
+          <TuileClient label={T("Arrivés en Guinée")} value={statsClient.arrivesGuinee} icon={MapPin} tint="#B8801C" />
+          <TuileClient label={T("Livrés")} value={statsClient.livres} icon={CheckCircle2} tint="#16A163" />
+          <TuileClient label={T("Poids total")} value={`${statsClient.poidsTotal.toFixed(1)} kg`} icon={FileStack} tint="#8B5CF6" />
         </div>
 
         {nonPayes.length > 0 && (

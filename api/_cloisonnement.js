@@ -96,8 +96,21 @@ const LISTES_PERSONNELLES = ["preAlertes", "demandesRegroupement"];
  * l'ajouter ici — un réglage qui ne s'enregistre pas se remarque tout de suite, une porte laissée
  * ouverte jamais.
  */
+/*
+ * Ce qu'un client peut changer sur sa propre fiche.
+ *
+ * `nom` et `prenom` en font partie : c'est son état civil, personne d'autre n'a à le corriger à sa
+ * place, et une faute de saisie au comptoir le suivait jusque sur ses factures.
+ *
+ * `telephone` N'EN FAIT PLUS PARTIE, et c'est délibéré. Ce n'est pas un champ comme un autre :
+ * c'est là que partent son ticket, l'annonce de l'arrivée de son colis et le code qui lui rendrait
+ * son mot de passe. Tant qu'il s'écrivait d'ici, un chiffre de travers le privait de tout sans que
+ * personne ne l'apprenne, et rien n'empêchait d'inscrire le numéro d'un autre — qui recevrait
+ * alors ses références et ses montants. Il passe désormais par api/numero.js, qui envoie un code
+ * sur le numéro proposé et ne l'inscrit qu'une fois la preuve faite.
+ */
 const CHAMPS_COMPTE_MODIFIABLES = [
-  "telephone", "adresse", "email", "messages", "derniereVisite",
+  "nom", "prenom", "adresse", "email", "messages", "derniereVisite",
   "motdepasseSecure", "motdepasseSalt", "motdepasseIter", "motdepasseAlgo",
 ];
 

@@ -673,6 +673,82 @@ function comptesDeLEquipe(base, envoye, moi, peut) {
   });
 }
 
+/*
+ * ─────────────────────────────────────────────────────────────────────────────
+ * LE GARDE-FOU CONTRE LA PAGE PÉRIMÉE
+ *
+ * Le 26 août 2026 à 21 h 41, un appareil a enregistré par-dessus la base une copie où les colis,
+ * les comptes clients, le répertoire et les dépenses étaient vides. En un enregistrement, seize
+ * colis, trois comptes, trois cent quarante-trois contacts et quatre écritures ont disparu. Le
+ * journal, lui, a survécu — parce qu'il était déjà protégé ici. Rien d'autre ne l'était.
+ *
+ * C'est le défaut de fond d'un document unique : l'application envoie TOUT le document à chaque
+ * geste. Un onglet resté ouvert depuis une heure — ou une page rechargée sur un cache incomplet —
+ * renvoie donc l'état du monde tel qu'il le croit, et l'écrase.
+ *
+ * La règle : une écriture ne peut pas faire fondre une collection. Supprimer des colis se fait un
+ * par un, et chaque suppression est un enregistrement ; passer de seize à zéro d'un coup n'est
+ * jamais un geste, c'est un accident.
+ *
+ * SAUF quand c'en est un. Trois gestes suppriment légitimement en masse : réinitialiser les
+ * colis, restaurer une sauvegarde, importer un fichier. Ceux-là posent une intention datée sur le
+ * document juste avant d'enregistrer. Une page périmée, elle, n'en a aucune — ou en porte une
+ * vieille, ce qui revient au même.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
+const COLLECTIONS_PROTEGEES = [
+  "colis", "clientAccounts", "repertoire", "depenses",
+  "bordereaux", "facturesPartenaire", "preAlertes", "remisesCaisse", "voyages",
+];
+/*
+ * Le seuil ne porte pas sur la TAILLE de la liste, mais sur ce qu'une seule écriture emporte.
+ *
+ * Un premier essai gardait les listes d'au moins cinq entrées — et laissait donc filer les trois
+ * comptes clients et les quatre dépenses, c'est-à-dire une partie exacte de ce qui a été perdu le
+ * 26 août. La taille ne dit rien : ce qui compte est que chaque suppression, dans l'application,
+ * est un enregistrement. Deux disparitions d'un coup, ce sont déjà deux gestes en un.
+ */
+const PERTE_TOLEREE = 1;
+const PART_CONSERVEE = 0.5;
+/* L'intention vaut pour le geste qui vient d'être fait, pas pour un onglet ouvert ce matin. */
+const FENETRE_INTENTION_MS = 10 * 60 * 1000;
+
+export const CHAMP_INTENTION = "_remplacementVolontaire";
+
+/** Le document envoyé porte-t-il une intention de remplacement, et est-elle fraîche ? */
+export function intentionDeRemplacement(envoye, maintenant = Date.now()) {
+  const marque = envoye?.[CHAMP_INTENTION];
+  if (!marque || typeof marque !== "object") return false;
+  const quand = Date.parse(marque.le || "");
+  if (!Number.isFinite(quand)) return false;
+  const ecart = Math.abs(maintenant - quand);
+  return ecart <= FENETRE_INTENTION_MS;
+}
+
+/**
+ * Les collections que cette écriture ferait fondre.
+ *
+ * Rend la liste des noms à préserver — vide quand tout va bien, ce qui est le cas ordinaire.
+ */
+export function collectionsQuiFondent(base, envoye) {
+  const perdues = [];
+  for (const cle of COLLECTIONS_PROTEGEES) {
+    const avant = base?.[cle];
+    if (!Array.isArray(avant) || avant.length === 0) continue;
+    const apres = envoye?.[cle];
+    const compte = Array.isArray(apres) ? apres.length : 0;
+    const perdus = avant.length - compte;
+    /*
+     * Deux conditions, et les deux ensemble : on perd plus d'une entrée d'un coup, ET il en reste
+     * moins de la moitié. Retirer un colis sur seize passe ; en perdre neuf, non.
+     */
+    if (perdus > PERTE_TOLEREE && compte < Math.ceil(avant.length * PART_CONSERVEE)) {
+      perdues.push({ cle, avant: avant.length, apres: compte });
+    }
+  }
+  return perdues;
+}
+
 /**
  * Le document réel, augmenté de ce qu'un membre de l'équipe avait le droit de changer.
  *
@@ -687,6 +763,18 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId) {
   const peut = (cle) => effectivePermission(moi, cle);
 
   const sortie = { ...envoye };
+
+  /*
+   * Le garde-fou, avant tout le reste.
+   *
+   * L'intention ne survit jamais dans le document : elle vaut pour cette écriture-ci, et c'est
+   * tout. La laisser s'y installer reviendrait à donner à toutes les pages ouvertes un
+   * laissez-passer permanent.
+   */
+  const deliberee = intentionDeRemplacement(envoye);
+  delete sortie[CHAMP_INTENTION];
+  const fondues = deliberee ? [] : collectionsQuiFondent(base, envoye);
+  fondues.forEach(({ cle }) => { sortie[cle] = base[cle]; });
 
   SECTIONS_REGLAGES.forEach(([cle, permission]) => {
     if (peut(permission)) return;
@@ -710,7 +798,20 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId) {
     .filter((e) => e && e.id && !dejaLa.has(e.id))
     .slice(0, MAX_ENTREES_JOURNAL)
     .map((e) => ({ ...e, utilisateur: signature, role: moi.role }));
-  sortie.activityLog = [...ajouts, ...anciens].slice(0, 500);
+  /*
+   * Un refus se consigne. Sans cela, l'appareil fautif continuerait d'essayer à chaque
+   * enregistrement, et personne ne saurait qu'une page périmée tourne quelque part — jusqu'au jour
+   * où elle passe. C'est la trace qui permet d'aller la fermer.
+   */
+  const refus = fondues.length === 0 ? [] : [{
+    id: `garde-${Date.now()}`,
+    date: new Date().toISOString(),
+    action: "Enregistrement refusé — page périmée",
+    detail: fondues.map(({ cle, avant, apres }) => `${cle} : ${avant} → ${apres}`).join(" · "),
+    utilisateur: signature,
+    role: moi.role,
+  }];
+  sortie.activityLog = [...refus, ...ajouts, ...anciens].slice(0, 500);
 
   /*
    * Les messages WhatsApp entrants ne se réécrivent pas non plus.
@@ -751,6 +852,17 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId) {
    */
   if (base.receptionWhatsApp !== undefined) sortie.receptionWhatsApp = base.receptionWhatsApp;
   else delete sortie.receptionWhatsApp;
+
+  /*
+   * Le compte rendu de la sauvegarde de nuit appartient au serveur, pour la même raison.
+   *
+   * C'est lui qui répond à « la sauvegarde a-t-elle bien eu lieu cette nuit ? ». Une page ouverte
+   * avant le passage de la tâche le renverrait absent, et l'écran se remettrait à dire qu'aucune
+   * sauvegarde n'existe — en effaçant la preuve du contraire. Un relevé de surveillance qu'on
+   * peut effacer par accident ne surveille rien.
+   */
+  if (base.veille !== undefined) sortie.veille = base.veille;
+  else delete sortie.veille;
 
   return sortie;
 }

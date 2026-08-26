@@ -5,6 +5,9 @@
   "rewrites": [
     { "source": "/((?!api/).*)", "destination": "/index.html" }
   ],
+  "crons": [
+    { "path": "/api/veille", "schedule": "0 2 * * *" }
+  ],
   "headers": [
     {
       "source": "/assets/(.*)",

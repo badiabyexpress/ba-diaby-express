@@ -21119,9 +21119,30 @@ function ComptabilitePage({ data, persist, session, notify }) {
   const [form, setForm] = useState(null);
   const depenses = data.depenses || [];
 
+  /*
+   * Mettre une écriture hors bilan, ou l'y remettre.
+   *
+   * Le geste passe par le journal : un résultat qui change sans qu'on sache pourquoi est
+   * exactement ce qu'un comptable ne peut pas accepter. La ligne, elle, n'est jamais touchée —
+   * seul son rattachement au calcul change.
+   */
+  function basculerBilan(d) {
+    const desormaisExclue = !d.horsBilan;
+    persist({
+      ...data,
+      depenses: depenses.map((x) => (x.id === d.id ? { ...x, horsBilan: desormaisExclue } : x)),
+      activityLog: pushActivity(data, session,
+        desormaisExclue ? "Écriture retirée du bilan" : "Écriture remise dans le bilan",
+        `${d.type} — ${d.nom || "sans libellé"}`),
+    });
+    notify?.(desormaisExclue
+      ? `« ${d.nom || d.type} » ne compte plus dans le bilan.`
+      : `« ${d.nom || d.type} » compte de nouveau dans le bilan.`);
+  }
+
   const {
     colisPeriode, recettes, facture, depensesPeriode, totalDepenses, totalSalaires, commissionsManuelles,
-    commissionsAuto, gnfRate, totalCommissions, commissionsParAgence,
+    commissionsAuto, gnfRate, totalCommissions, commissionsParAgence, exclues, totalExclu,
     benefice, resteAEncaisser, totalIndemnites, litigesOuverts, parMode, joursTries, paiementsPeriode,
   } = useMemo(() => {
     const now = new Date();
@@ -21137,9 +21158,24 @@ function ComptabilitePage({ data, persist, session, notify }) {
     const recettes = colisPeriode.reduce((s, c) => s + c.paye, 0); // encaissé réel, EUR-équivalent
     const facture = colisPeriode.reduce((s, c) => s + c.prix, 0); // facturé (créances comprises), EUR-équivalent
     const depensesPeriode = depenses.filter((d) => inPeriod(d.date));
-    const totalDepenses = depensesPeriode.filter((d) => d.type === "Dépense").reduce((s, d) => s + d.montant, 0); // en GNF (saisie manuelle)
-    const totalSalaires = depensesPeriode.filter((d) => d.type === "Salaire").reduce((s, d) => s + d.montant, 0); // en GNF
-    const commissionsManuelles = depensesPeriode.filter((d) => d.type === "Commission").reduce((s, d) => s + d.montant, 0); // en GNF
+    /*
+     * CE QUI COMPTE DANS LE BILAN, ET CE QUI N'Y COMPTE PLUS.
+     *
+     * Toute écriture pesait sur le résultat, sans exception. Or il en passe qui n'ont rien à y
+     * faire : une avance qu'on se remboursera, une dépense saisie deux fois qu'on n'ose pas
+     * effacer parce qu'elle a servi de justificatif, une somme avancée pour le compte d'un tiers.
+     * La seule issue était de supprimer la ligne — et de perdre la trace de ce qui avait été payé.
+     *
+     * Une écriture mise hors bilan reste donc dans la liste, gardée et lisible ; elle cesse
+     * seulement d'entrer dans le calcul. Et ce qu'elle pèse est affiché à part : un total qui
+     * omettrait des lignes en silence tromperait le comptable plus sûrement qu'un total faux.
+     */
+    const compteDansLeBilan = (d) => !d.horsBilan;
+    const totalDepenses = depensesPeriode.filter((d) => d.type === "Dépense" && compteDansLeBilan(d)).reduce((s, d) => s + d.montant, 0); // en GNF (saisie manuelle)
+    const totalSalaires = depensesPeriode.filter((d) => d.type === "Salaire" && compteDansLeBilan(d)).reduce((s, d) => s + d.montant, 0); // en GNF
+    const commissionsManuelles = depensesPeriode.filter((d) => d.type === "Commission" && compteDansLeBilan(d)).reduce((s, d) => s + d.montant, 0); // en GNF
+    const exclues = depensesPeriode.filter((d) => d.horsBilan);
+    const totalExclu = exclues.reduce((s, d) => s + (Number(d.montant) || 0), 0); // en GNF
     const commissionsAuto = colisPeriode.reduce((s, c) => s + calcCommission(c, data.commissionConfig, data.categories), 0); // EUR-équivalent (taux en €)
     const gnfRate = LIVE_RATES.GNF || CURRENCIES.GNF;
     const totalCommissions = commissionsAuto + commissionsManuelles / gnfRate;
@@ -21176,6 +21212,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
 
     return {
       colisPeriode, recettes, facture, depensesPeriode, totalDepenses, totalSalaires, commissionsManuelles,
+      exclues, totalExclu,
       commissionsAuto, gnfRate, totalCommissions, commissionsParAgence,
       benefice, resteAEncaisser, totalIndemnites, litigesOuverts, parMode, joursTries, paiementsPeriode,
     };
@@ -21229,7 +21266,13 @@ function ComptabilitePage({ data, persist, session, notify }) {
     // Le fichier suit la devise affichée : un tableur qui mélange deux monnaies dans la même
     // colonne ne s'additionne pas non plus.
     const headers = ["Type", "Nom", `Montant_${devise}`, "Date"];
-    const rows = depensesPeriode.map((d) => [d.type, d.nom, fmtRaw((d.montant || 0) / gnfRate, devise), new Date(d.date).toLocaleDateString("fr-FR")]);
+    // Le libellé porte la mention : un tableur trié par montant perdrait sinon l'information.
+    const rows = depensesPeriode.map((d) => [
+      d.type,
+      `${d.nom}${d.horsBilan ? " (hors bilan)" : ""}`,
+      fmtRaw((d.montant || 0) / gnfRate, devise),
+      new Date(d.date).toLocaleDateString("fr-FR"),
+    ]);
     rows.push(["Recette", "Total encaissé (période)", fmtRaw(recettes, devise), ""]);
     const csv = [headers, ...rows].map((r) => r.map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
     const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
@@ -21275,6 +21318,17 @@ function ComptabilitePage({ data, persist, session, notify }) {
         ["Indemnités de litige", fmt(totalIndemnites, devise)],
         ["Résultat de la période (sur le facturé)", fmt(benefice, devise)],
       ];
+      /*
+       * Ce que le résultat ne compte pas est écrit juste en dessous.
+       *
+       * Un récapitulatif qui omettrait des écritures sans le dire serait pire qu'un récapitulatif
+       * faux : celui qui le lit n'aurait aucune raison d'aller vérifier. La ligne n'apparaît que
+       * s'il y a quelque chose à déclarer.
+       */
+      if (exclues.length > 0) {
+        kpis.push([`Dont hors bilan (${exclues.length} écriture${exclues.length > 1 ? "s" : ""}, non déduites)`,
+          fmt(totalExclu / gnfRate, devise)]);
+      }
       const hasAutoTable = await ensureAutoTable();
       if (hasAutoTable && doc.autoTable) {
         doc.autoTable({ startY: y, body: kpis, theme: "plain", styles: { fontSize: 11, cellPadding: 3 }, columnStyles: { 0: { fontStyle: "bold", textColor: INK }, 1: { halign: "right", textColor: INK } }, margin: { left: 14, right: 14 } });
@@ -21446,20 +21500,54 @@ function ComptabilitePage({ data, persist, session, notify }) {
           <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["Type", "Libellé", `Montant (${devise})`, "Date", ""].map((h) => <th key={h} style={{ padding: "12px 16px", fontSize: 11.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
           <tbody>
             {depensesPeriode.map((d) => (
-              <tr key={d.id} style={{ borderTop: "1px solid var(--border)" }}>
+              /*
+                Une écriture hors bilan reste lisible — elle pâlit, elle ne disparaît pas. La faire
+                disparaître reviendrait à la supprimer, et c'est précisément ce qu'on voulait éviter.
+              */
+              <tr key={d.id} style={{ borderTop: "1px solid var(--border)", opacity: d.horsBilan ? 0.55 : 1 }}>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, whiteSpace: "nowrap" }}><span style={{ background: "var(--surface2)", color: "var(--text)", padding: "3px 10px", borderRadius: 20, fontWeight: 600 }}>{d.type}</span></td>
-                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--text)", whiteSpace: "nowrap" }}>{d.nom}</td>
+                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--text)", whiteSpace: "nowrap" }}>
+                  {d.nom}
+                  {d.horsBilan && (
+                    <span style={{ marginInlineStart: 8, background: "var(--surface2)", color: "var(--muted)", padding: "2px 8px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>
+                      hors bilan
+                    </span>
+                  )}
+                </td>
                 {/* Une écriture à zéro est presque toujours une saisie perdue : on la signale au lieu de la ranger sagement. */}
-                <td style={{ padding: "12px 16px", fontSize: 13, color: d.montant > 0 ? "var(--muted)" : "var(--danger-fg)", fontWeight: d.montant > 0 ? 400 : 700, whiteSpace: "nowrap" }}>
+                <td style={{ padding: "12px 16px", fontSize: 13, color: d.montant > 0 ? "var(--muted)" : "var(--danger-fg)", fontWeight: d.montant > 0 ? 400 : 700, whiteSpace: "nowrap", textDecoration: d.horsBilan ? "line-through" : "none" }}>
                   {fmt((d.montant || 0) / gnfRate, devise)}{d.montant > 0 ? "" : " — à corriger"}
                 </td>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{new Date(d.date).toLocaleDateString("fr-FR")}</td>
                 <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>{effectivePermission(session, "compta.gerer_depenses") && <>
+                  <button onClick={() => basculerBilan(d)}
+                    title={d.horsBilan ? "Remettre cette écriture dans le bilan" : "Retirer cette écriture du bilan"}
+                    aria-label={d.horsBilan ? "Remettre cette écriture dans le bilan" : "Retirer cette écriture du bilan"}
+                    aria-pressed={!d.horsBilan}
+                    style={{ background: "none", border: "none", color: d.horsBilan ? "var(--muted)" : "var(--ok-fg)", cursor: "pointer", marginRight: 6 }}>
+                    {d.horsBilan ? <EyeOff size={14} /> : <CheckCircle2 size={14} />}
+                  </button>
                   <button onClick={() => setForm({ id: d.id, type: d.type, nom: d.nom || "", montant: String(d.montant ?? ""), date: String(d.date || "").slice(0, 10), erreur: "" })} title="Modifier cette écriture" aria-label="Modifier cette écriture" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginRight: 6 }}><PenTool size={14} /></button>
                   <button onClick={() => setDepenseASupprimer(d)} title="Supprimer cette écriture" aria-label="Supprimer cette écriture" style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={14} /></button>
                 </>}</td>
               </tr>
             ))}
+            {exclues.length > 0 && (
+              /*
+                Ce que le bilan NE compte PAS, dit à voix haute. Un total qui omettrait des lignes
+                en silence tromperait le comptable plus sûrement qu'un total faux : il n'aurait
+                aucune raison d'aller vérifier.
+              */
+              <tr style={{ borderTop: "2px solid var(--border)", background: "var(--surface2)" }}>
+                <td colSpan={5} style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)", lineHeight: 1.55 }}>
+                  <strong style={{ color: "var(--text)" }}>
+                    {exclues.length} écriture{exclues.length > 1 ? "s" : ""} hors bilan
+                  </strong>
+                  {" — "}{fmt(totalExclu / gnfRate, devise)} qui ne pèse{exclues.length > 1 ? "nt" : ""} pas sur le résultat.
+                  {" "}Elles restent enregistrées et figurent au récapitulatif.
+                </td>
+              </tr>
+            )}
             {depensesPeriode.length === 0 && <tr><td colSpan={5} style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucune dépense, salaire ou commission sur cette période.</td></tr>}
           </tbody>
         </table>

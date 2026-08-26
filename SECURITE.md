@@ -774,3 +774,38 @@ où cet écran doit encore marcher.
 intercepté), `testtroiscles.mjs` (36 cas, connexion et récupération de l'équipe), `t80` (18 cas,
 les écrans du client), `t81` (17 cas, l'écran de l'équipe et son repli hors ligne) et `testcompte`
 (55 cas).
+
+## Choisir ce qui compte dans le bilan (26/08/2026)
+
+Toute écriture de la comptabilité pesait sur le résultat, sans exception. Or il en passe qui n'ont
+rien à y faire : une avance qu'on se remboursera, une dépense saisie deux fois qu'on n'ose pas
+effacer parce qu'elle a servi de justificatif, une somme avancée pour le compte d'un tiers. La
+seule issue était de **supprimer la ligne** — c'est-à-dire de fausser le résultat dans l'autre sens,
+et de perdre la trace de ce qui avait réellement été payé.
+
+Une écriture peut désormais être mise **hors bilan**. Elle reste dans la liste, gardée et lisible ;
+elle cesse seulement d'entrer dans le calcul — dépenses, salaires, commissions manuelles, et donc
+le résultat de la période.
+
+Trois précautions, qui tiennent toutes à la même idée : **ce que le total ne compte pas doit être
+dit.** Un total qui omettrait des lignes en silence tromperait le comptable plus sûrement qu'un
+total faux — il n'aurait aucune raison d'aller vérifier.
+
+- **La ligne pâlit, elle ne disparaît pas.** Elle porte la mention « hors bilan », son montant est
+  barré, et elle garde ses boutons. La faire disparaître reviendrait à la supprimer, ce qu'on
+  voulait précisément éviter.
+- **Ce qui est écarté est chiffré à part**, sous le tableau (« *N* écritures hors bilan — *X* GNF
+  qui ne pèsent pas sur le résultat ») et sur le récapitulatif PDF, qui gagne une ligne « Dont hors
+  bilan ». Le rapport CSV porte la mention dans le libellé, pour qu'un tableur trié par montant ne
+  perde pas l'information.
+- **Le journal d'activité enregistre le geste** — « Écriture retirée du bilan » / « Écriture remise
+  dans le bilan », avec le libellé concerné. Un résultat qui change sans qu'on sache pourquoi est
+  exactement ce qu'une comptabilité ne peut pas se permettre.
+
+Le geste est ouvert à la permission `compta.gerer_depenses`, la même que modifier et supprimer :
+qui peut effacer une écriture peut à plus forte raison l'écarter du calcul. Le champ ne vit que
+dans la comptabilité ; les dépenses de voyage et la caisse sont des listes distinctes, qu'il ne
+touche pas.
+
+Éprouvé par `t89` (22 cas) : le résultat change, la ligne survit, le montant reste intact en base,
+l'écran annonce ce qu'il n'a pas compté, le journal le nomme, et l'on peut tout remettre.

@@ -936,6 +936,19 @@ function identiteClientRequise(acheminement) {
 function colisSousRepere(colis) {
   return !!colis?.repereSeul;
 }
+/**
+ * La route du colis, dans le sens où il voyage.
+ *
+ * Elle s'écrivait `GN-<pays>` en toutes circonstances, comme si tout partait de Conakry. Sur un
+ * colis Paris → Conakry, l'étiquette annonçait donc « GN-FR » — la route à l'envers, sur la seule
+ * ligne qui la donne, et juste au-dessus d'un destinataire qui, lui, est bien en Guinée. Les deux
+ * bouts sont écrits sur le colis : il suffit de les lire dans l'ordre.
+ */
+function routeDuColis(colis) {
+  const depart = colis?.expediteurPays || "GN";
+  const arrivee = colis?.destinatairePays || colis?.pays || "GN";
+  return `${depart}-${arrivee}`;
+}
 /*
  * Le repère d'un colis, quand il en porte un.
  *
@@ -8796,18 +8809,26 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
   /*
    * LES DEUX BOUTS DE LA ROUTE, ET QUI SE TIENT À CHACUN.
    *
-   * Le sens de l'envoi ne changeait que le tarif : les deux blocs du formulaire gardaient leurs
-   * indicatifs, l'expéditeur en Guinée et le destinataire à l'étranger. Sur « Paris → Conakry »,
-   * ils étaient donc à l'envers — on proposait +224 à quelqu'un qui est à Paris et +33 à celui qui
-   * réceptionne à Conakry. Un numéro saisi sous le mauvais indicatif ne sonne nulle part, et rien
-   * ne le disait : ni l'écran, ni l'étiquette, ni la facture.
+   * Un colis de partenaire a toujours les mêmes deux parties : le partenaire — ou son
+   * correspondant — se tient EN GUINÉE, et son client se tient AU PAYS DE LA ROUTE. Ça, le sens
+   * de l'envoi n'y change rien : ce sont les mêmes personnes, aux mêmes endroits, avec les mêmes
+   * numéros. Les deux blocs de saisie sont donc fixes, et leurs indicatifs avec eux.
    *
-   * Le colis quitte Conakry : l'expéditeur est en Guinée, le destinataire au pays de la route.
-   * Le colis quitte le pays de la route : c'est l'inverse. Les documents lisent ensuite
-   * `expediteurPays` et `destinatairePays`, donc les quatre suivent d'eux-mêmes.
+   * CE QUE LE SENS CHANGE, C'EST LE RÔLE QUE CHACUN TIENT.
+   *
+   *   Conakry → Paris : la partie guinéenne EXPÉDIE, le client à Paris RÉCEPTIONNE.
+   *   Paris → Conakry : le client à Paris EXPÉDIE, la partie guinéenne RÉCEPTIONNE.
+   *
+   * On avait d'abord fait tourner les blocs eux-mêmes — l'indicatif du premier bloc passait de
+   * +224 à +33 selon le sens. C'était l'erreur : on demandait à celui qui saisit d'échanger les
+   * deux personnes de place à chaque changement de sens, alors qu'elles n'ont pas bougé. Le colis
+   * enregistré s'en ressentait — un numéro français sous la mention « Guinée », l'entreprise
+   * annoncée comme expéditrice d'un colis qu'elle reçoit. C'est l'inverse qu'il fallait faire :
+   * laisser les personnes où elles sont, et faire tourner les rôles autour d'elles.
    */
-  const paysExpediteur = sens === "export" ? "GN" : destPays;
-  const paysDestinataire = sens === "export" ? destPays : "GN";
+  const versLaGuinee = sens !== "export";
+  const roleCoteGuinee = versLaGuinee ? "Destinataire" : "Expéditeur";
+  const roleCoteClient = versLaGuinee ? "Expéditeur" : "Destinataire";
   const nomDuPays = (code) => COUNTRIES.find((p) => p.code === code)?.name || "";
   const indicatifDe = (code) => DIAL_CODES.find((c) => c.name === nomDuPays(code))?.dial;
   const annoncesDuPartenaire = (annonces || []).filter((a) => !partenaireId || a.partenaireId === partenaireId);
@@ -8954,11 +8975,24 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
     // Le premier appui a lancé l'écriture ; les suivants ne doivent rien faire du tout.
     if (enregistrement) return;
     if (!partenaireId) { setErr("Choisissez le partenaire pour le compte duquel ce colis est enregistré."); return; }
-    if (!expNom.trim()) { setErr("Indiquez le nom de l’expéditeur — la personne qui remet le colis."); return; }
+    /*
+     * Les messages nomment le rôle que le sens donne à chaque bloc. Réclamer « l'expéditeur » en
+     * désignant le bloc de celui qui réceptionne fait chercher l'erreur au mauvais endroit.
+     */
+    if (!expNom.trim()) {
+      setErr(versLaGuinee
+        ? "Indiquez le nom du destinataire en Guinée — la personne ou l’entreprise qui réceptionne le colis."
+        : "Indiquez le nom de l’expéditeur en Guinée — la personne qui remet le colis.");
+      return;
+    }
     if (!clientNom.trim()) {
       setErr(identiteRequise
-        ? "Indiquez le nom du destinataire — c’est lui qui identifie le colis à l’arrivée."
-        : "Indiquez qui réceptionne le lot — le correspondant du partenaire, repris de son contrat.");
+        ? (versLaGuinee
+          ? "Indiquez le nom de l’expéditeur — la personne qui remet le colis au départ."
+          : "Indiquez le nom du destinataire — c’est lui qui identifie le colis à l’arrivée.")
+        : (versLaGuinee
+          ? "Indiquez qui remet le lot — le correspondant du partenaire, repris de son contrat."
+          : "Indiquez qui réceptionne le lot — le correspondant du partenaire, repris de son contrat."));
       return;
     }
     if (!identiteRequise && !repere.trim()) {
@@ -8986,21 +9020,31 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
       // Colis expédié sous la marque du partenaire : son numéro de suivi porte son préfixe, pas
       // celui de l'entreprise — son client n'a jamais entendu parler de Ba-Diaby Express.
       tracking: genTracking((existingColis || []).map((c) => c.tracking), null, reglages.prefixeTracking || undefined),
-      expediteur: `${expPrenom} ${expNom}`.trim(), expediteurTelephone: expTelephone, expediteurEmail: "", expediteurAdresse: "",
+      /*
+       * Chacun est écrit dans le rôle que le sens lui donne, sans avoir bougé de sa place.
+       *
+       * La partie guinéenne (premier bloc) expédie quand le colis quitte Conakry, et réceptionne
+       * quand il y arrive ; le client (second bloc) fait l'inverse. Écrire les deux toujours dans
+       * le même champ mettait l'entreprise en expéditrice d'un colis qu'elle reçoit — et son
+       * numéro guinéen sous la mention du pays de la route.
+       */
+      expediteur: (versLaGuinee ? `${clientPrenom} ${clientNom}` : `${expPrenom} ${expNom}`).trim(),
+      expediteurTelephone: versLaGuinee ? clientTelephone : expTelephone,
+      expediteurEmail: "", expediteurAdresse: "",
       // À l'export le colis part de Guinée ; à l'import il part du pays de la route.
-      expediteurPays: sens === "export" ? "GN" : destPays,
+      expediteurPays: versLaGuinee ? destPays : "GN",
       /*
        * Sous repère, le champ « destinataire » porte le repère et le téléphone reste vide : tous
        * les écrans, étiquettes et documents continuent d'afficher quelque chose d'utile, sans
        * qu'aucun d'eux ait à connaître la règle. `repereSeul` dit à ceux qui doivent le savoir
        * qu'il ne s'agit pas d'un nom de personne.
        */
-      destinataire: `${clientPrenom} ${clientNom}`.trim(),
-      telephone: clientTelephone,
+      destinataire: (versLaGuinee ? `${expPrenom} ${expNom}` : `${clientPrenom} ${clientNom}`).trim(),
+      telephone: versLaGuinee ? expTelephone : clientTelephone,
       repereSeul: !identiteRequise,
       repere: identiteRequise ? "" : repere.trim(),
       destinataireEmail: "", destinataireAdresse: "",
-      destinataireVille: "", destinataireCodePostal: "", destinatairePays: sens === "export" ? destPays : "GN",
+      destinataireVille: "", destinataireCodePostal: "", destinatairePays: versLaGuinee ? "GN" : destPays,
       pays: paysRoute, direction, mode,
       produits,
       poids: +poidsTotal.toFixed(2), volume: 0,
@@ -9108,17 +9152,21 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
           </div>
         )}
 
-        {/* Le pays est écrit dans le titre : c'est ce qui empêche de remplir les deux bouts à l'envers. */}
+        {/*
+          Le pays reste écrit dans le titre — c'est ce qui empêche de remplir les deux bouts à
+          l'envers — mais c'est le RÔLE qui change avec le sens, pas le pays : les personnes ne se
+          déplacent pas d'un colis à l'autre.
+        */}
         <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "4px 0 10px" }}>
-          Expéditeur · {FLAGS[paysExpediteur] || ""} {nomDuPays(paysExpediteur)}
+          {roleCoteGuinee} · {FLAGS.GN || ""} {nomDuPays("GN")}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
           <Field label="Prénom"><input value={expPrenom} onChange={(e) => setExpPrenom(e.target.value)} style={inputStyle} /></Field>
           <Field label="Nom *"><input value={expNom} onChange={(e) => { setErr(""); setExpNom(e.target.value); }} style={inputStyle} /></Field>
         </div>
         <Field label="Téléphone (facultatif)">
-          <PhoneInput key={`exp-${paysExpediteur}`} value={expTelephone} onChange={setExpTelephone}
-            defaultDial={indicatifDe(paysExpediteur)} />
+          <PhoneInput key="exp-GN" value={expTelephone} onChange={setExpTelephone}
+            defaultDial={indicatifDe("GN")} />
         </Field>
 
         {/*
@@ -9131,25 +9179,32 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
         {identiteRequise ? (
           <>
             <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>
-              Destinataire · {FLAGS[paysDestinataire] || ""} {nomDuPays(paysDestinataire)}
+              {roleCoteClient} · {FLAGS[destPays] || ""} {nomDuPays(destPays)}
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
               <Field label="Prénom"><input value={clientPrenom} onChange={(e) => setClientPrenom(e.target.value)} style={inputStyle} /></Field>
               <Field label="Nom *"><input value={clientNom} onChange={(e) => { setErr(""); setClientNom(e.target.value); }} style={inputStyle} /></Field>
             </div>
-            {/* Indicatif calé sur le pays où se tient le destinataire — qui change avec le sens :
-                un destinataire à Conakry n'a pas un numéro français, et le champ le refuserait. */}
+            {/* Indicatif calé sur le pays de la route : c'est là que se tient le client du
+                partenaire, quel que soit le sens de l'envoi. */}
             <Field label="Téléphone (facultatif)">
-              <PhoneInput key={`dest-${paysDestinataire}`} value={clientTelephone} onChange={setClientTelephone}
-                defaultDial={indicatifDe(paysDestinataire)} />
+              <PhoneInput key={`dest-${destPays}`} value={clientTelephone} onChange={setClientTelephone}
+                defaultDial={indicatifDe(destPays)} />
             </Field>
           </>
         ) : (
           <>
-            <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>Remis à</div>
+            {/*
+              Le correspondant du partenaire se tient au pays de la route. Selon le sens, c'est lui
+              qui remet le lot ou lui qui le reçoit : dire « remis à » sur un colis qu'il expédie
+              ferait chercher à l'arrivée quelqu'un qui se tient au départ.
+            */}
+            <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>
+              {versLaGuinee ? "Remis par" : "Remis à"} · {FLAGS[destPays] || ""} {nomDuPays(destPays)}
+            </div>
             <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 10, padding: "11px 13px", marginBottom: 12 }}>
               <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
-                Sur cette route, le lot est remis au correspondant du partenaire — repris de son
+                Sur cette route, le lot est {versLaGuinee ? "remis par" : "remis au"} correspondant du partenaire — repris de son
                 contrat, il n’y a rien à saisir. Le client final n’apparaît pas : c’est le repère,
                 ci-dessous, qui dira à qui ce colis revient.
               </div>
@@ -9159,8 +9214,8 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
               <Field label="Nom *"><input value={clientNom} onChange={(e) => { setErr(""); setClientNom(e.target.value); }} style={inputStyle} /></Field>
             </div>
             <Field label="Téléphone (facultatif)">
-              <PhoneInput key={`remis-${paysDestinataire}`} value={clientTelephone} onChange={setClientTelephone}
-                defaultDial={indicatifDe(paysDestinataire)} />
+              <PhoneInput key={`remis-${destPays}`} value={clientTelephone} onChange={setClientTelephone}
+                defaultDial={indicatifDe(destPays)} />
             </Field>
             <Field label="Repère du colis *">
               <input value={repere} onChange={(e) => { setErr(""); setRepere(e.target.value); }} style={inputStyle}
@@ -14643,7 +14698,7 @@ async function construireEtiquetteDoc(colis, data) {
   doc.setTextColor(255, 255, 255);
   doc.text(pastille, M + pW / 2, Z.statut, { align: "center" });
   doc.setFont(undefined, "bold"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
-  doc.text(`GN-${colis.pays}`, W - M, Z.statut, { align: "right" });
+  doc.text(routeDuColis(colis), W - M, Z.statut, { align: "right" });
 
   // ── Destinataire (zone fixe : le texte s'adapte, la zone ne bouge pas) ─────
   // Fond teinté sur toute la zone réservée (jamais sur le texte débordant, elle est bornée par
@@ -14946,7 +15001,7 @@ async function renderLabelCanvas(colis, largeurDots, data) {
   ctx.fillText(pastille, M + pW / 2, 27.8 * s);
   ctx.restore();
   ctx.textAlign = "right";
-  ctx.fillText(`GN-${colis.pays}`, W - M, 27.8 * s);
+  ctx.fillText(routeDuColis(colis), W - M, 27.8 * s);
   ctx.textAlign = "left";
   hr(30.5 * s);
 
@@ -21119,9 +21174,62 @@ function ComptabilitePage({ data, persist, session, notify }) {
   const [form, setForm] = useState(null);
   const depenses = data.depenses || [];
 
+  /*
+   * Mettre une écriture hors bilan, ou l'y remettre.
+   *
+   * Le geste passe par le journal : un résultat qui change sans qu'on sache pourquoi est
+   * exactement ce qu'un comptable ne peut pas accepter. La ligne, elle, n'est jamais touchée —
+   * seul son rattachement au calcul change.
+   */
+  function basculerBilan(d) {
+    const desormaisExclue = !d.horsBilan;
+    persist({
+      ...data,
+      depenses: depenses.map((x) => (x.id === d.id ? { ...x, horsBilan: desormaisExclue } : x)),
+      activityLog: pushActivity(data, session,
+        desormaisExclue ? "Écriture retirée du bilan" : "Écriture remise dans le bilan",
+        `${d.type} — ${d.nom || "sans libellé"}`),
+    });
+    notify?.(desormaisExclue
+      ? `« ${d.nom || d.type} » ne compte plus dans le bilan.`
+      : `« ${d.nom || d.type} » compte de nouveau dans le bilan.`);
+  }
+
+  /*
+   * Le même choix pour les commissions d'agence.
+   *
+   * Elles ne sont pas saisies : elles se calculent sur les colis, selon les taux de Configuration.
+   * On ne peut donc ni les corriger ni les effacer — et elles pesaient malgré tout sur le résultat
+   * en toutes circonstances. Or une agence peut ne rien devoir sur une période : commissions déjà
+   * réglées en dehors des comptes, agence qui ne tourne pas encore, taux provisoire qu'on veut
+   * voir sans le subir. C'est la même décision qu'une écriture hors bilan, et elle se prend au
+   * même endroit.
+   *
+   * Le nom sert de repère parce que c'est déjà lui qui relie un colis à son agence partout
+   * ailleurs dans l'application (`colis.site`). Une agence renommée redevient donc comptée : mieux
+   * vaut qu'elle revienne au bilan — un oubli qui gonfle les charges se voit — que l'inverse.
+   */
+  const agencesHorsBilan = data.agencesHorsBilan || [];
+  function basculerAgence(nom) {
+    const desormaisExclue = !agencesHorsBilan.includes(nom);
+    persist({
+      ...data,
+      agencesHorsBilan: desormaisExclue
+        ? [...agencesHorsBilan, nom]
+        : agencesHorsBilan.filter((x) => x !== nom),
+      activityLog: pushActivity(data, session,
+        desormaisExclue ? "Commissions d’agence retirées du bilan" : "Commissions d’agence remises dans le bilan",
+        nom),
+    });
+    notify?.(desormaisExclue
+      ? `Les commissions de ${nom} ne comptent plus dans le bilan.`
+      : `Les commissions de ${nom} comptent de nouveau dans le bilan.`);
+  }
+
   const {
     colisPeriode, recettes, facture, depensesPeriode, totalDepenses, totalSalaires, commissionsManuelles,
-    commissionsAuto, gnfRate, totalCommissions, commissionsParAgence,
+    commissionsAuto, gnfRate, totalCommissions, commissionsParAgence, exclues, totalExclu,
+    commissionsAutoExclues, agencesEcartees,
     benefice, resteAEncaisser, totalIndemnites, litigesOuverts, parMode, joursTries, paiementsPeriode,
   } = useMemo(() => {
     const now = new Date();
@@ -21137,16 +21245,48 @@ function ComptabilitePage({ data, persist, session, notify }) {
     const recettes = colisPeriode.reduce((s, c) => s + c.paye, 0); // encaissé réel, EUR-équivalent
     const facture = colisPeriode.reduce((s, c) => s + c.prix, 0); // facturé (créances comprises), EUR-équivalent
     const depensesPeriode = depenses.filter((d) => inPeriod(d.date));
-    const totalDepenses = depensesPeriode.filter((d) => d.type === "Dépense").reduce((s, d) => s + d.montant, 0); // en GNF (saisie manuelle)
-    const totalSalaires = depensesPeriode.filter((d) => d.type === "Salaire").reduce((s, d) => s + d.montant, 0); // en GNF
-    const commissionsManuelles = depensesPeriode.filter((d) => d.type === "Commission").reduce((s, d) => s + d.montant, 0); // en GNF
-    const commissionsAuto = colisPeriode.reduce((s, c) => s + calcCommission(c, data.commissionConfig, data.categories), 0); // EUR-équivalent (taux en €)
+    /*
+     * CE QUI COMPTE DANS LE BILAN, ET CE QUI N'Y COMPTE PLUS.
+     *
+     * Toute écriture pesait sur le résultat, sans exception. Or il en passe qui n'ont rien à y
+     * faire : une avance qu'on se remboursera, une dépense saisie deux fois qu'on n'ose pas
+     * effacer parce qu'elle a servi de justificatif, une somme avancée pour le compte d'un tiers.
+     * La seule issue était de supprimer la ligne — et de perdre la trace de ce qui avait été payé.
+     *
+     * Une écriture mise hors bilan reste donc dans la liste, gardée et lisible ; elle cesse
+     * seulement d'entrer dans le calcul. Et ce qu'elle pèse est affiché à part : un total qui
+     * omettrait des lignes en silence tromperait le comptable plus sûrement qu'un total faux.
+     */
+    const compteDansLeBilan = (d) => !d.horsBilan;
+    const totalDepenses = depensesPeriode.filter((d) => d.type === "Dépense" && compteDansLeBilan(d)).reduce((s, d) => s + d.montant, 0); // en GNF (saisie manuelle)
+    const totalSalaires = depensesPeriode.filter((d) => d.type === "Salaire" && compteDansLeBilan(d)).reduce((s, d) => s + d.montant, 0); // en GNF
+    const commissionsManuelles = depensesPeriode.filter((d) => d.type === "Commission" && compteDansLeBilan(d)).reduce((s, d) => s + d.montant, 0); // en GNF
+    const exclues = depensesPeriode.filter((d) => d.horsBilan);
+    const totalExclu = exclues.reduce((s, d) => s + (Number(d.montant) || 0), 0); // en GNF
+    /*
+     * Les commissions d'agence suivent la même règle que les écritures.
+     *
+     * L'agence d'un colis est son `site` — le même repère que partout ailleurs, avec Bambeto par
+     * défaut. Ce qui est écarté est retiré du total ET compté à part : sans ce second chiffre, le
+     * résultat baisserait sans que rien ne dise de combien.
+     */
+    const ecartees = new Set(data.agencesHorsBilan || []);
+    const agenceDuColis = (c) => c.site || "Bambeto";
+    const commissionDuColis = (c) => calcCommission(c, data.commissionConfig, data.categories);
+    const commissionsAuto = colisPeriode
+      .filter((c) => !ecartees.has(agenceDuColis(c)))
+      .reduce((s, c) => s + commissionDuColis(c), 0); // EUR-équivalent (taux en €)
+    const commissionsAutoExclues = colisPeriode
+      .filter((c) => ecartees.has(agenceDuColis(c)))
+      .reduce((s, c) => s + commissionDuColis(c), 0); // EUR-équivalent
     const gnfRate = LIVE_RATES.GNF || CURRENCIES.GNF;
     const totalCommissions = commissionsAuto + commissionsManuelles / gnfRate;
     const commissionsParAgence = sitesLocaux(data.sites).map((s) => ({
       nom: s.nom,
-      montant: colisPeriode.filter((c) => (c.site || "Bambeto") === s.nom).reduce((sum, c) => sum + calcCommission(c, data.commissionConfig, data.categories), 0),
+      horsBilan: ecartees.has(s.nom),
+      montant: colisPeriode.filter((c) => agenceDuColis(c) === s.nom).reduce((sum, c) => sum + commissionDuColis(c), 0),
     }));
+    const agencesEcartees = commissionsParAgence.filter((a) => a.horsBilan);
     /*
      * Pas de commission par partenaire : un partenaire facture ses clients lui-même, l'entreprise
      * ne prélève rien sur ses colis et n'a donc aucune commission à lui verser. Le tableau qui
@@ -21176,10 +21316,11 @@ function ComptabilitePage({ data, persist, session, notify }) {
 
     return {
       colisPeriode, recettes, facture, depensesPeriode, totalDepenses, totalSalaires, commissionsManuelles,
+      exclues, totalExclu, commissionsAutoExclues, agencesEcartees,
       commissionsAuto, gnfRate, totalCommissions, commissionsParAgence,
       benefice, resteAEncaisser, totalIndemnites, litigesOuverts, parMode, joursTries, paiementsPeriode,
     };
-  }, [data.colis, depenses, data.sites, data.users, data.commissionConfig, data.categories, periode]);
+  }, [data.colis, depenses, data.sites, data.users, data.commissionConfig, data.categories, data.agencesHorsBilan, periode]);
 
   /*
    * Une écriture s'enregistre ET se corrige. Elle ne s'enregistre jamais à zéro en silence :
@@ -21229,7 +21370,13 @@ function ComptabilitePage({ data, persist, session, notify }) {
     // Le fichier suit la devise affichée : un tableur qui mélange deux monnaies dans la même
     // colonne ne s'additionne pas non plus.
     const headers = ["Type", "Nom", `Montant_${devise}`, "Date"];
-    const rows = depensesPeriode.map((d) => [d.type, d.nom, fmtRaw((d.montant || 0) / gnfRate, devise), new Date(d.date).toLocaleDateString("fr-FR")]);
+    // Le libellé porte la mention : un tableur trié par montant perdrait sinon l'information.
+    const rows = depensesPeriode.map((d) => [
+      d.type,
+      `${d.nom}${d.horsBilan ? " (hors bilan)" : ""}`,
+      fmtRaw((d.montant || 0) / gnfRate, devise),
+      new Date(d.date).toLocaleDateString("fr-FR"),
+    ]);
     rows.push(["Recette", "Total encaissé (période)", fmtRaw(recettes, devise), ""]);
     const csv = [headers, ...rows].map((r) => r.map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
     const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
@@ -21275,6 +21422,21 @@ function ComptabilitePage({ data, persist, session, notify }) {
         ["Indemnités de litige", fmt(totalIndemnites, devise)],
         ["Résultat de la période (sur le facturé)", fmt(benefice, devise)],
       ];
+      /*
+       * Ce que le résultat ne compte pas est écrit juste en dessous.
+       *
+       * Un récapitulatif qui omettrait des écritures sans le dire serait pire qu'un récapitulatif
+       * faux : celui qui le lit n'aurait aucune raison d'aller vérifier. La ligne n'apparaît que
+       * s'il y a quelque chose à déclarer.
+       */
+      if (exclues.length > 0) {
+        kpis.push([`Dont hors bilan (${exclues.length} écriture${exclues.length > 1 ? "s" : ""}, non déduites)`,
+          fmt(totalExclu / gnfRate, devise)]);
+      }
+      if (agencesEcartees.length > 0) {
+        kpis.push([`Commissions d’agence hors bilan (${agencesEcartees.map((a) => a.nom).join(", ")}, non déduites)`,
+          fmt(commissionsAutoExclues, devise)]);
+      }
       const hasAutoTable = await ensureAutoTable();
       if (hasAutoTable && doc.autoTable) {
         doc.autoTable({ startY: y, body: kpis, theme: "plain", styles: { fontSize: 11, cellPadding: 3 }, columnStyles: { 0: { fontStyle: "bold", textColor: INK }, 1: { halign: "right", textColor: INK } }, margin: { left: 14, right: 14 } });
@@ -21391,7 +21553,10 @@ function ComptabilitePage({ data, persist, session, notify }) {
         <StatCard label="Recettes encaissées" value={fmt(recettes, devise)} icon={CheckCircle2} tint="#16A163" trend={`Facturé : ${fmt(facture, devise)}`} trendColor="var(--muted)" />
         <StatCard label="Dépenses" value={fmt(totalDepenses / gnfRate, devise)} icon={Receipt} tint="#E23F52" />
         <StatCard label="Salaires" value={fmt(totalSalaires / gnfRate, devise)} icon={Users} tint="#B8801C" />
-        <StatCard label="Commissions" value={fmt(totalCommissions, devise)} icon={DollarSign} tint="#8B5CF6" trend={`dont auto : ${fmt(commissionsAuto, devise)}`} trendColor="var(--muted)" />
+        {/* La tuile compte ce que le résultat compte : mentionner ce qui en est sorti évite de croire à une baisse d'activité. */}
+        <StatCard label="Commissions" value={fmt(totalCommissions, devise)} icon={DollarSign} tint="#8B5CF6"
+          trend={`dont auto : ${fmt(commissionsAuto, devise)}${commissionsAutoExclues > 0.005 ? ` · ${fmt(commissionsAutoExclues, devise)} hors bilan` : ""}`}
+          trendColor="var(--muted)" />
       </div>
 
       <div style={{ background: benefice >= 0 ? "var(--ok-bg)" : "var(--danger-bg)", borderRadius: 14, padding: 20, marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -21428,15 +21593,48 @@ function ComptabilitePage({ data, persist, session, notify }) {
       {commissionsParAgence.length > 0 && (
         <div style={{ background: "var(--surface)", borderRadius: 14, padding: 20, border: "1px solid var(--border)", marginBottom: 20 }}>
           <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Commissions automatiques par agence</div>
-          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14 }}>Calculées selon les taux définis dans Configuration → Commissions par Agence.</div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14 }}>
+            Calculées selon les taux définis dans Configuration → Commissions par Agence.
+            {effectivePermission(session, "compta.gerer_depenses") && " Chacune peut être retirée du résultat sans changer son calcul."}
+          </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12 }}>
             {commissionsParAgence.map((a) => (
-              <div key={a.nom} style={{ background: "var(--surface2)", borderRadius: 12, padding: 14 }}>
-                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{a.nom}</div>
-                <div style={{ fontSize: 18, fontWeight: 700, color: "var(--ok-fg)", fontFamily: "'Space Grotesk',sans-serif", marginTop: 4 }}>{fmt(a.montant, devise)}</div>
+              /*
+                Une agence écartée reste affichée avec son montant : ce qu'elle a produit sur la
+                période ne change pas, seul son passage au résultat est suspendu.
+              */
+              <div key={a.nom} style={{ background: "var(--surface2)", borderRadius: 12, padding: 14, opacity: a.horsBilan ? 0.55 : 1 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{a.nom}</div>
+                  {effectivePermission(session, "compta.gerer_depenses") && (
+                    <button onClick={() => basculerAgence(a.nom)}
+                      title={a.horsBilan ? `Remettre les commissions de ${a.nom} dans le bilan` : `Retirer les commissions de ${a.nom} du bilan`}
+                      aria-label={a.horsBilan ? `Remettre les commissions de ${a.nom} dans le bilan` : `Retirer les commissions de ${a.nom} du bilan`}
+                      aria-pressed={!a.horsBilan}
+                      style={{ background: "none", border: "none", color: a.horsBilan ? "var(--muted)" : "var(--ok-fg)", cursor: "pointer", padding: 0, lineHeight: 0 }}>
+                      {a.horsBilan ? <EyeOff size={14} /> : <CheckCircle2 size={14} />}
+                    </button>
+                  )}
+                </div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: a.horsBilan ? "var(--muted)" : "var(--ok-fg)", fontFamily: "'Space Grotesk',sans-serif", marginTop: 4, textDecoration: a.horsBilan ? "line-through" : "none" }}>{fmt(a.montant, devise)}</div>
+                {a.horsBilan && <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", marginTop: 3 }}>hors bilan</div>}
               </div>
             ))}
           </div>
+          {agencesEcartees.length > 0 && (
+            /*
+              Ce qui a été retiré est nommé et chiffré. Le résultat baisse sans cela, et rien ne
+              dirait pourquoi — c'est exactement ce qu'on veut éviter d'un bilan.
+            */
+            <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--border)", fontSize: 12.5, color: "var(--muted)", lineHeight: 1.55 }}>
+              <strong style={{ color: "var(--text)" }}>
+                {agencesEcartees.length === 1 ? "1 agence hors bilan" : `${agencesEcartees.length} agences hors bilan`}
+              </strong>
+              {" — "}{agencesEcartees.map((a) => a.nom).join(", ")}
+              {" · "}{fmt(commissionsAutoExclues, devise)} qui ne pèse{agencesEcartees.length > 1 ? "nt" : ""} pas sur le résultat.
+              {" "}Les commissions restent calculées et dues.
+            </div>
+          )}
         </div>
       )}
 
@@ -21446,20 +21644,54 @@ function ComptabilitePage({ data, persist, session, notify }) {
           <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["Type", "Libellé", `Montant (${devise})`, "Date", ""].map((h) => <th key={h} style={{ padding: "12px 16px", fontSize: 11.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
           <tbody>
             {depensesPeriode.map((d) => (
-              <tr key={d.id} style={{ borderTop: "1px solid var(--border)" }}>
+              /*
+                Une écriture hors bilan reste lisible — elle pâlit, elle ne disparaît pas. La faire
+                disparaître reviendrait à la supprimer, et c'est précisément ce qu'on voulait éviter.
+              */
+              <tr key={d.id} style={{ borderTop: "1px solid var(--border)", opacity: d.horsBilan ? 0.55 : 1 }}>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, whiteSpace: "nowrap" }}><span style={{ background: "var(--surface2)", color: "var(--text)", padding: "3px 10px", borderRadius: 20, fontWeight: 600 }}>{d.type}</span></td>
-                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--text)", whiteSpace: "nowrap" }}>{d.nom}</td>
+                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--text)", whiteSpace: "nowrap" }}>
+                  {d.nom}
+                  {d.horsBilan && (
+                    <span style={{ marginInlineStart: 8, background: "var(--surface2)", color: "var(--muted)", padding: "2px 8px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>
+                      hors bilan
+                    </span>
+                  )}
+                </td>
                 {/* Une écriture à zéro est presque toujours une saisie perdue : on la signale au lieu de la ranger sagement. */}
-                <td style={{ padding: "12px 16px", fontSize: 13, color: d.montant > 0 ? "var(--muted)" : "var(--danger-fg)", fontWeight: d.montant > 0 ? 400 : 700, whiteSpace: "nowrap" }}>
+                <td style={{ padding: "12px 16px", fontSize: 13, color: d.montant > 0 ? "var(--muted)" : "var(--danger-fg)", fontWeight: d.montant > 0 ? 400 : 700, whiteSpace: "nowrap", textDecoration: d.horsBilan ? "line-through" : "none" }}>
                   {fmt((d.montant || 0) / gnfRate, devise)}{d.montant > 0 ? "" : " — à corriger"}
                 </td>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{new Date(d.date).toLocaleDateString("fr-FR")}</td>
                 <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }}>{effectivePermission(session, "compta.gerer_depenses") && <>
+                  <button onClick={() => basculerBilan(d)}
+                    title={d.horsBilan ? "Remettre cette écriture dans le bilan" : "Retirer cette écriture du bilan"}
+                    aria-label={d.horsBilan ? "Remettre cette écriture dans le bilan" : "Retirer cette écriture du bilan"}
+                    aria-pressed={!d.horsBilan}
+                    style={{ background: "none", border: "none", color: d.horsBilan ? "var(--muted)" : "var(--ok-fg)", cursor: "pointer", marginRight: 6 }}>
+                    {d.horsBilan ? <EyeOff size={14} /> : <CheckCircle2 size={14} />}
+                  </button>
                   <button onClick={() => setForm({ id: d.id, type: d.type, nom: d.nom || "", montant: String(d.montant ?? ""), date: String(d.date || "").slice(0, 10), erreur: "" })} title="Modifier cette écriture" aria-label="Modifier cette écriture" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginRight: 6 }}><PenTool size={14} /></button>
                   <button onClick={() => setDepenseASupprimer(d)} title="Supprimer cette écriture" aria-label="Supprimer cette écriture" style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><Trash2 size={14} /></button>
                 </>}</td>
               </tr>
             ))}
+            {exclues.length > 0 && (
+              /*
+                Ce que le bilan NE compte PAS, dit à voix haute. Un total qui omettrait des lignes
+                en silence tromperait le comptable plus sûrement qu'un total faux : il n'aurait
+                aucune raison d'aller vérifier.
+              */
+              <tr style={{ borderTop: "2px solid var(--border)", background: "var(--surface2)" }}>
+                <td colSpan={5} style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)", lineHeight: 1.55 }}>
+                  <strong style={{ color: "var(--text)" }}>
+                    {exclues.length} écriture{exclues.length > 1 ? "s" : ""} hors bilan
+                  </strong>
+                  {" — "}{fmt(totalExclu / gnfRate, devise)} qui ne pèse{exclues.length > 1 ? "nt" : ""} pas sur le résultat.
+                  {" "}Elles restent enregistrées et figurent au récapitulatif.
+                </td>
+              </tr>
+            )}
             {depensesPeriode.length === 0 && <tr><td colSpan={5} style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucune dépense, salaire ou commission sur cette période.</td></tr>}
           </tbody>
         </table>

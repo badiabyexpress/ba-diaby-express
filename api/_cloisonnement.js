@@ -557,6 +557,13 @@ const SECTIONS_REGLAGES = [
    */
   ["pointages", "equipe.pointage"],
   ["pointageHoraire", "equipe.pointage"],
+  /*
+   * Les agences dont les commissions ne comptent pas dans le résultat. Ce n'est pas un réglage
+   * non plus, mais une décision comptable : elle retire des charges du bilan, et se garde donc
+   * comme le droit d'écarter une écriture — celui qui ne peut pas gérer les dépenses ne doit pas
+   * pouvoir améliorer le résultat en silence.
+   */
+  ["agencesHorsBilan", "compta.gerer_depenses"],
 ];
 
 /** Le rôle le plus modeste : celui qu'on donne quand on n'a pas le droit d'en choisir un. */

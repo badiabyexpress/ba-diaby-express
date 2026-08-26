@@ -774,3 +774,121 @@ où cet écran doit encore marcher.
 intercepté), `testtroiscles.mjs` (36 cas, connexion et récupération de l'équipe), `t80` (18 cas,
 les écrans du client), `t81` (17 cas, l'écran de l'équipe et son repli hors ligne) et `testcompte`
 (55 cas).
+
+## Choisir ce qui compte dans le bilan (26/08/2026)
+
+Toute écriture de la comptabilité pesait sur le résultat, sans exception. Or il en passe qui n'ont
+rien à y faire : une avance qu'on se remboursera, une dépense saisie deux fois qu'on n'ose pas
+effacer parce qu'elle a servi de justificatif, une somme avancée pour le compte d'un tiers. La
+seule issue était de **supprimer la ligne** — c'est-à-dire de fausser le résultat dans l'autre sens,
+et de perdre la trace de ce qui avait réellement été payé.
+
+Une écriture peut désormais être mise **hors bilan**. Elle reste dans la liste, gardée et lisible ;
+elle cesse seulement d'entrer dans le calcul — dépenses, salaires, commissions manuelles, et donc
+le résultat de la période.
+
+Trois précautions, qui tiennent toutes à la même idée : **ce que le total ne compte pas doit être
+dit.** Un total qui omettrait des lignes en silence tromperait le comptable plus sûrement qu'un
+total faux — il n'aurait aucune raison d'aller vérifier.
+
+- **La ligne pâlit, elle ne disparaît pas.** Elle porte la mention « hors bilan », son montant est
+  barré, et elle garde ses boutons. La faire disparaître reviendrait à la supprimer, ce qu'on
+  voulait précisément éviter.
+- **Ce qui est écarté est chiffré à part**, sous le tableau (« *N* écritures hors bilan — *X* GNF
+  qui ne pèsent pas sur le résultat ») et sur le récapitulatif PDF, qui gagne une ligne « Dont hors
+  bilan ». Le rapport CSV porte la mention dans le libellé, pour qu'un tableur trié par montant ne
+  perde pas l'information.
+- **Le journal d'activité enregistre le geste** — « Écriture retirée du bilan » / « Écriture remise
+  dans le bilan », avec le libellé concerné. Un résultat qui change sans qu'on sache pourquoi est
+  exactement ce qu'une comptabilité ne peut pas se permettre.
+
+Le geste est ouvert à la permission `compta.gerer_depenses`, la même que modifier et supprimer :
+qui peut effacer une écriture peut à plus forte raison l'écarter du calcul. Le champ ne vit que
+dans la comptabilité ; les dépenses de voyage et la caisse sont des listes distinctes, qu'il ne
+touche pas.
+
+Éprouvé par `t89` (22 cas) : le résultat change, la ligne survit, le montant reste intact en base,
+l'écran annonce ce qu'il n'a pas compté, le journal le nomme, et l'on peut tout remettre.
+
+## Les commissions d'agence, et le droit de ne pas les compter (26/08/2026)
+
+Une écriture de dépense peut être écartée du bilan. Les commissions d'agence, non — alors qu'elles
+ne sont même pas saisies : elles se **calculent** sur les colis selon les taux de Configuration. On
+ne pouvait donc ni les corriger ni les effacer, et elles pesaient sur le résultat en toutes
+circonstances. Une agence qui ne doit rien sur la période — commissions déjà réglées en dehors des
+comptes, agence qui ne tourne pas encore, taux provisoire qu'on veut voir sans le subir — faussait
+le bilan sans recours.
+
+Chaque agence porte désormais le même bouton que les écritures. Le choix est gardé dans
+`agencesHorsBilan`, une liste de noms d'agences.
+
+Les mêmes précautions, pour la même raison :
+
+- **L'agence reste affichée avec son montant**, barré. C'est le point important : une commission
+  écartée du bilan **reste calculée et reste due**. La remettre à zéro reviendrait à la retirer à
+  l'agence, ce qui n'est pas la question posée.
+- **Ce qui sort du résultat est nommé et chiffré** — sous le bloc (« 1 agence hors bilan — Madina ·
+  570 000 GNF qui ne pèse pas sur le résultat »), sur la tuile Commissions (« dont auto : … ·
+  … hors bilan ») et sur le récapitulatif PDF. Un résultat qui monte sans qu'on sache pourquoi est
+  un résultat qu'on ne peut pas défendre.
+- **Le journal enregistre le geste** dans les deux sens, avec le nom de l'agence.
+
+**Le nom sert de repère** parce que c'est déjà lui qui relie un colis à son agence partout ailleurs
+(`colis.site`, avec Bambeto par défaut). Une agence renommée redevient donc comptée. C'est le sens
+d'erreur qu'on préfère : un oubli qui **gonfle** les charges se voit sur le bilan, un oubli qui les
+efface, non.
+
+**Le choix se garde comme un droit, pas comme un réglage.** `agencesHorsBilan` entre dans
+`SECTIONS_REGLAGES` (`api/_cloisonnement.js`) sous la permission `compta.gerer_depenses` — la même
+que gérer les dépenses. Sans cela, un agent qui envoie son propre document pourrait retirer des
+charges du résultat, ou en remettre que le responsable en avait sorties, sans jamais ouvrir
+l'écran. Le bouton n'est pas la serrure.
+
+Éprouvé par `t90` (29 cas) et par deux cas de `testdonnees` qui vérifient les **deux sens** de la
+porte : l'agent ne décide pas de ce qui compte dans le bilan, l'administrateur oui — une décision
+comptable qui ne s'enregistrerait pour personne serait un bilan qu'on ne peut pas corriger.
+
+## Les rôles tournent, les personnes ne bougent pas (26/08/2026)
+
+Correction de la section précédente sur le sens de l'envoi — le remède était pris à l'envers, et
+une étiquette réelle l'a montré.
+
+Un colis de partenaire a toujours les mêmes deux parties : le partenaire — ou son correspondant —
+se tient **en Guinée**, son client se tient **au pays de la route**. Le sens de l'envoi n'y change
+rien : ce sont les mêmes personnes, aux mêmes endroits, avec les mêmes numéros. Ce que le sens
+change, c'est **le rôle que chacun tient** :
+
+| Sens | Expéditeur | Destinataire |
+| --- | --- | --- |
+| Conakry → Paris | la partie guinéenne | le client au pays de la route |
+| Paris → Conakry | le client au pays de la route | la partie guinéenne |
+
+On avait d'abord fait tourner **les blocs de saisie** : l'indicatif du premier bloc passait de +224
+à +33 selon le sens. Cela revenait à demander à celui qui saisit d'échanger deux personnes de place
+à chaque changement de sens, alors qu'elles n'ont pas bougé — et personne ne le fait. Le colis
+enregistré s'en est ressenti : l'entreprise guinéenne inscrite **expéditrice d'un colis qu'elle
+reçoit**, avec son numéro en +224 sous la mention du pays de la route, et son client français
+inscrit **« Livrer à » sous la mention GUINÉE**, avec un numéro en +33. Chaque bout se contredisait
+lui-même, et les quatre documents recopiaient la contradiction.
+
+Les blocs sont donc redevenus fixes — le bloc guinéen garde +224, le bloc du client garde
+l'indicatif de la route — et c'est **l'écriture du colis qui distribue les rôles** selon le sens.
+Les titres suivent (« Destinataire · Guinée » sur un colis qui arrive, « Remis par » au lieu de
+« Remis à » quand le correspondant expédie), ainsi que les messages d'erreur : réclamer
+« l'expéditeur » en désignant le bloc de celui qui réceptionne fait chercher l'erreur au mauvais
+endroit.
+
+**La route de l'étiquette était fausse elle aussi**, et pour la même raison : elle s'écrivait
+`GN-<pays>` en toutes circonstances, comme si tout partait de Conakry. Sur un colis Paris →
+Conakry, l'étiquette annonçait donc « GN-FR » — la route à l'envers, sur la seule ligne qui la
+donne, juste au-dessus d'un destinataire qui est bien en Guinée. `routeDuColis` lit désormais les
+deux bouts écrits sur le colis, dans l'ordre où il voyage ; les deux étiquettes (PDF et thermique)
+y passent.
+
+Le cloisonnement n'est pas touché : `buildClientDirectory` écarte le colis partenaire **avant** de
+lire l'un ou l'autre bout, donc l'échange des rôles ne peut pas faire entrer le client d'un
+partenaire dans les listes commerciales de l'entreprise. `clientDuColisPartenaire` continue de
+désigner celui qui n'est pas en Guinée, et retombe donc sur le bon nom dans les deux sens.
+
+Éprouvé par `t88` (18 cas), réécrit : les indicatifs ne s'échangent plus d'un sens à l'autre, les
+titres portent le rôle, et le colis enregistré met le client à un bout et l'entreprise à l'autre.

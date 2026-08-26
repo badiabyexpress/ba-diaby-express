@@ -117,6 +117,42 @@ const EXPLICATIONS_TWILIO = {
   63007: "Le numéro expéditeur n'est pas un numéro WhatsApp valide. Vérifiez TWILIO_WHATSAPP_FROM.",
 };
 
+/*
+ * LA FORME D'UN MODÈLE, telle que Meta l'a validée.
+ *
+ * Un modèle se remplit exactement comme il a été déposé : trois variables si le corps en porte
+ * trois, un en-tête « document » seulement s'il en a un, un paramètre de bouton seulement si le
+ * bouton en attend un. Toute différence est refusée en bloc (#132000), avec le même message pour
+ * les trois causes.
+ *
+ * C'est le piège de la MODIFICATION. On retouche un modèle chez Meta — on ajoute une ligne, on
+ * retire une variable — il repasse en examen, il est réapprouvé, tout paraît normal. Mais le code,
+ * lui, envoie toujours l'ancien nombre de variables : les messages échouent en silence, et l'on ne
+ * s'en aperçoit qu'en constatant que des clients n'ont rien reçu.
+ *
+ * On lit donc la forme réelle chez Meta pour pouvoir la comparer à ce que l'application envoie.
+ */
+function formeDuModele(composants) {
+  const liste = Array.isArray(composants) ? composants : [];
+  const corps = liste.find((c) => c?.type === "BODY");
+  const entete = liste.find((c) => c?.type === "HEADER");
+  const boutons = liste.find((c) => c?.type === "BUTTONS");
+
+  // Le nombre de variables est le PLUS GRAND indice rencontré : « {{1}} … {{3}} » en demande trois.
+  let variables = 0;
+  for (const trouve of String(corps?.text || "").matchAll(/\{\{\s*(\d+)\s*\}\}/g)) {
+    variables = Math.max(variables, Number(trouve[1]) || 0);
+  }
+  const boutonUrl = (boutons?.buttons || []).some(
+    (b) => b?.type === "URL" && /\{\{\s*\d+\s*\}\}/.test(String(b?.url || "")),
+  );
+  return {
+    variables,
+    entete: entete?.format || null,
+    boutonUrl,
+  };
+}
+
 /**
  * Envoi par Meta Cloud API.
  *
@@ -578,7 +614,7 @@ export default async function handler(req, res) {
     }
     try {
       const reponse = await fetch(
-        `https://graph.facebook.com/${VERSION_GRAPH}/${waba}/message_templates?fields=name,status,language,category&limit=100`,
+        `https://graph.facebook.com/${VERSION_GRAPH}/${waba}/message_templates?fields=name,status,language,category,components&limit=100`,
         { headers: { Authorization: `Bearer ${meta.jeton}` } },
       );
       const corps = await reponse.json();
@@ -591,6 +627,7 @@ export default async function handler(req, res) {
       }
       const modeles = (corps.data || []).map((m) => ({
         nom: m.name, statut: m.status, langue: m.language, categorie: m.category,
+        ...formeDuModele(m.components),
       }));
       return res.status(200).json({
         modeles,

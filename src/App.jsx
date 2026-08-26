@@ -2626,6 +2626,22 @@ async function saveData(data) {
 // vraies versions qui mettent les écritures en file d’attente hors-ligne et les rejouent au retour
 // de la connexion — remplacées automatiquement au déploiement (voir apply_deploy_patches.py).
 
+/**
+ * L'intention de remplacer en masse, posée sur le document juste avant de l'enregistrer.
+ *
+ * Le serveur refuse désormais une écriture qui fait fondre les colis, les clients ou le
+ * répertoire : c'est ainsi qu'un onglet resté ouvert a effacé seize colis d'un coup le 26 août.
+ * Mais trois gestes suppriment légitimement en masse — réinitialiser les colis, restaurer une
+ * sauvegarde, importer un fichier. Ils marquent donc leur intention, datée, et le serveur la
+ * retire aussitôt : elle vaut pour cette écriture-là et pour aucune autre.
+ *
+ * Une page périmée n'en porte aucune. C'est toute la différence entre le geste et l'accident.
+ */
+const CHAMP_INTENTION = "_remplacementVolontaire";
+function avecIntentionDeRemplacer(document, quoi) {
+  return { ...document, [CHAMP_INTENTION]: { le: new Date().toISOString(), quoi } };
+}
+
 const BACKUP_PREFIX = "bde-backup-";
 const BACKUP_RETENTION_DAYS = 14;
 /**
@@ -23721,6 +23737,15 @@ function SauvegardePage({ data, persist, notify, session, onBack }) {
     <div>
       <ConfigPageHeader title="Sauvegarde des données" desc="Téléchargez une copie complète de votre plateforme, ou restaurez-la depuis un fichier." onBack={onBack} />
 
+      {/*
+        L'état de la sauvegarde de nuit, ici aussi.
+        Cette carte est celle qu'on ouvre quand on cherche son filet — sa description dit « le seul
+        filet en cas de perte ». Y taire l'état de la sauvegarde automatique laisserait croire que
+        le téléchargement manuel est tout ce qui existe, ou qu'il est superflu. C'est précisément
+        là que la réponse doit se trouver.
+      */}
+      <EtatVeille data={data} notify={notify} />
+
       <PoidsDesDonnees data={data} persist={persist} notify={notify} session={session} />
 
       {/*
@@ -24108,6 +24133,68 @@ function JournalActivitePage({ data, onBack }) {
   );
 }
 
+/**
+ * L'état de la sauvegarde de nuit — dit à voix haute.
+ *
+ * La sauvegarde se faisait depuis le navigateur, au chargement de l'application : elle supposait
+ * donc que quelqu'un l'ouvre ce jour-là. Elle est désormais faite par le serveur, à heure fixe.
+ * Mais une tâche planifiée qui travaille en silence est une tâche dont on ne sait rien : elle peut
+ * n'avoir jamais tourné, et l'écran continuerait d'annoncer une protection imaginaire.
+ *
+ * Ce bloc lit le relevé que la tâche écrit elle-même. Trois états, et un seul est rassurant.
+ */
+function EtatVeille({ data, notify }) {
+  const [encours, setEncours] = useState(false);
+  const veille = data?.veille || null;
+  const quand = veille?.le ? new Date(veille.le) : null;
+  /* « Cette nuit » ne veut rien dire tout seul : c'est la fraîcheur qui compte. */
+  const heures = quand ? (Date.now() - quand.getTime()) / 3600000 : null;
+  const recente = heures !== null && heures < 30;
+  const bon = recente && (veille.etat === "ok" || veille.etat === "deja-faite");
+
+  async function sauvegarderMaintenant() {
+    setEncours(true);
+    try {
+      const reponse = await appelServeurQuiDepense("/api/veille", { method: "POST" });
+      const corps = await reponse.json().catch(() => ({}));
+      if (reponse.ok) {
+        notify?.(corps.ecrite === false
+          ? "La sauvegarde d’aujourd’hui existe déjà — elle n’a pas été refaite."
+          : "Sauvegarde enregistrée sur le serveur.");
+      } else {
+        notify?.(corps.message || corps.error || "Sauvegarde impossible pour le moment.");
+      }
+    } catch (e) {
+      notify?.("Serveur injoignable — sauvegarde impossible pour le moment.");
+    } finally {
+      setEncours(false);
+    }
+  }
+
+  const teinte = bon ? "ok" : (veille ? "danger" : "warn");
+  const message = !veille
+    ? "Le serveur n’a encore jamais sauvegardé. Tant que cette ligne ne change pas, la seule protection est la copie que vous téléchargez vous-même."
+    : !recente
+      ? `Dernier passage il y a plus de 30 heures (${quand.toLocaleString("fr-FR")}). La tâche planifiée ne tourne plus.`
+      : veille.etat === "document-suspect"
+        ? "Le serveur a refusé de sauvegarder : le document ne lui a pas semblé complet. Rien n’a été effacé — appelez-nous avant de travailler."
+        : veille.etat === "echec"
+          ? `Échec de la dernière sauvegarde (${veille.raison || "raison inconnue"}).`
+          : `Dernière sauvegarde ${quand.toLocaleString("fr-FR")}${veille.colis !== undefined ? ` — ${veille.colis} colis, ${veille.comptes} comptes` : ""}.`;
+
+  return (
+    <div style={{ background: `var(--${teinte}-bg)`, border: `1px solid var(--${teinte}-border)`, borderRadius: 10, padding: "11px 13px", marginBottom: 14, display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
+      {bon ? <CheckCircle2 size={15} color={`var(--${teinte}-fg)`} style={{ flexShrink: 0, marginTop: 2 }} />
+        : <AlertTriangle size={15} color={`var(--${teinte}-fg)`} style={{ flexShrink: 0, marginTop: 2 }} />}
+      <div style={{ fontSize: 12.5, color: `var(--${teinte}-fg)`, lineHeight: 1.55, flex: 1, minWidth: 200 }}>{message}</div>
+      <button onClick={sauvegarderMaintenant} disabled={encours}
+        style={{ background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: encours ? "default" : "pointer", opacity: encours ? 0.6 : 1, flexShrink: 0 }}>
+        {encours ? "Sauvegarde…" : "Sauvegarder maintenant"}
+      </button>
+    </div>
+  );
+}
+
 function ParametresSystemePage({ data, persist, notify, onBack, offline }) {
   const [confirmReset, setConfirmReset] = useState(false);
   const fileRef = useRef(null);
@@ -24123,7 +24210,7 @@ function ParametresSystemePage({ data, persist, notify, onBack, offline }) {
     setRestoring(key);
     try {
       const snapshot = await loadBackup(key);
-      persist(snapshot);
+      persist(avecIntentionDeRemplacer(snapshot, `restauration-${key}`));
       notify?.(`Données restaurées depuis la sauvegarde du ${key.replace(BACKUP_PREFIX, "")}`);
     } catch (e) {
       notify?.("Échec de la restauration de cette sauvegarde");
@@ -24133,7 +24220,7 @@ function ParametresSystemePage({ data, persist, notify, onBack, offline }) {
   }
 
   function resetColis() {
-    persist({ ...data, colis: [] });
+    persist(avecIntentionDeRemplacer({ ...data, colis: [] }, "reinitialisation-colis"));
     notify?.("Tous les colis ont été supprimés");
     setConfirmReset(false);
   }
@@ -24154,7 +24241,7 @@ function ParametresSystemePage({ data, persist, notify, onBack, offline }) {
       try {
         const parsed = JSON.parse(reader.result);
         if (!parsed.users || !parsed.colis) throw new Error("format invalide");
-        persist(parsed);
+        persist(avecIntentionDeRemplacer(parsed, "import-fichier"));
         notify?.("Données restaurées depuis la sauvegarde");
       } catch (err) {
         notify?.("Échec de la restauration — fichier invalide");
@@ -24245,9 +24332,10 @@ function ParametresSystemePage({ data, persist, notify, onBack, offline }) {
 
         <div style={{ background: "var(--surface)", borderRadius: 14, padding: 20, border: "1px solid var(--border)" }}>
           <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Sauvegardes automatiques</div>
-          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>Une copie complète est enregistrée automatiquement une fois par jour, conservée 14 jours.</div>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>Une copie complète est enregistrée chaque nuit par le serveur, conservée 14 jours — que quelqu’un ouvre l’application ou non.</div>
+          <EtatVeille data={data} notify={notify} />
           {backups === null && <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Chargement…</div>}
-          {backups !== null && backups.length === 0 && <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Aucune sauvegarde automatique pour le moment — la première sera créée à la prochaine ouverture de l’application.</div>}
+          {backups !== null && backups.length === 0 && <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Aucune sauvegarde pour le moment — la prochaine passera cette nuit.</div>}
           {backups && backups.length > 0 && (
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {backups.map((key) => {

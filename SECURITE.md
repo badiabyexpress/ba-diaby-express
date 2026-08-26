@@ -892,3 +892,114 @@ désigner celui qui n'est pas en Guinée, et retombe donc sur le bon nom dans le
 
 Éprouvé par `t88` (18 cas), réécrit : les indicatifs ne s'échangent plus d'un sens à l'autre, les
 titres portent le rôle, et le colis enregistré met le client à un bout et l'entreprise à l'autre.
+
+## La sauvegarde qui ne dépend de personne (26/08/2026)
+
+Toute l'entreprise tient dans un seul document JSON : les colis, les clients, la caisse, les
+factures, les comptes. Il existait bien une copie quotidienne — mais elle partait du
+**navigateur**, au chargement de l'application, et seulement là. Autrement dit, elle supposait que
+quelqu'un ouvre l'application ce jour-là.
+
+C'est exactement la supposition qui tombe quand on en a le plus besoin. L'agence ferme une
+semaine, personne ne se connecte, et il n'existe aucune copie de cette semaine ; une fausse
+manœuvre le lundi matin efface alors huit jours de travail. Pire, l'écran de Configuration
+annonçait « la première sera créée à la prochaine ouverture de l'application » — une protection
+conditionnelle, présentée sans sa condition.
+
+`api/veille.js` fait le même geste depuis le serveur, à heure fixe (2 h, déclarée dans
+`vercel.json`), que quelqu'un ouvre l'application ou non. La sauvegarde du navigateur reste en
+place : deux filets valent mieux qu'un, et celui-ci continue de servir tant que la tâche n'est pas
+configurée.
+
+**Ce que la tâche refuse de faire.** Elle ne sauvegarde pas n'importe quoi. Un document vide ou
+tronqué — une lecture partielle, une base en cours de migration — recopié tel quel occuperait la
+place du jour **et** pousserait une bonne copie hors de la fenêtre de quatorze jours. Une mauvaise
+copie qui chasse les bonnes est pire que pas de copie du tout : on se croit protégé.
+`documentPlausible` vérifie donc le minimum qui ne peut pas manquer — c'est un objet, il porte une
+équipe, cette équipe n'est pas vide — et à défaut la tâche s'arrête net : **rien n'est écrit, et
+surtout rien n'est purgé.** Garder les anciennes copies est alors la seule chose utile qui reste à
+faire. La purge ne s'exécute d'ailleurs qu'**après** une écriture réussie, jamais avant.
+
+**La copie du jour ne se réécrit pas.** Ce n'est pas une économie : la première copie de la journée
+précède les fausses manœuvres de la journée. La réécrire par-dessus reviendrait à sauvegarder
+l'accident.
+
+**Trois façons légitimes d'appeler**, et le secret de la tâche est éprouvé en premier — il voyage
+dans l'en-tête `Authorization`, où `refusSaufEquipe` chercherait un jeton de session et n'en
+trouverait pas :
+
+| Qui | Comment |
+| --- | --- |
+| La tâche planifiée | `Authorization: Bearer $CRON_SECRET`, comparé en temps constant |
+| Une autre fonction du déploiement | le laissez-passer interne `x-bde-interne` |
+| Un membre de l'équipe | sa session, via le bouton « Sauvegarder maintenant » |
+
+**`CRON_SECRET` est obligatoire.** Vercel n'ajoute l'en-tête à ses appels planifiés que si la
+variable existe ; sans elle, la tâche appellerait sans rien présenter, et cette adresse serait
+ouverte à qui la devine. La fonction la refuse alors — la sauvegarde ne se fait plus, mais la porte
+reste fermée. Un client ou un partenaire connecté est refusé dans tous les cas.
+
+**Et le relevé, pour qu'on sache qu'elle a tourné.** Une tâche planifiée silencieuse est une tâche
+dont on ne sait rien : elle peut n'avoir jamais tourné, et l'écran continuerait d'annoncer une
+protection imaginaire — c'est ce qui rendait un webhook muet indétectable. Chaque passage écrit
+`veille` dans le document, l'échec compris, et Configuration en tire trois états distincts :
+jamais sauvegardé · silence de plus de 30 heures · à jour, avec le nombre de colis et de comptes.
+Ce relevé est protégé dans `fusionnerEcritureEquipe` comme `receptionWhatsApp` : une page ouverte
+avant le passage de la tâche l'effacerait sinon en enregistrant, et l'écran se remettrait à dire
+qu'aucune sauvegarde n'existe.
+
+Éprouvé par `testveille` (51 cas, la vraie fonction serveur avec la base interceptée) et `t91`
+(17 cas, les trois états de l'écran et le bouton manuel).
+
+## L'incident du 26 août, et le garde-fou contre la page périmée (26/08/2026)
+
+**Ce qui s'est passé.** À 21 h 41, un appareil a enregistré par-dessus la base une copie où les
+colis, les comptes clients, le répertoire et les dépenses étaient vides. En un enregistrement :
+seize colis, trois comptes clients, trois cent quarante-trois contacts, quatre écritures et trois
+bordereaux effacés. Le journal d'activité, lui, a survécu — parce qu'il était déjà protégé dans
+`fusionnerEcritureEquipe`. Rien d'autre ne l'était.
+
+C'est le journal qui a permis de tout reconstituer : il portait encore les 230 actions de la
+journée, et nommait le geste déclencheur (« Profil utilisateur modifié — MOUSTAPAHA BAH », 21 h 40).
+
+**La restauration** est partie du document vivant, pas de la sauvegarde : on n'y a remis que les
+collections effacées, en réunissant les colis et les factures par identifiant. Les modifications
+du soir — le renommage d'un identifiant partenaire, une fiche de compte, les messages WhatsApp,
+les pointages — ont donc été conservées. L'état avant restauration a d'abord été copié sous
+`bde-backup-2026-08-26-avant-restauration`, pour que la réparation elle-même soit annulable.
+
+**La cause de fond.** L'application envoie le document ENTIER à chaque geste. Un onglet resté
+ouvert depuis une heure renvoie donc l'état du monde tel qu'il le croit, et l'écrase. Le
+cloisonnement protégeait déjà les comptes, le journal et les messages ; il ne disait rien du reste.
+
+**La règle ajoutée.** Une écriture ne peut pas faire fondre une collection. Chaque suppression,
+dans l'application, est un enregistrement : passer de seize colis à zéro d'un coup n'est jamais un
+geste, c'est un accident. Le refus porte sur neuf collections — `colis`, `clientAccounts`,
+`repertoire`, `depenses`, `bordereaux`, `facturesPartenaire`, `preAlertes`, `remisesCaisse`,
+`voyages` — et se déclenche quand **plus d'une entrée disparaît d'un coup ET qu'il en reste moins
+de la moitié**.
+
+Le seuil ne porte pas sur la taille de la liste. Un premier essai ne gardait que les listes d'au
+moins cinq entrées : il laissait donc filer les trois comptes clients et les quatre dépenses,
+c'est-à-dire une partie exacte de ce qui avait été perdu. La taille ne dit rien ; ce qui compte est
+ce qu'une seule écriture emporte.
+
+**Les trois suppressions légitimes continuent de fonctionner.** Réinitialiser les colis, restaurer
+une sauvegarde, importer un fichier : ces gestes posent sur le document une intention datée
+(`_remplacementVolontaire`) juste avant d'enregistrer. Une page périmée n'en porte aucune — ou en
+porte une vieille, ce qui revient au même : la fenêtre est de dix minutes. Le serveur **retire
+l'intention avant d'écrire**, car la laisser s'installer donnerait à toutes les pages ouvertes un
+laissez-passer permanent, et le garde-fou serait mort dès l'enregistrement suivant.
+
+Un garde-fou qui bloquerait le travail ordinaire serait retiré dans la semaine et ne protégerait
+plus rien : retirer un colis sur seize passe, en retirer six aussi. C'est en perdre neuf d'un coup
+qui ne passe pas.
+
+**Le refus se consigne.** Sans trace, l'appareil fautif recommencerait à chaque enregistrement et
+personne ne saurait qu'une page périmée tourne quelque part — jusqu'au jour où elle passe. Le
+journal porte donc « Enregistrement refusé — page périmée », avec le détail de ce qui a été sauvé
+(`colis : 16 → 0 · repertoire : 343 → 0`) et le nom du compte qui a envoyé. C'est cette ligne qui
+permet d'aller fermer l'onglet.
+
+Éprouvé par `testgardefou` (34 cas), qui rejoue l'envoi exact du 26 août et vérifie aussi que les
+trois suppressions légitimes passent toujours.

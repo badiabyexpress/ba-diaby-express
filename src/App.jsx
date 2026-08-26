@@ -8792,6 +8792,24 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
 
   const partenaire = (partenaires || []).find((p) => p.id === partenaireId);
   const reglages = reglagesPartenaire(partenaire);
+
+  /*
+   * LES DEUX BOUTS DE LA ROUTE, ET QUI SE TIENT À CHACUN.
+   *
+   * Le sens de l'envoi ne changeait que le tarif : les deux blocs du formulaire gardaient leurs
+   * indicatifs, l'expéditeur en Guinée et le destinataire à l'étranger. Sur « Paris → Conakry »,
+   * ils étaient donc à l'envers — on proposait +224 à quelqu'un qui est à Paris et +33 à celui qui
+   * réceptionne à Conakry. Un numéro saisi sous le mauvais indicatif ne sonne nulle part, et rien
+   * ne le disait : ni l'écran, ni l'étiquette, ni la facture.
+   *
+   * Le colis quitte Conakry : l'expéditeur est en Guinée, le destinataire au pays de la route.
+   * Le colis quitte le pays de la route : c'est l'inverse. Les documents lisent ensuite
+   * `expediteurPays` et `destinatairePays`, donc les quatre suivent d'eux-mêmes.
+   */
+  const paysExpediteur = sens === "export" ? "GN" : destPays;
+  const paysDestinataire = sens === "export" ? destPays : "GN";
+  const nomDuPays = (code) => COUNTRIES.find((p) => p.code === code)?.name || "";
+  const indicatifDe = (code) => DIAL_CODES.find((c) => c.name === nomDuPays(code))?.dial;
   const annoncesDuPartenaire = (annonces || []).filter((a) => !partenaireId || a.partenaireId === partenaireId);
 
   function reprendreAnnonce(id) {
@@ -9090,14 +9108,17 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
           </div>
         )}
 
-        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "4px 0 10px" }}>Expéditeur</div>
+        {/* Le pays est écrit dans le titre : c'est ce qui empêche de remplir les deux bouts à l'envers. */}
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "4px 0 10px" }}>
+          Expéditeur · {FLAGS[paysExpediteur] || ""} {nomDuPays(paysExpediteur)}
+        </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
           <Field label="Prénom"><input value={expPrenom} onChange={(e) => setExpPrenom(e.target.value)} style={inputStyle} /></Field>
           <Field label="Nom *"><input value={expNom} onChange={(e) => { setErr(""); setExpNom(e.target.value); }} style={inputStyle} /></Field>
         </div>
         <Field label="Téléphone (facultatif)">
-          <PhoneInput value={expTelephone} onChange={setExpTelephone}
-            defaultDial={DIAL_CODES.find((c) => c.name === COUNTRIES.find((p) => p.code === (partenaire?.paysOperation || "GN"))?.name)?.dial} />
+          <PhoneInput key={`exp-${paysExpediteur}`} value={expTelephone} onChange={setExpTelephone}
+            defaultDial={indicatifDe(paysExpediteur)} />
         </Field>
 
         {/*
@@ -9109,16 +9130,18 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
         */}
         {identiteRequise ? (
           <>
-            <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>Destinataire</div>
+            <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 13.5, margin: "12px 0 10px" }}>
+              Destinataire · {FLAGS[paysDestinataire] || ""} {nomDuPays(paysDestinataire)}
+            </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12 }}>
               <Field label="Prénom"><input value={clientPrenom} onChange={(e) => setClientPrenom(e.target.value)} style={inputStyle} /></Field>
               <Field label="Nom *"><input value={clientNom} onChange={(e) => { setErr(""); setClientNom(e.target.value); }} style={inputStyle} /></Field>
             </div>
-            {/* Indicatif calé sur le pays de destination : un destinataire allemand n'a pas un
-                numéro guinéen, et le champ le refuserait comme invalide. */}
+            {/* Indicatif calé sur le pays où se tient le destinataire — qui change avec le sens :
+                un destinataire à Conakry n'a pas un numéro français, et le champ le refuserait. */}
             <Field label="Téléphone (facultatif)">
-              <PhoneInput value={clientTelephone} onChange={setClientTelephone}
-                defaultDial={DIAL_CODES.find((c) => c.name === COUNTRIES.find((p) => p.code === destPays)?.name)?.dial} />
+              <PhoneInput key={`dest-${paysDestinataire}`} value={clientTelephone} onChange={setClientTelephone}
+                defaultDial={indicatifDe(paysDestinataire)} />
             </Field>
           </>
         ) : (
@@ -9136,8 +9159,8 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
               <Field label="Nom *"><input value={clientNom} onChange={(e) => { setErr(""); setClientNom(e.target.value); }} style={inputStyle} /></Field>
             </div>
             <Field label="Téléphone (facultatif)">
-              <PhoneInput value={clientTelephone} onChange={setClientTelephone}
-                defaultDial={DIAL_CODES.find((c) => c.name === COUNTRIES.find((p) => p.code === destPays)?.name)?.dial} />
+              <PhoneInput key={`remis-${paysDestinataire}`} value={clientTelephone} onChange={setClientTelephone}
+                defaultDial={indicatifDe(paysDestinataire)} />
             </Field>
             <Field label="Repère du colis *">
               <input value={repere} onChange={(e) => { setErr(""); setRepere(e.target.value); }} style={inputStyle}
@@ -24924,6 +24947,23 @@ function redimensionnerLogo(file, maxWidth = 320) {
  * que lui-même adresse à ses clients, dont l'application ignore tout. Elle porte l'identité de
  * l'entreprise, pas celle du partenaire : c'est nous qui réclamons le paiement.
  */
+/**
+ * Le client du partenaire sur un colis donné, quel que soit le sens de l'envoi.
+ *
+ * Il était toujours pris dans `destinataire`. Depuis que chaque partie se tient au bon bout de la
+ * route, ce n'est plus vrai : sur un colis qui part de Paris vers Conakry, le client du partenaire
+ * est l'EXPÉDITEUR, et `destinataire` désigne celui qui réceptionne à Conakry. Lire le mauvais
+ * champ affichait sur la facture un nom que le partenaire ne reconnaissait pas.
+ *
+ * La règle est simple : le client est celui qui n'est pas en Guinée. Un colis dont les deux bouts
+ * sont en Guinée — ou dont le pays n'a pas été renseigné — retombe sur le destinataire, comme avant.
+ */
+function clientDuColisPartenaire(colis) {
+  const partDeGuinee = (colis?.expediteurPays || "GN") === "GN";
+  const nom = partDeGuinee ? colis?.destinataire : colis?.expediteur;
+  return String(nom || colis?.destinataire || "—");
+}
+
 async function construireFacturePartenaireDoc(facture, partenaire, colisFactures) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF());
@@ -24959,7 +24999,16 @@ async function construireFacturePartenaireDoc(facture, partenaire, colisFactures
   doc.setFont(undefined, "bold"); doc.setFontSize(8.5); doc.setTextColor(255, 255, 255);
   const colX = [M + 3, M + 36, M + 96, W - M - 30, W - M - 3];
   doc.text("N° DE SUIVI", colX[0], y + 5.4);
-  doc.text("DESTINATAIRE", colX[1], y + 5.4);
+  /*
+   * « CLIENT », et non « DESTINATAIRE ».
+   *
+   * Depuis que le sens de l'envoi place chaque partie au bon bout, le client du partenaire n'est
+   * plus toujours le destinataire : sur un colis qui part de Paris vers Conakry, c'est lui
+   * l'expéditeur. Garder l'ancien titre aurait nommé « destinataire » quelqu'un qui expédie, ou
+   * — pire — affiché le correspondant à Conakry à la place du client que le partenaire cherche
+   * sur sa facture.
+   */
+  doc.text("CLIENT", colX[1], y + 5.4);
   doc.text("CONTENU", colX[2], y + 5.4);
   doc.text("POIDS", colX[3], y + 5.4, { align: "right" });
   doc.text("MONTANT", colX[4], y + 5.4, { align: "right" });
@@ -24971,7 +25020,7 @@ async function construireFacturePartenaireDoc(facture, partenaire, colisFactures
     if (i % 2 === 1) { doc.setFillColor(247, 249, 252); doc.rect(M, y, W - 2 * M, 8, "F"); }
     doc.setTextColor(...INK);
     doc.text(String(c.tracking || "—"), colX[0], y + 5.4);
-    doc.text(doc.splitTextToSize(String(c.destinataire || "—"), 56)[0], colX[1], y + 5.4);
+    doc.text(doc.splitTextToSize(clientDuColisPartenaire(c), 56)[0], colX[1], y + 5.4);
     // Le timbre refacturé apparaît sur la ligne : le partenaire doit pouvoir vérifier qu'il paie
     // un envoi postal, et non une majoration de transport inexpliquée.
     const contenu = ((c.produits || []).map((p) => `${p.quantite || 1}× ${p.nom || "article"}`).join(", ") || "—")

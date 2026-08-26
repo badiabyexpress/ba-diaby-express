@@ -512,6 +512,31 @@ pas non plus en inventer un.
 
 Éprouvé par `testentrant` (53 cas) et `t82` (18 cas, les deux états de l'écran).
 
+## Le sens de l'envoi, et les deux bouts de la route (26/08/2026)
+
+Sur le dépôt d'un colis partenaire, le sens ne changeait que le tarif. Les deux blocs du
+formulaire gardaient leurs indicatifs — l'expéditeur en Guinée, le destinataire à l'étranger —
+quel que soit le choix. Sur « Paris → Conakry » ils étaient donc à l'envers : on proposait **+224**
+à quelqu'un qui se tient à Paris, et **+33** à celui qui réceptionne à Conakry.
+
+Un numéro saisi sous le mauvais indicatif ne sonne nulle part, et rien ne le disait : ni l'écran,
+ni l'étiquette, ni le ticket, ni la facture.
+
+Les deux bouts suivent maintenant le sens — indicatif proposé, et pays écrit dans le titre du bloc,
+qui est ce qui empêche de remplir les deux côtés à l'envers. Comme les quatre documents lisent
+`expediteurPays` et `destinatairePays` sur le colis, une seule règle à l'enregistrement les corrige
+tous.
+
+La facture partenaire nomme désormais la colonne **« CLIENT »** et non « DESTINATAIRE » : depuis
+que chaque partie se tient au bon bout, le client du partenaire n'est plus toujours le
+destinataire — sur un colis qui part de Paris, c'est lui l'expéditeur. Garder l'ancien titre aurait
+nommé « destinataire » quelqu'un qui expédie, ou affiché le correspondant à Conakry à la place du
+client que le partenaire cherche sur sa facture. `clientDuColisPartenaire` tranche : le client est
+celui qui n'est pas en Guinée, et l'on retombe sur le destinataire quand les deux bouts le sont.
+
+Éprouvé par `t88` (17 cas), qui enregistre un vrai colis dans le sens « Paris → Conakry » et relit
+ce qui a été écrit.
+
 ## L'expéditeur qui ne comptait pas (26/08/2026)
 
 `buildClientDirectory` créait la fiche d'un expéditeur une fois, avec `count: 0`, et n'y revenait

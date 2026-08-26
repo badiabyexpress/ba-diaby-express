@@ -21140,9 +21140,41 @@ function ComptabilitePage({ data, persist, session, notify }) {
       : `« ${d.nom || d.type} » compte de nouveau dans le bilan.`);
   }
 
+  /*
+   * Le même choix pour les commissions d'agence.
+   *
+   * Elles ne sont pas saisies : elles se calculent sur les colis, selon les taux de Configuration.
+   * On ne peut donc ni les corriger ni les effacer — et elles pesaient malgré tout sur le résultat
+   * en toutes circonstances. Or une agence peut ne rien devoir sur une période : commissions déjà
+   * réglées en dehors des comptes, agence qui ne tourne pas encore, taux provisoire qu'on veut
+   * voir sans le subir. C'est la même décision qu'une écriture hors bilan, et elle se prend au
+   * même endroit.
+   *
+   * Le nom sert de repère parce que c'est déjà lui qui relie un colis à son agence partout
+   * ailleurs dans l'application (`colis.site`). Une agence renommée redevient donc comptée : mieux
+   * vaut qu'elle revienne au bilan — un oubli qui gonfle les charges se voit — que l'inverse.
+   */
+  const agencesHorsBilan = data.agencesHorsBilan || [];
+  function basculerAgence(nom) {
+    const desormaisExclue = !agencesHorsBilan.includes(nom);
+    persist({
+      ...data,
+      agencesHorsBilan: desormaisExclue
+        ? [...agencesHorsBilan, nom]
+        : agencesHorsBilan.filter((x) => x !== nom),
+      activityLog: pushActivity(data, session,
+        desormaisExclue ? "Commissions d’agence retirées du bilan" : "Commissions d’agence remises dans le bilan",
+        nom),
+    });
+    notify?.(desormaisExclue
+      ? `Les commissions de ${nom} ne comptent plus dans le bilan.`
+      : `Les commissions de ${nom} comptent de nouveau dans le bilan.`);
+  }
+
   const {
     colisPeriode, recettes, facture, depensesPeriode, totalDepenses, totalSalaires, commissionsManuelles,
     commissionsAuto, gnfRate, totalCommissions, commissionsParAgence, exclues, totalExclu,
+    commissionsAutoExclues, agencesEcartees,
     benefice, resteAEncaisser, totalIndemnites, litigesOuverts, parMode, joursTries, paiementsPeriode,
   } = useMemo(() => {
     const now = new Date();
@@ -21176,13 +21208,30 @@ function ComptabilitePage({ data, persist, session, notify }) {
     const commissionsManuelles = depensesPeriode.filter((d) => d.type === "Commission" && compteDansLeBilan(d)).reduce((s, d) => s + d.montant, 0); // en GNF
     const exclues = depensesPeriode.filter((d) => d.horsBilan);
     const totalExclu = exclues.reduce((s, d) => s + (Number(d.montant) || 0), 0); // en GNF
-    const commissionsAuto = colisPeriode.reduce((s, c) => s + calcCommission(c, data.commissionConfig, data.categories), 0); // EUR-équivalent (taux en €)
+    /*
+     * Les commissions d'agence suivent la même règle que les écritures.
+     *
+     * L'agence d'un colis est son `site` — le même repère que partout ailleurs, avec Bambeto par
+     * défaut. Ce qui est écarté est retiré du total ET compté à part : sans ce second chiffre, le
+     * résultat baisserait sans que rien ne dise de combien.
+     */
+    const ecartees = new Set(data.agencesHorsBilan || []);
+    const agenceDuColis = (c) => c.site || "Bambeto";
+    const commissionDuColis = (c) => calcCommission(c, data.commissionConfig, data.categories);
+    const commissionsAuto = colisPeriode
+      .filter((c) => !ecartees.has(agenceDuColis(c)))
+      .reduce((s, c) => s + commissionDuColis(c), 0); // EUR-équivalent (taux en €)
+    const commissionsAutoExclues = colisPeriode
+      .filter((c) => ecartees.has(agenceDuColis(c)))
+      .reduce((s, c) => s + commissionDuColis(c), 0); // EUR-équivalent
     const gnfRate = LIVE_RATES.GNF || CURRENCIES.GNF;
     const totalCommissions = commissionsAuto + commissionsManuelles / gnfRate;
     const commissionsParAgence = sitesLocaux(data.sites).map((s) => ({
       nom: s.nom,
-      montant: colisPeriode.filter((c) => (c.site || "Bambeto") === s.nom).reduce((sum, c) => sum + calcCommission(c, data.commissionConfig, data.categories), 0),
+      horsBilan: ecartees.has(s.nom),
+      montant: colisPeriode.filter((c) => agenceDuColis(c) === s.nom).reduce((sum, c) => sum + commissionDuColis(c), 0),
     }));
+    const agencesEcartees = commissionsParAgence.filter((a) => a.horsBilan);
     /*
      * Pas de commission par partenaire : un partenaire facture ses clients lui-même, l'entreprise
      * ne prélève rien sur ses colis et n'a donc aucune commission à lui verser. Le tableau qui
@@ -21212,11 +21261,11 @@ function ComptabilitePage({ data, persist, session, notify }) {
 
     return {
       colisPeriode, recettes, facture, depensesPeriode, totalDepenses, totalSalaires, commissionsManuelles,
-      exclues, totalExclu,
+      exclues, totalExclu, commissionsAutoExclues, agencesEcartees,
       commissionsAuto, gnfRate, totalCommissions, commissionsParAgence,
       benefice, resteAEncaisser, totalIndemnites, litigesOuverts, parMode, joursTries, paiementsPeriode,
     };
-  }, [data.colis, depenses, data.sites, data.users, data.commissionConfig, data.categories, periode]);
+  }, [data.colis, depenses, data.sites, data.users, data.commissionConfig, data.categories, data.agencesHorsBilan, periode]);
 
   /*
    * Une écriture s'enregistre ET se corrige. Elle ne s'enregistre jamais à zéro en silence :
@@ -21328,6 +21377,10 @@ function ComptabilitePage({ data, persist, session, notify }) {
       if (exclues.length > 0) {
         kpis.push([`Dont hors bilan (${exclues.length} écriture${exclues.length > 1 ? "s" : ""}, non déduites)`,
           fmt(totalExclu / gnfRate, devise)]);
+      }
+      if (agencesEcartees.length > 0) {
+        kpis.push([`Commissions d’agence hors bilan (${agencesEcartees.map((a) => a.nom).join(", ")}, non déduites)`,
+          fmt(commissionsAutoExclues, devise)]);
       }
       const hasAutoTable = await ensureAutoTable();
       if (hasAutoTable && doc.autoTable) {
@@ -21445,7 +21498,10 @@ function ComptabilitePage({ data, persist, session, notify }) {
         <StatCard label="Recettes encaissées" value={fmt(recettes, devise)} icon={CheckCircle2} tint="#16A163" trend={`Facturé : ${fmt(facture, devise)}`} trendColor="var(--muted)" />
         <StatCard label="Dépenses" value={fmt(totalDepenses / gnfRate, devise)} icon={Receipt} tint="#E23F52" />
         <StatCard label="Salaires" value={fmt(totalSalaires / gnfRate, devise)} icon={Users} tint="#B8801C" />
-        <StatCard label="Commissions" value={fmt(totalCommissions, devise)} icon={DollarSign} tint="#8B5CF6" trend={`dont auto : ${fmt(commissionsAuto, devise)}`} trendColor="var(--muted)" />
+        {/* La tuile compte ce que le résultat compte : mentionner ce qui en est sorti évite de croire à une baisse d'activité. */}
+        <StatCard label="Commissions" value={fmt(totalCommissions, devise)} icon={DollarSign} tint="#8B5CF6"
+          trend={`dont auto : ${fmt(commissionsAuto, devise)}${commissionsAutoExclues > 0.005 ? ` · ${fmt(commissionsAutoExclues, devise)} hors bilan` : ""}`}
+          trendColor="var(--muted)" />
       </div>
 
       <div style={{ background: benefice >= 0 ? "var(--ok-bg)" : "var(--danger-bg)", borderRadius: 14, padding: 20, marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -21482,15 +21538,48 @@ function ComptabilitePage({ data, persist, session, notify }) {
       {commissionsParAgence.length > 0 && (
         <div style={{ background: "var(--surface)", borderRadius: 14, padding: 20, border: "1px solid var(--border)", marginBottom: 20 }}>
           <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Commissions automatiques par agence</div>
-          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14 }}>Calculées selon les taux définis dans Configuration → Commissions par Agence.</div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 14 }}>
+            Calculées selon les taux définis dans Configuration → Commissions par Agence.
+            {effectivePermission(session, "compta.gerer_depenses") && " Chacune peut être retirée du résultat sans changer son calcul."}
+          </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12 }}>
             {commissionsParAgence.map((a) => (
-              <div key={a.nom} style={{ background: "var(--surface2)", borderRadius: 12, padding: 14 }}>
-                <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{a.nom}</div>
-                <div style={{ fontSize: 18, fontWeight: 700, color: "var(--ok-fg)", fontFamily: "'Space Grotesk',sans-serif", marginTop: 4 }}>{fmt(a.montant, devise)}</div>
+              /*
+                Une agence écartée reste affichée avec son montant : ce qu'elle a produit sur la
+                période ne change pas, seul son passage au résultat est suspendu.
+              */
+              <div key={a.nom} style={{ background: "var(--surface2)", borderRadius: 12, padding: 14, opacity: a.horsBilan ? 0.55 : 1 }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{a.nom}</div>
+                  {effectivePermission(session, "compta.gerer_depenses") && (
+                    <button onClick={() => basculerAgence(a.nom)}
+                      title={a.horsBilan ? `Remettre les commissions de ${a.nom} dans le bilan` : `Retirer les commissions de ${a.nom} du bilan`}
+                      aria-label={a.horsBilan ? `Remettre les commissions de ${a.nom} dans le bilan` : `Retirer les commissions de ${a.nom} du bilan`}
+                      aria-pressed={!a.horsBilan}
+                      style={{ background: "none", border: "none", color: a.horsBilan ? "var(--muted)" : "var(--ok-fg)", cursor: "pointer", padding: 0, lineHeight: 0 }}>
+                      {a.horsBilan ? <EyeOff size={14} /> : <CheckCircle2 size={14} />}
+                    </button>
+                  )}
+                </div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: a.horsBilan ? "var(--muted)" : "var(--ok-fg)", fontFamily: "'Space Grotesk',sans-serif", marginTop: 4, textDecoration: a.horsBilan ? "line-through" : "none" }}>{fmt(a.montant, devise)}</div>
+                {a.horsBilan && <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", marginTop: 3 }}>hors bilan</div>}
               </div>
             ))}
           </div>
+          {agencesEcartees.length > 0 && (
+            /*
+              Ce qui a été retiré est nommé et chiffré. Le résultat baisse sans cela, et rien ne
+              dirait pourquoi — c'est exactement ce qu'on veut éviter d'un bilan.
+            */
+            <div style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--border)", fontSize: 12.5, color: "var(--muted)", lineHeight: 1.55 }}>
+              <strong style={{ color: "var(--text)" }}>
+                {agencesEcartees.length === 1 ? "1 agence hors bilan" : `${agencesEcartees.length} agences hors bilan`}
+              </strong>
+              {" — "}{agencesEcartees.map((a) => a.nom).join(", ")}
+              {" · "}{fmt(commissionsAutoExclues, devise)} qui ne pèse{agencesEcartees.length > 1 ? "nt" : ""} pas sur le résultat.
+              {" "}Les commissions restent calculées et dues.
+            </div>
+          )}
         </div>
       )}
 

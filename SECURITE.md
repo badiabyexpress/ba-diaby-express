@@ -809,3 +809,41 @@ touche pas.
 
 Éprouvé par `t89` (22 cas) : le résultat change, la ligne survit, le montant reste intact en base,
 l'écran annonce ce qu'il n'a pas compté, le journal le nomme, et l'on peut tout remettre.
+
+## Les commissions d'agence, et le droit de ne pas les compter (26/08/2026)
+
+Une écriture de dépense peut être écartée du bilan. Les commissions d'agence, non — alors qu'elles
+ne sont même pas saisies : elles se **calculent** sur les colis selon les taux de Configuration. On
+ne pouvait donc ni les corriger ni les effacer, et elles pesaient sur le résultat en toutes
+circonstances. Une agence qui ne doit rien sur la période — commissions déjà réglées en dehors des
+comptes, agence qui ne tourne pas encore, taux provisoire qu'on veut voir sans le subir — faussait
+le bilan sans recours.
+
+Chaque agence porte désormais le même bouton que les écritures. Le choix est gardé dans
+`agencesHorsBilan`, une liste de noms d'agences.
+
+Les mêmes précautions, pour la même raison :
+
+- **L'agence reste affichée avec son montant**, barré. C'est le point important : une commission
+  écartée du bilan **reste calculée et reste due**. La remettre à zéro reviendrait à la retirer à
+  l'agence, ce qui n'est pas la question posée.
+- **Ce qui sort du résultat est nommé et chiffré** — sous le bloc (« 1 agence hors bilan — Madina ·
+  570 000 GNF qui ne pèse pas sur le résultat »), sur la tuile Commissions (« dont auto : … ·
+  … hors bilan ») et sur le récapitulatif PDF. Un résultat qui monte sans qu'on sache pourquoi est
+  un résultat qu'on ne peut pas défendre.
+- **Le journal enregistre le geste** dans les deux sens, avec le nom de l'agence.
+
+**Le nom sert de repère** parce que c'est déjà lui qui relie un colis à son agence partout ailleurs
+(`colis.site`, avec Bambeto par défaut). Une agence renommée redevient donc comptée. C'est le sens
+d'erreur qu'on préfère : un oubli qui **gonfle** les charges se voit sur le bilan, un oubli qui les
+efface, non.
+
+**Le choix se garde comme un droit, pas comme un réglage.** `agencesHorsBilan` entre dans
+`SECTIONS_REGLAGES` (`api/_cloisonnement.js`) sous la permission `compta.gerer_depenses` — la même
+que gérer les dépenses. Sans cela, un agent qui envoie son propre document pourrait retirer des
+charges du résultat, ou en remettre que le responsable en avait sorties, sans jamais ouvrir
+l'écran. Le bouton n'est pas la serrure.
+
+Éprouvé par `t90` (29 cas) et par deux cas de `testdonnees` qui vérifient les **deux sens** de la
+porte : l'agent ne décide pas de ce qui compte dans le bilan, l'administrateur oui — une décision
+comptable qui ne s'enregistrerait pour personne serait un bilan qu'on ne peut pas corriger.

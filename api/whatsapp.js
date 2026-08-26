@@ -520,6 +520,52 @@ export default async function handler(req, res) {
    * Demande l'identifiant du compte professionnel (WHATSAPP_WABA_ID). Sans lui, on le dit
    * plutôt que de faire semblant.
    */
+  /*
+   * L'ABONNEMENT DE L'APPLICATION AU COMPTE — la case qu'on ne voit nulle part.
+   *
+   * Déclarer l'adresse du webhook et cocher le champ « messages » se fait au niveau de
+   * l'APPLICATION. Encore faut-il que cette application soit abonnée au COMPTE PROFESSIONNEL qui
+   * porte le numéro : c'est une seconde opération, invisible dans l'écran des webhooks, et rien
+   * n'avertit quand elle manque. Tout paraît alors en ordre — l'adresse est vérifiée, le champ est
+   * sur « Abonné » — et Meta n'appelle jamais. Les messages des clients tombent dans le vide.
+   *
+   * Meta expose la liste ; on la lit plutôt que de la deviner.
+   */
+  if (req.query?.abonnement !== undefined && (req.method === "GET" || req.method === "POST")) {
+    const waba = process.env.WHATSAPP_WABA_ID;
+    if (!metaPret) return res.status(501).json({ error: "Meta n'est pas configuré.", configure: false });
+    if (!waba) {
+      return res.status(501).json({
+        error: "Ajoutez WHATSAPP_WABA_ID dans Vercel — c'est l'« ID du compte WhatsApp Business », "
+          + "affiché au-dessus de vos numéros dans la console Meta.",
+        manquant: "WHATSAPP_WABA_ID",
+      });
+    }
+    try {
+      const reponse = await fetch(
+        `https://graph.facebook.com/${VERSION_GRAPH}/${encodeURIComponent(waba)}/subscribed_apps`,
+        { method: req.method, headers: { Authorization: `Bearer ${meta.jeton}` } },
+      );
+      const corps = await reponse.json().catch(() => ({}));
+      if (!reponse.ok) {
+        const code = corps?.error?.code;
+        return res.status(reponse.status).json({
+          error: EXPLICATIONS_META[code] || corps?.error?.message || "Meta n'a pas répondu.",
+          code: code || null,
+        });
+      }
+      // POST ne rend qu'un accusé ; c'est la lecture qui porte la liste.
+      if (req.method === "POST") return res.status(200).json({ ok: corps?.success !== false });
+      const applications = (corps.data || []).map((a) => ({
+        id: a?.whatsapp_business_api_data?.id || null,
+        nom: a?.whatsapp_business_api_data?.name || null,
+      }));
+      return res.status(200).json({ abonne: applications.length > 0, applications });
+    } catch (e) {
+      return res.status(502).json({ error: "Impossible de joindre Meta." });
+    }
+  }
+
   if (req.method === "GET" && req.query?.modeles !== undefined) {
     const waba = process.env.WHATSAPP_WABA_ID;
     if (!metaPret) return res.status(501).json({ error: "Meta n'est pas configuré.", configure: false });

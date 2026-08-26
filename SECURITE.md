@@ -511,6 +511,35 @@ pas non plus en inventer un.
 
 Éprouvé par `testentrant` (53 cas) et `t82` (18 cas, les deux états de l'écran).
 
+## Les deux causes d'un webhook muet (26/08/2026)
+
+Le numéro envoie, les modèles sont approuvés, l'adresse est vérifiée, le champ `messages` affiche
+« Abonné » — et rien n'arrive. Deux causes possibles, opposées, et jusqu'ici indistinguables.
+
+**L'application n'est pas abonnée au compte professionnel.** Déclarer l'adresse du webhook et
+cocher `messages` se fait au niveau de l'APPLICATION. Encore faut-il que cette application soit
+abonnée au COMPTE (la WABA) qui porte le numéro : c'est une seconde opération, invisible dans
+l'écran des webhooks, et rien n'avertit quand elle manque. `?abonnement=1` sur `api/whatsapp.js`
+pose la question à Meta (`GET /{WABA}/subscribed_apps`) et la même adresse en POST l'abonne. On lit
+la réponse de Meta plutôt que de la deviner, et le bouton fait un vrai appel — pas un succès de
+façade. Sans `WHATSAPP_WABA_ID`, la fonction le dit et n'invente rien.
+
+**Meta appelle, et c'est nous qui refusons.** L'adresse déclarée doit porter son `?jeton=` — la
+preuve que l'appel vient bien de lui. Recopiée sans ce bout, la vérification passe quand même (elle
+emprunte `hub.verify_token`, un autre chemin), et pourtant chaque notification repart en 401. Tout
+paraît en ordre, rien n'arrive, et le relevé des appels restait vide exactement comme si Meta
+n'appelait pas.
+
+`api/whatsapp-entrant.js` note donc aussi les appels REFUSÉS — `receptionWhatsApp.refuses` et
+`dernierRefus`. Un refus plus récent que le dernier appel accepté désigne ce cas, et l'écran donne
+alors l'adresse exacte à recoller. Deux précautions, parce que cette porte est publique et
+qu'écrire coûte : on ne note que ce qui a la **forme** d'une notification Meta (`object` et `entry`),
+et au plus une note toutes les cinq minutes par instance — sans ce frein, n'importe qui provoquerait
+une écriture en base à volonté.
+
+Éprouvé par `testabonnement.mjs` (28 cas), `testentrant` (55, dont un qui décrivait l'ancien
+silence), `t82` (26 cas, les trois états de l'écran) et `t83` (15 cas, la carte d'abonnement).
+
 ## Récupérer un compte perdu (26/08/2026)
 
 Trois défauts se tenaient l'un derrière l'autre dans ce qui est, pour un client, la seule sortie

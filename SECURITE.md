@@ -511,6 +511,34 @@ pas non plus en inventer un.
 
 Éprouvé par `testentrant` (53 cas) et `t82` (18 cas, les deux états de l'écran).
 
+## Un modèle modifié n'est plus le même modèle (26/08/2026)
+
+Un modèle se remplit **exactement** comme il a été déposé : trois variables si le corps en porte
+trois, un en-tête « document » seulement s'il en a un, un paramètre de bouton seulement si le
+bouton en attend un. Toute différence est refusée en bloc — code #132000, avec le même message pour
+les trois causes.
+
+D'où le piège. On retouche un modèle chez Meta : on ajoute une ligne, on retire une variable. Il
+repasse en examen, il est réapprouvé, tout paraît normal. Mais l'application, elle, envoie toujours
+l'ancien nombre de variables. Les envois échouent en silence, et l'on ne s'en aperçoit qu'en
+constatant, des jours plus tard, que des clients n'ont rien reçu — sans qu'aucun écran ne l'ait dit.
+
+`api/whatsapp.js?modeles=1` demande donc aussi les `components` et en tire la forme réelle :
+nombre de variables (le **plus grand** indice `{{n}}` rencontré, pas le nombre d'occurrences), type
+d'en-tête, et présence d'un bouton URL à suffixe variable. Configuration → Notifications la compare
+à ce que `MODELES_WHATSAPP` envoie vraiment, et nomme chaque écart avec ses deux chiffres.
+
+Deux précautions pour que l'alerte reste crédible :
+
+- **Un modèle en examen n'est pas jugé.** Sa forme n'est pas stable tant que Meta ne l'a pas
+  approuvé ; crier à l'écart pendant l'examen serait une fausse alerte exactement au moment où l'on
+  modifie un modèle.
+- **Un modèle absent n'est pas jugé non plus** : il est déjà signalé au-dessus, et le redire
+  n'ajouterait rien.
+
+Éprouvé par `testforme.mjs` (17 cas, la lecture de la forme chez Meta) et `t84` (16 cas, l'écran —
+y compris son silence quand tout concorde).
+
 ## Les deux causes d'un webhook muet (26/08/2026)
 
 Le numéro envoie, les modèles sont approuvés, l'adresse est vérifiée, le champ `messages` affiche

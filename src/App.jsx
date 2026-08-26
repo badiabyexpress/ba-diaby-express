@@ -22507,6 +22507,74 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
             );
           })()}
 
+          {/*
+            LE PIÈGE DE LA MODIFICATION.
+
+            On retouche un modèle chez Meta — une ligne ajoutée, une variable retirée — il repasse
+            en examen, il est réapprouvé, tout paraît normal. Mais l'application, elle, envoie
+            toujours l'ancien nombre de variables. Meta refuse alors en bloc (#132000), avec le même
+            message que pour un nom mal orthographié, et personne ne s'en aperçoit : on constate,
+            des jours plus tard, que des clients n'ont rien reçu.
+
+            On compare donc ce que Meta a validé à ce que le code envoie vraiment.
+          */}
+          {(() => {
+            const parNom = new Map((modeles.modeles || []).map((m) => [m.nom, m]));
+            const ecarts = [];
+            for (const [cle, fabrique] of Object.entries(MODELES_WHATSAPP)) {
+              let envoi = null;
+              try { envoi = fabrique({ tracking: "X", destinataire: "X", paiements: [] }, data); }
+              catch (e) { continue; }
+              const chezMeta = envoi?.nom ? parNom.get(envoi.nom) : null;
+              // Un modèle absent est déjà signalé plus haut ; un modèle en examen n'a pas de forme stable.
+              if (!chezMeta || chezMeta.statut !== "APPROVED" || chezMeta.variables === undefined) continue;
+              const attendues = (envoi.variables || []).length;
+              const raisons = [];
+              if (chezMeta.variables !== attendues) {
+                raisons.push(`le modèle attend ${chezMeta.variables} variable${chezMeta.variables > 1 ? "s" : ""}, l’application en envoie ${attendues}`);
+              }
+              const envoieTicket = ETAPES_AVEC_TICKET.includes(cle);
+              if (envoieTicket && chezMeta.entete !== "DOCUMENT") {
+                raisons.push("l’application joint le ticket, mais le modèle n’a plus d’en-tête « document »");
+              }
+              if (!envoieTicket && chezMeta.entete === "DOCUMENT") {
+                raisons.push("le modèle réclame un en-tête « document » que l’application n’envoie pas");
+              }
+              const envoieSuivi = ETAPES_AVEC_SUIVI.includes(cle);
+              if (envoieSuivi && !chezMeta.boutonUrl) {
+                raisons.push("l’application remplit un bouton de suivi que le modèle n’a plus");
+              }
+              if (!envoieSuivi && chezMeta.boutonUrl) {
+                raisons.push("le modèle attend un paramètre de bouton que l’application n’envoie pas");
+              }
+              if (raisons.length) ecarts.push({ nom: envoi.nom, raisons });
+            }
+            if (!ecarts.length) return null;
+            return (
+              <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "11px 13px", marginTop: 10 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--danger-fg)" }}>
+                  {ecarts.length > 1
+                    ? `${ecarts.length} modèles ne correspondent plus à ce que l’application envoie`
+                    : "Un modèle ne correspond plus à ce que l’application envoie"}
+                </div>
+                <div style={{ fontSize: 12, color: "var(--text)", marginTop: 5, lineHeight: 1.55 }}>
+                  Un modèle se remplit exactement comme il a été déposé. Depuis sa modification,
+                  celui-ci n’attend plus la même chose — Meta refusera l’envoi, et le client ne
+                  recevra rien. Remettez le modèle dans sa forme d’origine chez Meta, ou dites-le-moi
+                  pour que le code suive la nouvelle.
+                </div>
+                {ecarts.map((e) => (
+                  <div key={e.nom} style={{ fontSize: 11.5, color: "var(--text)", marginTop: 8, lineHeight: 1.6 }}>
+                    <span style={{ fontFamily: "monospace", fontWeight: 700 }}>{e.nom}</span>
+                    <ul style={{ margin: "3px 0 0", paddingInlineStart: 18, color: "var(--muted)" }}>
+                      {e.raisons.map((r) => <li key={r}>{r}</li>)}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+
           {modeles.enAttente > 0 && (
             <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 5, lineHeight: 1.55 }}>
               Un modèle en examen ne peut pas servir : l’envoi échoue comme s’il n’existait pas.

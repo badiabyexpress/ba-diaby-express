@@ -478,6 +478,92 @@ function normalizeBordereauStatut(statut) {
  */
 const BORDEREAU_VERS_STATUT_COLIS = { "Acheminement": "En transit", "Arrivé": "Arrivé", "Livré": "Disponible au retrait" };
 
+/**
+ * Le statut de colis qu'un bordereau impose, à l'étape où il est.
+ *
+ * « Validé » n'a pas d'équivalent propre — c'est une étape administrative — mais il vient APRÈS
+ * l'acheminement : un colis d'un bordereau validé est en transit. Rendre `null` pour cette étape
+ * ferait tomber le rattrapage exactement là, et c'est ce qui laissait des colis en arrière.
+ */
+export function statutColisImposeParBordereau(statutBordereau) {
+  const normalise = { "En cours": "Acheminement", "Expédié": "Acheminement", "Reçu": "Arrivé" }[statutBordereau] || statutBordereau;
+  const rang = BORDEREAU_STATUSES.indexOf(normalise);
+  if (rang < 0) return null;
+  /* On descend l'échelle du bordereau jusqu'à la première étape qui dise quelque chose du colis. */
+  for (let i = rang; i >= 0; i--) {
+    const cible = BORDEREAU_VERS_STATUT_COLIS[BORDEREAU_STATUSES[i]];
+    if (cible) return cible;
+  }
+  return null;
+}
+
+/**
+ * REMET LES COLIS D'UN BORDEREAU AU NIVEAU DE CE BORDEREAU.
+ *
+ * Constaté en production : le bordereau BR260824BAD-1002 était « Arrivé » pendant que deux de ses
+ * colis affichaient encore « Enregistré ». Le rattrapage n'existait qu'au moment du bouton
+ * « Statut suivant » : un colis AJOUTÉ APRÈS que le bordereau ait avancé restait donc au point de
+ * départ, invisible pour son client, et rien ne le signalait — la liste s'affichait normalement.
+ *
+ * Deux règles, et elles comptent autant l'une que l'autre :
+ *
+ *   — ON N'AVANCE JAMAIS UN COLIS DÉJÀ PLUS LOIN. Un colis remis à son client (« Disponible au
+ *     retrait ») ne redevient pas « Arrivé » parce que son bordereau en est là. Le bordereau dit
+ *     un minimum, pas un état exact.
+ *   — UN COLIS ANNULÉ OU REFUSÉ N'EST PAS TOUCHÉ. Son sort a été décidé à part.
+ *
+ * Rend la liste de colis et le nombre de fiches réellement changées — c'est ce nombre qu'on
+ * annonce, pour ne pas dire « 13 colis mis à jour » quand un seul l'a été.
+ */
+export function synchroniserColisAvecBordereau(colis, bordereau, maintenant = new Date().toISOString()) {
+  const cible = statutColisImposeParBordereau(bordereau?.statut);
+  const trackings = new Set(Array.isArray(bordereau?.colisTrackings) ? bordereau.colisTrackings : []);
+  if (!cible || trackings.size === 0) return { colis, synchronises: 0 };
+  const rangCible = STATUSES.indexOf(cible);
+  let synchronises = 0;
+  const suivants = (Array.isArray(colis) ? colis : []).map((c) => {
+    if (!c || !trackings.has(c.tracking)) return c;
+    if (["Annulé", "Refusé"].includes(c.status)) return c;
+    if (STATUSES.indexOf(c.status) >= rangCible) return c;
+    synchronises++;
+    return { ...c, status: cible, historique: [...(c.historique || []), { status: cible, date: maintenant }] };
+  });
+  return { colis: synchronises ? suivants : colis, synchronises };
+}
+
+/**
+ * À PARTIR DE L'ACHEMINEMENT, UN BORDEREAU NE SE MODIFIE PLUS QU'EN ADMINISTRATEUR.
+ *
+ * Tant qu'il est en brouillon, un bordereau est une liste de travail : on y ajoute, on en retire,
+ * personne n'a encore rien annoncé. Dès qu'il passe à l'acheminement, il devient autre chose : les
+ * clients ont été prévenus que leur colis est parti, le manifeste a été imprimé, le transporteur
+ * l'a en main. Retirer un colis d'un lot déjà parti, c'est faire mentir ce qui a été dit au client
+ * et ce que porte le papier du transporteur — et rien ne le rattrape ensuite.
+ *
+ * On ne verrouille donc pas « après coup » : le verrou tombe à l'étape exacte où le lot cesse
+ * d'être une intention pour devenir un fait.
+ */
+export function bordereauVerrouille(statutBordereau) {
+  const rang = BORDEREAU_STATUSES.indexOf(normalizeBordereauStatut(statutBordereau));
+  return rang >= BORDEREAU_STATUSES.indexOf("Acheminement");
+}
+
+/**
+ * Qui peut modifier ce bordereau, et — si ce n'est pas possible — pourquoi.
+ *
+ * On rend le motif plutôt qu'un simple `false` parce que l'écran doit le DIRE. Un bouton qui
+ * disparaît sans explication se lit comme une panne : l'agent réessaie, appelle, et finit par
+ * demander à quelqu'un de modifier à sa place. Un bouton qui reste, éteint, avec sa raison, se
+ * comprend du premier coup d'œil.
+ */
+export function autorisationModifierBordereau(session, bordereau) {
+  if (!effectivePermission(session, "bordereaux.modifier")) return { autorise: false, motif: "permission" };
+  if (bordereauVerrouille(bordereau?.statut) && session?.role !== "Administrateur") {
+    return { autorise: false, motif: "verrouille", statut: normalizeBordereauStatut(bordereau?.statut) };
+  }
+  return { autorise: true, motif: null };
+}
+
 const T = {
   fr: { dashboard: "Tableau de bord", colis: "Colis", tarif: "Tarification", clients: "Clients", admin: "Configuration", ia: "Assistant IA", logout: "Déconnexion", newColis: "Nouveau colis", search: "Rechercher", createAccount: "Créer un compte", bordereaux: "Bordereaux", paiements: "Paiements & Factures" },
   en: { dashboard: "Dashboard", colis: "Parcels", tarif: "Pricing", clients: "Clients", admin: "Settings", ia: "AI Assistant", logout: "Log out", newColis: "New parcel", search: "Search", createAccount: "Create account", bordereaux: "Waybills", paiements: "Payments & Invoices" },
@@ -13479,8 +13565,29 @@ function BordereauxPage({ data, persist, session, notify }) {
     notify?.(`Bordereau ${numero} créé (Brouillon)`);
     setSelectedId(b.id); setMode("detail");
   }
+  /*
+   * Toute modification d'un bordereau remet ses colis à son niveau.
+   *
+   * C'est le chemin par lequel la désynchronisation arrivait : le rattrapage n'existait qu'au
+   * bouton « Statut suivant », alors qu'un colis AJOUTÉ à un bordereau déjà parti restait au
+   * point de départ — invisible pour son client, et sans que rien ne le signale.
+   */
   function updateBordereau(id, patch) {
-    persist({ ...data, bordereaux: bordereaux.map((b) => (b.id === id ? { ...b, ...patch, dateModif: new Date().toISOString() } : b)) });
+    const suivant = bordereaux.map((b) => (b.id === id ? { ...b, ...patch, dateModif: new Date().toISOString() } : b));
+    const modifie = suivant.find((b) => b.id === id);
+    const { colis: colisMaj, synchronises } = synchroniserColisAvecBordereau(data.colis, modifie);
+    persist({
+      ...data,
+      bordereaux: suivant,
+      colis: colisMaj,
+      ...(synchronises ? {
+        activityLog: pushActivity(data, session, "Colis remis au niveau du bordereau",
+          `${modifie?.numero || id} — ${synchronises} colis`),
+      } : {}),
+    });
+    if (synchronises) {
+      notify?.(`${synchronises} colis mis au niveau du bordereau (${modifie?.statut}).`, 5000);
+    }
   }
   function avancerStatut(id) {
     const b = bordereaux.find((x) => x.id === id);
@@ -13499,20 +13606,8 @@ function BordereauxPage({ data, persist, session, notify }) {
      * déjà plus avancé (un agent qui a fait avancer certains colis à la main via "Faire avancer
      * les colis" ne verra rien se dédoubler) ni toucher un colis Annulé/Refusé.
      */
-    const statutColisCible = BORDEREAU_VERS_STATUT_COLIS[next];
-    let colisMaj = data.colis;
-    let colisSynchronises = 0;
-    if (statutColisCible) {
-      const cibleIdx = STATUSES.indexOf(statutColisCible);
-      const maintenant = new Date().toISOString();
-      colisMaj = data.colis.map((c) => {
-        if (!b.colisTrackings.includes(c.tracking)) return c;
-        if (["Annulé", "Refusé"].includes(c.status)) return c;
-        if (STATUSES.indexOf(c.status) >= cibleIdx) return c;
-        colisSynchronises++;
-        return { ...c, status: statutColisCible, historique: [...(c.historique || []), { status: statutColisCible, date: maintenant }] };
-      });
-    }
+    const { colis: colisMaj, synchronises: colisSynchronises } =
+      synchroniserColisAvecBordereau(data.colis, { ...b, statut: next });
 
     persist({
       ...data,
@@ -13690,6 +13785,13 @@ function BordereauCreation({ data, session, onCancel, onCreate }) {
 
 function BordereauDetail({ bordereau, data, persist, session, notify, onBack, onUpdate, onAvancerStatut }) {
   const [modification, setModification] = useState(false);
+  /*
+   * Le droit de modifier est réévalué à chaque rendu, et pas seulement à l'ouverture : un agent
+   * qui a ouvert la modification en brouillon puis fait avancer le bordereau doit voir le verrou
+   * se refermer aussitôt, sans avoir à ressortir de l'écran.
+   */
+  const droitModifier = autorisationModifierBordereau(session, bordereau);
+  const enModification = modification && droitModifier.autorise;
   const [genPdf, setGenPdf] = useState(false);
   const [depenseForm, setDepenseForm] = useState(null);
   const [devise, setDevise] = useState("GNF");
@@ -13822,8 +13924,19 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
     setConfirmation(null);
   }
 
-  function retirer(tracking) { onUpdate({ colisTrackings: bordereau.colisTrackings.filter((t) => t !== tracking) }); }
-  function ajouter(tracking) { onUpdate({ colisTrackings: [...bordereau.colisTrackings, tracking] }); }
+  /*
+   * Le verrou est revérifié ici, et pas seulement à l'affichage du bouton. Un écran resté ouvert
+   * pendant qu'un collègue faisait avancer le bordereau appliquerait sinon une retouche que
+   * l'étape ne permet plus.
+   */
+  function retirer(tracking) {
+    if (!droitModifier.autorise) { notify?.("Ce bordereau est parti : seul un administrateur peut en retirer un colis."); return; }
+    onUpdate({ colisTrackings: bordereau.colisTrackings.filter((t) => t !== tracking) });
+  }
+  function ajouter(tracking) {
+    if (!droitModifier.autorise) { notify?.("Ce bordereau est parti : seul un administrateur peut y ajouter un colis."); return; }
+    onUpdate({ colisTrackings: [...bordereau.colisTrackings, tracking] });
+  }
 
   async function telechargerPdf() {
     setGenPdf(true);
@@ -13849,7 +13962,7 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
 
   return (
     <div>
-      <ConfigPageHeader title={`Bordereau ${bordereau.numero}`} desc={routeLabel(bordereau.pays, bordereau.direction)} onBack={onBack} />
+      <ConfigPageHeader title={`Bordereau ${bordereau.numero}`} desc={routeLabel(bordereau.pays, bordereau.direction)} onBack={onBack} retour="Bordereaux" />
 
       <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "18px 20px", marginBottom: 18 }}>
         <div style={{ display: "flex", alignItems: "center" }}>
@@ -13874,8 +13987,28 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
         <button onClick={telechargerPdf} disabled={genPdf} style={{ background: "var(--surface2)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>{genPdf ? "Génération…" : "Télécharger PDF"}</button>
         <button onClick={envoyerMail} style={{ background: "var(--surface2)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>Envoyer un mail</button>
         <button onClick={() => setDepenseForm({ nom: "", montant: "" })} style={{ background: "var(--surface2)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>Ajouter une dépense</button>
-        {effectivePermission(session, "bordereaux.modifier") && <button onClick={() => setModification((m) => !m)} style={{ background: "var(--surface2)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>{modification ? "Terminer la modification" : "Modifier"}</button>}
+        {effectivePermission(session, "bordereaux.modifier") && (
+          droitModifier.autorise
+            ? <button onClick={() => setModification((m) => !m)} style={{ background: "var(--surface2)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>{enModification ? "Terminer la modification" : "Modifier"}</button>
+            /*
+             * Éteint, mais présent, et avec son motif. Un bouton qui disparaît se lit comme une
+             * panne : l'agent réessaie, appelle, et finit par faire modifier à sa place.
+             */
+            : <button disabled title={`Bordereau ${droitModifier.statut} — modification réservée à un administrateur`} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", color: "var(--muted)", border: "1.5px dashed var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 12.5, fontWeight: 700, cursor: "not-allowed" }}><Lock size={13} /> Modifier — administrateur</button>
+        )}
       </div>
+
+      {!droitModifier.autorise && droitModifier.motif === "verrouille" && (
+        <div style={{ display: "flex", gap: 10, alignItems: "flex-start", background: "var(--warn-bg)", color: "var(--warn-fg)", border: "1px solid var(--border)", borderRadius: 10, padding: "11px 14px", fontSize: 12.5, marginBottom: 18 }}>
+          <Lock size={15} style={{ flexShrink: 0, marginTop: 1 }} />
+          <div>
+            <strong>Ce bordereau est à l’étape « {droitModifier.statut} » : sa composition est figée.</strong>{" "}
+            Les clients ont été prévenus que leur colis est parti et le manifeste est entre les mains du
+            transporteur — y ajouter ou en retirer un colis ferait mentir les deux. Si une correction
+            est réellement nécessaire, demandez-la à un administrateur.
+          </div>
+        </div>
+      )}
 
       <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8, marginBottom: 10 }}>
         <span style={{ fontSize: 12, color: "var(--muted)" }}>Afficher les montants en :</span>
@@ -14009,10 +14142,10 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
           </button>
         )}
       </div>
-      <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", marginBottom: modification ? 18 : 0 }}>
+      <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", marginBottom: enModification ? 18 : 0 }}>
         <div style={{ overflowX: "auto" }}>
         <table style={{ width: "100%", minWidth: 580, borderCollapse: "collapse" }}>
-          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["ID Colis", "Destinataire", "Statut", "Poids", `Prix (${devise})`, modification ? "" : null].filter(Boolean).map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
+          <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["ID Colis", "Destinataire", "Statut", "Poids", `Prix (${devise})`, enModification ? "" : null].filter(Boolean).map((h) => <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
           <tbody>
             {colisInclus.map((c) => {
               const st = STATUS_STYLE[c.status];
@@ -14023,7 +14156,7 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
                   <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}><span style={{ background: st.bg, color: st.fg, padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>{c.status}</span></td>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.poids} kg</td>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{fmt(c.prix, devise)}</td>
-                  {modification && <td style={{ padding: "10px 14px", textAlign: "right" }}><button onClick={() => retirer(c.tracking)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><X size={14} /></button></td>}
+                  {enModification && <td style={{ padding: "10px 14px", textAlign: "right" }}><button onClick={() => retirer(c.tracking)} title={`Retirer ${c.tracking} du bordereau`} aria-label={`Retirer ${c.tracking} du bordereau`} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer" }}><X size={14} /></button></td>}
                 </tr>
               );
             })}
@@ -14032,7 +14165,7 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
         </div>
       </div>
 
-      {modification && (
+      {enModification && (
         <div>
           <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, margin: "18px 0 10px" }}>Ajouter un colis non expédié à ce bordereau</div>
           <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden" }}>

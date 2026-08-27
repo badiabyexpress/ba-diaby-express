@@ -4317,7 +4317,7 @@ function App() {
  * détectée sur l’appareil. Dans ces cas, un message clair explique le problème plutôt que
  * d’échouer silencieusement.
  */
-function ScannerModal({ onClose, onScan }) {
+function ScannerModal({ onClose, onScan, titre = "Scanner un colis", aide }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
@@ -4370,7 +4370,16 @@ function ScannerModal({ onClose, onScan }) {
     async function lancerBoucleDetection() {
       let detector = null;
       if ("BarcodeDetector" in window) {
-        try { detector = new window.BarcodeDetector({ formats: ["qr_code", "code_128"] }); } catch { /* repli jsQR ci-dessous */ }
+        /*
+         * Plusieurs symbologies, parce que les étiquettes ne s'accordent pas entre elles : nos
+         * propres étiquettes portent un QR et du Code 128, celles des boutiques en ligne du
+         * Code 128, du Code 39 ou de l'ITF selon le transporteur. En demander une seule revenait à
+         * ne rien lire sur la moitié des colis, sans que l'agent comprenne pourquoi.
+         */
+        try { detector = new window.BarcodeDetector({ formats: ["qr_code", "code_128", "code_39", "ean_13", "itf"] }); }
+        catch {
+          try { detector = new window.BarcodeDetector({ formats: ["qr_code", "code_128"] }); } catch { /* repli jsQR ci-dessous */ }
+        }
       }
       if (!detector) await ensureJsQR();
 
@@ -4407,7 +4416,8 @@ function ScannerModal({ onClose, onScan }) {
   }, []);
 
   return (
-    <Modal onClose={onClose} title="Scanner un colis">
+    <Modal onClose={onClose} title={titre}>
+      {aide && <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 12, lineHeight: 1.55 }}>{aide}</div>}
       {etat === "erreur" ? (
         <div style={{ fontSize: 13, color: "var(--danger-fg)", padding: "16px 0", lineHeight: 1.6 }}>{erreur}</div>
       ) : (
@@ -23218,6 +23228,7 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
   const [onglet, setOnglet] = useState("articles");
   const [articles, setArticles] = useState([ligneArticleEnLigne()]);
   const [erreurArticles, setErreurArticles] = useState("");
+  const [scan, setScan] = useState(false);
   /*
    * Le comptoir se tient souvent sur un téléphone. On mesure la fenêtre plutôt que de deviner :
    * une media query CSS n'était pas possible ici, les styles étant écrits en ligne.
@@ -23442,6 +23453,45 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
    * qui rendent ensuite tout comptage impossible. Un bouton la pose sur toutes les lignes d'un
    * coup ; la liste par ligne reste là pour le colis qui mêle deux commandes.
    */
+  /**
+   * LA RÉFÉRENCE VIENT DU CODE-BARRES, PAS DU CLAVIER.
+   *
+   * Une référence de commande fait quinze à vingt caractères sans signification : « GSHN0293841X ».
+   * La recopier à la main devant un carton, c'est trente secondes et une chance sérieuse de se
+   * tromper d'un caractère — et une référence fausse ne se rattrape pas, elle ne correspond à rien
+   * nulle part. Le code-barres de l'étiquette la donne exactement.
+   *
+   * Elle se pose sur la première ligne encore vide, ou en ouvre une nouvelle : on scanne les
+   * étiquettes les unes après les autres, et l'on saisit les poids ensuite, à la balance.
+   *
+   * LE POIDS N'EST PAS SCANNÉ, ET CE N'EST PAS UN OUBLI. Celui imprimé sur l'étiquette est celui
+   * déclaré par la boutique. La facture dit « poids constaté à la réception » et c'est là-dessus
+   * que le prix se fonde : le reprendre de l'étiquette reviendrait à facturer sur la parole du
+   * vendeur plutôt que sur la balance de l'agence.
+   */
+  function referenceScannee(valeur) {
+    const brut = String(valeur || "").trim();
+    setScan(false);
+    if (!brut) return;
+    /*
+     * Nos propres étiquettes portent un QR qui est une adresse de suivi. Scanner l'une d'elles ici
+     * inscrirait « https://badiabyexpress.com/?suivi=1&code=BDE270812 » comme référence de
+     * commande. On n'en garde que le numéro.
+     */
+    let reference = brut;
+    if (/^https?:\/\//i.test(brut)) {
+      try { reference = new URL(brut).searchParams.get("code") || brut; } catch (e) { /* on garde le brut */ }
+    }
+    setArticles((liste) => {
+      if (liste.some((a) => a.reference.trim() === reference)) return liste;
+      const vide = liste.findIndex((a) => !a.reference.trim());
+      if (vide >= 0) return liste.map((a, i) => (i === vide ? { ...a, reference } : a));
+      return [...liste, { ...ligneArticleEnLigne(), reference, commande: boutiqueCommune }];
+    });
+    setErreurArticles("");
+    notify?.(`Référence ${reference} ajoutée — pesez l’article, puis scannez le suivant.`);
+  }
+
   function poserCommandePartout(boutique) {
     setArticles((l) => l.map((a) => ({ ...a, commande: boutique })));
     setErreurArticles("");
@@ -23671,9 +23721,26 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
                     * clique « Shein » puis ajoute un article se retrouve avec une ligne vide au
                     * milieu d'une commande d'un seul tenant — et ne s'en aperçoit qu'à la facture.
                     */}
-                  <button onClick={() => setArticles((l) => [...l, { ...ligneArticleEnLigne(), commande: boutiqueCommune }])} style={{ background: "none", border: "1px dashed var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>
-                    + Ajouter un article
-                  </button>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button onClick={() => setArticles((l) => [...l, { ...ligneArticleEnLigne(), commande: boutiqueCommune }])} style={{ background: "none", border: "1px dashed var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>
+                      + Ajouter un article
+                    </button>
+                    <button onClick={() => setScan(true)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12, fontWeight: 700, color: "var(--text)", cursor: "pointer" }}>
+                      <Camera size={14} /> Scanner une étiquette
+                    </button>
+                  </div>
+                  {/*
+                    * L'avertissement vit ICI, et non dans la fenêtre du scanner.
+                    *
+                    * Sur une étiquette nette, la lecture prend une demi-seconde : le message
+                    * affiché pendant le scan disparaît avant d'avoir été lu. Or c'est justement
+                    * celui qu'il ne faut pas manquer — un agent qui croit le poids rempli validera
+                    * un colis facturé sur la déclaration de la boutique, pas sur sa balance.
+                    */}
+                  <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 10, lineHeight: 1.5 }}>
+                    Le scan remplit la référence. <strong style={{ color: "var(--text)" }}>Le poids reste à peser</strong> :
+                    c’est lui qui fait le prix, et celui imprimé par la boutique n’est qu’une déclaration.
+                  </div>
                 </div>
               )}
 
@@ -23772,6 +23839,14 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
             </>
           )}
         </>
+      )}
+      {scan && (
+        <ScannerModal
+          titre="Scanner une étiquette"
+          aide="Approchez le code-barres de l’étiquette. La référence se remplit toute seule ; le poids reste à peser — c’est lui qui fait le prix, et celui imprimé par la boutique n’est qu’une déclaration."
+          onClose={() => setScan(false)}
+          onScan={referenceScannee}
+        />
       )}
     </Modal>
   );

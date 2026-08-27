@@ -868,6 +868,29 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId, contexte = {}
   const sortie = { ...envoye };
 
   /*
+   * UNE SECTION ABSENTE N'EST PAS UNE SECTION SUPPRIMÉE.
+   *
+   * Constaté en production le 27 août 2026 : les fiches de pointage de toute l'équipe ont disparu
+   * du document. Elles étaient là dans la sauvegarde de la nuit, plus là le soir. Personne ne les
+   * avait effacées — personne n'a de bouton pour cela.
+   *
+   * Le mécanisme : cette fusion part de CE QUE LE NAVIGATEUR ENVOIE. Un appareil dont la page
+   * était ouverte avant que les pointages n'existent, ou dont le cache local datait d'avant,
+   * envoie un document où la clé `pointages` ne figure tout simplement pas. Toutes les sections
+   * protégées plus bas le sont par une permission ; un administrateur les a toutes, donc rien ne
+   * le retenait. Son moindre enregistrement — corriger un téléphone — emportait la section
+   * entière, sans un mot.
+   *
+   * C'est exactement la faute qui avait effacé deux mots de passe clients en août, et la règle est
+   * la même : NE PAS PARLER D'UNE CHOSE N'EST PAS DEMANDER SA SUPPRESSION. Une clé absente est
+   * donc reprise de la base. Une clé présente mais vide, elle, est respectée : vider une liste est
+   * un geste, l'omettre n'en est pas un.
+   */
+  Object.keys(base).forEach((cle) => {
+    if (!Object.prototype.hasOwnProperty.call(envoye, cle)) sortie[cle] = base[cle];
+  });
+
+  /*
    * Le garde-fou, avant tout le reste.
    *
    * L'intention ne survit jamais dans le document : elle vaut pour cette écriture-ci, et c'est

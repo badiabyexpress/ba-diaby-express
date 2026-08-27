@@ -281,6 +281,48 @@ function numerosPourPays(data, pays) {
     return true;
   });
 }
+/**
+ * Ce colis relève-t-il de l'agence de ce compte ?
+ *
+ * CONSTATÉ EN PRODUCTION LE 27 AOÛT 2026. Le site « Bambeto » a été renommé « Conakry » depuis
+ * l'écran des sites. Les colis enregistrés avant portaient encore `site: "Bambeto"`, ceux d'après
+ * `site: "Conakry"`, et l'agente rattachée à « Bambeto » ne voyait plus que dix colis sur
+ * vingt-et-un. Rien ne le signalait : sa liste s'affichait normalement, simplement plus courte.
+ * Elle a cru que les colis de ses collègues avaient disparu.
+ *
+ * Trois causes tenaient ensemble :
+ *
+ *   — LE NOM SERT DE CLÉ. Renommer une agence coupait donc le lien avec tout ce qui portait
+ *     l'ancien nom. Le renommage le répare désormais lui-même (voir saveSite) ; cette fonction
+ *     est le filet en dessous.
+ *   — LA CASSE COMPTAIT. « conakry » et « Conakry » sont la même agence pour tout le monde sauf
+ *     pour une comparaison stricte.
+ *   — UN COLIS SANS SITE ÉTAIT ATTRIBUÉ À « Bambeto », écrit en dur. Le jour où plus aucune
+ *     agence ne s'appelle ainsi, ce colis n'appartient à personne et n'apparaît nulle part. Un
+ *     colis sans agence inscrite est maintenant visible de TOUS les agents : mieux vaut qu'il
+ *     apparaisse deux fois que pas du tout — on ne retrouve pas un colis qu'on ne voit pas.
+ */
+/**
+ * Le nom de l'agence par défaut, tel qu'il est réglé — jamais celui qu'on croyait.
+ *
+ * « Bambeto » était écrit en dur à une dizaine d'endroits comme agence de repli : sur un colis
+ * qu'on crée, dans les lignes d'historique, dans les statistiques. Le jour où ce site a été
+ * renommé « Conakry », ces valeurs ont continué de désigner une agence qui n'existait plus.
+ */
+function nomSiteParDefaut(data) {
+  const sites = data?.sites || [];
+  const retrait = sites.find((s) => s.id === (data?.agenceRetraitClient || "site-bambeto"));
+  return (retrait || sites.find((s) => (s.pays || "GN") === "GN") || sites[0])?.nom || "";
+}
+
+function colisDeLAgence(colis, agence) {
+  const sienne = String(agence || "").trim();
+  if (!sienne) return true;
+  const site = String(colis?.site || "").trim();
+  if (!site) return true;
+  return site.toLowerCase() === sienne.toLowerCase();
+}
+
 function telephonePourPays(data, pays) {
   return numerosPourPays(data, pays)[0] || "";
 }
@@ -7287,7 +7329,7 @@ function BandeauEcrasement({ data, persist, session }) {
 
 function Dashboard({ data, session, onNavigate, onNouveauColis }) {
   const stats = useMemo(() => {
-    const colis = session.agence ? data.colis.filter((c) => (c.site || "Bambeto") === session.agence) : data.colis;
+    const colis = data.colis.filter((c) => colisDeLAgence(c, session.agence));
     const total = colis.length;
     const now = new Date();
     const thisMonth = colis.filter((c) => { const d = new Date(c.createdAt); return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear(); }).length;
@@ -7298,7 +7340,9 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
     const parPays = COUNTRIES.map((p) => ({ ...p, count: colis.filter((c) => c.pays === p.code).length }));
     const recent = [...colis].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 5);
     const parAgence = sitesLocaux(data.sites).map((s) => {
-      const colisAgence = colis.filter((c) => (c.site || "Bambeto") === s.nom);
+      /* Comparaison au nom, insensible à la casse. Un colis sans site ne compte pour aucune
+         agence — l'attribuer à l'une d'elles gonflerait ses chiffres sans raison. */
+      const colisAgence = colis.filter((c) => (c.site || "").trim().toLowerCase() === (s.nom || "").trim().toLowerCase());
       return { nom: s.nom, count: colisAgence.length, ca: colisAgence.reduce((sum, c) => sum + c.prix, 0) };
     });
     // Colis "oubliés" : toujours au statut Enregistré après plus de 3 jours — signe qu’ils ont
@@ -7411,12 +7455,20 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
         </div>
       )}
 
+      {/*
+        * Les chiffres du tableau de bord suivent « stats.globales », ou à défaut
+        * « stats.personnelles » — deux permissions qui existaient et n'étaient lues nulle part.
+        * Un compte à qui l'on n'a ouvert ni l'une ni l'autre voyait quand même le chiffre
+        * d'affaires de l'entreprise dès la page d'accueil.
+        */}
+      {(effectivePermission(session, "stats.globales") || effectivePermission(session, "stats.personnelles")) && (
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 20 }}>
         <StatCard label="Volume total" value={total} icon={Package} tint="#3D63FF" trend={`+${thisMonth} ce mois`} trendColor="var(--ok-fg)" />
         <StatCard label="Revenus" value={fmt(ca, "EUR")} icon={DollarSign} tint="#16A163" trend={`${fmt(encaisse, "EUR")} encaissés`} trendColor="var(--ok-fg)" outline="#1E4430" />
         <StatCard label="En transit" value={enTransit} icon={Plane} tint="#5B8DEF" trend="Actuellement en cours" trendColor="var(--muted)" />
         <StatCard label="À expédier" value={aExpedier} icon={AlertTriangle} tint="var(--danger-fg)" trend={aExpedier > 0 ? "Nécessite action" : "Rien en attente"} trendColor={aExpedier > 0 ? "var(--danger-fg)" : "var(--muted)"} />
       </div>
+      )}
 
       {soldesCaisse.length > 0 && (
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: "16px 20px", marginBottom: 20 }}>
@@ -7546,7 +7598,8 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
         </div>
       )}
 
-      {parRoute.length > 0 && (
+      {/* La marge par route est une marge : elle suit « compta.marges », comme le résultat. */}
+      {parRoute.length > 0 && effectivePermission(session, "compta.marges") && (
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 20, marginBottom: 20 }}>
           <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14.5, marginBottom: 2 }}>Rentabilité par route</div>
           <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 }}>Marge = prix facturé moins les commissions d’agence. Les frais de transport, de douane et les charges fixes ne sont pas suivis par colis : ce n’est donc pas un résultat net, mais une base fiable pour comparer les routes entre elles.</div>
@@ -10040,26 +10093,81 @@ function calcPrice(countryCode, poids, volume, mode) {
   return +(5 + volKg * rate).toFixed(2);
 }
 
+/**
+ * Ce qu'on affiche à la place d'un écran qu'on n'a pas le droit d'ouvrir.
+ *
+ * Un écran vide, ou un retour muet au menu, laisse croire à une panne : on recommence, on
+ * s'énerve, on appelle. Dire « ce n'est pas votre droit, voici qui peut vous l'ouvrir » règle la
+ * question en une phrase.
+ */
+function AccesRefuse({ onBack }) {
+  return (
+    <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center" }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>Cet écran ne vous est pas ouvert</div>
+      <div style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.6, maxWidth: 460, margin: "0 auto 18px" }}>
+        Votre compte n’a pas le droit correspondant. Un administrateur peut vous l’accorder depuis
+        Configuration → Gestion Utilisateurs.
+      </div>
+      {onBack && (
+        <button onClick={onBack} style={{ background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 9, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+          Retour
+        </button>
+      )}
+    </div>
+  );
+}
+
 function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offline }) {
   const [sub, setSub] = useState(null);
   const back = () => setSub(null);
 
-  if (sub === "identite") return <IdentitePubliquePage data={data} persist={persist} notify={notify} onBack={back} />;
-  if (sub === "devises") return <GestionDevisesPage data={data} persist={persist} session={session} notify={notify} onBack={back} />;
-  if (sub === "commissions") return <CommissionsPage data={data} persist={persist} session={session} notify={notify} onBack={back} />;
-  if (sub === "reception") return <ReceptionTarifsPage data={data} persist={persist} notify={notify} onBack={back} />;
-  if (sub === "adresses") return <AdressesEtSitesPage data={data} persist={persist} notify={notify} onBack={back} />;
-  if (sub === "guide") return <GuidePage onBack={back} />;
-  if (sub === "categories") return <CategoriesProduitsPage data={data} persist={persist} session={session} notify={notify} onBack={back} />;
-  if (sub === "sauvegarde") return <SauvegardePage data={data} persist={persist} notify={notify} session={session} onBack={back} />;
-  if (sub === "notifwa") return <NotificationsWhatsAppPage data={data} persist={persist} notify={notify} onBack={back} />;
-  if (sub === "departs") return <DepartsPage data={data} persist={persist} notify={notify} onBack={back} />;
-  if (sub === "paiement") return <PaiementConfigPage data={data} persist={persist} notify={notify} onBack={back} />;
-  if (sub === "users") return <UtilisateursPage data={data} persist={persist} notify={notify} onBack={back} session={session} />;
-  if (sub === "performance") return <PerformanceAgentsPage data={data} onBack={back} />;
-  if (sub === "pointage") return <PointagePage data={data} persist={persist} notify={notify} onBack={back} session={session} />;
-  if (sub === "systeme") return <ParametresSystemePage data={data} persist={persist} notify={notify} onBack={back} offline={offline} />;
-  if (sub === "journal") return <JournalActivitePage data={data} onBack={back} />;
+  /*
+   * CHAQUE ÉCRAN DERRIÈRE SA PROPRE PERMISSION.
+   *
+   * Toutes ces cartes s'ouvraient sur le seul « config.acceder ». Le serveur, lui, exige déjà la
+   * permission précise pour écrire : api/_cloisonnement.js remet en place ce qui a été changé sans
+   * le droit correspondant. Le résultat était le pire des deux mondes — l'écran s'ouvrait,
+   * acceptait la saisie, annonçait « Tarifs mis à jour », et le serveur reposait silencieusement
+   * l'ancienne valeur. Personne n'apprenait qu'il n'avait pas le droit ; on croyait simplement que
+   * l'application perdait les réglages.
+   *
+   * Les permissions posées ici sont EXACTEMENT celles que le serveur vérifie, section par section.
+   */
+  const droit = (cle) => effectivePermission(session, cle);
+  const ecrans = {
+    identite: { permission: "config.acceder", rendu: () => <IdentitePubliquePage data={data} persist={persist} notify={notify} onBack={back} /> },
+    devises: { permission: "config.tarifs", rendu: () => <GestionDevisesPage data={data} persist={persist} session={session} notify={notify} onBack={back} /> },
+    commissions: { permission: "config.tarifs", rendu: () => <CommissionsPage data={data} persist={persist} session={session} notify={notify} onBack={back} /> },
+    reception: { permission: "config.tarifs", rendu: () => <ReceptionTarifsPage data={data} persist={persist} notify={notify} onBack={back} /> },
+    paiement: { permission: "config.tarifs", rendu: () => <PaiementConfigPage data={data} persist={persist} notify={notify} onBack={back} /> },
+    categories: { permission: "config.categories", rendu: () => <CategoriesProduitsPage data={data} persist={persist} session={session} notify={notify} onBack={back} /> },
+    adresses: { permission: "config.acceder", rendu: () => <AdressesEtSitesPage data={data} persist={persist} notify={notify} onBack={back} /> },
+    departs: { permission: "config.acceder", rendu: () => <DepartsPage data={data} persist={persist} notify={notify} onBack={back} /> },
+    notifwa: { permission: "config.acceder", rendu: () => <NotificationsWhatsAppPage data={data} persist={persist} notify={notify} onBack={back} /> },
+    systeme: { permission: "config.acceder", rendu: () => <ParametresSystemePage data={data} persist={persist} notify={notify} onBack={back} offline={offline} /> },
+    guide: { permission: "config.acceder", rendu: () => <GuidePage onBack={back} /> },
+    journal: { permission: "config.acceder", rendu: () => <JournalActivitePage data={data} onBack={back} /> },
+    /* Une sauvegarde, c'est le fichier entier de l'entreprise qui sort sur un appareil. */
+    sauvegarde: { permission: "stats.exporter", rendu: () => <SauvegardePage data={data} persist={persist} notify={notify} session={session} onBack={back} /> },
+    users: { permission: "users.consulter", rendu: () => <UtilisateursPage data={data} persist={persist} notify={notify} onBack={back} session={session} /> },
+    performance: { permission: "stats.globales", rendu: () => <PerformanceAgentsPage data={data} onBack={back} /> },
+    /* Ouverte à tous : celui qui ne tient pas la fiche de l'équipe voit la sienne, en lecture. */
+    pointage: { permission: null, rendu: () => <PointagePage data={data} persist={persist} notify={notify} onBack={back} session={session} /> },
+  };
+  /* Une carte ne se propose que si l'écran qu'elle ouvre accepterait de s'ouvrir. */
+  const ouvrable = (cle) => {
+    const ecran = ecrans[cle];
+    return !!ecran && (!ecran.permission || droit(ecran.permission));
+  };
+  const ecranDemande = sub ? ecrans[sub] : null;
+  /*
+   * La permission est revérifiée à l'ouverture, et pas seulement sur la carte. Un droit retiré
+   * pendant qu'un écran est ouvert doit le refermer, et non attendre le prochain chargement.
+   */
+  if (ecranDemande) {
+    if (ecranDemande.permission && !droit(ecranDemande.permission)) return <AccesRefuse onBack={back} />;
+    return ecranDemande.rendu();
+  }
 
   const Card = ({ icon: Icon, tint, title, desc, onClick }) => (
     <button onClick={onClick} style={{ display: "flex", gap: 16, textAlign: "start", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16, padding: 20, cursor: "pointer", boxShadow: "0 2px 10px rgba(10,38,71,0.05)" }}>
@@ -10100,24 +10208,24 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
       */}
       <SectionLabel>VOTRE ENTREPRISE</SectionLabel>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14, marginBottom: 26 }}>
-        <Card icon={Globe} tint="#3D63FF" title="Identité &amp; site public" desc="Votre nom, votre slogan et votre logo — dans l’application comme sur votre page d’accueil publique." onClick={() => setSub("identite")} />
-        <Card icon={MapPin} tint="#5B8DEF" title="Adresses &amp; sites" desc="Où vous enregistrez, où vous remettez, et les coordonnées qui s’impriment sur vos documents." onClick={() => setSub("adresses")} />
-        <Card icon={Plane} tint="#0EA5E9" title="Calendrier des départs" desc="Annoncez quand part le prochain envoi : vos clients cessent d’appeler pour le demander." onClick={() => setSub("departs")} />
+        {ouvrable("identite") && <Card icon={Globe} tint="#3D63FF" title="Identité &amp; site public" desc="Votre nom, votre slogan et votre logo — dans l’application comme sur votre page d’accueil publique." onClick={() => setSub("identite")} />}
+        {ouvrable("adresses") && <Card icon={MapPin} tint="#5B8DEF" title="Adresses &amp; sites" desc="Où vous enregistrez, où vous remettez, et les coordonnées qui s’impriment sur vos documents." onClick={() => setSub("adresses")} />}
+        {ouvrable("departs") && <Card icon={Plane} tint="#0EA5E9" title="Calendrier des départs" desc="Annoncez quand part le prochain envoi : vos clients cessent d’appeler pour le demander." onClick={() => setSub("departs")} />}
       </div>
 
       <SectionLabel>TARIFS &amp; ARGENT</SectionLabel>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14, marginBottom: 26 }}>
-        <Card icon={Receipt} tint="#E0794E" title="Catégories de Produits" desc="Configuration des types de marchandises et taxes." onClick={() => setSub("categories")} />
-        <Card icon={RefreshCw} tint="#0EA5E9" title="Gestion des devises" desc="Un taux par devise, partagé automatiquement par tous les pays concernés." onClick={() => setSub("devises")} />
-        <Card icon={Package} tint="var(--danger-fg)" title="Tarifs de réception client" desc="Le tarif au kg appliqué sur les bordereaux de réception, selon le poids du lot." onClick={() => setSub("reception")} />
-        <Card icon={Users} tint="#16A163" title="Commissions par Agence" desc="Définissez combien chaque agence gagne par kg et par unité vendue." onClick={() => setSub("commissions")} />
-        <Card icon={Wallet} tint="#5B8DEF" title="Paiement" desc="Configurez vos numéros pour accepter les paiements de vos clients." onClick={() => setSub("paiement")} />
+        {ouvrable("categories") && <Card icon={Receipt} tint="#E0794E" title="Catégories de Produits" desc="Configuration des types de marchandises et taxes." onClick={() => setSub("categories")} />}
+        {ouvrable("devises") && <Card icon={RefreshCw} tint="#0EA5E9" title="Gestion des devises" desc="Un taux par devise, partagé automatiquement par tous les pays concernés." onClick={() => setSub("devises")} />}
+        {ouvrable("reception") && <Card icon={Package} tint="var(--danger-fg)" title="Tarifs de réception client" desc="Le tarif au kg appliqué sur les bordereaux de réception, selon le poids du lot." onClick={() => setSub("reception")} />}
+        {ouvrable("commissions") && <Card icon={Users} tint="#16A163" title="Commissions par Agence" desc="Définissez combien chaque agence gagne par kg et par unité vendue." onClick={() => setSub("commissions")} />}
+        {ouvrable("paiement") && <Card icon={Wallet} tint="#5B8DEF" title="Paiement" desc="Configurez vos numéros pour accepter les paiements de vos clients." onClick={() => setSub("paiement")} />}
       </div>
 
       <SectionLabel>VOTRE ÉQUIPE</SectionLabel>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14, marginBottom: 26 }}>
-        <Card icon={Users} tint="#6366F1" title="Gestion Utilisateurs" desc="Accès, rôles et permissions de l’équipe." onClick={() => setSub("users")} />
-        <Card icon={LayoutDashboard} tint="#3D63FF" title="Performance des agents" desc="Colis enregistrés, chiffre d’affaires et paiements encaissés, par agent." onClick={() => setSub("performance")} />
+        {ouvrable("users") && <Card icon={Users} tint="#6366F1" title="Gestion Utilisateurs" desc="Accès, rôles et permissions de l’équipe." onClick={() => setSub("users")} />}
+        {ouvrable("performance") && <Card icon={LayoutDashboard} tint="#3D63FF" title="Performance des agents" desc="Colis enregistrés, chiffre d’affaires et paiements encaissés, par agent." onClick={() => setSub("performance")} />}
         {/*
           * La carte est ouverte à tous, mais pas au même écran : celui qui tient la fiche voit
           * toute l'équipe et corrige ; les autres n'ont accès qu'à la leur, en lecture. Un employé
@@ -10134,11 +10242,11 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
 
       <SectionLabel>SUIVI &amp; MAINTENANCE</SectionLabel>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14 }}>
-        <Card icon={MessageCircle} tint="#16A163" title="Notifications" desc="Qui est prévenu automatiquement, et pour quel événement — clients, expéditeurs et partenaires." onClick={() => setSub("notifwa")} />
-        <Card icon={FileStack} tint="#5B8DEF" title="Journal d’activité" desc="Historique complet des actions effectuées par les utilisateurs." onClick={() => setSub("journal")} />
-        <Card icon={Download} tint="var(--danger-fg)" title="Sauvegarde des données" desc="Téléchargez une copie complète de votre plateforme. Le seul filet en cas de perte." onClick={() => setSub("sauvegarde")} />
-        <Card icon={Settings} tint="#6B7280" title="Paramètres Système" desc="Options avancées de la plateforme." onClick={() => setSub("systeme")} />
-        <Card icon={Sparkles} tint="#8B5CF6" title="Guide d’utilisation" desc="Explications des fonctionnalités récentes : comptes clients, pré-alertes, bordereau de réception, tarifs par palier..." onClick={() => setSub("guide")} />
+        {ouvrable("notifwa") && <Card icon={MessageCircle} tint="#16A163" title="Notifications" desc="Qui est prévenu automatiquement, et pour quel événement — clients, expéditeurs et partenaires." onClick={() => setSub("notifwa")} />}
+        {ouvrable("journal") && <Card icon={FileStack} tint="#5B8DEF" title="Journal d’activité" desc="Historique complet des actions effectuées par les utilisateurs." onClick={() => setSub("journal")} />}
+        {ouvrable("sauvegarde") && <Card icon={Download} tint="var(--danger-fg)" title="Sauvegarde des données" desc="Téléchargez une copie complète de votre plateforme. Le seul filet en cas de perte." onClick={() => setSub("sauvegarde")} />}
+        {ouvrable("systeme") && <Card icon={Settings} tint="#6B7280" title="Paramètres Système" desc="Options avancées de la plateforme." onClick={() => setSub("systeme")} />}
+        {ouvrable("guide") && <Card icon={Sparkles} tint="#8B5CF6" title="Guide d’utilisation" desc="Explications des fonctionnalités récentes : comptes clients, pré-alertes, bordereau de réception, tarifs par palier..." onClick={() => setSub("guide")} />}
       </div>
     </div>
   );
@@ -12023,7 +12131,7 @@ function CentreClientsPage({ data, persist, notify, session }) {
       pays: saisie.paysOrigine || "FR", direction: "import", mode: "air",
       produits: [{ id: `p${Date.now()}`, nom: saisie.description || saisie.reference || "Commande en ligne",
                    quantite: String(saisie.nbArticles || 1), poids: String(saisie.poids), categorie: "" }],
-      poids: saisie.poids, volume: 0, valeurDeclaree: saisie.valeurCommande || 0, site: session?.agence || "Bambeto",
+      poids: saisie.poids, volume: 0, valeurDeclaree: saisie.valeurCommande || 0, site: session?.agence || nomSiteParDefaut(data),
       prixBrut: prixEUR, discountLoyalty: 0, rabaisMontant: 0, rabaisDevise: "GNF", rabaisEUR: 0,
       prix: prixEUR, paye: 0, reste: prixEUR, photos: [], paiements: [],
       notesInternes: `Pré-alerte ${saisie.provenance}${saisie.reference ? ` — réf. ${saisie.reference}` : ""} · ${saisie.poids} kg à ${fmtGNF(saisie.tauxParKg)}/kg`,
@@ -12522,7 +12630,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
   const baseList = useMemo(() => {
     return data.colis
       .filter((c) => (isChauffeur ? c.status === "Disponible au retrait" : true))
-      .filter((c) => !session.agence || (c.site || "Bambeto") === session.agence);
+      .filter((c) => colisDeLAgence(c, session.agence));
   }, [data.colis, isChauffeur, session.agence]);
   const [statutFiltre, setStatutFiltre] = useState(null);
   const list = useMemo(() => {
@@ -12792,7 +12900,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
       ...c, status: "Livré", remise: preuve,
       historique: [...(c.historique || []), {
         status: "Livré", date: maintenant,
-        utilisateur: preuve.agent, agence: c.site || "Bambeto",
+        utilisateur: preuve.agent, agence: c.site || nomSiteParDefaut(data),
         motif: `Remis à ${preuve.nom}${preuve.typePiece ? ` (${preuve.typePiece}${preuve.numeroPiece ? " " + preuve.numeroPiece : ""})` : ""}`,
       }],
     })) };
@@ -12823,7 +12931,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
       const codeRetrait = nextStatus === "Disponible au retrait" && !c.codeRetrait ? genCodeRetrait() : c.codeRetrait;
       return { ...c, status: nextStatus, codeRetrait, historique: [...c.historique, {
         status: nextStatus, date: new Date().toISOString(),
-        utilisateur: `${session.prenom} ${session.nom}`, agence: c.site || "Bambeto",
+        utilisateur: `${session.prenom} ${session.nom}`, agence: c.site || nomSiteParDefaut(data),
       }] };
     }) };
     next.activityLog = logActivity("Changement de statut", `${tracking} → ${nextStatus}`);
@@ -12871,7 +12979,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
       litige: { type, description, date: maintenant, statut: "Ouvert",
                 par: `${session.prenom} ${session.nom}`.trim() || session.identifiant },
       historique: [...(c.historique || []), { status: c.status, date: maintenant,
-        utilisateur: `${session.prenom} ${session.nom}`.trim(), agence: c.site || "Bambeto",
+        utilisateur: `${session.prenom} ${session.nom}`.trim(), agence: c.site || nomSiteParDefaut(data),
         motif: `Litige déclaré : ${type === "perdu" ? "colis perdu" : "colis endommagé"}${description ? ` — ${description}` : ""}` }],
     })) };
     next.activityLog = logActivity(type === "perdu" ? "Colis déclaré perdu" : "Colis déclaré endommagé", `${tracking}${description ? ` — ${description}` : ""}`);
@@ -12899,7 +13007,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
       if (c.tracking !== tracking) return c;
       return { ...c, status: "Annulé", historique: [...c.historique, {
         status: "Annulé", date: new Date().toISOString(),
-        utilisateur: `${session.prenom} ${session.nom}`, agence: c.site || "Bambeto", motif,
+        utilisateur: `${session.prenom} ${session.nom}`, agence: c.site || nomSiteParDefaut(data), motif,
       }] };
     }) };
     next.activityLog = logActivity("Colis annulé", `${tracking}${motif ? ` — ${motif}` : ""}`);
@@ -12912,7 +13020,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
       if (c.tracking !== tracking) return c;
       return { ...c, status: "Refusé", retour: { motif, date: new Date().toISOString(), statutRetour: "En attente de décision" }, historique: [...c.historique, {
         status: "Refusé", date: new Date().toISOString(),
-        utilisateur: `${session.prenom} ${session.nom}`, agence: c.site || "Bambeto", motif,
+        utilisateur: `${session.prenom} ${session.nom}`, agence: c.site || nomSiteParDefaut(data), motif,
       }] };
     }) };
     next.activityLog = logActivity("Colis refusé par le destinataire", `${tracking}${motif ? ` — ${motif}` : ""}`);
@@ -13523,7 +13631,7 @@ function BordereauCreation({ data, session, onCancel, onCreate }) {
   const country = COUNTRIES.find((c) => c.code === pays);
 
   const dejaInclus = new Set((data.bordereaux || []).filter((b) => normalizeBordereauStatut(b.statut) !== "Livré").flatMap((b) => b.colisTrackings));
-  const eligibles = data.colis.filter((c) => c.pays === pays && (c.direction || "export") === direction && c.status !== "Livré" && c.status !== "Annulé" && !dejaInclus.has(c.tracking) && (!session?.agence || (c.site || "Bambeto") === session.agence));
+  const eligibles = data.colis.filter((c) => c.pays === pays && (c.direction || "export") === direction && c.status !== "Livré" && c.status !== "Annulé" && !dejaInclus.has(c.tracking) && colisDeLAgence(c, session?.agence));
 
   function toggle(tracking) {
     setSelectedTrackings((list) => (list.includes(tracking) ? list.filter((t) => t !== tracking) : [...list, tracking]));
@@ -16937,16 +17045,6 @@ function EncaisserGroupeModal({ data, session, onEncaisser, onClose }) {
   );
 }
 
-/** Une ligne du résumé : libellé à gauche, valeur à droite, sur la même ligne. */
-function LigneResume({ libelle, valeur }) {
-  return (
-    <div style={{ display: "flex", justifyContent: "space-between", gap: 14, flexWrap: "wrap" }}>
-      <span style={{ color: "var(--muted)" }}>{libelle}</span>
-      <strong style={{ color: "var(--text)", textAlign: "end" }}>{valeur}</strong>
-    </div>
-  );
-}
-
 function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeConfig, categories, session, partenaire }) {
   /*
    * Modifier un colis partenaire n'est pas modifier un colis ordinaire.
@@ -17089,14 +17187,12 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
    */
   const etapesEdition = useMemo(() => {
     const parCle = Object.fromEntries(WIZARD_STEPS.map((e) => [e.key, e]));
-    const liste = [];
-    if (modifiableComplet) liste.push(parCle.route);
-    liste.push(parCle.expediteur, parCle.destinataire);
-    if (modifiableComplet && produits.length > 0) liste.push(parCle.produits);
+    const liste = [parCle.expediteur, parCle.destinataire];
+    if (modifiableComplet) liste.push(parCle.produits);
     if (modifiableComplet && !estPartenaire) liste.push(parCle.frais);
     liste.push(parCle.resume);
     return liste;
-  }, [modifiableComplet, produits.length, estPartenaire]);
+  }, [modifiableComplet, estPartenaire]);
 
   const [step, setStep] = useState(0);
   /*
@@ -17108,6 +17204,10 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
     setStep((s) => Math.min(s, etapesEdition.length - 1));
   }, [etapesEdition.length]);
   const etapeCourante = etapesEdition[Math.min(step, etapesEdition.length - 1)]?.key;
+  /* Les deux bouts de la route, tels qu'ils s'affichent au résumé. */
+  const villeDestination = COUNTRIES.find((c) => c.code === pays)?.city || pays;
+  const villeDepart = direction === "export" ? "Conakry" : villeDestination;
+  const villeArrivee = direction === "export" ? villeDestination : "Conakry";
 
   /*
    * « Suivant » ne vérifie que ce que l'étape quittée contenait.
@@ -17120,7 +17220,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
     if (etapeCourante === "expediteur" && !expediteur) { setErr("Renseignez le prénom et le nom de l’expéditeur."); return; }
     if (etapeCourante === "destinataire" && !destinataire) { setErr("Renseignez le prénom et le nom du destinataire."); return; }
     if (etapeCourante === "destinataire" && !String(telephone || "").trim()) { setErr("Renseignez le téléphone du destinataire."); return; }
-    if (etapeCourante === "route" && !((montantSaisi(poids) ?? 0) > 0)) { setErr("Le poids doit être supérieur à 0 kg — écrivez par exemple 12,5."); return; }
+    if (etapeCourante === "produits" && !((montantSaisi(poids) ?? 0) > 0)) { setErr("Le poids doit être supérieur à 0 kg — écrivez par exemple 12,5."); return; }
     setStep((s) => Math.min(s + 1, etapesEdition.length - 1));
   }
   // La valeur des produits suit désormais l'état local `produits` (modifiable ci-dessous), et
@@ -17237,7 +17337,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
     // ligne qui faussera ensuite les totaux de poids, le chiffre d'affaires et les commissions.
     // « 12,5 » est la façon normale d'écrire douze kilos et demi : Number() y voit NaN, et le
     // colis se refusait avec un message parlant d'un poids nul que l'agent venait pourtant de saisir.
-    if (!((montantSaisi(poids) ?? 0) > 0)) { refus("Le poids doit être supérieur à 0 kg — écrivez par exemple 12,5.", "route"); return; }
+    if (!((montantSaisi(poids) ?? 0) > 0)) { refus("Le poids doit être supérieur à 0 kg — écrivez par exemple 12,5.", "produits"); return; }
     // Mêmes règles que sur l'encaissement d'un colis : on n'enregistre jamais plus que ce qui est
     // dû (le surplus est de la monnaie à rendre, pas une recette), et une somme retirée de la
     // caisse d'un agent doit être justifiée.
@@ -17393,26 +17493,27 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
         <Field label="Code postal (optionnel)"><input value={destinataireCodePostal} onChange={(e) => setDestinataireCodePostal(e.target.value)} style={inputStyle} /></Field>
         </>)}
 
-        {etapeCourante === "route" && (
-          <>
-        <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Route &amp; tarif</div>
-        <Field label="Destination"><select value={pays} onChange={(e) => setPays(e.target.value)} style={inputStyle}>{COUNTRIES.map((c) => <option key={c.code} value={c.code}>{c.name} — {c.city}</option>)}</select></Field>
-        <div style={{ gridColumn: "1 / -1" }}>
-          <Field label="Sens de la route">
-            <div style={{ display: "flex", gap: 8 }}>
-              <button type="button" onClick={() => setDirection("export")} style={{ ...toggleBtn, ...(direction === "export" ? toggleActive : {}) }}>Conakry → {COUNTRIES.find(c=>c.code===pays)?.city}</button>
-              <button type="button" onClick={() => setDirection("import")} style={{ ...toggleBtn, ...(direction === "import" ? toggleActive : {}) }}>{COUNTRIES.find(c=>c.code===pays)?.city} → Conakry</button>
-            </div>
-          </Field>
-        </div>
-        <Field label="Poids (kg)"><input value={poids} onChange={(e) => setPoids(e.target.value)} style={inputStyle} /></Field>
-        <Field label="Volume (m³, optionnel)"><input value={volume} onChange={(e) => setVolume(e.target.value)} style={inputStyle} /></Field>
-          </>
-        )}
-
         {etapeCourante === "produits" && (
           <>
-            <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Contenu du colis</div>
+            {/*
+              * LA ROUTE NE SE REMODIFIE PAS ICI, ET LE VOLUME A DISPARU.
+              *
+              * La destination et le sens sont arrêtés au dépôt : ils décident du tarif appliqué,
+              * du bordereau sur lequel le colis part et de l'agence de retrait annoncée au
+              * client. Les rouvrir à la correction, c'était offrir de changer d'un geste ce qui
+              * est déjà imprimé — et ce n'est jamais ce qu'on vient corriger. La route reste
+              * lisible au résumé, pour vérifier qu'on est bien sur le bon colis.
+              *
+              * Le volume, lui, ne servait qu'à une chose : le poids volumétrique, un mètre cube
+              * comptant pour 167 kg. Un « 2 » saisi de travers dans ce champ facultatif faisait
+              * passer un colis de 2,8 kg à 334 kg facturés, sans un mot. Le champ est retiré ; la
+              * valeur déjà enregistrée sur un colis reste prise en compte telle quelle, pour ne
+              * pas changer le prix d'un envoi en cours.
+              */}
+            <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Poids &amp; contenu</div>
+            <Field label="Poids (kg)"><input value={poids} onChange={(e) => setPoids(e.target.value)} style={inputStyle} inputMode="decimal" /></Field>
+            <div style={{ gridColumn: "1 / -1" }} />
+            {produits.length > 0 && (
             <div style={{ gridColumn: "1 / -1" }}>
               {produits.map((p, idx) => (
                 <div key={p.id} style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 12 }}>
@@ -17486,6 +17587,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
               ))}
               <button type="button" onClick={addProduit} style={{ width: "100%", border: "1.5px dashed var(--border)", borderRadius: 12, padding: "12px 0", background: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>+ Ajouter un article</button>
             </div>
+            )}
             {estPartenaire && (
               <div style={{ gridColumn: "1 / -1", background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 10, padding: "11px 13px" }}>
                 <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
@@ -17580,27 +17682,100 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
 
         {etapeCourante === "resume" && (
           <div style={{ gridColumn: "1 / -1" }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 12 }}>Résumé</div>
-            <div style={{ background: "var(--surface2)", borderRadius: 12, padding: "14px 16px", fontSize: 13, color: "var(--text)", lineHeight: 1.9 }}>
-              <LigneResume libelle="Expéditeur" valeur={expediteur || "—"} />
-              <LigneResume libelle="Destinataire" valeur={destinataire || "—"} />
-              {estPartenaire && repere.trim() && <LigneResume libelle="Repère" valeur={repere.trim()} />}
-              <LigneResume libelle="Téléphone" valeur={telephone || "—"} />
-              <LigneResume libelle="Route" valeur={`${direction === "export" ? "Conakry" : COUNTRIES.find((c) => c.code === pays)?.city || pays} → ${direction === "export" ? (COUNTRIES.find((c) => c.code === pays)?.city || pays) : "Conakry"}`} />
-              <LigneResume libelle="Poids" valeur={`${montantSaisi(poids) ?? 0} kg`} />
-              {produits.length > 0 && <LigneResume libelle="Articles" valeur={`${produits.length}`} />}
-            </div>
             {/*
-              * Le total ne s'affiche que pour un colis de l'entreprise. Sur un colis partenaire il
-              * vaut zéro par construction — l'afficher laisserait croire à une erreur de calcul,
-              * alors que c'est le principe même : c'est le partenaire qui facture son client.
+              * LE RÉSUMÉ EST LA DERNIÈRE CHANCE DE VOIR L'ERREUR.
+              *
+              * C'est le seul écran où l'on relit le colis en entier avant de l'enregistrer. Une
+              * liste de couples « libellé : valeur » se parcourt sans rien voir : l'œil glisse.
+              * On sépare donc ce qui se vérifie séparément — qui envoie, qui reçoit, ce qui part —
+              * et l'on met en avant les deux chiffres qu'on relit vraiment : le poids et le total.
               */}
-            {!estPartenaire && (
-              <div style={{ background: "var(--surface2)", borderRadius: 12, padding: "12px 16px", display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
-                <div style={{ fontSize: 13, color: "var(--text)" }}>Total recalculé : <strong>{fmt(prix, "EUR")}</strong></div>
-                <div style={{ fontSize: 13, color: reste > 0 ? "var(--danger-fg)" : "var(--ok-fg)" }}>Reste à payer : <strong>{fmt(reste, "EUR")}</strong></div>
+            <div style={{ background: "var(--surface2)", borderRadius: 16, overflow: "hidden", border: "1px solid var(--border)" }}>
+
+              {/* La route, en bandeau : c'est elle qui dit de quel colis on parle. */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 12, padding: "16px 18px", background: "var(--surface)", borderBottom: "1px solid var(--border)", flexWrap: "wrap" }}>
+                <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{villeDepart}</span>
+                <span style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--muted)" }}>
+                  <span style={{ width: 26, height: 1, background: "var(--border)" }} />
+                  <Plane size={14} />
+                  <span style={{ width: 26, height: 1, background: "var(--border)" }} />
+                </span>
+                <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{villeArrivee}</span>
               </div>
-            )}
+
+              {/* Les deux chiffres qu'on relit vraiment. */}
+              <div style={{ display: "flex", borderBottom: "1px solid var(--border)" }}>
+                <div style={{ flex: 1, padding: "14px 18px", textAlign: "center" }}>
+                  <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.6 }}>POIDS</div>
+                  <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 20, fontWeight: 700, color: "var(--text)", marginTop: 3 }}>{montantSaisi(poids) ?? 0} kg</div>
+                </div>
+                {produits.length > 0 && (
+                  <div style={{ flex: 1, padding: "14px 18px", textAlign: "center", borderInlineStart: "1px solid var(--border)" }}>
+                    <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.6 }}>ARTICLES</div>
+                    <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 20, fontWeight: 700, color: "var(--text)", marginTop: 3 }}>{produits.length}</div>
+                  </div>
+                )}
+                {!estPartenaire && (
+                  <div style={{ flex: 1.4, padding: "14px 18px", textAlign: "center", borderInlineStart: "1px solid var(--border)" }}>
+                    <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.6 }}>TOTAL</div>
+                    <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 20, fontWeight: 700, color: "var(--text)", marginTop: 3 }}>{fmt(prix, "EUR")}</div>
+                  </div>
+                )}
+              </div>
+
+              {/* Qui envoie, qui reçoit — côte à côte, pour que l'inversion saute aux yeux. */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
+                <div style={{ padding: "16px 18px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 8 }}>
+                    <User size={13} color="var(--muted)" />
+                    <span style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.6 }}>EXPÉDITEUR</span>
+                  </div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: expediteur ? "var(--text)" : "var(--danger-fg)" }}>{expediteur || "à renseigner"}</div>
+                  {expediteurTelephone && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>{expediteurTelephone}</div>}
+                  {expediteurAdresse && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>{expediteurAdresse}</div>}
+                </div>
+                <div style={{ padding: "16px 18px", borderInlineStart: "1px solid var(--border)" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 8 }}>
+                    <MapPin size={13} color="var(--muted)" />
+                    <span style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.6 }}>DESTINATAIRE</span>
+                  </div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: destinataire ? "var(--text)" : "var(--danger-fg)" }}>{destinataire || "à renseigner"}</div>
+                  {telephone && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>{telephone}</div>}
+                  {[destinataireAdresse, destinataireVille, destinataireCodePostal].filter(Boolean).length > 0 && (
+                    <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
+                      {[destinataireAdresse, destinataireVille, destinataireCodePostal].filter(Boolean).join(", ")}
+                    </div>
+                  )}
+                  {estPartenaire && repere.trim() && (
+                    <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6 }}>
+                      Repère : <strong style={{ color: "var(--text)" }}>{repere.trim()}</strong>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/*
+                * Le reste à payer, seulement quand il en reste un. Une ligne « 0,00 EUR » sous un
+                * colis soldé n'apprend rien et noie celle qui compte.
+                */}
+              {!estPartenaire && reste > 0.005 && (
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "13px 18px", background: "var(--danger-bg)", borderTop: "1px solid var(--border)", flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 12.5, color: "var(--danger-fg)", fontWeight: 600 }}>Reste à payer</span>
+                  <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 17, fontWeight: 700, color: "var(--danger-fg)" }}>{fmt(reste, "EUR")}</span>
+                </div>
+              )}
+              {!estPartenaire && reste <= 0.005 && (
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "13px 18px", background: "var(--ok-bg-soft)", borderTop: "1px solid var(--border)", flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 12.5, color: "var(--ok-fg)", fontWeight: 600 }}>Intégralement réglé</span>
+                  <CheckCircle2 size={16} color="var(--ok-fg)" />
+                </div>
+              )}
+              {estPartenaire && (
+                <div style={{ padding: "13px 18px", background: "var(--info-bg)", borderTop: "1px solid var(--border)", fontSize: 12, color: "var(--text)", lineHeight: 1.5 }}>
+                  Colis partenaire — l’entreprise n’encaisse rien auprès du client final.
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -18221,7 +18396,13 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
             )}
           </div>
 
-          {canManage && !isLast && colis.status !== "Annulé" && colis.status !== "Refusé" && (
+          {/*
+            * Faire avancer un colis suit « colis.changer_statut », pas le seul fait de ne pas être
+            * chauffeur. Un comptable, qui voit tous les colis pour les facturer, pouvait faire
+            * passer un colis d'« Enregistré » à « En transit » — donc partir une notification au
+            * client annonçant un départ qui n'a pas eu lieu.
+            */}
+          {effectivePermission(session, "colis.changer_statut") && !isLast && colis.status !== "Annulé" && colis.status !== "Refusé" && (
             <button onClick={onAdvance} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
               Statut suivant <ChevronRight size={14} />
             </button>
@@ -18811,370 +18992,20 @@ function detecterDoublonsClients(clients) {
   return groupes;
 }
 
-/**
- * Répertoire repris de l'ancienne plateforme, lu sur les captures d'écran fournies.
+/*
+ * LE RÉPERTOIRE REPRIS DE L'ANCIENNE PLATEFORME N'EST PLUS DANS LE CODE.
  *
- * ATTENTION — ces fiches sont marquées « à vérifier » (champ `aVerifier`). Les numéros ont été
- * lus sur des photos d'écran : certains chiffres pouvaient être flous ou coupés. Une erreur d'un
- * seul chiffre rend un client injoignable, il faut donc confirmer chaque fiche au premier contact.
- * L'agent confirme d'un clic depuis la page Clients, et le repère disparaît.
+ * Il y a vécu le temps de la reprise : 343 fiches — un nom et un numéro de téléphone par client —
+ * écrites en dur dans ce fichier. Or ce fichier part dans le navigateur de CHAQUE visiteur du
+ * site, connecté ou non. Le carnet d'adresses de l'entreprise était donc téléchargeable par
+ * quiconque ouvrait la page d'accueil, sans compte, sans mot de passe, sans laisser de trace.
  *
- * Il manque environ 40 clients (383 sur l'ancienne plateforme) : les pages 1 à 40 n'étaient pas
- * dans les captures. Ils sont à ajouter à la main.
+ * La reprise a eu lieu : les 343 fiches sont en base, où elles sont servies au seul personnel
+ * identifié. La copie du code n'était plus qu'une fuite qui ne servait plus à rien.
+ *
+ * Une base neuve ne repart donc plus avec ces clients — et c'est juste : le carnet d'une
+ * entreprise n'a pas à être livré avec le programme.
  */
-const REPERTOIRE_IMPORTE = [
-  { n: "aboubacar bah", t: "+224624538625" },
-  { n: "djoulde bah", t: "+224627260728" },
-  { n: "fatoumata bah", t: "+33780597034" },
-  { n: "fatoumata lamarana bah", t: "+224623435322" },
-  { n: "guraissy bah", t: "+224624924566" },
-  { n: "koundouba bah", t: "+224627290816" },
-  { n: "mamadou djoumah bah", t: "+224622015589" },
-  { n: "mamadou saliou bah", t: "+49622636470" },
-  { n: "mariama bah", t: "+224625278583" },
-  { n: "mariama cire bah", t: "+22626938617" },
-  { n: "oury bah", t: "+49629595970" },
-  { n: "thierno bah", t: "+33768408027" },
-  { n: "yaya bah", t: "+33768551442" },
-  { n: "hassanatou balde", t: "+224624364647" },
-  { n: "hawaou balde", t: "+224623385065" },
-  { n: "mariama cire baldé", t: "+224626228348" },
-  { n: "souleymane baldé", t: "+49627859734" },
-  { n: "aly bamba", t: "+224621425829" },
-  { n: "hawa bamba", t: "+224622598314" },
-  { n: "ibrahima bangoura", t: "+224620174697" },
-  { n: "ousmanr bangoura", t: "+224611726034" },
-  { n: "fatoumata bangoura", t: "+224627099308" },
-  { n: "ibrahima bangoura", t: "+49664495257" },
-  { n: "mariame bangoura", t: "+224613964512" },
-  { n: "m'balia bangoura", t: "+33766814454" },
-  { n: "naby laye bangoura", t: "+224621574031" },
-  { n: "boubacar barry", t: "+224627585505" },
-  { n: "hawa barry", t: "+224626698367" },
-  { n: "kadjaliou barry", t: "+224622251487" },
-  { n: "mamadou barry", t: "+224628103829" },
-  { n: "mamadou dian barry", t: "+224623193961" },
-  { n: "oumou tabara barry", t: "+224624597514" },
-  { n: "ramatoulaye barry", t: "+224622543649" },
-  { n: "abdourahmane barry", t: "+224623532352" },
-  { n: "boubacar barry", t: "+224620356729" },
-  { n: "djoulde barry", t: "+33758370589" },
-  { n: "fatoumata binta barry", t: "+224628128143" },
-  { n: "fatoumata djaraye barry", t: "+224628068063" },
-  { n: "mariama barry", t: "+224622308700" },
-  { n: "mariame barry", t: "+224620910880" },
-  { n: "muhammed barry", t: "+224621528148", e: "famous.hayere@gmail.com" },
-  { n: "oury bailo barry", t: "+224612954810" },
-  { n: "salimatou barry", t: "+224655870323" },
-  { n: "souleymane barry", t: "+224623308070" },
-  { n: "yero barry", t: "+224611167920" },
-  { n: "mouhamed lamine bayo", t: "+224622227448" },
-  { n: "anama bayo", t: "+224620421523" },
-  { n: "fatoumata berete", t: "+49758386706" },
-  { n: "fatoumata berete", t: "+33758386706", e: "djeneefanta94@gmail.com" },
-  { n: "hawa berete", t: "+33751520116" },
-  { n: "moussa tiranke berete", t: "+224628813950", e: "mtberete@gmail.com" },
-  { n: "bramx bramx", t: "+33768122438" },
-  { n: "aissata camara", t: "+224624194189" },
-  { n: "alseny camara", t: "+224627624077" },
-  { n: "ba fode morcane camara", t: "+224622341229" },
-  { n: "celestin camara", t: "+224622292953" },
-  { n: "ibrahima camara", t: "+22622144906" },
-  { n: "ibrahima camara", t: "+224620179927" },
-  { n: "mamadama camara", t: "+224625306536" },
-  { n: "mamadama camara", t: "+224625306537" },
-  { n: "mariame camara", t: "+33783334930", e: "mariecamara878@gmail.com" },
-  { n: "m'mah camara", t: "+224626743509" },
-  { n: "sekouba camara", t: "+224625240843" },
-  { n: "abdoulaye camara", t: "+224611711143" },
-  { n: "aicha camara", t: "+224623696000" },
-  { n: "aly rouen camara", t: "+33606419460" },
-  { n: "aminata camara", t: "+224622216028" },
-  { n: "aminata camara", t: "+224621247737" },
-  { n: "fatima bintou camara", t: "+224620749159" },
-  { n: "fatoumata camara", t: "+224610302769" },
-  { n: "fode mouhamadou camara", t: "+224620202597" },
-  { n: "ibrahima camara", t: "+224622144906" },
-  { n: "ibrahima sory camara", t: "+224627162055" },
-  { n: "kadiza camara", t: "+33778329313" },
-  { n: "karamba camara", t: "+33612600777" },
-  { n: "laye camara", t: "+224625065193" },
-  { n: "mayeni camara", t: "+224626198781" },
-  { n: "mme camara", t: "+224624725085" },
-  { n: "morlaye camara", t: "+224621734444" },
-  { n: "naminata camara", t: "+33603295186" },
-  { n: "salif camara", t: "+224629358239" },
-  { n: "nounou camaraa", t: "+33673924171" },
-  { n: "nounou camaraa", t: "+33758993786" },
-  { n: "aladji cisse", t: "+33758063848", e: "tikendjahcisse@gmail.com" },
-  { n: "hirene cisse", t: "+224624816669" },
-  { n: "lonceny cisse", t: "+224620052542" },
-  { n: "moussa mariam cisse", t: "+224627695350" },
-  { n: "aboubacar cissé", t: "+49780051002", e: "koundouba@yahoo.fr" },
-  { n: "ibou cl", t: "+33623161085", e: "famous.hayere@gmail.com" },
-  { n: "ahmed conde", t: "+224620574183" },
-  { n: "aminata conde", t: "+224626882109" },
-  { n: "fanta conde", t: "+33604128349" },
-  { n: "la belle soeur de fanta conde", t: "+33751188872" },
-  { n: "lamine conde", t: "+33781820660" },
-  { n: "moussa conde", t: "+224624461879" },
-  { n: "mr conde", t: "+224628683515" },
-  { n: "prince conde", t: "+33766832214" },
-  { n: "seckou conde", t: "+33753775050" },
-  { n: "aly mariame condé", t: "+224611201212" },
-  { n: "hamidou condé", t: "+224629310012" },
-  { n: "maleny conte", t: "+224627292701" },
-  { n: "emmanuel correah", t: "+224627929880" },
-  { n: "oumar dabo", t: "+224629429140" },
-  { n: "seckou dabo", t: "+33617185305" },
-  { n: "kadiatou dallo", t: "+224624637650" },
-  { n: "maodo dell", t: "+33668324539" },
-  { n: "mme delphine", t: "+224628209640" },
-  { n: "maman de papo", t: "+224622320875" },
-  { n: "sona diabaté", t: "+224627165018" },
-  { n: "alkhaly diaby", t: "+224620990433" },
-  { n: "lassana diaby", t: "+224628047406" },
-  { n: "djaraye diaby", t: "+224610120814" },
-  { n: "fine diaby", t: "+33751419202" },
-  { n: "gassama diaby", t: "+224621022228" },
-  { n: "goundoba diaby", t: "+33605877468" },
-  { n: "lanssana diaby", t: "+33758757832" },
-  { n: "oumar diaby", t: "+224613045289", e: "badiabyexpress.bde@gmail.com" },
-  { n: "ousmane diaby", t: "+224623870026" },
-  { n: "fatoumata diakhaby", t: "+224620428398" },
-  { n: "adama hawa diallo", t: "+224611949029" },
-  { n: "alpha diallo", t: "+12069605294" },
-  { n: "alpha diallo", t: "+49625201405", e: "ousmane816077@gmail.com" },
-  { n: "assiatou diallo", t: "+224621228568" },
-  { n: "fatoumata diallo", t: "+224622844093" },
-  { n: "fatoumata binta diallo", t: "+224661139740" },
-  { n: "fatoumata binta diallo", t: "+224626815211" },
-  { n: "ibrahima diallo", t: "+224612162226" },
-  { n: "ibrahima diallo", t: "+221611122270" },
-  { n: "karimata diallo", t: "+224624383433" },
-  { n: "mamadou alpha diallo", t: "+224620059495" },
-  { n: "mamadou mouctar diallo", t: "+224628177163" },
-  { n: "saïd diallo", t: "+224628061099" },
-  { n: "saliou djan diallo", t: "+224620085461" },
-  { n: "souleymane diallo", t: "+224628284732" },
-  { n: "abdourahmane diallo", t: "+224628318478" },
-  { n: "alassane diallo", t: "+224625235544" },
-  { n: "aloha diallo", t: "+33753789750" },
-  { n: "alpha diallo", t: "+33641293656" },
-  { n: "alpha diallo", t: "+12069605254" },
-  { n: "amadou diallo", t: "+221775780281" },
-  { n: "amadou sadio diallo", t: "+49623192559" },
-  { n: "amadou sadjo diallo", t: "+224666043708" },
-  { n: "amadou tidiane diallo", t: "+33780789468" },
-  { n: "aminata diallo", t: "+393510780598" },
-  { n: "aminata diallo", t: "+224625864688" },
-  { n: "elhadji mamadou diallo", t: "+224622222903" },
-  { n: "fanta diallo", t: "+224620159884" },
-  { n: "fanta diallo", t: "+224629823075" },
-  { n: "fatoumata diarraye diallo", t: "+224628604325" },
-  { n: "fatoumata djoulde diallo", t: "+2246211603231" },
-  { n: "fatoumata djoulde diallo", t: "+224621603231" },
-  { n: "ibrahima diallo", t: "+224624830921" },
-  { n: "maïmouna diallo", t: "+224622310736" },
-  { n: "mamadou diallo", t: "+224620710034" },
-  { n: "mamadou alimou diallo", t: "+49621354117" },
-  { n: "mamadou mouctar diallo", t: "+49628177123" },
-  { n: "mamadou saidou diallo", t: "+33656721853" },
-  { n: "mariama diallo", t: "+224625688899" },
-  { n: "mr diallo", t: "+224613037333" },
-  { n: "souleymane diallo", t: "+49627390660" },
-  { n: "thierno mahmoud diallo", t: "+224620251653" },
-  { n: "siaka diawara", t: "+224621516924" },
-  { n: "lansana diawara", t: "+224629959232" },
-  { n: "hawa dieye", t: "+224611286465" },
-  { n: "thierno dillo", t: "+33769710135" },
-  { n: "j.o diop", t: "+224611159454", e: "badiabyexpress.bde@gmail.com" },
-  { n: "toure djimo", t: "+33652591510" },
-  { n: "djouwe djouwe", t: "+33751183947" },
-  { n: "ibrahima donzo", t: "+224620212770" },
-  { n: "moriba dougouno", t: "+33623080764" },
-  { n: "aissatou doumbouya", t: "+224626558340" },
-  { n: "fatoumata doumbouya", t: "+224621969844" },
-  { n: "hadja mahawa doumbouya", t: "+224620001058" },
-  { n: "maguette doumbouya", t: "+224611491953" },
-  { n: "séréfi doumbouya", t: "+224625660696" },
-  { n: "aicha doumbouya", t: "+33782616462" },
-  { n: "ibrahima kalil doumbouya", t: "+22669175189" },
-  { n: "ibrahima kalil doumbouya", t: "+224669175189" },
-  { n: "maïssata doumbouyah", t: "+224629631151" },
-  { n: "kadiatou doumbouyah", t: "+224628554800" },
-  { n: "saraba drame", t: "+224625208083" },
-  { n: "banfa drame", t: "+33652884808" },
-  { n: "n'na mariama drame", t: "+33652930499" },
-  { n: "soukama drame", t: "+33640287236" },
-  { n: "fatoumata duaby", t: "+224622145605" },
-  { n: "abdoulaye elhadji", t: "+224628770004" },
-  { n: "mariata eoumanigui", t: "+224622002236" },
-  { n: "hadja fatou fadiga", t: "+224620203043" },
-  { n: "diallo fatoumata binta", t: "+33753381481" },
-  { n: "fatoumata fofana", t: "+224624120622" },
-  { n: "hawa fofana", t: "+224628375686" },
-  { n: "lamine fofana", t: "+224620085937" },
-  { n: "maciré ben fofana", t: "+224622310753" },
-  { n: "mr fofana", t: "+224623519577" },
-  { n: "abdoulaye fofana", t: "+224622389780" },
-  { n: "fatoumata fofana", t: "+49627159536" },
-  { n: "fatoumata fofana", t: "+224627159536" },
-  { n: "fatoumata fofana", t: "+224624180622" },
-  { n: "mme fofana", t: "+224622727540" },
-  { n: "moussa fofana", t: "+224622084314" },
-  { n: "youlia fofana", t: "+224628138941" },
-  { n: "marie yvette foulah", t: "+33754834160" },
-  { n: "oumou gassama", t: "+33604494053" },
-  { n: "laurent gbamou", t: "+224623451975" },
-  { n: "mohamed lamine guirassy", t: "+224622329457" },
-  { n: "hariete heloumou", t: "+224623278782" },
-  { n: "diallo ibdiallo", t: "+224611122270" },
-  { n: "abdoulaye kaba", t: "+224625907575" },
-  { n: "abdoul bachir kaba", t: "+224629245656" },
-  { n: "djenabiou kaba", t: "+224660992080" },
-  { n: "mamadi kaba", t: "+49625158826" },
-  { n: "kandjigora kadiatou", t: "+33771819496" },
-  { n: "mme kakimbo", t: "+224664222141" },
-  { n: "hadja kande", t: "+33785374045" },
-  { n: "bintou kante", t: "+33610867943" },
-  { n: "mohamed kante", t: "+33780596626" },
-  { n: "kerfala kebe", t: "+224627505872", e: "kerfalakebe97@gmail.com" },
-  { n: "moussa keita", t: "+224627017667" },
-  { n: "aissata keita", t: "+33781749245" },
-  { n: "moussa keita", t: "+224660208877" },
-  { n: "oumar keita", t: "+224628168051" },
-  { n: "saran koma", t: "+33628778057" },
-  { n: "oumou konate", t: "+33621277276", e: "oumoukonate14@hotmail.fr" },
-  { n: "fatoumata konate", t: "+224621213729" },
-  { n: "aicha konate", t: "+224622093398" },
-  { n: "el kounfia", t: "+33672426366", e: "famous.hayere@gmail.com" },
-  { n: "mouhamed kourouma", t: "+224626284647" },
-  { n: "ayoub kourouma", t: "+224628468689" },
-  { n: "issa kourouma", t: "+49621649704" },
-  { n: "issa kourouma", t: "+224621649704" },
-  { n: "tiemoko kourouma", t: "+224625942340" },
-  { n: "yaya kouroumq", t: "+224613969102" },
-  { n: "fatoumata kouyate", t: "+224621288828" },
-  { n: "aminata kouyate", t: "+33613918089" },
-  { n: "aminata kouyate", t: "+33758060315" },
-  { n: "kadiatou kouyaté", t: "+49629541160" },
-  { n: "catherine lamah", t: "+224622160768" },
-  { n: "nyan kwita charles lega", t: "+224625368376" },
-  { n: "fatoumata madane", t: "+33777034948" },
-  { n: "mouhamed magane", t: "+224613396305" },
-  { n: "batoul magane", t: "+224628942411" },
-  { n: "fanta magane", t: "+33662012332" },
-  { n: "bangoura mouhamed lamine.", t: "+224611193022" },
-  { n: "ya moussa", t: "+224623126598" },
-  { n: "mohamed mozalin", t: "+224626246724" },
-  { n: "thiianguil multi service", t: "+224611835683" },
-  { n: "fatoumata nabe", t: "+33753765901" },
-  { n: "khalifa nabé", t: "+224624916306" },
-  { n: "hadja namou", t: "+33787822249" },
-  { n: "n'dela n'dela", t: "+33762632305" },
-  { n: "binta ndiaye", t: "+224621353537" },
-  { n: "maman papi", t: "+22462230875" },
-  { n: "coa partenaire", t: "+22462222903" },
-  { n: "saraba sacko", t: "+224623929815" },
-  { n: "hadja aicha sacko", t: "+224622583089" },
-  { n: "ibrahima sacko", t: "+33641275989" },
-  { n: "nasou sacko", t: "+224629930451" },
-  { n: "n na aissata sacko", t: "+33768593619" },
-  { n: "m'mah sakho", t: "+224620757279" },
-  { n: "hassanatou sambo", t: "+33759197378" },
-  { n: "mbalou samourah", t: "+224623067565" },
-  { n: "diaby senegalais", t: "+224613080456" },
-  { n: "hadja siata", t: "+224628240465" },
-  { n: "aminata sidibe", t: "+224623977879" },
-  { n: "mohamed sidibe", t: "+49625958449" },
-  { n: "muhamed sidibe", t: "+224626941779" },
-  { n: "ahmed tidiane sidibé", t: "+224613311060" },
-  { n: "diaby sidiya", t: "+33641201835" },
-  { n: "rabiatou souare", t: "+224621751768" },
-  { n: "mohamed soumah", t: "+224622923083" },
-  { n: "aminata soumah", t: "+224626173993" },
-  { n: "issiaga soumah", t: "+224611911644" },
-  { n: "mabintou soumah", t: "+224620838074" },
-  { n: "mama nana soumah", t: "+224629684722" },
-  { n: "mr thiam soumah", t: "+3306218069304" },
-  { n: "abdoul karim soumah camara", t: "+33753493367" },
-  { n: "boubacar sow", t: "+224622091237" },
-  { n: "mamadou lamarana sow", t: "+224620599288" },
-  { n: "oumar sow", t: "+224621224948" },
-  { n: "ramatoulaye sow", t: "+224624735474" },
-  { n: "aissatou bily sow", t: "+224622865086" },
-  { n: "amadou sow", t: "+224622326166" },
-  { n: "aminatou sow", t: "+224624138835" },
-  { n: "habibou sow", t: "+224623046611" },
-  { n: "mamadou dian sow", t: "+224623356932" },
-  { n: "mamadou djoulde sow", t: "+224620923675" },
-  { n: "ousmane sow", t: "+224628400956" },
-  { n: "ousmane sow", t: "+49628400956" },
-  { n: "mariam sy", t: "+224622647422" },
-  { n: "aboubacar sylla", t: "+224622147164" },
-  { n: "amadou sylla", t: "+224622033699" },
-  { n: "benoit sylla", t: "+224622005365" },
-  { n: "fatoumata sylla", t: "+224613446129" },
-  { n: "lamine sylla", t: "+224622405815" },
-  { n: "moussa sylla", t: "+224629263603" },
-  { n: "nabintou sylla", t: "+224621792479" },
-  { n: "ousmane sylla", t: "+224622737808" },
-  { n: "ousmane sylla", t: "+224629625515" },
-  { n: "yafode sylla", t: "+224613054876" },
-  { n: "zenab sylla", t: "+33781242374" },
-  { n: "abdoualye sylla", t: "+224628295041" },
-  { n: "abdoulaye sylla", t: "+224621114717" },
-  { n: "abdoulaye sylla", t: "+224625832203" },
-  { n: "aboubacar sylla", t: "+224624357866" },
-  { n: "amadou sylla", t: "+33753722998" },
-  { n: "amadou sylla", t: "+33604449595" },
-  { n: "mariama cire sylla", t: "+33689653576" },
-  { n: "mariama cire sylla", t: "+33689659576" },
-  { n: "mariame sylla", t: "+224628469132" },
-  { n: "mohamed sylla", t: "+33753090379" },
-  { n: "mouhamed sylla", t: "+224660973007" },
-  { n: "ousmane sylla", t: "+224629625520" },
-  { n: "taminy taminy", t: "+33766043199" },
-  { n: "mr thiam", t: "+33621806934", e: "famous.hayere@gmail.com" },
-  { n: "mamoudou thierno", t: "+224612145441" },
-  { n: "chek ahmed tidiane", t: "+224622500519" },
-  { n: "aly tombolia", t: "+224613901670" },
-  { n: "djiba toure", t: "+224627552014" },
-  { n: "fatoumata dominique toure", t: "+224620126887" },
-  { n: "macire toure", t: "+224627449781" },
-  { n: "mariame toure", t: "+224628558449" },
-  { n: "aissata toure", t: "+224622282762" },
-  { n: "aminata toure", t: "+33785948317" },
-  { n: "aye toure", t: "+224622126923" },
-  { n: "kadiatou toure", t: "+33780559695" },
-  { n: "kadiatou toure", t: "+224621682932" },
-  { n: "kamalbase toure", t: "+224610888872" },
-  { n: "mamadou oury toure", t: "+33751348514" },
-  { n: "mariama toure", t: "+224624425914" },
-  { n: "moustapha toure", t: "+33766783991" },
-  { n: "nana toure", t: "+224628047470" },
-  { n: "kakéba touré", t: "+224625494249" },
-  { n: "kamalbasse touré", t: "+49610888872" },
-  { n: "tanti toutou", t: "+33783963329" },
-  { n: "aissatou traore", t: "+224625598025" },
-  { n: "ibrahima traore", t: "+224627093411" },
-  { n: "fatoumata traore", t: "+224627293246" },
-  { n: "facinet traoré", t: "+49628316732" },
-  { n: "no yaawi", t: "+224624834960" },
-  { n: "abdoulaye yeressa", t: "+224629315255" },
-  { n: "mariame youla", t: "+224626160676" },
-  { n: "soeur de youla", t: "+224628354009" },
-  { n: "alayrangues zoe", t: "+224614220449" },
-].map((c, i) => ({
-  id: `imp-${i}`,
-  nomComplet: c.n,
-  telephone: c.t,
-  email: c.e || "",
-  adresse: "",
-  aVerifier: true,
-  source: "ancienne plateforme",
-}));
 
 /**
  * Données de référence : catégories tarifaires et compte administrateur.
@@ -19381,12 +19212,8 @@ function buildClientDirectory(colisList, repertoireEnBase = null) {
    * l'onglet « Doublons possibles » signale ces cas et vous tranchez.
    */
   const dejaPresents = new Set(Object.keys(map).map((t) => String(t).replace(/\D/g, "")).filter(Boolean));
-  /*
-   * Deux sources pour le répertoire : celui livré avec l'application (valeurs par défaut) et
-   * celui éventuellement chargé en base via « Charger les données de référence ». Sur une
-   * plateforme déjà en service, seul le second existe.
-   */
-  const repertoire = repertoireEnBase && repertoireEnBase.length ? repertoireEnBase : REPERTOIRE_IMPORTE;
+  /* Une seule source : la base. Voir plus haut pourquoi le code n'en porte plus de copie. */
+  const repertoire = repertoireEnBase || [];
   repertoire.forEach((c) => {
     const cle = String(c.telephone).replace(/\D/g, "");
     if (!cle || dejaPresents.has(cle)) return;
@@ -20439,7 +20266,7 @@ function CaissePage({ data, persist, session, notify }) {
       tracking: c.tracking,
       client: c.destinataire || "—",
       clientKey: c.clientAccountId || normaliserTelephone(c.telephone) || (c.destinataire || "").toLowerCase(),
-      site: c.site || "Bambeto",
+      site: c.site || nomSiteParDefaut(data),
       poids: Number(c.poids) || 0,
       date: p.date,
       mode: p.mode || MODE_ESPECES,
@@ -22299,7 +22126,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
      * résultat baisserait sans que rien ne dise de combien.
      */
     const ecartees = new Set(data.agencesHorsBilan || []);
-    const agenceDuColis = (c) => c.site || "Bambeto";
+    const agenceDuColis = (c) => c.site || nomSiteParDefaut(data);
     const commissionDuColis = (c) => calcCommission(c, data.commissionConfig, data.categories);
     const commissionsAuto = colisPeriode
       .filter((c) => !ecartees.has(agenceDuColis(c)))
@@ -22334,7 +22161,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
     const resteAEncaisser = facture - recettes;
 
     // Encaissements réels (date du paiement, pas de la création du colis), par mode et par jour
-    const tousPaiements = data.colis.flatMap((c) => (c.paiements || []).map((p) => ({ ...p, tracking: c.tracking, site: c.site || "Bambeto" })));
+    const tousPaiements = data.colis.flatMap((c) => (c.paiements || []).map((p) => ({ ...p, tracking: c.tracking, site: c.site || nomSiteParDefaut(data) })));
     const paiementsPeriode = tousPaiements.filter((p) => inPeriod(p.date));
     const parMode = {};
     paiementsPeriode.forEach((p) => { parMode[p.mode] = (parMode[p.mode] || 0) + p.montant; });
@@ -22552,8 +22379,16 @@ function ComptabilitePage({ data, persist, session, notify }) {
           <p style={{ color: "var(--muted)", fontSize: 14.5, margin: "5px 0 0" }}>Recettes, dépenses, salaires, commissions et bénéfices</p>
         </div>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <button onClick={exportRapport} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "11px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><Download size={16} /> Rapport CSV</button>
-          <button onClick={exportRapportPDF} disabled={pdfState === "loading"} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "11px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={16} /> {pdfState === "loading" ? "Génération…" : "Récapitulatif PDF"}</button>
+          {/*
+          * Un export, c'est le fichier de l'entreprise qui sort sur un appareil et n'y revient
+          * jamais. « stats.exporter » existe pour cela ; il n'était lu nulle part.
+          */}
+        {effectivePermission(session, "stats.exporter") && (
+        <button onClick={exportRapport} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "11px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><Download size={16} /> Rapport CSV</button>
+        )}
+          {effectivePermission(session, "stats.exporter") && (
+        <button onClick={exportRapportPDF} disabled={pdfState === "loading"} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "11px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={16} /> {pdfState === "loading" ? "Génération…" : "Récapitulatif PDF"}</button>
+        )}
           {pdfState === "error" && <span style={{ fontSize: 11, color: "var(--danger-fg)", alignSelf: "center" }}>Échec — réessayez</span>}
           {effectivePermission(session, "compta.gerer_depenses") && <button onClick={() => setForm({ type: "Dépense", nom: "", montant: "", date: new Date().toISOString().slice(0,10) })} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}><Plus size={16} /> Ajouter</button>}
         </div>
@@ -22580,13 +22415,22 @@ function ComptabilitePage({ data, persist, session, notify }) {
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 20 }}>
         <StatCard label="Recettes encaissées" value={fmt(recettes, devise)} icon={CheckCircle2} tint="#16A163" trend={`Facturé : ${fmt(facture, devise)}`} trendColor="var(--muted)" />
         <StatCard label="Dépenses" value={fmt(totalDepenses / gnfRate, devise)} icon={Receipt} tint="#E23F52" />
-        <StatCard label="Salaires" value={fmt(totalSalaires / gnfRate, devise)} icon={Users} tint="#B8801C" />
+        {/*
+          * La masse salariale suit « compta.charges_fixes ». Consulter la comptabilité et savoir
+          * ce que gagne l'équipe ne sont pas la même chose : un compte à qui l'on ouvre les
+          * recettes pour suivre son agence n'a pas à lire les salaires du même coup.
+          */}
+        {effectivePermission(session, "compta.charges_fixes") && (
+          <StatCard label="Salaires" value={fmt(totalSalaires / gnfRate, devise)} icon={Users} tint="#B8801C" />
+        )}
         {/* La tuile compte ce que le résultat compte : mentionner ce qui en est sorti évite de croire à une baisse d'activité. */}
         <StatCard label="Commissions" value={fmt(totalCommissions, devise)} icon={DollarSign} tint="#8B5CF6"
           trend={`dont auto : ${fmt(commissionsAuto, devise)}${commissionsAutoExclues > 0.005 ? ` · ${fmt(commissionsAutoExclues, devise)} hors bilan` : ""}`}
           trendColor="var(--muted)" />
       </div>
 
+      {/* Le bénéfice de l'entreprise suit « compta.marges » — c'est le chiffre qu'il désigne. */}
+      {effectivePermission(session, "compta.marges") && (
       <div style={{ background: benefice >= 0 ? "var(--ok-bg)" : "var(--danger-bg)", borderRadius: 14, padding: 20, marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div>
           <div style={{ fontSize: 13, color: "var(--text)", fontWeight: 700 }}>Résultat de la période</div>
@@ -22594,6 +22438,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
         </div>
         <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 22, fontWeight: 700, color: benefice >= 0 ? "var(--ok-fg)" : "var(--danger-fg)" }}>{fmt(benefice, devise)}</div>
       </div>
+      )}
 
       {paiementsPeriode.length > 0 && (
         <div style={{ display: "flex", gap: 20, flexWrap: "wrap", marginBottom: 20 }}>
@@ -22823,7 +22668,7 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
       destinataire: `${compte.prenom} ${compte.nom}`, telephone: compte.telephone, destinataireEmail: compte.email || "", destinataireAdresse: compte.adresse || "", destinataireVille: "", destinataireCodePostal: "", destinatairePays: "GN",
       pays: "GN", direction: "import", mode: "air",
       produits: [{ id: `p${Date.now()}`, nom: refColis || "Colis reçu", quantite: String(Number(articlesAjout) || 1), poids: String(poids), categorie: "", personnalise: false, montant: "", devise: "GNF", typePrix: "unitaire" }],
-      poids, volume: 0, valeurDeclaree: 0, site: "Bambeto",
+      poids, volume: 0, valeurDeclaree: 0, site: agence || nomSiteParDefaut(data),
       // Le prix est calculé dès l'enregistrement, à partir du poids et des paliers de réception.
       // Auparavant il restait à 0 : le client voyait « Reste à payer 0,00 » alors qu'il devait payer.
       prixBrut: prixEUR, discountLoyalty: 0, rabaisMontant: 0, rabaisDevise: "GNF", rabaisEUR: 0,
@@ -24895,11 +24740,13 @@ function SauvegardePage({ data, persist, notify, session, onBack }) {
     const catsExistantes = new Set((data.categories || []).map((c) => (c.nom || "").toLowerCase()));
     const catsAAjouter = DONNEES_REFERENCE.categories.filter((c) => !catsExistantes.has(c.nom.toLowerCase()));
 
-    const telsExistants = new Set(
-      [...(data.colis || []).map((c) => normaliserTelephone(c.telephone)),
-       ...(data.repertoire || []).map((c) => normaliserTelephone(c.telephone))].filter(Boolean)
-    );
-    const clientsAAjouter = REPERTOIRE_IMPORTE.filter((c) => !telsExistants.has(normaliserTelephone(c.telephone)));
+    /*
+     * Le répertoire ne fait plus partie des données de référence : il a été repris une fois, il
+     * est en base, et le code n'en garde plus de copie — elle partait dans le navigateur de
+     * chaque visiteur. Ce bouton ne complète donc plus que les catégories et le compte
+     * administrateur.
+     */
+    const clientsAAjouter = [];
 
     const identifiants = new Set((data.users || []).map((u) => (u.identifiant || "").toLowerCase()));
     const compteAAjouter = identifiants.has("iboush") ? null : DONNEES_REFERENCE.admin;
@@ -25123,13 +24970,40 @@ function SitesOperationPage({ data, persist, notify, onBack, sansEntete }) {
     const site = { ...form, nom, telephone: telephoneAvecIndicatif(form.telephone, form.pays || "GN") };
     const next = exists ? sites.map((s) => (s.id === site.id ? site : s)) : [...sites, { ...site, id: site.id || `s${Date.now()}` }];
     /*
+     * RENOMMER UNE AGENCE EMPORTE CE QUI Y ÉTAIT RATTACHÉ.
+     *
+     * Puisque c'est le nom qui fait le lien, le changer sans plus laissait derrière lui tous les
+     * colis et tous les agents inscrits sous l'ancien. C'est arrivé : « Bambeto » est devenu
+     * « Conakry », et l'agente rattachée à « Bambeto » a cessé de voir les colis enregistrés
+     * après. Rien ne le signalait — sa liste s'affichait normalement, simplement plus courte.
+     *
+     * Le renommage réécrit donc les deux, dans la même écriture : on ne peut pas se retrouver
+     * avec des sites renommés d'un côté et des colis restés de l'autre.
+     */
+    const ancienNom = exists ? (sites.find((s) => s.id === site.id)?.nom || "").trim() : "";
+    const renomme = ancienNom && ancienNom.toLowerCase() !== nom.toLowerCase();
+    const colisSuivis = renomme
+      ? (data.colis || []).map((c) => ((c.site || "").trim().toLowerCase() === ancienNom.toLowerCase() ? { ...c, site: nom } : c))
+      : data.colis;
+    const comptesSuivis = renomme
+      ? (data.users || []).map((u) => ((u.agence || "").trim().toLowerCase() === ancienNom.toLowerCase() ? { ...u, agence: nom } : u))
+      : data.users;
+    /*
      * L'agence de retrait de l'Espace Client doit toujours désigner un site existant, en Guinée
      * (un site à l'étranger ne sert que de point de retrait sur le ticket). Si la référence ne
      * pointe plus vers rien — site passé à l'étranger, ou réglage jamais enregistré — on la fait
      * suivre vers le premier site local, celui-là même que le menu affiche déjà.
      */
-    persist({ ...data, sites: next, agenceRetraitClient: agenceRetraitValide(next, data.agenceRetraitClient) });
-    notify?.(exists ? "Site mis à jour" : "Site ajouté");
+    persist({
+      ...data, sites: next, colis: colisSuivis, users: comptesSuivis,
+      agenceRetraitClient: agenceRetraitValide(next, data.agenceRetraitClient),
+    });
+    if (renomme) {
+      const nbColis = (data.colis || []).filter((c) => (c.site || "").trim().toLowerCase() === ancienNom.toLowerCase()).length;
+      notify?.(`Agence renommée « ${ancienNom} » → « ${nom} » — ${nbColis} colis suivent, ainsi que les agents qui y sont rattachés.`, 6000);
+    } else {
+      notify?.(exists ? "Site mis à jour" : "Site ajouté");
+    }
     fermerFormulaire();
   }
   function removeSite(id) {
@@ -27354,13 +27228,22 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
         />
       )}
 
+      {/*
+        * « factures.creer » et « factures.modifier » existaient sans que rien ne les lise : toute
+        * personne qui ouvrait l'écran Partenaires pouvait émettre une facture, la rouvrir, en
+        * corriger le montant ou annuler un règlement. Ces deux gestes-là engagent de l'argent
+        * réclamé à un tiers ; ils se distinguent du fait de consulter la facturation.
+        */}
       {onglet === "facturation" && partenaire && (
         <FacturationPartenaire
           partenaire={partenaire} aFacturer={aFacturer} factures={sesFactures}
-          colis={data.colis || []} onCreerFacture={creerFacture} onImprimer={imprimerFacture}
-          onCorriger={corrigerMontant} onRouvrir={rouvrirFacture}
-          onEncaisser={encaisserFacture} onAnnulerReglement={annulerReglement}
-          onRelancer={marquerRelance} onReleve={imprimerReleve}
+          colis={data.colis || []} onImprimer={imprimerFacture} onReleve={imprimerReleve}
+          onCreerFacture={effectivePermission(session, "factures.creer") ? creerFacture : null}
+          onCorriger={effectivePermission(session, "factures.modifier") ? corrigerMontant : null}
+          onRouvrir={effectivePermission(session, "factures.modifier") ? rouvrirFacture : null}
+          onEncaisser={effectivePermission(session, "factures.modifier") ? encaisserFacture : null}
+          onAnnulerReglement={effectivePermission(session, "factures.modifier") ? annulerReglement : null}
+          onRelancer={effectivePermission(session, "factures.modifier") ? marquerRelance : null}
         />
       )}
     </div>
@@ -28178,7 +28061,7 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
                         )}
                       </td>
                       <td style={{ padding: "10px 14px", textAlign: "right", whiteSpace: "nowrap" }}>
-                        {enCorrection !== c.tracking && (
+                        {enCorrection !== c.tracking && onCorriger && (
                           <button onClick={() => { setEnCorrection(c.tracking); setMontant(String(Number(c.prixPartenaire) || 0)); }}
                             title="Corriger le montant"
                             style={{ background: "none", border: "none", color: "var(--info-fg)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>Corriger</button>
@@ -28212,10 +28095,10 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
                     {[...new Set([devise, "GNF", "EUR", "USD"])].map((d) => <option key={d} value={d}>{d}</option>)}
                   </select>
                 </div>
-                <button onClick={() => setConfirmation(true)} disabled={retenus.length === 0}
+                {onCreerFacture && <button onClick={() => setConfirmation(true)} disabled={retenus.length === 0}
                   style={{ display: "flex", alignItems: "center", gap: 7, background: retenus.length ? "var(--brand-solid)" : "var(--surface2)", color: retenus.length ? "#fff" : "var(--muted)", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: retenus.length ? "pointer" : "not-allowed" }}>
                   <Receipt size={16} /> Créer la facture
-                </button>
+                </button>}
               </div>
             </div>
           </>
@@ -28282,7 +28165,7 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
                       </div>
                     )}
                   </div>
-                  {reste > 0.005 && (
+                  {reste > 0.005 && onEncaisser && (
                     <button onClick={() => setAEncaisser(f)} style={{ display: "flex", alignItems: "center", gap: 6, background: "#16A163", border: "none", color: "#fff", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
                       <DollarSign size={14} /> Encaisser
                     </button>
@@ -28295,7 +28178,7 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
                   {retard > 0 && (
                     <a href={waLink(reglagesDuPartenaire.telephone, messageRelanceFacture(f, partenaire, retard))}
                       target="_blank" rel="noreferrer"
-                      onClick={() => onRelancer(f.id)}
+                      onClick={() => onRelancer?.(f.id)}
                       style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "#3ECB84", color: "#fff", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, textDecoration: "none" }}>
                       <MessageCircle size={14} /> Relancer
                     </a>
@@ -28303,9 +28186,9 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
                   <button onClick={() => onImprimer(f)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
                     <Printer size={14} /> PDF
                   </button>
-                  <button onClick={() => setARouvrir(f)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "1.5px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                  {onRouvrir && <button onClick={() => setARouvrir(f)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "1.5px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
                     <RefreshCw size={14} /> Rouvrir
-                  </button>
+                  </button>}
                 </div>
               </div>
               {versements.length > 0 && (
@@ -28317,10 +28200,10 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
                         {" — "}{r.mode || MODE_ESPECES}{r.reference ? ` · réf. ${r.reference}` : ""}
                         {" · "}{new Date(r.date).toLocaleDateString("fr-FR")}{r.par ? ` · reçu par ${r.par}` : ""}
                       </span>
-                      <button onClick={() => setReglementAAnnuler({ facture: f, reglement: r })}
+                      {onAnnulerReglement && <button onClick={() => setReglementAAnnuler({ facture: f, reglement: r })}
                         style={{ background: "none", border: "none", color: "var(--danger-fg)", fontSize: 11.5, fontWeight: 600, cursor: "pointer", padding: 0 }}>
                         Annuler
-                      </button>
+                      </button>}
                     </div>
                   ))}
                 </div>
@@ -28735,6 +28618,16 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
   const [permissionsOverride, setPermissionsOverride] = useState(user.permissionsOverride || {});
   const isAdmin = role === "Administrateur";
   const totalPermCount = PERMISSIONS_SCHEMA.reduce((s, g) => s + g.permissions.length, 0);
+  /*
+   * Régler les droits d'un collègue est un pouvoir à part, et il a sa propre permission :
+   * « users.permissions ». Elle était déclarée, affichée dans cet écran même — et jamais lue :
+   * quiconque pouvait ouvrir la fiche d'un compte pouvait aussi lui cocher « Administrateur ».
+   *
+   * Le serveur, lui, refusait déjà : CHAMPS_DE_POUVOIR remet en place le rôle et les droits
+   * envoyés par un compte qui n'y a pas droit. L'écran promettait donc un changement que la base
+   * annulait — sans le dire. On lit la règle du même côté que le serveur l'applique.
+   */
+  const peutReglerLesDroits = effectivePermission(session, "users.permissions");
 
   function toggleCountry(code) {
     setPaysAutorises((list) => (list.includes(code) ? list.filter((c) => c !== code) : [...list, code]));
@@ -28850,7 +28743,11 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
           )}
           <Field label="Téléphone"><PhoneInput value={telephone} onChange={setTelephone} /></Field>
           <Field label="Rôle">
-            <select value={role} onChange={(e) => setRole(e.target.value)} disabled={user.identifiant === "admin"} style={inputStyle}>
+            {/* Le rôle décide de tous les droits d'un coup : il suit la même permission qu'eux. */}
+            <select value={role} onChange={(e) => setRole(e.target.value)}
+              disabled={user.identifiant === "admin" || !peutReglerLesDroits}
+              title={peutReglerLesDroits ? undefined : "Changer le rôle demande la permission « Gérer les permissions des autres comptes »"}
+              style={{ ...inputStyle, opacity: peutReglerLesDroits ? 1 : 0.6 }}>
               {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
             </select>
           </Field>
@@ -28906,6 +28803,17 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
               Permissions héritées du rôle <strong style={{ color: "var(--text)" }}>{role}</strong>. Les modifications individuelles sont marquées d’un point <span style={{ color: "var(--info-fg)" }}>●</span>.
             </div>
           )}
+          {/*
+            * Sans le droit, la liste se lit mais ne se touche pas — et l'écran le dit. La masquer
+            * entièrement priverait un responsable d'équipe de savoir ce que ses collègues peuvent
+            * faire, ce qui est précisément la question qu'il se pose en ouvrant cette fiche.
+            */}
+          {!isAdmin && !peutReglerLesDroits && (
+            <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "var(--text)", marginBottom: 16, lineHeight: 1.5 }}>
+              Vous consultez ces droits sans pouvoir les changer : cela demande la permission
+              « Gérer les permissions des autres comptes ».
+            </div>
+          )}
           {PERMISSIONS_SCHEMA.map((g) => {
             const enabledCount = g.permissions.filter((p) => effectivePermission({ role, permissionsOverride }, p.key)).length;
             return (
@@ -28914,7 +28822,7 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
                   <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", letterSpacing: 0.5 }}>{g.group}</div>
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                     <span style={{ fontSize: 11, color: "var(--muted)" }}>{enabledCount}/{g.permissions.length}</span>
-                    {!isAdmin && (
+                    {!isAdmin && peutReglerLesDroits && (
                       <button onClick={() => toggleGroup(g, enabledCount < g.permissions.length)} style={{ width: 38, height: 22, borderRadius: 20, border: "none", background: enabledCount === g.permissions.length ? "#3ECB84" : "var(--surface)", position: "relative", cursor: "pointer", flexShrink: 0 }}>
                         <div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: enabledCount === g.permissions.length ? 19 : 3, transition: "left 0.15s" }} />
                       </button>
@@ -28927,7 +28835,7 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
                   return (
                     <div key={p.key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 16px", borderTop: "1px solid var(--border)" }}>
                       <div style={{ fontSize: 13, color: "var(--text)", display: "flex", alignItems: "center", gap: 6 }}>{p.label} {overridden && <span style={{ color: "var(--info-fg)", fontSize: 16, lineHeight: 0 }}>●</span>}</div>
-                      <button onClick={() => !isAdmin && togglePermission(p.key)} disabled={isAdmin} style={{ width: 38, height: 22, borderRadius: 20, border: "none", background: on ? "#3ECB84" : "var(--surface2)", position: "relative", cursor: isAdmin ? "default" : "pointer", flexShrink: 0, opacity: isAdmin ? 0.6 : 1 }}>
+                      <button onClick={() => !isAdmin && peutReglerLesDroits && togglePermission(p.key)} disabled={isAdmin || !peutReglerLesDroits} style={{ width: 38, height: 22, borderRadius: 20, border: "none", background: on ? "#3ECB84" : "var(--surface2)", position: "relative", cursor: (isAdmin || !peutReglerLesDroits) ? "default" : "pointer", flexShrink: 0, opacity: (isAdmin || !peutReglerLesDroits) ? 0.6 : 1 }}>
                         <div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: on ? 19 : 3, transition: "left 0.15s" }} />
                       </button>
                     </div>

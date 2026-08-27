@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue, memo } from "react";
+import React, { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue, memo, createContext, useContext } from "react";
 import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, ChevronDown, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell, SlidersHorizontal, Copy, MoreHorizontal, Wallet } from "lucide-react";
 import { ROLES, PERMISSIONS_SCHEMA, ROLE_DEFAULT_PERMISSIONS, effectivePermission } from "../api/_permissions.js";
 import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree, relireDuServeur } from "./lib/storage.js";
@@ -2614,6 +2614,65 @@ function lienEspaceClient() {
   return `${adressePublique()}/client`;
 }
 
+/*
+ * UN NUMÉRO DE SUIVI EST UNE ADRESSE, PAS UNE DÉCORATION.
+ *
+ * Les numéros de colis s'affichent sur une vingtaine d'écrans — tableaux, cartes, listes de
+ * paiements, conversations WhatsApp, demandes de livraison express. Sur trois d'entre eux la ligne
+ * entière était cliquable ; partout ailleurs le numéro était du texte mort. Pour ouvrir le colis
+ * qu'on avait sous les yeux, il fallait le sélectionner à la souris, le copier, changer de page,
+ * le coller dans la recherche. Douze caractères recopiés à la main plusieurs dizaines de fois par
+ * jour, avec chaque fois la possibilité d'en rater un.
+ *
+ * Ce canal permet à n'importe quel écran d'ouvrir un colis sans que le composant qui l'affiche
+ * ait à recevoir de fil en aiguille une fonction depuis le sommet de l'application. Il ne porte
+ * PAS de données : seulement le moyen d'en demander l'ouverture.
+ *
+ * Il vaut `null` là où l'on ne peut pas ouvrir la fiche : l'Espace Client et l'espace partenaire
+ * n'ont pas la liste des colis de l'entreprise. Le numéro y devient alors un lien vers la page de
+ * suivi publique — celle que le client peut aussi transmettre à qui il veut.
+ */
+const ContexteOuvrirColis = createContext(null);
+
+/**
+ * Le numéro de suivi, cliquable partout où il s'affiche.
+ *
+ * Le repère visuel est volontairement discret — un soulignement pointillé — parce que ces numéros
+ * apparaissent dans des tableaux denses : un vrai style de lien sur chaque ligne ferait un mur de
+ * bleu souligné où plus rien ne ressort.
+ */
+function CodeColis({ code, style, titre }) {
+  const ouvrir = useContext(ContexteOuvrirColis);
+  /* Un colis sans numéro ne devrait pas exister ; s'il s'en présente un, on n'affiche pas de lien mort. */
+  if (!code) return null;
+  const commun = {
+    style: {
+      background: "none", border: "none", padding: 0, margin: 0, font: "inherit", color: "inherit",
+      cursor: "pointer", textDecoration: "underline", textDecorationStyle: "dotted",
+      textUnderlineOffset: 3, textDecorationColor: "var(--muted)", ...style,
+    },
+  };
+  if (ouvrir) {
+    return (
+      <button type="button" {...commun}
+        title={titre || `Ouvrir la fiche du colis ${code}`}
+        onClick={(e) => { e.stopPropagation(); e.preventDefault(); ouvrir(code); }}>
+        {code}
+      </button>
+    );
+  }
+  /*
+   * `stopPropagation` compte ici aussi : plusieurs de ces numéros sont posés dans une carte ou une
+   * ligne elle-même cliquable. Sans cela, un clic sur le numéro déclencherait les deux.
+   */
+  return (
+    <a {...commun} href={trackingUrlFor(code)} target="_blank" rel="noopener noreferrer"
+      title={titre || `Suivre le colis ${code}`} onClick={(e) => e.stopPropagation()}>
+      {code}
+    </a>
+  );
+}
+
 function loadScript(src) {
   return new Promise((res, rej) => {
     const s = document.createElement("script");
@@ -3350,7 +3409,26 @@ function App() {
    */
   const [ongletPartenaire, setOngletPartenaire] = useState("accueil");
   const [showGlobalSearch, setShowGlobalSearch] = useState(false);
-  const [colisInitialQuery, setColisInitialQuery] = useState("");
+  /*
+   * La demande d'ouverture d'un colis, d'où qu'elle vienne.
+   *
+   * Le jeton s'incrémente à chaque demande : sans lui, redemander le MÊME colis ne changerait pas
+   * l'état, React ne rejouerait rien, et le second clic sur le même numéro ne ferait rien du tout
+   * — exactement le geste qu'on fait quand on a fermé la fiche par erreur.
+   */
+  const [demandeColis, setDemandeColis] = useState(null);
+  /*
+   * Déclaré ICI, avant les pages publiques qui sortent plus bas par un `return` anticipé.
+   *
+   * React exige que les mêmes crochets soient appelés dans le même ordre à chaque rendu. Placé
+   * après ces sorties, ce `useCallback` n'existait qu'une fois l'agent connecté : le rendu suivant
+   * en comptait un de plus que le précédent, et l'application entière tombait sur « Rendered more
+   * hooks than during the previous render » — au moment exact de la connexion.
+   */
+  const ouvrirColis = useCallback((tracking) => {
+    setView("colis");
+    setDemandeColis((d) => ({ tracking, jeton: (d?.jeton || 0) + 1 }));
+  }, []);
   // Permet au tableau de bord de demander l'ouverture directe du formulaire de création :
   // un bouton nommé « Nouveau Colis » doit créer un colis, pas seulement changer de page.
   const [ouvrirFormulaireColis, setOuvrirFormulaireColis] = useState(0);
@@ -3741,6 +3819,16 @@ function App() {
   const perm = (key) => effectivePermission(session, key);
 
   /*
+   * Qui a le droit d'ouvrir une fiche colis depuis un numéro affiché.
+   *
+   * La même condition que celle qui fait apparaître la page « Colis » dans le menu. Un rôle qui
+   * n'y a pas accès ne doit pas y être envoyé par un lien : la page refuserait, et l'on aurait
+   * fabriqué un bouton qui ne mène nulle part. Pour ceux-là — et pour l'espace partenaire — le
+   * numéro reste cliquable, mais vers la page de suivi publique.
+   */
+  const peutOuvrirColis = session.role !== "Partenaire" && (perm("colis.voir_propres") || perm("colis.voir_tous"));
+
+  /*
    * Identité affichée dans l'interface.
    *
    * Un partenaire travaille avec ses propres clients, sous son propre nom : son espace ne doit
@@ -3845,6 +3933,7 @@ function App() {
   ].filter((n) => n.show);
 
   return (
+    <ContexteOuvrirColis.Provider value={peutOuvrirColis ? ouvrirColis : null}>
     <Shell rtl={rtl} theme={theme}>
       <div style={{ display: "flex", minHeight: "100vh", background: "var(--surface2)" }}>
         {isMobile && mobileNavOpen && (
@@ -3952,7 +4041,7 @@ function App() {
           <main style={{ flex: 1, padding: isMobile ? "16px 14px" : "28px 32px", overflowY: "auto", minWidth: 0 }}>
             <BandeauEcrasement data={data} persist={persist} session={session} />
             {view === "dashboard" && (session.role === "Partenaire" ? <PartnerDashboard data={data} session={session} persist={persist} verifier={persisterEtVerifier} notify={notify} onglet={ongletPartenaire} /> : <Dashboard data={data} session={session} onNavigate={setView} onNouveauColis={() => { setView("colis"); setOuvrirFormulaireColis((n) => n + 1); }} />)}
-            {view === "colis" && <ColisView data={data} persist={persist} verifier={persisterEtVerifier} session={session} notify={notify} t={t} initialQuery={colisInitialQuery} ouvrirFormulaire={ouvrirFormulaireColis} />}
+            {view === "colis" && <ColisView data={data} persist={persist} verifier={persisterEtVerifier} session={session} notify={notify} t={t} demandeOuverture={demandeColis} onDemandeTraitee={() => setDemandeColis(null)} ouvrirFormulaire={ouvrirFormulaireColis} />}
             {view === "centreclients" && (effectivePermission(session, "espaceclient.gerer")
               ? <CentreClientsPage data={data} persist={persist} notify={notify} session={session} />
               : <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>
@@ -3971,7 +4060,7 @@ function App() {
           </main>
         </div>
       </div>
-      {showGlobalSearch && <GlobalSearchModal data={data} onClose={() => setShowGlobalSearch(false)} onOpenColis={(tracking) => { setView("colis"); setShowGlobalSearch(false); setColisInitialQuery(tracking); }} onOpenClient={() => { setView("clients"); setShowGlobalSearch(false); }} onOpenPreAlerte={() => { setView("centreclients"); setShowGlobalSearch(false); }} />}
+      {showGlobalSearch && <GlobalSearchModal data={data} onClose={() => setShowGlobalSearch(false)} onOpenColis={(tracking) => { setShowGlobalSearch(false); ouvrirColis(tracking); }} onOpenClient={() => { setView("clients"); setShowGlobalSearch(false); }} onOpenPreAlerte={() => { setView("centreclients"); setShowGlobalSearch(false); }} />}
       {/*
         Bandeau d'état de la connexion.
 
@@ -4012,6 +4101,7 @@ function App() {
       )}
       {toast && <div style={{ position: "fixed", bottom: 24, insetInlineEnd: 24, insetInlineStart: isMobile ? 24 : "auto", background: "#0A2647", color: "#fff", padding: "12px 18px", borderRadius: 12, fontSize: 13.5, boxShadow: "0 8px 24px rgba(10,38,71,0.3)", textAlign: "center" }}>{toast}</div>}
     </Shell>
+    </ContexteOuvrirColis.Provider>
   );
 }
 
@@ -6042,7 +6132,7 @@ function ClientPaiementsModal({ colisListe, onClose, devise = "GNF", onDeclarer 
               return (
                 <div key={c.tracking} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: "var(--surface)", borderRadius: 8, padding: "9px 12px", flexWrap: "wrap" }}>
                   <div>
-                    <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>{c.tracking}</div>
+                    <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}><CodeColis code={c.tracking} /></div>
                     <div style={{ fontSize: 11.5, color: "var(--danger-fg)" }}>{fmt(c.reste, devise)}</div>
                   </div>
                   {dejaDeclare ? (
@@ -6070,7 +6160,7 @@ function ClientPaiementsModal({ colisListe, onClose, devise = "GNF", onDeclarer 
           {paiements.map((p) => (
             <div key={p.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--surface2)", borderRadius: 8, padding: "10px 12px" }}>
               <div>
-                <div style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>{p.tracking} · {p.mode}</div>
+                <div style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}><CodeColis code={p.tracking} /> · {p.mode}</div>
                 <div style={{ fontSize: 11, color: "var(--muted)" }}>{new Date(p.date).toLocaleString("fr-FR")}</div>
               </div>
               <div style={{ fontSize: 13, color: "var(--ok-fg)", fontWeight: 700 }}>{p.deviseSaisie ? fmt(p.montant, p.deviseSaisie) : fmt(p.montant, devise)}</div>
@@ -6623,7 +6713,7 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
                   <div key={c.tracking} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: "16px 18px", boxShadow: "0 2px 10px rgba(10,38,71,0.05)" }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 8 }}>
                       <div>
-                        <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{c.tracking}{c.provenance && <span style={{ marginInlineStart: 8, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 6, padding: "2px 8px", fontSize: 10.5, fontWeight: 600, color: "var(--muted)" }}>{c.provenance}</span>}</div>
+                        <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}><CodeColis code={c.tracking} />{c.provenance && <span style={{ marginInlineStart: 8, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 6, padding: "2px 8px", fontSize: 10.5, fontWeight: 600, color: "var(--muted)" }}>{c.provenance}</span>}</div>
                         {c.litige && (
                           <div style={{ background: c.litige.statut === "Ouvert" ? "var(--warn-bg)" : "var(--ok-bg)",
                                         border: "1px solid " + (c.litige.statut === "Ouvert" ? "var(--warn-border)" : "var(--ok-border)"),
@@ -7794,16 +7884,46 @@ function PartnerDashboard({ data, session, persist, verifier, notify, onglet }) 
    * laissé déverrouillé une minute suffirait à verrouiller le compte de son propriétaire.
    */
   async function changerMonMotDePasse(ancien, nouveau) {
-    const verif = await verifyPassword(ancien, monCompte);
-    if (!verif.ok) return { erreur: "Mot de passe actuel incorrect." };
     if (!nouveau || nouveau.length < 8) return { erreur: "Choisissez un mot de passe d’au moins 8 caractères." };
+    /*
+     * L'ANCIEN MOT DE PASSE SE VÉRIFIE AUPRÈS DU SERVEUR.
+     *
+     * La vérification était faite ici, dans le navigateur, contre la fiche que cet écran a en
+     * main. Or le serveur retire de cette fiche le sel et l'empreinte avant de l'envoyer — c'est
+     * précisément ce qui protège les mots de passe. `verifyPassword` n'avait donc rien à comparer
+     * et répondait « incorrect » QUEL QUE SOIT le mot de passe saisi : aucun partenaire, ni aucun
+     * de ses employés, ne pouvait changer le sien. L'écran existait, le bouton répondait, et la
+     * seule issue était d'appeler l'entreprise — ce que cet écran devait justement éviter.
+     *
+     * La vérification locale reste en second, pour un appareil hors ligne dont le cache porte
+     * encore une fiche complète.
+     */
+    const parLeServeur = await connexionServeur(monCompte.identifiant, ancien);
+    if (parLeServeur?.refus) return { erreur: parLeServeur.refus };
+    const bon = parLeServeur ? !!parLeServeur.utilisateur : (await verifyPassword(ancien, monCompte)).ok;
+    if (!bon) return { erreur: "Mot de passe actuel incorrect." };
+
     const identifiants = await creerIdentifiantsMotDePasse(nouveau);
     await persist({
       ...data,
       users: (data.users || []).map((u) => (u.id === session.id ? { ...u, ...identifiants } : u)),
       activityLog: pushActivity(data, session, "Mot de passe changé", `${session.prenom} ${session.nom}`.trim() || session.identifiant),
     });
-    return { ok: true };
+
+    /*
+     * Puis l'on reprend une session, avec le nouveau mot de passe.
+     *
+     * Le jeton de session porte l'empreinte du compte : changer le mot de passe la change aussi,
+     * et le jeton en cours devient caduc à la seconde qui suit — c'est voulu, c'est ce qui coupe
+     * les sessions ouvertes ailleurs. Sans ce rappel, celui qui vient de changer son mot de passe
+     * serait éjecté dans la minute, sur un message d'expiration, en croyant avoir cassé quelque
+     * chose. L'enregistrement, lui, est déjà fait : il a été accepté avec l'ancien jeton, encore
+     * valable au moment de l'écriture.
+     */
+    const reprise = await connexionServeur(monCompte.identifiant, nouveau);
+    if (reprise?.session) { ecrireJetonSession(reprise.session, reprise.sessionExpireA); }
+    if (reprise?.token) { ecrireJeton(reprise.token, reprise.expireA); }
+    return { ok: true, reconnexionARefaire: !reprise?.session };
   }
 
   /*
@@ -8036,7 +8156,7 @@ function PartnerDashboard({ data, session, persist, verifier, notify, onglet }) 
               const arrive = ["Arrivé", "Disponible au retrait", "Livré"].includes(c.status);
               return (
                 <tr key={c.tracking} style={{ borderTop: "1px solid var(--border)" }}>
-                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.tracking}</td>
+                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}><CodeColis code={c.tracking} /></td>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.expediteur || "—"}</td>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>
                     {c.destinataire}
@@ -8213,7 +8333,7 @@ function PartnerDashboard({ data, session, persist, verifier, notify, onglet }) 
                         <tbody>
                           {lot.map((c) => (
                             <tr key={c.tracking} style={{ borderTop: "1px solid var(--border)", verticalAlign: "top" }}>
-                              <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.tracking}</td>
+                              <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}><CodeColis code={c.tracking} /></td>
                               <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{c.destinataire}</td>
                               <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
                                 {(c.produits || []).map((p, i) => <div key={p.id || i}>×{p.quantite || 1} {p.nom || "article"}</div>)}
@@ -8245,7 +8365,7 @@ function PartnerDashboard({ data, session, persist, verifier, notify, onglet }) 
                       <tbody>
                         {bloques.map((c) => (
                           <tr key={c.tracking} style={{ borderTop: "1px solid var(--border)" }}>
-                            <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.tracking}</td>
+                            <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}><CodeColis code={c.tracking} /></td>
                             <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{c.destinataire}</td>
                             <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{routeLabel(c.pays, c.direction) || "—"}</td>
                             <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.poids} kg</td>
@@ -8532,22 +8652,52 @@ function MonMotDePasse({ compte, onChanger }) {
   const [err, setErr] = useState("");
   const [occupe, setOccupe] = useState(false);
   const [fait, setFait] = useState(false);
+  /*
+   * L'œil, sur les trois champs à la fois.
+   *
+   * Ces formulaires se remplissent au téléphone, souvent d'une main. Trois champs masqués dont
+   * deux doivent être identiques, sur un clavier qui n'affiche la lettre qu'une demi-seconde :
+   * l'erreur de frappe est la règle, pas l'exception — et elle ne se voit qu'au message « les
+   * deux mots de passe ne correspondent pas », sans dire lequel des deux est fautif.
+   *
+   * Un seul bouton pour les trois : les révéler séparément obligerait à trois gestes pour
+   * comparer deux champs, ce qui est exactement ce qu'on cherche à faire.
+   */
+  const [montrer, setMontrer] = useState(false);
+  const [aReconnecter, setAReconnecter] = useState(false);
 
   function fermer() {
-    setOuvert(false); setAncien(""); setNouveau(""); setConfirmation(""); setErr(""); setFait(false);
+    setOuvert(false); setAncien(""); setNouveau(""); setConfirmation("");
+    setErr(""); setFait(false); setMontrer(false); setAReconnecter(false);
   }
 
   async function valider(e) {
     e.preventDefault();
     setErr("");
     if (nouveau !== confirmation) { setErr("Les deux mots de passe ne correspondent pas."); return; }
+    if (nouveau === ancien) { setErr("Le nouveau mot de passe doit être différent de l’ancien."); return; }
     setOccupe(true);
     const r = await onChanger(ancien, nouveau);
     setOccupe(false);
     if (r?.erreur) { setErr(r.erreur); return; }
     setFait(true);
-    setTimeout(fermer, 1600);
+    setAReconnecter(!!r?.reconnexionARefaire);
+    /* Quand la session n'a pas pu être reprise, le message doit rester lisible : on ne referme pas. */
+    if (!r?.reconnexionARefaire) setTimeout(fermer, 1600);
   }
+
+  const champMasque = (valeur, poser, extra = {}) => (
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <input type={montrer ? "text" : "password"} value={valeur} onChange={(e) => poser(e.target.value)}
+        style={{ ...inputStyle, flex: 1 }} {...extra} />
+      <button type="button" onClick={() => setMontrer((s) => !s)}
+        title={montrer ? "Masquer les mots de passe" : "Afficher les mots de passe"}
+        aria-label={montrer ? "Masquer les mots de passe" : "Afficher les mots de passe"}
+        style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, width: 38, height: 38, cursor: "pointer", display: "grid", placeItems: "center", flexShrink: 0 }}>
+        {montrer ? <EyeOff size={15} color="var(--muted)" /> : <Eye size={15} color="var(--muted)" />}
+      </button>
+    </div>
+  );
 
   return (
     <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, border: "1px solid var(--border)" }}>
@@ -8563,19 +8713,21 @@ function MonMotDePasse({ compte, onChanger }) {
           <Key size={15} /> Changer mon mot de passe
         </button>
       ) : fait ? (
-        <div style={{ background: "var(--ok-bg-soft)", borderRadius: 10, padding: "12px 14px", fontSize: 13, color: "var(--ok-fg)", fontWeight: 700 }}>
-          Mot de passe changé. Il servira à votre prochaine connexion.
+        <div style={{ background: aReconnecter ? "var(--warn-bg)" : "var(--ok-bg-soft)", borderRadius: 10, padding: "12px 14px", fontSize: 13, color: aReconnecter ? "var(--warn-fg)" : "var(--ok-fg)", fontWeight: 700, lineHeight: 1.5 }}>
+          {aReconnecter
+            ? "Mot de passe changé — il est bien enregistré. Reconnectez-vous avec le nouveau : les sessions ouvertes ailleurs sont coupées, y compris celle-ci."
+            : "Mot de passe changé. Il servira à votre prochaine connexion."}
         </div>
       ) : (
         <form onSubmit={valider}>
           <Field label="Mot de passe actuel">
-            <input type="password" value={ancien} onChange={(e) => setAncien(e.target.value)} autoFocus style={inputStyle} />
+            {champMasque(ancien, setAncien, { autoFocus: true, autoComplete: "current-password" })}
           </Field>
           <Field label="Nouveau mot de passe">
-            <input type="password" value={nouveau} onChange={(e) => setNouveau(e.target.value)} style={inputStyle} placeholder="8 caractères au minimum" />
+            {champMasque(nouveau, setNouveau, { placeholder: "8 caractères au minimum", autoComplete: "new-password" })}
           </Field>
           <Field label="Répétez le nouveau mot de passe">
-            <input type="password" value={confirmation} onChange={(e) => setConfirmation(e.target.value)} style={inputStyle} />
+            {champMasque(confirmation, setConfirmation, { autoComplete: "new-password" })}
           </Field>
           {err && <div style={{ color: "var(--warn-fg)", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
           <div style={{ display: "flex", gap: 8 }}>
@@ -11115,7 +11267,7 @@ function VerifierReferenceModal({ data, compteClient, onClose }) {
         <div key={c.tracking} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 10 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
             <div>
-              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{c.tracking}</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}><CodeColis code={c.tracking} /></div>
               <div style={{ fontSize: 11.5, color: "var(--muted)" }}>
                 {c.destinataire}{c.referenceCommande ? ` · réf. ${c.referenceCommande}` : ""} · {c.poids} kg
               </div>
@@ -11612,7 +11764,7 @@ function MessagesWhatsAppPage({ data, persist, session, notify }) {
                     {siens.map((c) => (
                       <span key={c.tracking} title={`${c.destinataire || ""} · ${c.poids || 0} kg`}
                         style={{ background: "var(--surface2)", borderRadius: 20, padding: "3px 10px", fontSize: 11.5, color: "var(--text)", fontWeight: 600 }}>
-                        {c.tracking} · <span style={{ color: "var(--muted)", fontWeight: 500 }}>{c.status}</span>
+                        <CodeColis code={c.tracking} /> · <span style={{ color: "var(--muted)", fontWeight: 500 }}>{c.status}</span>
                       </span>
                     ))}
                   </div>
@@ -12217,7 +12369,7 @@ function CentreClientsPage({ data, persist, notify, session }) {
                 <div key={c.tracking} style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 12, padding: "14px 16px" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 10, marginBottom: 10 }}>
                     <div>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>⚡ {c.tracking} — {client ? `${client.prenom} ${client.nom}` : c.destinataire}</div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>⚡ <CodeColis code={c.tracking} /> — {client ? `${client.prenom} ${client.nom}` : c.destinataire}</div>
                       <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
                         Livraison express 72 h · {fmtGNF((c.demandeExpress.montant || 0) * (LIVE_RATES.GNF || CURRENCIES.GNF))} · {c.poids} kg
                         {c.demandeExpress.date ? ` · demandé le ${new Date(c.demandeExpress.date).toLocaleDateString("fr-FR")}` : ""}
@@ -12316,15 +12468,14 @@ const ColisStatCard = memo(function ColisStatCard({ label, value, icon: Icon, ti
   );
 });
 
-function ColisView({ data, persist, verifier, session, notify, t, initialQuery, ouvrirFormulaire }) {
+function ColisView({ data, persist, verifier, session, notify, t, demandeOuverture, onDemandeTraitee, ouvrirFormulaire }) {
   const [showForm, setShowForm] = useState(false);
   const [showFormPartenaire, setShowFormPartenaire] = useState(false);
   const [showAi, setShowAi] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [showReception, setShowReception] = useState(false);
   const [showEncaisseGroupe, setShowEncaisseGroupe] = useState(false);
-  const [query, setQuery] = useState(initialQuery || "");
-  useEffect(() => { if (initialQuery) setQuery(initialQuery); }, [initialQuery]);
+  const [query, setQuery] = useState(demandeOuverture?.tracking || "");
   useEffect(() => { if (ouvrirFormulaire) setShowForm(true); }, [ouvrirFormulaire]);
   const deferredQuery = useDeferredValue(query);
   const [selected, setSelected] = useState(null);
@@ -12370,6 +12521,33 @@ function ColisView({ data, persist, verifier, session, notify, t, initialQuery, 
       .filter((c) => !statutFiltre || c.status === statutFiltre)
       .filter((c) => !q || pourRecherche(c.tracking).includes(q) || pourRecherche(c.destinataire).includes(q) || pourRecherche(c.referenceCommande).includes(q) || pourRecherche(c.emplacement).includes(q));
   }, [baseList, statutFiltre, deferredQuery]);
+  /*
+   * Un numéro cliqué ailleurs dans l'application ouvre sa fiche ici.
+   *
+   * La recherche est renseignée AUSSI, pour deux raisons : l'agent voit d'où vient ce qu'il a
+   * sous les yeux, et s'il ferme la fiche il retombe sur la ligne du colis plutôt que sur la
+   * liste entière.
+   *
+   * Le colis est cherché dans `baseList`, jamais dans `data.colis` : c'est la liste que ce compte
+   * a le droit de voir. Un chauffeur, ou un agent rattaché à une autre agence, ne doit pas ouvrir
+   * par un lien une fiche que sa propre liste ne lui montrerait pas.
+   */
+  useEffect(() => {
+    const tracking = demandeOuverture?.tracking;
+    if (!tracking) return;
+    setQuery(tracking);
+    const trouve = baseList.find((c) => c.tracking === tracking);
+    if (trouve) setSelected(trouve);
+    else notify(`Le colis ${tracking} n’est pas dans votre liste.`);
+    /*
+     * La demande est consommée une fois servie. Sans cela elle resterait posée : l'agent qui
+     * revient plus tard sur « Colis » par le menu verrait se rouvrir la fiche du dernier colis
+     * cliqué, au lieu de sa liste.
+     */
+    onDemandeTraitee?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demandeOuverture?.jeton]);
+
   const statsParStatut = useMemo(() => {
     const compte = { "Enregistré": 0, "En transit": 0, "Arrivé": 0, "Disponible au retrait": 0, "Livré": 0 };
     baseList.forEach((c) => { if (compte[c.status] !== undefined) compte[c.status]++; });
@@ -13720,7 +13898,7 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
               const st = STATUS_STYLE[c.status];
               return (
                 <tr key={c.tracking} style={{ borderTop: "1px solid var(--border)" }}>
-                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.tracking}</td>
+                  <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}><CodeColis code={c.tracking} /></td>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{c.destinataire}</td>
                   <td style={{ padding: "10px 14px", whiteSpace: "nowrap" }}><span style={{ background: st.bg, color: st.fg, padding: "3px 9px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>{c.status}</span></td>
                   <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.poids} kg</td>
@@ -13742,7 +13920,7 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
               <div style={{ padding: 16, color: "var(--muted)", fontSize: 13 }}>Aucun autre colis disponible sur cette route.</div>
             ) : ajoutables.map((c) => (
               <div key={c.tracking} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 14px", borderTop: "1px solid var(--border)" }}>
-                <div style={{ fontSize: 12.5, color: "var(--text)" }}>{c.tracking} — {c.destinataire} · {c.poids} kg</div>
+                <div style={{ fontSize: 12.5, color: "var(--text)" }}><CodeColis code={c.tracking} /> — {c.destinataire} · {c.poids} kg</div>
                 <button onClick={() => ajouter(c.tracking)} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 6, padding: "5px 12px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>Ajouter</button>
               </div>
             ))}
@@ -19772,7 +19950,7 @@ function PaiementsPage({ data, notify }) {
                 return (
                   <div key={c.tracking} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderTop: "1px solid var(--surface2)", flexWrap: "wrap", gap: 8 }}>
                     <div>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>{c.tracking} — {c.destinataire}</div>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}><CodeColis code={c.tracking} /> — {c.destinataire}</div>
                       <div style={{ fontSize: 11.5, color: "var(--muted)" }}>Reste {fmt(c.reste, "EUR")} · {jours} jours</div>
                     </div>
                     <a href={waLink(c.telephone, msg)} target="_blank" rel="noreferrer" style={{ display: "flex", alignItems: "center", gap: 6, background: "#3ECB84", color: "#fff", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 700, textDecoration: "none" }}><MessageCircle size={13} /> Relancer sur WhatsApp</a>
@@ -19806,7 +19984,7 @@ function PaiementsPage({ data, notify }) {
           <tbody>
             {visibles.map((c) => (
               <tr key={c.tracking} style={{ borderTop: "1px solid var(--surface2)" }}>
-                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.tracking}</td>
+                <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}><CodeColis code={c.tracking} /></td>
                 <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" }}>{c.destinataire}</td>
                 <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" }}>{fmt(c.prix, "EUR")}</td>
                 <td style={{ padding: "12px 16px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" }}>{fmt(c.paye, "EUR")}</td>
@@ -21700,7 +21878,7 @@ function VoyagesPage({ data, persist, session, notify }) {
                   const p = (data.users || []).find((u) => u.id === c.partenaireId);
                   return (
                     <tr key={c.tracking} style={{ borderTop: "1px solid var(--border)", verticalAlign: "top" }}>
-                      <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.tracking}</td>
+                      <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}><CodeColis code={c.tracking} /></td>
                       <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{p ? `${p.prenom} ${p.nom}`.trim() : "—"}</td>
                       <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{c.destinataire || "—"}</td>
                       <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
@@ -27426,7 +27604,7 @@ function VerificationColisPartenaire({ partenaire, colis, onValider }) {
             <div key={c.tracking} style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", padding: 16 }}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{c.tracking}</div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}><CodeColis code={c.tracking} /></div>
                   <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 3 }}>
                     {c.expediteur || "—"} → {c.destinataire || "—"} · {routeLabel(c.pays, c.direction) || "—"}
                   </div>
@@ -27560,7 +27738,7 @@ function RemiseAuCorrespondant({ lots, partenaire, onRemettre }) {
               <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "10px 12px", fontSize: 12, color: "var(--muted)", lineHeight: 1.7 }}>
                 {lot.colis.map((c) => (
                   <div key={c.tracking}>
-                    <strong style={{ color: "var(--text)" }}>{c.tracking}</strong>
+                    <strong style={{ color: "var(--text)" }}><CodeColis code={c.tracking} /></strong>
                     {" — "}{repereColis(c) || c.destinataire || "sans repère"} · {c.poids || 0} kg
                   </div>
                 ))}
@@ -27767,7 +27945,7 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
                         <input type="checkbox" checked={selection.includes(c.tracking)}
                           onChange={(e) => setSelection((l) => (e.target.checked ? [...l, c.tracking] : l.filter((t) => t !== c.tracking)))} />
                       </td>
-                      <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.tracking}</td>
+                      <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}><CodeColis code={c.tracking} /></td>
                       <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>
                         {c.destinataire}
                         {repereColis(c) && <div style={{ fontSize: 10.5, color: "var(--muted)" }}>repère : {repereColis(c)}</div>}

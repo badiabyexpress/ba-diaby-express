@@ -34,6 +34,10 @@
 import crypto from "node:crypto";
 import { signerSession, empreinteDuCompte } from "./_session.js";
 import { passage, adresseDe, refuser } from "./_verrou.js";
+import {
+  entreeAcces, inscrireAcces, connexionInhabituelle, envoyerAlerteConnexion,
+} from "./_acces.js";
+import { modifierDocument } from "./_base.js";
 
 /** Durée de validité du jeton. Assez longue pour une journée de travail, assez courte pour qu'un
  *  jeton volé sur un téléphone perdu cesse de servir rapidement. */
@@ -260,9 +264,38 @@ export default async function handler(req, res) {
       }
     }
 
+    /*
+     * LE JOURNAL DES ACCÈS.
+     *
+     * Le journal d'activité consigne ce qu'on FAIT une fois entré. Il ne dit rien de l'entrée
+     * elle-même : quelqu'un qui obtient un mot de passe — noté sur un carnet, réutilisé ailleurs —
+     * entre, regarde tout, et repart sans laisser la moindre trace, puisqu'il n'a rien modifié.
+     *
+     * L'inscription se fait après la vérification et sans jamais faire échouer la connexion : un
+     * incident de journal ne doit pas empêcher une agente d'ouvrir sa session à sept heures du
+     * matin. Elle est lancée sans être attendue, pour ne pas rallonger l'attente.
+     */
+    const journaliser = (resultat) => {
+      const entree = entreeAcces({
+        compte, identifiantSaisi: cherche, resultat,
+        adresse: adresseDe(req), req, espace: espaceClient ? "client" : "equipe",
+      });
+      modifierDocument((document) => {
+        const inhabituelle = resultat === "reussie" && connexionInhabituelle(document, compte?.id, entree);
+        return { document: inscrireAcces(document, { ...entree, inhabituelle }), retour: { entree, inhabituelle } };
+      })
+        .then((retour) => {
+          if (retour?.inhabituelle) return envoyerAlerteConnexion(donnees, retour.entree);
+          return null;
+        })
+        .catch((e) => console.error("Journal des accès", e?.message || e));
+    };
+
     if (!compte) {
+      journaliser("refusee");
       return res.status(echec.status).json(echec.corps);
     }
+    journaliser("reussie");
 
     const jeton = secretJwt
       ? signerJeton({

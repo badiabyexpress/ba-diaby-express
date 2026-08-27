@@ -28,6 +28,8 @@
  */
 import { configurationBase, baseConfiguree, lireCle, ecrireCle, modifierDocument } from "./_base.js";
 import { ENTETE_INTERNE, jetonInterne, refusSaufEquipe } from "./_session.js";
+import { chiffresDuJour, envoyerBilanEmail, envoyerBilanWhatsApp } from "./_bilan.js";
+import { envoyerCopieHorsBase } from "./_copie.js";
 import crypto from "node:crypto";
 
 const PREFIXE = "bde-backup-";
@@ -208,15 +210,57 @@ export default async function handler(req, res) {
       /* Une purge manquée ne compromet rien : la sauvegarde, elle, est faite. */
     }
 
+    /*
+     * LE BILAN DE LA JOURNÉE, une fois la sauvegarde faite.
+     *
+     * Dans cet ordre, et pas l'inverse : la sauvegarde est ce qui protège l'entreprise, le bilan
+     * est un confort. Un envoi de courriel qui échoue ne doit jamais faire échouer la copie de la
+     * nuit — c'est pourquoi il est tenté ici, après, et sous `try`.
+     */
+    /*
+     * LA COPIE HORS DE SUPABASE.
+     *
+     * Celle qu'on vient d'écrire est dans la même base que le document vivant : elle protège d'une
+     * fausse manœuvre, pas de la perte du projet. Un compte fermé, une facture impayée, une
+     * suppression, et les quinze copies s'en vont avec les données. Celle-ci part ailleurs.
+     *
+     * Elle est tentée APRÈS la copie interne, et sous `try` : un courriel qui échoue ne doit
+     * jamais faire échouer la sauvegarde, qui est ce qui protège vraiment.
+     */
+    let copieHorsBase = null;
+    try {
+      copieHorsBase = await envoyerCopieHorsBase(vivant.valeur, clef.replace(PREFIXE, ""));
+    } catch (e) {
+      copieHorsBase = { envoye: false, raison: "exception", detail: String(e?.message || e).slice(0, 160) };
+    }
+
+    let bilan = null;
+    try {
+      const chiffres = chiffresDuJour(vivant.valeur);
+      const parEmail = await envoyerBilanEmail(vivant.valeur, chiffres);
+      const parWhatsApp = await envoyerBilanWhatsApp(chiffres);
+      bilan = { chiffres, parEmail, parWhatsApp };
+    } catch (e) {
+      bilan = { erreur: String(e?.message || e).slice(0, 160) };
+    }
+
     const compte = {
       etat: "ok",
       clef,
       colis: Array.isArray(vivant.valeur.colis) ? vivant.valeur.colis.length : 0,
       comptes: vivant.valeur.users.length,
       purgees: purgees.length,
+      /* Une copie hors site dont on ne sait pas si elle est partie ne protège de rien. */
+      horsBase: copieHorsBase?.envoye
+        ? { envoyee: true, octets: copieHorsBase.octets }
+        : { envoyee: false, raison: copieHorsBase?.raison || "inconnue" },
+      bilan: bilan && bilan.chiffres
+        ? { jour: bilan.chiffres.jour, email: !!bilan.parEmail?.envoye, whatsapp: !!bilan.parWhatsApp?.envoye,
+          raisonWhatsApp: bilan.parWhatsApp?.envoye ? null : bilan.parWhatsApp?.raison || null }
+        : bilan,
     };
     await noterVeille(compte);
-    return res.status(200).json({ ok: true, ...compte, ecrite: true });
+    return res.status(200).json({ ok: true, ...compte, ecrite: true, bilan, copieHorsBase });
   } catch (e) {
     await noterVeille({ etat: "echec", clef, raison: String(e?.message || e).slice(0, 120) });
     return res.status(502).json({ ok: false, etat: "echec", error: "Sauvegarde impossible.", detail: String(e?.message || e).slice(0, 200) });

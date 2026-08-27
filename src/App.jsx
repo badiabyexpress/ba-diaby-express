@@ -10147,6 +10147,7 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
     systeme: { permission: "config.acceder", rendu: () => <ParametresSystemePage data={data} persist={persist} notify={notify} onBack={back} offline={offline} /> },
     guide: { permission: "config.acceder", rendu: () => <GuidePage onBack={back} /> },
     journal: { permission: "config.acceder", rendu: () => <JournalActivitePage data={data} onBack={back} /> },
+    acces: { permission: "config.acceder", rendu: () => <JournalAccesPage data={data} onBack={back} /> },
     /* Une sauvegarde, c'est le fichier entier de l'entreprise qui sort sur un appareil. */
     sauvegarde: { permission: "stats.exporter", rendu: () => <SauvegardePage data={data} persist={persist} notify={notify} session={session} onBack={back} /> },
     users: { permission: "users.consulter", rendu: () => <UtilisateursPage data={data} persist={persist} notify={notify} onBack={back} session={session} /> },
@@ -10244,6 +10245,7 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14 }}>
         {ouvrable("notifwa") && <Card icon={MessageCircle} tint="#16A163" title="Notifications" desc="Qui est prévenu automatiquement, et pour quel événement — clients, expéditeurs et partenaires." onClick={() => setSub("notifwa")} />}
         {ouvrable("journal") && <Card icon={FileStack} tint="#5B8DEF" title="Journal d’activité" desc="Historique complet des actions effectuées par les utilisateurs." onClick={() => setSub("journal")} />}
+        {ouvrable("acces") && <Card icon={Shield} tint="#8B5CF6" title="Journal des accès" desc="Qui s’est connecté, quand et depuis quel appareil — et les tentatives refusées." onClick={() => setSub("acces")} />}
         {ouvrable("sauvegarde") && <Card icon={Download} tint="var(--danger-fg)" title="Sauvegarde des données" desc="Téléchargez une copie complète de votre plateforme. Le seul filet en cas de perte." onClick={() => setSub("sauvegarde")} />}
         {ouvrable("systeme") && <Card icon={Settings} tint="#6B7280" title="Paramètres Système" desc="Options avancées de la plateforme." onClick={() => setSub("systeme")} />}
         {ouvrable("guide") && <Card icon={Sparkles} tint="#8B5CF6" title="Guide d’utilisation" desc="Explications des fonctionnalités récentes : comptes clients, pré-alertes, bordereau de réception, tarifs par palier..." onClick={() => setSub("guide")} />}
@@ -25133,6 +25135,121 @@ function PaiementConfigPage({ data, persist, notify, onBack }) {
         </div>
         <button onClick={save} style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "10px 20px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * LE JOURNAL DES ACCÈS — qui est entré, d'où, et depuis quel appareil.
+ *
+ * Le journal d'activité, juste à côté, consigne ce qu'on FAIT une fois entré : un colis créé, un
+ * paiement encaissé. Il ne dit rien de l'entrée elle-même. Quelqu'un qui obtient un mot de passe —
+ * noté sur un carnet, réutilisé ailleurs, deviné — entre, regarde tout, et repart sans laisser la
+ * moindre trace : il n'a rien modifié.
+ *
+ * Les entrées sont écrites par le serveur, à la connexion, et cet écran ne fait que les lire :
+ * elles ne se réécrivent pas depuis un navigateur. Un journal qu'on peut effacer ne prouve rien.
+ */
+function JournalAccesPage({ data, onBack }) {
+  const [filtre, setFiltre] = useState("tout");   // tout | inhabituelles | refusees
+  const [nbAffiches, setNbAffiches] = useState(60);
+  const entrees = data.journalAcces || [];
+
+  const visibles = useMemo(() => entrees.filter((e) => {
+    if (filtre === "inhabituelles") return !!e.inhabituelle;
+    if (filtre === "refusees") return e.resultat === "refusee";
+    return true;
+  }), [entrees, filtre]);
+
+  const inhabituelles = entrees.filter((e) => e.inhabituelle).length;
+  const refusees = entrees.filter((e) => e.resultat === "refusee").length;
+
+  const onglet = (cle, libelle, nombre) => (
+    <button key={cle} onClick={() => { setFiltre(cle); setNbAffiches(60); }}
+      style={{ padding: "7px 14px", borderRadius: 20, cursor: "pointer", fontSize: 12.5, fontWeight: 600,
+        background: filtre === cle ? "var(--brand-solid)" : "var(--surface)",
+        color: filtre === cle ? "#fff" : "var(--text)",
+        border: filtre === cle ? "none" : "1.5px solid var(--border)" }}>
+      {libelle}{nombre > 0 ? ` · ${nombre}` : ""}
+    </button>
+  );
+
+  return (
+    <div>
+      <ConfigPageHeader title="Journal des accès"
+        desc="Qui s’est connecté, quand, depuis quel appareil — et les tentatives refusées."
+        onBack={onBack} />
+
+      {entrees.length === 0 ? (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center" }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>Aucune connexion consignée pour l’instant</div>
+          <div style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.6, maxWidth: 480, margin: "0 auto" }}>
+            Le journal se remplit à partir de la prochaine connexion. Il garde les 400 dernières
+            entrées, réussies comme refusées.
+          </div>
+        </div>
+      ) : (
+        <>
+          {inhabituelles > 0 && (
+            <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 12, padding: "12px 16px", marginBottom: 16 }}>
+              <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
+                <strong>{inhabituelles} connexion{inhabituelles > 1 ? "s" : ""} depuis un appareil et une adresse jamais vus</strong> pour le compte concerné.
+                Si c’était vous — téléphone neuf, autre réseau, déplacement — il n’y a rien à faire.
+                Sinon : Configuration → Gestion Utilisateurs, réinitialisez le mot de passe et
+                déconnectez le compte de tous ses appareils.
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+            {onglet("tout", "Tout", entrees.length)}
+            {onglet("inhabituelles", "Inhabituelles", inhabituelles)}
+            {onglet("refusees", "Refusées", refusees)}
+          </div>
+
+          <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, overflow: "hidden" }}>
+            {visibles.slice(0, nbAffiches).map((e) => (
+              <div key={e.id} style={{ display: "flex", gap: 12, padding: "12px 16px", borderTop: "1px solid var(--border)", alignItems: "flex-start", flexWrap: "wrap" }}>
+                <div style={{ width: 8, height: 8, borderRadius: "50%", marginTop: 6, flexShrink: 0,
+                  background: e.resultat === "refusee" ? "var(--danger-fg)" : e.inhabituelle ? "var(--warn-fg)" : "var(--ok-fg)" }} />
+                <div style={{ flex: 1, minWidth: 200 }}>
+                  <div style={{ fontSize: 13, color: "var(--text)", fontWeight: 600 }}>
+                    {e.qui || e.identifiant || "identifiant inconnu"}
+                    <span style={{ color: "var(--muted)", fontWeight: 500 }}>
+                      {" · "}{e.resultat === "refusee" ? "tentative refusée" : "connexion"}
+                      {e.espace === "client" ? " (Espace Client)" : ""}
+                    </span>
+                    {e.inhabituelle && (
+                      <span style={{ marginInlineStart: 8, background: "var(--warn-bg)", color: "var(--warn-fg)", borderRadius: 6, padding: "2px 8px", fontSize: 10.5, fontWeight: 700 }}>
+                        INHABITUELLE
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3 }}>
+                    {e.appareilLisible || "appareil inconnu"} · {e.adresse || "adresse inconnue"}
+                  </div>
+                </div>
+                <div style={{ fontSize: 11.5, color: "var(--muted)", whiteSpace: "nowrap" }}>
+                  {new Date(e.le).toLocaleString("fr-FR")}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {visibles.length > nbAffiches && (
+            <button onClick={() => setNbAffiches((n) => n + 60)}
+              style={{ marginTop: 12, background: "var(--surface)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 9, padding: "10px 18px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+              Afficher plus ({visibles.length - nbAffiches} restantes)
+            </button>
+          )}
+
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 14, lineHeight: 1.6, maxWidth: 620 }}>
+            Ce journal est écrit par le serveur et ne peut pas être modifié depuis l’application —
+            pas même par un administrateur. L’appareil n’est reconnu que par une empreinte courte :
+            rien de ce qui suivrait quelqu’un ailleurs n’est conservé.
+          </div>
+        </>
+      )}
     </div>
   );
 }

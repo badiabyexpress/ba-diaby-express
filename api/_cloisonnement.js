@@ -749,13 +749,37 @@ export function collectionsQuiFondent(base, envoye) {
   return perdues;
 }
 
+/*
+ * Le nombre d'alertes d'écrasement conservées. Elles servent à comprendre ce qui s'est passé et à
+ * aller fermer l'onglet fautif : au-delà d'une vingtaine, elles ne racontent plus rien de neuf.
+ */
+export const MAX_ALERTES_ECRASEMENT = 20;
+
+/**
+ * Réunit les alertes d'écrasement de la base et celles renvoyées par la page.
+ *
+ * La base fait foi sur le contenu — une page ne réécrit pas une alerte qui la concerne. Elle a en
+ * revanche le droit de la marquer comme lue : c'est le seul geste qu'on lui laisse, et c'est celui
+ * qui fait disparaître le bandeau une fois l'onglet fautif fermé.
+ */
+export function reunirAlertesEcrasement(alertesBase, alertesEnvoyees) {
+  const vues = new Set(
+    (Array.isArray(alertesEnvoyees) ? alertesEnvoyees : [])
+      .filter((a) => a && a.vue && a.id).map((a) => a.id),
+  );
+  return (Array.isArray(alertesBase) ? alertesBase : [])
+    .filter((a) => a && a.id)
+    .map((a) => (vues.has(a.id) ? { ...a, vue: true } : a));
+}
+
 /**
  * Le document réel, augmenté de ce qu'un membre de l'équipe avait le droit de changer.
  *
- * Un compte introuvable dans la base ne peut rien : on rend le document tel qu'il est plutôt que
- * de deviner à quels droits il pourrait bien prétendre.
+ * `contexte` porte de quoi nommer l'appareil fautif dans l'alerte ({ appareil, adresse }) — sans
+ * lui, l'alerte dirait qu'un enregistrement a été refusé sans dire d'où il venait, et il n'y
+ * aurait rien à aller fermer.
  */
-export function fusionnerEcritureEquipe(actuel, propose, compteId) {
+export function fusionnerEcritureEquipe(actuel, propose, compteId, contexte = {}) {
   const base = actuel && typeof actuel === "object" && !Array.isArray(actuel) ? actuel : {};
   const envoye = propose && typeof propose === "object" && !Array.isArray(propose) ? propose : {};
   const moi = liste(base.users).find((u) => u && u.id === compteId);
@@ -812,6 +836,32 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId) {
     role: moi.role,
   }];
   sortie.activityLog = [...refus, ...ajouts, ...anciens].slice(0, 500);
+
+  /*
+   * L'alerte d'écrasement — la trace que quelqu'un doit VOIR, pas seulement retrouver.
+   *
+   * Le journal consigne le refus, mais personne ne lit le journal à l'heure où l'accident se
+   * produit. Cette liste-ci est celle que l'application affiche en bandeau rouge, et celle que le
+   * serveur transforme en courriel immédiat au responsable. Elle nomme le compte et l'appareil :
+   * sans cela on saurait qu'une page périmée tourne, sans savoir laquelle aller fermer.
+   */
+  const alertesBase = liste(base.alertesEcrasement);
+  const alertes = reunirAlertesEcrasement(alertesBase, envoye.alertesEcrasement);
+  if (fondues.length) {
+    alertes.unshift({
+      id: `ecrasement-${Date.now()}`,
+      le: new Date().toISOString(),
+      compte: signature,
+      compteId: moi.id,
+      role: moi.role,
+      collections: fondues,
+      appareil: typeof contexte?.appareil === "string" ? contexte.appareil.slice(0, 300) : "",
+      adresse: typeof contexte?.adresse === "string" ? contexte.adresse.slice(0, 60) : "",
+      vue: false,
+    });
+  }
+  if (alertes.length) sortie.alertesEcrasement = alertes.slice(0, MAX_ALERTES_ECRASEMENT);
+  else delete sortie.alertesEcrasement;
 
   /*
    * Les messages WhatsApp entrants ne se réécrivent pas non plus.

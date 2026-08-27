@@ -3655,6 +3655,7 @@ function App() {
             </div>
           )}
           <main style={{ flex: 1, padding: isMobile ? "16px 14px" : "28px 32px", overflowY: "auto", minWidth: 0 }}>
+            <BandeauEcrasement data={data} persist={persist} session={session} />
             {view === "dashboard" && (session.role === "Partenaire" ? <PartnerDashboard data={data} session={session} persist={persist} verifier={persisterEtVerifier} notify={notify} onglet={ongletPartenaire} /> : <Dashboard data={data} session={session} onNavigate={setView} onNouveauColis={() => { setView("colis"); setOuvrirFormulaireColis((n) => n + 1); }} />)}
             {view === "colis" && <ColisView data={data} persist={persist} verifier={persisterEtVerifier} session={session} notify={notify} t={t} initialQuery={colisInitialQuery} ouvrirFormulaire={ouvrirFormulaireColis} />}
             {view === "centreclients" && (effectivePermission(session, "espaceclient.gerer")
@@ -6804,6 +6805,62 @@ const StatCard = memo(function StatCard({ label, value, icon: Icon, tint, trend,
     </div>
   );
 });
+
+/*
+ * LE BANDEAU D'ÉCRASEMENT
+ *
+ * Le serveur consigne dans `alertesEcrasement` chaque enregistrement qu'il a refusé parce qu'une
+ * page périmée allait effacer des collections entières. Le journal en garde trace, et un courriel
+ * part au responsable — mais celui qui travaille dans l'application, lui, ne va pas lire le
+ * journal. Ce bandeau est là pour qu'il l'apprenne sans le chercher.
+ *
+ * Il dit d'abord que les données sont intactes. Une alerte qui commence par annoncer une perte
+ * fait perdre une heure à celui qui la lit, alors que le refus est précisément ce qui a tout sauvé.
+ *
+ * Le bouton ne « supprime » pas l'alerte : il la marque lue. Elle reste dans le document, et le
+ * journal garde de toute façon la trace du refus — sinon il suffirait d'un clic pour effacer le
+ * seul indice qu'un appareil dangereux tourne quelque part.
+ */
+function BandeauEcrasement({ data, persist, session }) {
+  // Seuls les comptes de l'entreprise sont concernés : un partenaire n'a pas d'onglet à aller
+  // fermer chez quelqu'un d'autre, et le message ne lui apprendrait rien d'utile.
+  if (!session || session.role === "Partenaire") return null;
+  const alertes = (data?.alertesEcrasement || []).filter((a) => a && !a.vue);
+  if (!alertes.length) return null;
+
+  const marquerLues = () => {
+    const lues = new Set(alertes.map((a) => a.id));
+    persist({
+      ...data,
+      alertesEcrasement: (data.alertesEcrasement || []).map((a) => (lues.has(a.id) ? { ...a, vue: true } : a)),
+    });
+  };
+
+  return (
+    <div style={{ background: "var(--danger-bg)", border: "1.5px solid var(--danger-fg)", borderRadius: 12, padding: "14px 16px", marginBottom: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+        <AlertTriangle size={17} color="var(--danger-fg)" />
+        <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--danger-fg)" }}>
+          {alertes.length > 1 ? `${alertes.length} enregistrements refusés` : "Un enregistrement a été refusé"} — page périmée
+        </div>
+      </div>
+      <div style={{ fontSize: 13, color: "var(--text)", marginBottom: 10 }}>
+        Vos données sont intactes : le serveur a remis en place ce qui allait être effacé. Il reste à
+        fermer l’onglet fautif, sinon il réessaiera à chaque geste.
+      </div>
+      {alertes.slice(0, 3).map((a) => (
+        <div key={a.id} style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 4 }}>
+          {new Date(a.le).toLocaleString("fr-FR")} — <strong style={{ color: "var(--text)" }}>{a.compte || "compte inconnu"}</strong>
+          {" · "}
+          {(a.collections || []).map((c) => `${c.cle} : ${c.avant} → ${c.apres}`).join(" · ") || "—"}
+        </div>
+      ))}
+      <button onClick={marquerLues} style={{ marginTop: 10, background: "var(--danger-fg)", color: "#fff", border: "none", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+        L’onglet est fermé — masquer
+      </button>
+    </div>
+  );
+}
 
 function Dashboard({ data, session, onNavigate, onNouveauColis }) {
   const stats = useMemo(() => {

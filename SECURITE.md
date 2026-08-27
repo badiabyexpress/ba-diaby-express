@@ -1034,3 +1034,41 @@ pas s'effacer avant qu'on l'ait lue : le bandeau ordinaire dure 2,8 secondes, ce
 Éprouvé par `t92` (16 cas), qui enregistre un colis par le vrai formulaire face à un serveur qui
 répond 200 sans rien garder — le cas du 26 août, enfin visible à l'écran.
 
+## Être prévenu pendant que ça arrive
+
+Le garde-fou empêche la perte et consigne son refus. Mais un refus consigné n'est vu que par celui
+qui va le chercher : le 26 août, la trace était dans le journal dès 21 h 41, et elle a été lue le
+lendemain matin. Le refus arrive maintenant par trois chemins, dont deux ne demandent d'aller rien
+chercher.
+
+**Le document garde une alerte nommée.** `alertesEcrasement` retient les vingt derniers refus avec
+la date, le compte, son rôle, ce qui allait disparaître, l'appareil (`User-Agent`) et l'adresse de
+connexion. Sans ces deux derniers, on saurait qu'une page périmée tourne quelque part sans savoir
+laquelle aller fermer — ce qui ne sert à rien.
+
+L'application peut **marquer une alerte lue**, et c'est tout ce qu'elle peut en faire. Elle ne peut
+ni la réécrire ni la supprimer : sinon un enregistrement venu de la page fautive effacerait le seul
+indice de son existence.
+
+**Un bandeau rouge s'affiche dans l'application**, sur toutes les pages, pour les comptes de
+l'entreprise. Il commence par dire que les données sont intactes — une alerte qui annonce d'abord
+une perte fait perdre une heure à celui qui la lit, alors que le refus est précisément ce qui a tout
+sauvé. Puis il nomme le compte, ce qui allait partir, et le geste à faire : fermer l'onglet, le
+rouvrir.
+
+**Un courriel part immédiatement au responsable** (`api/_alerte.js`), avant même que la fonction ne
+rende la main — un envoi non attendu ne partirait pas, une fonction serverless étant arrêtée dès sa
+réponse. Il est envoyé **après** l'écriture : prévenir avant laisserait une fenêtre où le message
+affirme que les données sont intactes alors que rien n'est encore enregistré. Un échec d'envoi ne
+transforme jamais un enregistrement réussi en erreur ; il est seulement consigné. Destinataire :
+`ALERTE_EMAIL` si elle est réglée, sinon le premier administrateur ayant une adresse.
+
+**Pas de WhatsApp, et ce n'est pas un oubli.** Hors de la fenêtre de vingt-quatre heures, Meta
+n'autorise que les modèles approuvés. Une alerte d'incident est par définition imprévisible : elle
+tomberait presque toujours hors fenêtre. Il faudrait d'abord faire approuver un modèle « alerte »
+dans WhatsApp Manager. Écrire aujourd'hui du code qui « enverrait un WhatsApp » reviendrait à
+promettre une alerte qui n'arriverait jamais.
+
+Éprouvé par `testalerte` (31 cas), qui vérifie aussi qu'un nom de compte contenant du HTML ne
+devient pas du HTML dans le courriel.
+

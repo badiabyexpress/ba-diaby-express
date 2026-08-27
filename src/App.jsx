@@ -2094,7 +2094,13 @@ const TYPES_DE_CAMPAGNE = {
     modele: MODELE_DEPARTS_WHATSAPP,
     objetParDefaut: "Prochain départ Ba-Diaby Express",
     labelTexte: "Le ou les départs à annoncer",
-    exempleTexte: "ex : Conakry → Paris le 5 septembre, le kilo à 10 € au lieu de 12 €.",
+    /*
+     * L'exemple ne montre AUCUN prix, et c'est délibéré. Un départ est une information : mêler un
+     * tarif à l'exemple laissait croire qu'il en fallait un, alors que la plupart des annonces
+     * n'ont rien à annoncer d'autre que la date. Le prix reste possible — c'est du texte libre —
+     * mais il n'est pas ce qu'on vient dire.
+     */
+    exempleTexte: "ex : Conakry → Paris le 5 septembre. Ajoutez un tarif seulement s’il y en a un.",
     labelDate: "Dépôt des colis jusqu’au",
     exempleDate: "ex : 4 septembre",
     dateParDefaut: "la veille du départ",

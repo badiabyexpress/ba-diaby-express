@@ -902,6 +902,16 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId, contexte = {}
   const fondues = deliberee ? [] : collectionsQuiFondent(base, envoye);
   fondues.forEach(({ cle }) => { sortie[cle] = base[cle]; });
 
+  /*
+   * LE JOURNAL DES ACCÈS NE SE RÉÉCRIT JAMAIS DEPUIS UN NAVIGATEUR.
+   *
+   * Il consigne les entrées — dont celles qu'on n'a pas faites soi-même. Le laisser réécrire par
+   * la page reviendrait à laisser effacer la trace de sa propre visite, et un journal qu'on peut
+   * effacer ne prouve rien. Seul api/login.js y ajoute, ligne à ligne.
+   */
+  if (base.journalAcces === undefined) delete sortie.journalAcces;
+  else sortie.journalAcces = base.journalAcces;
+
   SECTIONS_REGLAGES.forEach(([cle, permission]) => {
     if (peut(permission)) return;
     if (base[cle] === undefined) delete sortie[cle];

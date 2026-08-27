@@ -281,6 +281,48 @@ function numerosPourPays(data, pays) {
     return true;
   });
 }
+/**
+ * Ce colis relève-t-il de l'agence de ce compte ?
+ *
+ * CONSTATÉ EN PRODUCTION LE 27 AOÛT 2026. Le site « Bambeto » a été renommé « Conakry » depuis
+ * l'écran des sites. Les colis enregistrés avant portaient encore `site: "Bambeto"`, ceux d'après
+ * `site: "Conakry"`, et l'agente rattachée à « Bambeto » ne voyait plus que dix colis sur
+ * vingt-et-un. Rien ne le signalait : sa liste s'affichait normalement, simplement plus courte.
+ * Elle a cru que les colis de ses collègues avaient disparu.
+ *
+ * Trois causes tenaient ensemble :
+ *
+ *   — LE NOM SERT DE CLÉ. Renommer une agence coupait donc le lien avec tout ce qui portait
+ *     l'ancien nom. Le renommage le répare désormais lui-même (voir saveSite) ; cette fonction
+ *     est le filet en dessous.
+ *   — LA CASSE COMPTAIT. « conakry » et « Conakry » sont la même agence pour tout le monde sauf
+ *     pour une comparaison stricte.
+ *   — UN COLIS SANS SITE ÉTAIT ATTRIBUÉ À « Bambeto », écrit en dur. Le jour où plus aucune
+ *     agence ne s'appelle ainsi, ce colis n'appartient à personne et n'apparaît nulle part. Un
+ *     colis sans agence inscrite est maintenant visible de TOUS les agents : mieux vaut qu'il
+ *     apparaisse deux fois que pas du tout — on ne retrouve pas un colis qu'on ne voit pas.
+ */
+/**
+ * Le nom de l'agence par défaut, tel qu'il est réglé — jamais celui qu'on croyait.
+ *
+ * « Bambeto » était écrit en dur à une dizaine d'endroits comme agence de repli : sur un colis
+ * qu'on crée, dans les lignes d'historique, dans les statistiques. Le jour où ce site a été
+ * renommé « Conakry », ces valeurs ont continué de désigner une agence qui n'existait plus.
+ */
+function nomSiteParDefaut(data) {
+  const sites = data?.sites || [];
+  const retrait = sites.find((s) => s.id === (data?.agenceRetraitClient || "site-bambeto"));
+  return (retrait || sites.find((s) => (s.pays || "GN") === "GN") || sites[0])?.nom || "";
+}
+
+function colisDeLAgence(colis, agence) {
+  const sienne = String(agence || "").trim();
+  if (!sienne) return true;
+  const site = String(colis?.site || "").trim();
+  if (!site) return true;
+  return site.toLowerCase() === sienne.toLowerCase();
+}
+
 function telephonePourPays(data, pays) {
   return numerosPourPays(data, pays)[0] || "";
 }
@@ -7287,7 +7329,7 @@ function BandeauEcrasement({ data, persist, session }) {
 
 function Dashboard({ data, session, onNavigate, onNouveauColis }) {
   const stats = useMemo(() => {
-    const colis = session.agence ? data.colis.filter((c) => (c.site || "Bambeto") === session.agence) : data.colis;
+    const colis = data.colis.filter((c) => colisDeLAgence(c, session.agence));
     const total = colis.length;
     const now = new Date();
     const thisMonth = colis.filter((c) => { const d = new Date(c.createdAt); return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear(); }).length;
@@ -7298,7 +7340,9 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
     const parPays = COUNTRIES.map((p) => ({ ...p, count: colis.filter((c) => c.pays === p.code).length }));
     const recent = [...colis].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 5);
     const parAgence = sitesLocaux(data.sites).map((s) => {
-      const colisAgence = colis.filter((c) => (c.site || "Bambeto") === s.nom);
+      /* Comparaison au nom, insensible à la casse. Un colis sans site ne compte pour aucune
+         agence — l'attribuer à l'une d'elles gonflerait ses chiffres sans raison. */
+      const colisAgence = colis.filter((c) => (c.site || "").trim().toLowerCase() === (s.nom || "").trim().toLowerCase());
       return { nom: s.nom, count: colisAgence.length, ca: colisAgence.reduce((sum, c) => sum + c.prix, 0) };
     });
     // Colis "oubliés" : toujours au statut Enregistré après plus de 3 jours — signe qu’ils ont
@@ -12087,7 +12131,7 @@ function CentreClientsPage({ data, persist, notify, session }) {
       pays: saisie.paysOrigine || "FR", direction: "import", mode: "air",
       produits: [{ id: `p${Date.now()}`, nom: saisie.description || saisie.reference || "Commande en ligne",
                    quantite: String(saisie.nbArticles || 1), poids: String(saisie.poids), categorie: "" }],
-      poids: saisie.poids, volume: 0, valeurDeclaree: saisie.valeurCommande || 0, site: session?.agence || "Bambeto",
+      poids: saisie.poids, volume: 0, valeurDeclaree: saisie.valeurCommande || 0, site: session?.agence || nomSiteParDefaut(data),
       prixBrut: prixEUR, discountLoyalty: 0, rabaisMontant: 0, rabaisDevise: "GNF", rabaisEUR: 0,
       prix: prixEUR, paye: 0, reste: prixEUR, photos: [], paiements: [],
       notesInternes: `Pré-alerte ${saisie.provenance}${saisie.reference ? ` — réf. ${saisie.reference}` : ""} · ${saisie.poids} kg à ${fmtGNF(saisie.tauxParKg)}/kg`,
@@ -12586,7 +12630,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
   const baseList = useMemo(() => {
     return data.colis
       .filter((c) => (isChauffeur ? c.status === "Disponible au retrait" : true))
-      .filter((c) => !session.agence || (c.site || "Bambeto") === session.agence);
+      .filter((c) => colisDeLAgence(c, session.agence));
   }, [data.colis, isChauffeur, session.agence]);
   const [statutFiltre, setStatutFiltre] = useState(null);
   const list = useMemo(() => {
@@ -12856,7 +12900,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
       ...c, status: "Livré", remise: preuve,
       historique: [...(c.historique || []), {
         status: "Livré", date: maintenant,
-        utilisateur: preuve.agent, agence: c.site || "Bambeto",
+        utilisateur: preuve.agent, agence: c.site || nomSiteParDefaut(data),
         motif: `Remis à ${preuve.nom}${preuve.typePiece ? ` (${preuve.typePiece}${preuve.numeroPiece ? " " + preuve.numeroPiece : ""})` : ""}`,
       }],
     })) };
@@ -12887,7 +12931,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
       const codeRetrait = nextStatus === "Disponible au retrait" && !c.codeRetrait ? genCodeRetrait() : c.codeRetrait;
       return { ...c, status: nextStatus, codeRetrait, historique: [...c.historique, {
         status: nextStatus, date: new Date().toISOString(),
-        utilisateur: `${session.prenom} ${session.nom}`, agence: c.site || "Bambeto",
+        utilisateur: `${session.prenom} ${session.nom}`, agence: c.site || nomSiteParDefaut(data),
       }] };
     }) };
     next.activityLog = logActivity("Changement de statut", `${tracking} → ${nextStatus}`);
@@ -12935,7 +12979,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
       litige: { type, description, date: maintenant, statut: "Ouvert",
                 par: `${session.prenom} ${session.nom}`.trim() || session.identifiant },
       historique: [...(c.historique || []), { status: c.status, date: maintenant,
-        utilisateur: `${session.prenom} ${session.nom}`.trim(), agence: c.site || "Bambeto",
+        utilisateur: `${session.prenom} ${session.nom}`.trim(), agence: c.site || nomSiteParDefaut(data),
         motif: `Litige déclaré : ${type === "perdu" ? "colis perdu" : "colis endommagé"}${description ? ` — ${description}` : ""}` }],
     })) };
     next.activityLog = logActivity(type === "perdu" ? "Colis déclaré perdu" : "Colis déclaré endommagé", `${tracking}${description ? ` — ${description}` : ""}`);
@@ -12963,7 +13007,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
       if (c.tracking !== tracking) return c;
       return { ...c, status: "Annulé", historique: [...c.historique, {
         status: "Annulé", date: new Date().toISOString(),
-        utilisateur: `${session.prenom} ${session.nom}`, agence: c.site || "Bambeto", motif,
+        utilisateur: `${session.prenom} ${session.nom}`, agence: c.site || nomSiteParDefaut(data), motif,
       }] };
     }) };
     next.activityLog = logActivity("Colis annulé", `${tracking}${motif ? ` — ${motif}` : ""}`);
@@ -12976,7 +13020,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
       if (c.tracking !== tracking) return c;
       return { ...c, status: "Refusé", retour: { motif, date: new Date().toISOString(), statutRetour: "En attente de décision" }, historique: [...c.historique, {
         status: "Refusé", date: new Date().toISOString(),
-        utilisateur: `${session.prenom} ${session.nom}`, agence: c.site || "Bambeto", motif,
+        utilisateur: `${session.prenom} ${session.nom}`, agence: c.site || nomSiteParDefaut(data), motif,
       }] };
     }) };
     next.activityLog = logActivity("Colis refusé par le destinataire", `${tracking}${motif ? ` — ${motif}` : ""}`);
@@ -13587,7 +13631,7 @@ function BordereauCreation({ data, session, onCancel, onCreate }) {
   const country = COUNTRIES.find((c) => c.code === pays);
 
   const dejaInclus = new Set((data.bordereaux || []).filter((b) => normalizeBordereauStatut(b.statut) !== "Livré").flatMap((b) => b.colisTrackings));
-  const eligibles = data.colis.filter((c) => c.pays === pays && (c.direction || "export") === direction && c.status !== "Livré" && c.status !== "Annulé" && !dejaInclus.has(c.tracking) && (!session?.agence || (c.site || "Bambeto") === session.agence));
+  const eligibles = data.colis.filter((c) => c.pays === pays && (c.direction || "export") === direction && c.status !== "Livré" && c.status !== "Annulé" && !dejaInclus.has(c.tracking) && colisDeLAgence(c, session?.agence));
 
   function toggle(tracking) {
     setSelectedTrackings((list) => (list.includes(tracking) ? list.filter((t) => t !== tracking) : [...list, tracking]));
@@ -18948,370 +18992,20 @@ function detecterDoublonsClients(clients) {
   return groupes;
 }
 
-/**
- * Répertoire repris de l'ancienne plateforme, lu sur les captures d'écran fournies.
+/*
+ * LE RÉPERTOIRE REPRIS DE L'ANCIENNE PLATEFORME N'EST PLUS DANS LE CODE.
  *
- * ATTENTION — ces fiches sont marquées « à vérifier » (champ `aVerifier`). Les numéros ont été
- * lus sur des photos d'écran : certains chiffres pouvaient être flous ou coupés. Une erreur d'un
- * seul chiffre rend un client injoignable, il faut donc confirmer chaque fiche au premier contact.
- * L'agent confirme d'un clic depuis la page Clients, et le repère disparaît.
+ * Il y a vécu le temps de la reprise : 343 fiches — un nom et un numéro de téléphone par client —
+ * écrites en dur dans ce fichier. Or ce fichier part dans le navigateur de CHAQUE visiteur du
+ * site, connecté ou non. Le carnet d'adresses de l'entreprise était donc téléchargeable par
+ * quiconque ouvrait la page d'accueil, sans compte, sans mot de passe, sans laisser de trace.
  *
- * Il manque environ 40 clients (383 sur l'ancienne plateforme) : les pages 1 à 40 n'étaient pas
- * dans les captures. Ils sont à ajouter à la main.
+ * La reprise a eu lieu : les 343 fiches sont en base, où elles sont servies au seul personnel
+ * identifié. La copie du code n'était plus qu'une fuite qui ne servait plus à rien.
+ *
+ * Une base neuve ne repart donc plus avec ces clients — et c'est juste : le carnet d'une
+ * entreprise n'a pas à être livré avec le programme.
  */
-const REPERTOIRE_IMPORTE = [
-  { n: "aboubacar bah", t: "+224624538625" },
-  { n: "djoulde bah", t: "+224627260728" },
-  { n: "fatoumata bah", t: "+33780597034" },
-  { n: "fatoumata lamarana bah", t: "+224623435322" },
-  { n: "guraissy bah", t: "+224624924566" },
-  { n: "koundouba bah", t: "+224627290816" },
-  { n: "mamadou djoumah bah", t: "+224622015589" },
-  { n: "mamadou saliou bah", t: "+49622636470" },
-  { n: "mariama bah", t: "+224625278583" },
-  { n: "mariama cire bah", t: "+22626938617" },
-  { n: "oury bah", t: "+49629595970" },
-  { n: "thierno bah", t: "+33768408027" },
-  { n: "yaya bah", t: "+33768551442" },
-  { n: "hassanatou balde", t: "+224624364647" },
-  { n: "hawaou balde", t: "+224623385065" },
-  { n: "mariama cire baldé", t: "+224626228348" },
-  { n: "souleymane baldé", t: "+49627859734" },
-  { n: "aly bamba", t: "+224621425829" },
-  { n: "hawa bamba", t: "+224622598314" },
-  { n: "ibrahima bangoura", t: "+224620174697" },
-  { n: "ousmanr bangoura", t: "+224611726034" },
-  { n: "fatoumata bangoura", t: "+224627099308" },
-  { n: "ibrahima bangoura", t: "+49664495257" },
-  { n: "mariame bangoura", t: "+224613964512" },
-  { n: "m'balia bangoura", t: "+33766814454" },
-  { n: "naby laye bangoura", t: "+224621574031" },
-  { n: "boubacar barry", t: "+224627585505" },
-  { n: "hawa barry", t: "+224626698367" },
-  { n: "kadjaliou barry", t: "+224622251487" },
-  { n: "mamadou barry", t: "+224628103829" },
-  { n: "mamadou dian barry", t: "+224623193961" },
-  { n: "oumou tabara barry", t: "+224624597514" },
-  { n: "ramatoulaye barry", t: "+224622543649" },
-  { n: "abdourahmane barry", t: "+224623532352" },
-  { n: "boubacar barry", t: "+224620356729" },
-  { n: "djoulde barry", t: "+33758370589" },
-  { n: "fatoumata binta barry", t: "+224628128143" },
-  { n: "fatoumata djaraye barry", t: "+224628068063" },
-  { n: "mariama barry", t: "+224622308700" },
-  { n: "mariame barry", t: "+224620910880" },
-  { n: "muhammed barry", t: "+224621528148", e: "famous.hayere@gmail.com" },
-  { n: "oury bailo barry", t: "+224612954810" },
-  { n: "salimatou barry", t: "+224655870323" },
-  { n: "souleymane barry", t: "+224623308070" },
-  { n: "yero barry", t: "+224611167920" },
-  { n: "mouhamed lamine bayo", t: "+224622227448" },
-  { n: "anama bayo", t: "+224620421523" },
-  { n: "fatoumata berete", t: "+49758386706" },
-  { n: "fatoumata berete", t: "+33758386706", e: "djeneefanta94@gmail.com" },
-  { n: "hawa berete", t: "+33751520116" },
-  { n: "moussa tiranke berete", t: "+224628813950", e: "mtberete@gmail.com" },
-  { n: "bramx bramx", t: "+33768122438" },
-  { n: "aissata camara", t: "+224624194189" },
-  { n: "alseny camara", t: "+224627624077" },
-  { n: "ba fode morcane camara", t: "+224622341229" },
-  { n: "celestin camara", t: "+224622292953" },
-  { n: "ibrahima camara", t: "+22622144906" },
-  { n: "ibrahima camara", t: "+224620179927" },
-  { n: "mamadama camara", t: "+224625306536" },
-  { n: "mamadama camara", t: "+224625306537" },
-  { n: "mariame camara", t: "+33783334930", e: "mariecamara878@gmail.com" },
-  { n: "m'mah camara", t: "+224626743509" },
-  { n: "sekouba camara", t: "+224625240843" },
-  { n: "abdoulaye camara", t: "+224611711143" },
-  { n: "aicha camara", t: "+224623696000" },
-  { n: "aly rouen camara", t: "+33606419460" },
-  { n: "aminata camara", t: "+224622216028" },
-  { n: "aminata camara", t: "+224621247737" },
-  { n: "fatima bintou camara", t: "+224620749159" },
-  { n: "fatoumata camara", t: "+224610302769" },
-  { n: "fode mouhamadou camara", t: "+224620202597" },
-  { n: "ibrahima camara", t: "+224622144906" },
-  { n: "ibrahima sory camara", t: "+224627162055" },
-  { n: "kadiza camara", t: "+33778329313" },
-  { n: "karamba camara", t: "+33612600777" },
-  { n: "laye camara", t: "+224625065193" },
-  { n: "mayeni camara", t: "+224626198781" },
-  { n: "mme camara", t: "+224624725085" },
-  { n: "morlaye camara", t: "+224621734444" },
-  { n: "naminata camara", t: "+33603295186" },
-  { n: "salif camara", t: "+224629358239" },
-  { n: "nounou camaraa", t: "+33673924171" },
-  { n: "nounou camaraa", t: "+33758993786" },
-  { n: "aladji cisse", t: "+33758063848", e: "tikendjahcisse@gmail.com" },
-  { n: "hirene cisse", t: "+224624816669" },
-  { n: "lonceny cisse", t: "+224620052542" },
-  { n: "moussa mariam cisse", t: "+224627695350" },
-  { n: "aboubacar cissé", t: "+49780051002", e: "koundouba@yahoo.fr" },
-  { n: "ibou cl", t: "+33623161085", e: "famous.hayere@gmail.com" },
-  { n: "ahmed conde", t: "+224620574183" },
-  { n: "aminata conde", t: "+224626882109" },
-  { n: "fanta conde", t: "+33604128349" },
-  { n: "la belle soeur de fanta conde", t: "+33751188872" },
-  { n: "lamine conde", t: "+33781820660" },
-  { n: "moussa conde", t: "+224624461879" },
-  { n: "mr conde", t: "+224628683515" },
-  { n: "prince conde", t: "+33766832214" },
-  { n: "seckou conde", t: "+33753775050" },
-  { n: "aly mariame condé", t: "+224611201212" },
-  { n: "hamidou condé", t: "+224629310012" },
-  { n: "maleny conte", t: "+224627292701" },
-  { n: "emmanuel correah", t: "+224627929880" },
-  { n: "oumar dabo", t: "+224629429140" },
-  { n: "seckou dabo", t: "+33617185305" },
-  { n: "kadiatou dallo", t: "+224624637650" },
-  { n: "maodo dell", t: "+33668324539" },
-  { n: "mme delphine", t: "+224628209640" },
-  { n: "maman de papo", t: "+224622320875" },
-  { n: "sona diabaté", t: "+224627165018" },
-  { n: "alkhaly diaby", t: "+224620990433" },
-  { n: "lassana diaby", t: "+224628047406" },
-  { n: "djaraye diaby", t: "+224610120814" },
-  { n: "fine diaby", t: "+33751419202" },
-  { n: "gassama diaby", t: "+224621022228" },
-  { n: "goundoba diaby", t: "+33605877468" },
-  { n: "lanssana diaby", t: "+33758757832" },
-  { n: "oumar diaby", t: "+224613045289", e: "badiabyexpress.bde@gmail.com" },
-  { n: "ousmane diaby", t: "+224623870026" },
-  { n: "fatoumata diakhaby", t: "+224620428398" },
-  { n: "adama hawa diallo", t: "+224611949029" },
-  { n: "alpha diallo", t: "+12069605294" },
-  { n: "alpha diallo", t: "+49625201405", e: "ousmane816077@gmail.com" },
-  { n: "assiatou diallo", t: "+224621228568" },
-  { n: "fatoumata diallo", t: "+224622844093" },
-  { n: "fatoumata binta diallo", t: "+224661139740" },
-  { n: "fatoumata binta diallo", t: "+224626815211" },
-  { n: "ibrahima diallo", t: "+224612162226" },
-  { n: "ibrahima diallo", t: "+221611122270" },
-  { n: "karimata diallo", t: "+224624383433" },
-  { n: "mamadou alpha diallo", t: "+224620059495" },
-  { n: "mamadou mouctar diallo", t: "+224628177163" },
-  { n: "saïd diallo", t: "+224628061099" },
-  { n: "saliou djan diallo", t: "+224620085461" },
-  { n: "souleymane diallo", t: "+224628284732" },
-  { n: "abdourahmane diallo", t: "+224628318478" },
-  { n: "alassane diallo", t: "+224625235544" },
-  { n: "aloha diallo", t: "+33753789750" },
-  { n: "alpha diallo", t: "+33641293656" },
-  { n: "alpha diallo", t: "+12069605254" },
-  { n: "amadou diallo", t: "+221775780281" },
-  { n: "amadou sadio diallo", t: "+49623192559" },
-  { n: "amadou sadjo diallo", t: "+224666043708" },
-  { n: "amadou tidiane diallo", t: "+33780789468" },
-  { n: "aminata diallo", t: "+393510780598" },
-  { n: "aminata diallo", t: "+224625864688" },
-  { n: "elhadji mamadou diallo", t: "+224622222903" },
-  { n: "fanta diallo", t: "+224620159884" },
-  { n: "fanta diallo", t: "+224629823075" },
-  { n: "fatoumata diarraye diallo", t: "+224628604325" },
-  { n: "fatoumata djoulde diallo", t: "+2246211603231" },
-  { n: "fatoumata djoulde diallo", t: "+224621603231" },
-  { n: "ibrahima diallo", t: "+224624830921" },
-  { n: "maïmouna diallo", t: "+224622310736" },
-  { n: "mamadou diallo", t: "+224620710034" },
-  { n: "mamadou alimou diallo", t: "+49621354117" },
-  { n: "mamadou mouctar diallo", t: "+49628177123" },
-  { n: "mamadou saidou diallo", t: "+33656721853" },
-  { n: "mariama diallo", t: "+224625688899" },
-  { n: "mr diallo", t: "+224613037333" },
-  { n: "souleymane diallo", t: "+49627390660" },
-  { n: "thierno mahmoud diallo", t: "+224620251653" },
-  { n: "siaka diawara", t: "+224621516924" },
-  { n: "lansana diawara", t: "+224629959232" },
-  { n: "hawa dieye", t: "+224611286465" },
-  { n: "thierno dillo", t: "+33769710135" },
-  { n: "j.o diop", t: "+224611159454", e: "badiabyexpress.bde@gmail.com" },
-  { n: "toure djimo", t: "+33652591510" },
-  { n: "djouwe djouwe", t: "+33751183947" },
-  { n: "ibrahima donzo", t: "+224620212770" },
-  { n: "moriba dougouno", t: "+33623080764" },
-  { n: "aissatou doumbouya", t: "+224626558340" },
-  { n: "fatoumata doumbouya", t: "+224621969844" },
-  { n: "hadja mahawa doumbouya", t: "+224620001058" },
-  { n: "maguette doumbouya", t: "+224611491953" },
-  { n: "séréfi doumbouya", t: "+224625660696" },
-  { n: "aicha doumbouya", t: "+33782616462" },
-  { n: "ibrahima kalil doumbouya", t: "+22669175189" },
-  { n: "ibrahima kalil doumbouya", t: "+224669175189" },
-  { n: "maïssata doumbouyah", t: "+224629631151" },
-  { n: "kadiatou doumbouyah", t: "+224628554800" },
-  { n: "saraba drame", t: "+224625208083" },
-  { n: "banfa drame", t: "+33652884808" },
-  { n: "n'na mariama drame", t: "+33652930499" },
-  { n: "soukama drame", t: "+33640287236" },
-  { n: "fatoumata duaby", t: "+224622145605" },
-  { n: "abdoulaye elhadji", t: "+224628770004" },
-  { n: "mariata eoumanigui", t: "+224622002236" },
-  { n: "hadja fatou fadiga", t: "+224620203043" },
-  { n: "diallo fatoumata binta", t: "+33753381481" },
-  { n: "fatoumata fofana", t: "+224624120622" },
-  { n: "hawa fofana", t: "+224628375686" },
-  { n: "lamine fofana", t: "+224620085937" },
-  { n: "maciré ben fofana", t: "+224622310753" },
-  { n: "mr fofana", t: "+224623519577" },
-  { n: "abdoulaye fofana", t: "+224622389780" },
-  { n: "fatoumata fofana", t: "+49627159536" },
-  { n: "fatoumata fofana", t: "+224627159536" },
-  { n: "fatoumata fofana", t: "+224624180622" },
-  { n: "mme fofana", t: "+224622727540" },
-  { n: "moussa fofana", t: "+224622084314" },
-  { n: "youlia fofana", t: "+224628138941" },
-  { n: "marie yvette foulah", t: "+33754834160" },
-  { n: "oumou gassama", t: "+33604494053" },
-  { n: "laurent gbamou", t: "+224623451975" },
-  { n: "mohamed lamine guirassy", t: "+224622329457" },
-  { n: "hariete heloumou", t: "+224623278782" },
-  { n: "diallo ibdiallo", t: "+224611122270" },
-  { n: "abdoulaye kaba", t: "+224625907575" },
-  { n: "abdoul bachir kaba", t: "+224629245656" },
-  { n: "djenabiou kaba", t: "+224660992080" },
-  { n: "mamadi kaba", t: "+49625158826" },
-  { n: "kandjigora kadiatou", t: "+33771819496" },
-  { n: "mme kakimbo", t: "+224664222141" },
-  { n: "hadja kande", t: "+33785374045" },
-  { n: "bintou kante", t: "+33610867943" },
-  { n: "mohamed kante", t: "+33780596626" },
-  { n: "kerfala kebe", t: "+224627505872", e: "kerfalakebe97@gmail.com" },
-  { n: "moussa keita", t: "+224627017667" },
-  { n: "aissata keita", t: "+33781749245" },
-  { n: "moussa keita", t: "+224660208877" },
-  { n: "oumar keita", t: "+224628168051" },
-  { n: "saran koma", t: "+33628778057" },
-  { n: "oumou konate", t: "+33621277276", e: "oumoukonate14@hotmail.fr" },
-  { n: "fatoumata konate", t: "+224621213729" },
-  { n: "aicha konate", t: "+224622093398" },
-  { n: "el kounfia", t: "+33672426366", e: "famous.hayere@gmail.com" },
-  { n: "mouhamed kourouma", t: "+224626284647" },
-  { n: "ayoub kourouma", t: "+224628468689" },
-  { n: "issa kourouma", t: "+49621649704" },
-  { n: "issa kourouma", t: "+224621649704" },
-  { n: "tiemoko kourouma", t: "+224625942340" },
-  { n: "yaya kouroumq", t: "+224613969102" },
-  { n: "fatoumata kouyate", t: "+224621288828" },
-  { n: "aminata kouyate", t: "+33613918089" },
-  { n: "aminata kouyate", t: "+33758060315" },
-  { n: "kadiatou kouyaté", t: "+49629541160" },
-  { n: "catherine lamah", t: "+224622160768" },
-  { n: "nyan kwita charles lega", t: "+224625368376" },
-  { n: "fatoumata madane", t: "+33777034948" },
-  { n: "mouhamed magane", t: "+224613396305" },
-  { n: "batoul magane", t: "+224628942411" },
-  { n: "fanta magane", t: "+33662012332" },
-  { n: "bangoura mouhamed lamine.", t: "+224611193022" },
-  { n: "ya moussa", t: "+224623126598" },
-  { n: "mohamed mozalin", t: "+224626246724" },
-  { n: "thiianguil multi service", t: "+224611835683" },
-  { n: "fatoumata nabe", t: "+33753765901" },
-  { n: "khalifa nabé", t: "+224624916306" },
-  { n: "hadja namou", t: "+33787822249" },
-  { n: "n'dela n'dela", t: "+33762632305" },
-  { n: "binta ndiaye", t: "+224621353537" },
-  { n: "maman papi", t: "+22462230875" },
-  { n: "coa partenaire", t: "+22462222903" },
-  { n: "saraba sacko", t: "+224623929815" },
-  { n: "hadja aicha sacko", t: "+224622583089" },
-  { n: "ibrahima sacko", t: "+33641275989" },
-  { n: "nasou sacko", t: "+224629930451" },
-  { n: "n na aissata sacko", t: "+33768593619" },
-  { n: "m'mah sakho", t: "+224620757279" },
-  { n: "hassanatou sambo", t: "+33759197378" },
-  { n: "mbalou samourah", t: "+224623067565" },
-  { n: "diaby senegalais", t: "+224613080456" },
-  { n: "hadja siata", t: "+224628240465" },
-  { n: "aminata sidibe", t: "+224623977879" },
-  { n: "mohamed sidibe", t: "+49625958449" },
-  { n: "muhamed sidibe", t: "+224626941779" },
-  { n: "ahmed tidiane sidibé", t: "+224613311060" },
-  { n: "diaby sidiya", t: "+33641201835" },
-  { n: "rabiatou souare", t: "+224621751768" },
-  { n: "mohamed soumah", t: "+224622923083" },
-  { n: "aminata soumah", t: "+224626173993" },
-  { n: "issiaga soumah", t: "+224611911644" },
-  { n: "mabintou soumah", t: "+224620838074" },
-  { n: "mama nana soumah", t: "+224629684722" },
-  { n: "mr thiam soumah", t: "+3306218069304" },
-  { n: "abdoul karim soumah camara", t: "+33753493367" },
-  { n: "boubacar sow", t: "+224622091237" },
-  { n: "mamadou lamarana sow", t: "+224620599288" },
-  { n: "oumar sow", t: "+224621224948" },
-  { n: "ramatoulaye sow", t: "+224624735474" },
-  { n: "aissatou bily sow", t: "+224622865086" },
-  { n: "amadou sow", t: "+224622326166" },
-  { n: "aminatou sow", t: "+224624138835" },
-  { n: "habibou sow", t: "+224623046611" },
-  { n: "mamadou dian sow", t: "+224623356932" },
-  { n: "mamadou djoulde sow", t: "+224620923675" },
-  { n: "ousmane sow", t: "+224628400956" },
-  { n: "ousmane sow", t: "+49628400956" },
-  { n: "mariam sy", t: "+224622647422" },
-  { n: "aboubacar sylla", t: "+224622147164" },
-  { n: "amadou sylla", t: "+224622033699" },
-  { n: "benoit sylla", t: "+224622005365" },
-  { n: "fatoumata sylla", t: "+224613446129" },
-  { n: "lamine sylla", t: "+224622405815" },
-  { n: "moussa sylla", t: "+224629263603" },
-  { n: "nabintou sylla", t: "+224621792479" },
-  { n: "ousmane sylla", t: "+224622737808" },
-  { n: "ousmane sylla", t: "+224629625515" },
-  { n: "yafode sylla", t: "+224613054876" },
-  { n: "zenab sylla", t: "+33781242374" },
-  { n: "abdoualye sylla", t: "+224628295041" },
-  { n: "abdoulaye sylla", t: "+224621114717" },
-  { n: "abdoulaye sylla", t: "+224625832203" },
-  { n: "aboubacar sylla", t: "+224624357866" },
-  { n: "amadou sylla", t: "+33753722998" },
-  { n: "amadou sylla", t: "+33604449595" },
-  { n: "mariama cire sylla", t: "+33689653576" },
-  { n: "mariama cire sylla", t: "+33689659576" },
-  { n: "mariame sylla", t: "+224628469132" },
-  { n: "mohamed sylla", t: "+33753090379" },
-  { n: "mouhamed sylla", t: "+224660973007" },
-  { n: "ousmane sylla", t: "+224629625520" },
-  { n: "taminy taminy", t: "+33766043199" },
-  { n: "mr thiam", t: "+33621806934", e: "famous.hayere@gmail.com" },
-  { n: "mamoudou thierno", t: "+224612145441" },
-  { n: "chek ahmed tidiane", t: "+224622500519" },
-  { n: "aly tombolia", t: "+224613901670" },
-  { n: "djiba toure", t: "+224627552014" },
-  { n: "fatoumata dominique toure", t: "+224620126887" },
-  { n: "macire toure", t: "+224627449781" },
-  { n: "mariame toure", t: "+224628558449" },
-  { n: "aissata toure", t: "+224622282762" },
-  { n: "aminata toure", t: "+33785948317" },
-  { n: "aye toure", t: "+224622126923" },
-  { n: "kadiatou toure", t: "+33780559695" },
-  { n: "kadiatou toure", t: "+224621682932" },
-  { n: "kamalbase toure", t: "+224610888872" },
-  { n: "mamadou oury toure", t: "+33751348514" },
-  { n: "mariama toure", t: "+224624425914" },
-  { n: "moustapha toure", t: "+33766783991" },
-  { n: "nana toure", t: "+224628047470" },
-  { n: "kakéba touré", t: "+224625494249" },
-  { n: "kamalbasse touré", t: "+49610888872" },
-  { n: "tanti toutou", t: "+33783963329" },
-  { n: "aissatou traore", t: "+224625598025" },
-  { n: "ibrahima traore", t: "+224627093411" },
-  { n: "fatoumata traore", t: "+224627293246" },
-  { n: "facinet traoré", t: "+49628316732" },
-  { n: "no yaawi", t: "+224624834960" },
-  { n: "abdoulaye yeressa", t: "+224629315255" },
-  { n: "mariame youla", t: "+224626160676" },
-  { n: "soeur de youla", t: "+224628354009" },
-  { n: "alayrangues zoe", t: "+224614220449" },
-].map((c, i) => ({
-  id: `imp-${i}`,
-  nomComplet: c.n,
-  telephone: c.t,
-  email: c.e || "",
-  adresse: "",
-  aVerifier: true,
-  source: "ancienne plateforme",
-}));
 
 /**
  * Données de référence : catégories tarifaires et compte administrateur.
@@ -19518,12 +19212,8 @@ function buildClientDirectory(colisList, repertoireEnBase = null) {
    * l'onglet « Doublons possibles » signale ces cas et vous tranchez.
    */
   const dejaPresents = new Set(Object.keys(map).map((t) => String(t).replace(/\D/g, "")).filter(Boolean));
-  /*
-   * Deux sources pour le répertoire : celui livré avec l'application (valeurs par défaut) et
-   * celui éventuellement chargé en base via « Charger les données de référence ». Sur une
-   * plateforme déjà en service, seul le second existe.
-   */
-  const repertoire = repertoireEnBase && repertoireEnBase.length ? repertoireEnBase : REPERTOIRE_IMPORTE;
+  /* Une seule source : la base. Voir plus haut pourquoi le code n'en porte plus de copie. */
+  const repertoire = repertoireEnBase || [];
   repertoire.forEach((c) => {
     const cle = String(c.telephone).replace(/\D/g, "");
     if (!cle || dejaPresents.has(cle)) return;
@@ -20576,7 +20266,7 @@ function CaissePage({ data, persist, session, notify }) {
       tracking: c.tracking,
       client: c.destinataire || "—",
       clientKey: c.clientAccountId || normaliserTelephone(c.telephone) || (c.destinataire || "").toLowerCase(),
-      site: c.site || "Bambeto",
+      site: c.site || nomSiteParDefaut(data),
       poids: Number(c.poids) || 0,
       date: p.date,
       mode: p.mode || MODE_ESPECES,
@@ -22436,7 +22126,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
      * résultat baisserait sans que rien ne dise de combien.
      */
     const ecartees = new Set(data.agencesHorsBilan || []);
-    const agenceDuColis = (c) => c.site || "Bambeto";
+    const agenceDuColis = (c) => c.site || nomSiteParDefaut(data);
     const commissionDuColis = (c) => calcCommission(c, data.commissionConfig, data.categories);
     const commissionsAuto = colisPeriode
       .filter((c) => !ecartees.has(agenceDuColis(c)))
@@ -22471,7 +22161,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
     const resteAEncaisser = facture - recettes;
 
     // Encaissements réels (date du paiement, pas de la création du colis), par mode et par jour
-    const tousPaiements = data.colis.flatMap((c) => (c.paiements || []).map((p) => ({ ...p, tracking: c.tracking, site: c.site || "Bambeto" })));
+    const tousPaiements = data.colis.flatMap((c) => (c.paiements || []).map((p) => ({ ...p, tracking: c.tracking, site: c.site || nomSiteParDefaut(data) })));
     const paiementsPeriode = tousPaiements.filter((p) => inPeriod(p.date));
     const parMode = {};
     paiementsPeriode.forEach((p) => { parMode[p.mode] = (parMode[p.mode] || 0) + p.montant; });
@@ -22978,7 +22668,7 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
       destinataire: `${compte.prenom} ${compte.nom}`, telephone: compte.telephone, destinataireEmail: compte.email || "", destinataireAdresse: compte.adresse || "", destinataireVille: "", destinataireCodePostal: "", destinatairePays: "GN",
       pays: "GN", direction: "import", mode: "air",
       produits: [{ id: `p${Date.now()}`, nom: refColis || "Colis reçu", quantite: String(Number(articlesAjout) || 1), poids: String(poids), categorie: "", personnalise: false, montant: "", devise: "GNF", typePrix: "unitaire" }],
-      poids, volume: 0, valeurDeclaree: 0, site: "Bambeto",
+      poids, volume: 0, valeurDeclaree: 0, site: agence || nomSiteParDefaut(data),
       // Le prix est calculé dès l'enregistrement, à partir du poids et des paliers de réception.
       // Auparavant il restait à 0 : le client voyait « Reste à payer 0,00 » alors qu'il devait payer.
       prixBrut: prixEUR, discountLoyalty: 0, rabaisMontant: 0, rabaisDevise: "GNF", rabaisEUR: 0,
@@ -25050,11 +24740,13 @@ function SauvegardePage({ data, persist, notify, session, onBack }) {
     const catsExistantes = new Set((data.categories || []).map((c) => (c.nom || "").toLowerCase()));
     const catsAAjouter = DONNEES_REFERENCE.categories.filter((c) => !catsExistantes.has(c.nom.toLowerCase()));
 
-    const telsExistants = new Set(
-      [...(data.colis || []).map((c) => normaliserTelephone(c.telephone)),
-       ...(data.repertoire || []).map((c) => normaliserTelephone(c.telephone))].filter(Boolean)
-    );
-    const clientsAAjouter = REPERTOIRE_IMPORTE.filter((c) => !telsExistants.has(normaliserTelephone(c.telephone)));
+    /*
+     * Le répertoire ne fait plus partie des données de référence : il a été repris une fois, il
+     * est en base, et le code n'en garde plus de copie — elle partait dans le navigateur de
+     * chaque visiteur. Ce bouton ne complète donc plus que les catégories et le compte
+     * administrateur.
+     */
+    const clientsAAjouter = [];
 
     const identifiants = new Set((data.users || []).map((u) => (u.identifiant || "").toLowerCase()));
     const compteAAjouter = identifiants.has("iboush") ? null : DONNEES_REFERENCE.admin;
@@ -25278,13 +24970,40 @@ function SitesOperationPage({ data, persist, notify, onBack, sansEntete }) {
     const site = { ...form, nom, telephone: telephoneAvecIndicatif(form.telephone, form.pays || "GN") };
     const next = exists ? sites.map((s) => (s.id === site.id ? site : s)) : [...sites, { ...site, id: site.id || `s${Date.now()}` }];
     /*
+     * RENOMMER UNE AGENCE EMPORTE CE QUI Y ÉTAIT RATTACHÉ.
+     *
+     * Puisque c'est le nom qui fait le lien, le changer sans plus laissait derrière lui tous les
+     * colis et tous les agents inscrits sous l'ancien. C'est arrivé : « Bambeto » est devenu
+     * « Conakry », et l'agente rattachée à « Bambeto » a cessé de voir les colis enregistrés
+     * après. Rien ne le signalait — sa liste s'affichait normalement, simplement plus courte.
+     *
+     * Le renommage réécrit donc les deux, dans la même écriture : on ne peut pas se retrouver
+     * avec des sites renommés d'un côté et des colis restés de l'autre.
+     */
+    const ancienNom = exists ? (sites.find((s) => s.id === site.id)?.nom || "").trim() : "";
+    const renomme = ancienNom && ancienNom.toLowerCase() !== nom.toLowerCase();
+    const colisSuivis = renomme
+      ? (data.colis || []).map((c) => ((c.site || "").trim().toLowerCase() === ancienNom.toLowerCase() ? { ...c, site: nom } : c))
+      : data.colis;
+    const comptesSuivis = renomme
+      ? (data.users || []).map((u) => ((u.agence || "").trim().toLowerCase() === ancienNom.toLowerCase() ? { ...u, agence: nom } : u))
+      : data.users;
+    /*
      * L'agence de retrait de l'Espace Client doit toujours désigner un site existant, en Guinée
      * (un site à l'étranger ne sert que de point de retrait sur le ticket). Si la référence ne
      * pointe plus vers rien — site passé à l'étranger, ou réglage jamais enregistré — on la fait
      * suivre vers le premier site local, celui-là même que le menu affiche déjà.
      */
-    persist({ ...data, sites: next, agenceRetraitClient: agenceRetraitValide(next, data.agenceRetraitClient) });
-    notify?.(exists ? "Site mis à jour" : "Site ajouté");
+    persist({
+      ...data, sites: next, colis: colisSuivis, users: comptesSuivis,
+      agenceRetraitClient: agenceRetraitValide(next, data.agenceRetraitClient),
+    });
+    if (renomme) {
+      const nbColis = (data.colis || []).filter((c) => (c.site || "").trim().toLowerCase() === ancienNom.toLowerCase()).length;
+      notify?.(`Agence renommée « ${ancienNom} » → « ${nom} » — ${nbColis} colis suivent, ainsi que les agents qui y sont rattachés.`, 6000);
+    } else {
+      notify?.(exists ? "Site mis à jour" : "Site ajouté");
+    }
     fermerFormulaire();
   }
   function removeSite(id) {

@@ -23423,10 +23423,18 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
           */}
           {(() => {
             const deposes = new Set((modeles.modeles || []).map((m) => m.nom));
-            const attendus = [...new Set(Object.values(MODELES_WHATSAPP).map((f) => {
-              try { return f({ tracking: "X", destinataire: "X", paiements: [] }, data)?.nom; }
-              catch (e) { return null; }
-            }).filter(Boolean))];
+            /*
+             * Les modèles de service ET les deux modèles de campagne. Ces derniers manquaient à
+             * cette liste : ils ne servent qu'aux campagnes, donc leur absence ne se voyait que le
+             * jour d'un envoi en masse — au pire moment, quand tous les messages échouent d'un coup.
+             */
+            const attendus = [...new Set([
+              ...Object.values(MODELES_WHATSAPP).map((f) => {
+                try { return f({ tracking: "X", destinataire: "X", paiements: [] }, data)?.nom; }
+                catch (e) { return null; }
+              }),
+              ...Object.values(TYPES_DE_CAMPAGNE).map((t) => t.modele.nom),
+            ].filter(Boolean))];
             const absents = attendus.filter((n) => !deposes.has(n));
             if (!absents.length) return null;
             return (

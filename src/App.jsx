@@ -245,6 +245,24 @@ function sitesPourPays(sites, pays) {
 function sitesLocaux(sites) {
   return sitesPourPays(sites, "GN");
 }
+/*
+ * LE NUMÉRO PAR LEQUEL ON JOINT L'ENTREPRISE, DANS UN PAYS DONNÉ.
+ *
+ * Les boutons « Contacter » de l'Espace Client portaient deux numéros écrits en dur dans le code.
+ * Aucun réglage ne pouvait les changer : le jour où l'entreprise change de ligne, ces boutons
+ * continuent d'envoyer les clients vers l'ancienne — chez quelqu'un d'autre, une fois le numéro
+ * réattribué — et il faut une modification du programme pour y remédier.
+ *
+ * Ils lisent maintenant les données : Configuration → Agences pour le site du pays, à défaut le
+ * numéro de l'entreprise. Changer de numéro redevient un réglage, pas un déploiement.
+ */
+function telephonePourPays(data, pays) {
+  const site = (data?.sites || []).find((s) => (s.pays || "GN") === pays && s.telephone);
+  if (site) return site.telephone;
+  const reception = data?.agencesReception?.[pays];
+  if (reception?.telephone) return reception.telephone;
+  return data?.entreprise?.telephone || "";
+}
 /**
  * Site où le destinataire vient retirer son colis.
  *
@@ -6543,8 +6561,18 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
                         <span style={{ background: st?.bg, color: st?.fg, padding: "5px 12px", borderRadius: 20, fontSize: 12, fontWeight: 700 }}>{clientStatusLabel(c.status)}</span>
                         <span style={{ fontSize: 12.5, fontWeight: 700, color: c.reste > 0 ? "var(--danger-fg)" : "var(--ok-fg)" }}>{c.reste > 0 ? `${fmt(c.reste, deviseClient)} dû` : "Payé"}</span>
                         <button onClick={() => downloadInvoice(c, data)} style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 600, color: "var(--text)", cursor: "pointer" }}>{T("Facture")}</button>
-                        <a href={`https://wa.me/224612479339?text=${encodeURIComponent(`Bonjour, j’ai une question concernant mon colis ${c.tracking}.`)}`} target="_blank" rel="noopener noreferrer" style={{ background: "var(--ok-bg-soft)", border: "1px solid var(--ok-border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 600, color: "var(--ok-fg)", textDecoration: "none" }}>💬 Contacter (GN)</a>
-                        <a href={`https://wa.me/33767562963?text=${encodeURIComponent(`Bonjour, j’ai une question concernant mon colis ${c.tracking}.`)}`} target="_blank" rel="noopener noreferrer" style={{ background: "var(--ok-bg-soft)", border: "1px solid var(--ok-border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 600, color: "var(--ok-fg)", textDecoration: "none" }}>💬 Contacter (FR)</a>
+                        {/*
+                          * Les numéros viennent des réglages, jamais du code — et un bouton ne
+                          * s'affiche pas si le numéro n'est pas renseigné : mieux vaut pas de
+                          * bouton qu'un bouton qui appelle dans le vide.
+                          */}
+                        {[["GN", "GN"], ["FR", "FR"]].map(([pays, libelle]) => {
+                          const numero = clefTelephone(telephonePourPays(data, pays));
+                          if (!numero) return null;
+                          return (
+                            <a key={pays} href={`https://wa.me/${numero}?text=${encodeURIComponent(`Bonjour, j’ai une question concernant mon colis ${c.tracking}.`)}`} target="_blank" rel="noopener noreferrer" style={{ background: "var(--ok-bg-soft)", border: "1px solid var(--ok-border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 600, color: "var(--ok-fg)", textDecoration: "none" }}>💬 {T("Contacter")} ({libelle})</a>
+                          );
+                        })}
                       </div>
                     </div>
                     <ClientTimeline status={c.status} />

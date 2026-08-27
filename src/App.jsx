@@ -2744,13 +2744,13 @@ function defaultSeed() {
       parDefaut: false, commissionRate: null, ...c,
     })),
     sites: [
-      { id: "site-bambeto", nom: "Conakry", adresse: "Bambeto Park, Conakry", telephone: "+224612479339", horaires: "Lun–Sam 8h–18h", paiements: "Espèces, Orange Money", stockage: "Retrait sous 7 jours" },
-      { id: "site-madina", nom: "Madina", adresse: "Madina, Conakry", telephone: "+224612479339", horaires: "Lun–Sam 8h–18h", paiements: "Espèces, Orange Money", stockage: "Retrait sous 7 jours" },
+      { id: "site-bambeto", nom: "Conakry", adresse: "Bambeto Park, Conakry", telephone: "+224621654796", horaires: "Lun–Sam 8h–18h", paiements: "Espèces, Orange Money", stockage: "Retrait sous 7 jours" },
+      { id: "site-madina", nom: "Madina", adresse: "Madina, Conakry", telephone: "+224621654796", horaires: "Lun–Sam 8h–18h", paiements: "Espèces, Orange Money", stockage: "Retrait sous 7 jours" },
     ],
     agencesReception: {
       FR: { adresse: "26 rue Saint Blaise, 75020 Paris", telephone: "+33767562963", horaires: "" },
     },
-    entreprise: { adresseSiege: "Bambeto, Conakry, Guinée", telephone: "+224612479339", email: "badiabyexpress.bde@gmail.com", siteWeb: "www.ba-diaby-express.com" },
+    entreprise: { adresseSiege: "Bambeto, Conakry, Guinée", telephone: "+224621654796", email: "badiabyexpress.bde@gmail.com", siteWeb: "www.ba-diaby-express.com" },
     commissionConfig: { parKg: 2, parUnite: 5 }, // EUR — modifiable par l’Administrateur uniquement
   };
 }
@@ -4251,7 +4251,7 @@ function CguPage() {
       // complète avec un numéro générique qu'une page vide.
       .catch(() => {});
   }, []);
-  const entreprise = data?.entreprise?.adresseSiege ? data.entreprise : { adresseSiege: "Conakry, Guinée", telephone: "+224612479339", email: "badiabyexpress.bde@gmail.com", siteWeb: "www.ba-diaby-express.com" };
+  const entreprise = data?.entreprise?.adresseSiege ? data.entreprise : { adresseSiege: "Conakry, Guinée", telephone: "+224621654796", email: "badiabyexpress.bde@gmail.com", siteWeb: "www.ba-diaby-express.com" };
   const section = (titre, children) => (
     <div style={{ marginBottom: 26 }}>
       <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>{titre}</div>
@@ -23098,6 +23098,24 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
     } finally { setProfilEnCours(false); }
   }
 
+  /*
+   * Les numéros du compte professionnel, et leur identifiant.
+   *
+   * Changer la ligne qui envoie ne se fait pas ici : elle est désignée par WHATSAPP_PHONE_ID chez
+   * Vercel. Mais l'identifiant à y recopier est un nombre à quinze chiffres qui ne ressemble pas au
+   * numéro, et qu'on va chercher dans la console Meta en s'y perdant. On l'affiche donc, avec le
+   * bouton pour le copier.
+   */
+  const [numeros, setNumeros] = useState(null);
+  const [numeroCopie, setNumeroCopie] = useState("");
+  function relireNumeros() {
+    return appelServeurQuiDepense("/api/whatsapp?numeros=1")
+      .then((r) => r.json().then((corps) => ({ ok: r.ok, corps })))
+      .then(({ ok, corps }) => setNumeros(ok ? corps : { erreur: corps?.error, manquant: corps?.manquant }))
+      .catch(() => setNumeros({ erreur: "indisponible" }));
+  }
+  useEffect(() => { relireNumeros(); }, []);
+
   const [modeles, setModeles] = useState(null);
   function relireModeles() {
     return appelServeurQuiDepense("/api/whatsapp?modeles=1")
@@ -23524,6 +23542,68 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
               </button>
             </>
           )}
+        </div>
+      )}
+
+      {numeros && !numeros.erreur && (numeros.numeros || []).length > 0 && (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "13px 16px", marginBottom: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 4 }}>
+            Les numéros de votre compte professionnel
+          </div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 10, lineHeight: 1.55 }}>
+            Pour changer la ligne qui envoie les messages, copiez l’identifiant du numéro voulu et
+            remplacez <strong>WHATSAPP_PHONE_ID</strong> dans Vercel → Settings → Environment
+            Variables. Une variable n’est lue qu’au déploiement suivant : redéployez ensuite.
+          </div>
+          {numeros.actuelInconnu && (
+            <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "10px 12px", marginBottom: 10, fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
+              <strong style={{ color: "var(--danger-fg)" }}>L’identifiant configuré ne correspond à aucun numéro de ce compte.</strong>
+              {" "}Les envois échouent sans que la raison soit trouvable. Copiez ci-dessous celui du
+              numéro qui doit envoyer.
+            </div>
+          )}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {(numeros.numeros || []).map((n) => (
+              <div key={n.id} style={{ border: "1px solid " + (n.actif ? "var(--ok-fg)" : "var(--border)"), background: n.actif ? "var(--ok-bg-soft)" : "var(--surface2)", borderRadius: 9, padding: "10px 12px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>
+                    {n.numero || "numéro sans libellé"}
+                    {n.nom ? <span style={{ fontWeight: 500, color: "var(--muted)" }}> — {n.nom}</span> : null}
+                  </div>
+                  {n.actif
+                    ? <span style={{ fontSize: 11.5, fontWeight: 700, color: "var(--ok-fg)" }}>ENVOIE AUJOURD’HUI</span>
+                    : <span style={{ fontSize: 11.5, color: "var(--muted)" }}>inactif</span>}
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginTop: 6, flexWrap: "wrap" }}>
+                  <code style={{ fontSize: 12, fontFamily: "ui-monospace, monospace", color: "var(--muted)", wordBreak: "break-all" }}>{n.id}</code>
+                  <button
+                    onClick={() => {
+                      /* Le repli sur l'ancienne méthode : sans page sécurisée, le presse-papier
+                       * moderne n'existe pas, et le bouton ne ferait rien sans le dire. */
+                      const copier = navigator.clipboard?.writeText
+                        ? navigator.clipboard.writeText(String(n.id))
+                        : Promise.reject(new Error("indisponible"));
+                      copier.then(() => setNumeroCopie(n.id)).catch(() => setNumeroCopie(""));
+                      setTimeout(() => setNumeroCopie(""), 2200);
+                    }}
+                    style={{ background: "var(--surface)", border: "1.5px solid var(--border)", borderRadius: 7, padding: "5px 11px", fontSize: 12, fontWeight: 700, color: "var(--text)", cursor: "pointer", flexShrink: 0 }}>
+                    {numeroCopie === n.id ? "Copié ✓" : "Copier l’ID"}
+                  </button>
+                </div>
+                {n.qualite || n.etat ? (
+                  <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 5 }}>
+                    {n.etat ? `état ${String(n.etat).toLowerCase()}` : ""}
+                    {n.etat && n.qualite ? " · " : ""}
+                    {n.qualite ? `qualité ${String(n.qualite).toLowerCase()}` : ""}
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 10, lineHeight: 1.55 }}>
+            Vos modèles approuvés appartiennent au compte professionnel, pas au numéro : changer de
+            ligne à l’intérieur du même compte ne vous oblige à rien redéposer.
+          </div>
         </div>
       )}
 

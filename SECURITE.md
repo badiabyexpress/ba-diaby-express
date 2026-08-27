@@ -1341,3 +1341,39 @@ Un jeton révoqué ne peut donc plus lire ni écrire vos données, mais pourrait
 message pendant les heures restantes de sa validité.
 
 Éprouvé par `testdonnees` (247 cas, dont onze pour la révocation seule) et `testgardefou` (43).
+
+## Changer la ligne qui envoie les messages
+
+Elle est désignée par `WHATSAPP_PHONE_ID`, une variable de Vercel — pas par un réglage du site, et
+c'est normal : elle appartient à la configuration du serveur. Mais l'identifiant à y recopier est un
+nombre à quinze chiffres qui ne ressemble en rien au numéro de téléphone, et qu'on va chercher dans
+la console de Meta en s'y perdant.
+
+**Configuration → WhatsApp affiche désormais les numéros du compte professionnel**, chacun avec son
+identifiant, un bouton pour le copier, son état et sa note de qualité. Et surtout : **lequel envoie
+aujourd'hui**. Sans cela on recopie une variable sans savoir si l'on a changé quelque chose, et l'on
+découvre l'erreur au premier message parti du mauvais numéro — c'est-à-dire devant un client.
+
+Le cas qui fait perdre une journée est nommé à part : **quand la variable désigne une ligne qui
+n'est plus sur le compte**, tous les envois échouent et le message d'erreur de Meta ne dit pas que
+c'est ça. L'écran l'écrit en rouge et pointe vers l'identifiant à copier.
+
+Une phrase de plus, parce qu'elle décide si l'on ose toucher à la variable : **les modèles approuvés
+appartiennent au compte professionnel, pas au numéro.** Changer de ligne à l'intérieur du même
+compte ne fait rien perdre. Ouvrir un nouveau compte, si.
+
+L'identifiant est rendu tel quel par le serveur : ce n'est pas un secret — il désigne une ligne, il
+n'ouvre rien. Le jeton, lui, ne quitte jamais le serveur.
+
+Éprouvé par `t95` (16 cas).
+
+## Les numéros de contact ne sont plus écrits dans le programme
+
+Les deux boutons « Contacter » de l'Espace Client portaient deux numéros en dur. Aucun réglage ne
+pouvait les changer : le jour où l'entreprise change de ligne, ces boutons continuent d'envoyer les
+clients vers l'ancienne — chez quelqu'un d'autre une fois le numéro réattribué — et il faut une
+modification du programme pour y remédier.
+
+Ils lisent maintenant les données : le site du pays dans Configuration → Agences, à défaut le numéro
+de l'entreprise. Un bouton dont le numéro n'est pas renseigné ne s'affiche pas : mieux vaut pas de
+bouton qu'un bouton qui appelle dans le vide.

@@ -9423,7 +9423,8 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
    * Un agent de l'entreprise ou le titulaire du compte partent de Guinée, comme avant.
    */
   const [sens, setSens] = useState(() => (session?.lieuOperation && session.lieuOperation !== "GN" ? "import" : "export"));
-  const [mode, setMode] = useState("air");
+  /* Aérien tant que la voie maritime n'est pas ouverte — voir le champ « Mode de transport ». */
+  const mode = "air";
   const [articles, setArticles] = useState(() => [{ ...emptyProduit(), tarification: "kg", categoriePartenaire: "" }]);
   const [err, setErr] = useState("");
   // Vrai pendant que le colis s'écrit : le bouton se verrouille et le dit. Voir submit().
@@ -9874,11 +9875,20 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
               </button>
             </div>
           </Field>
+          {/*
+            * La voie maritime n'est pas ouverte : l'entreprise n'expédie que par avion pour le
+            * moment. La laisser proposée revenait à annoncer au partenaire un délai et un tarif
+            * bateau pour un colis qui partirait par avion — l'écart se découvrait à la
+            * facturation. L'option reste affichée, grisée : elle dit ce qui existe et ce qui
+            * n'est pas encore ouvert, là où la retirer laisserait croire qu'elle n'existe pas.
+            */}
           <Field label="Mode de transport">
-            <select value={mode} onChange={(e) => setMode(e.target.value)} style={inputStyle}>
+            <select value="air" disabled title="Voie maritime temporairement indisponible" style={{ ...inputStyle, opacity: 0.7, cursor: "not-allowed" }}>
               <option value="air">Aérien</option>
-              <option value="sea">Maritime</option>
             </select>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -8, lineHeight: 1.5 }}>
+              Voie maritime temporairement indisponible.
+            </div>
           </Field>
         </div>
         {destPaysAjuste && (
@@ -13965,10 +13975,30 @@ const WIZARD_STEPS = [
  * le résumé sans ressaisir. Le bouton "Suivant" garde ses propres vérifications (téléphone,
  * poids...) : sauter une étape ne contourne donc pas la validation finale à l'enregistrement.
  */
-function StepIndicator({ step, onStepClick }) {
+/**
+ * Sépare un nom complet en prénom et nom — et sait les recoller à l'identique.
+ *
+ * Le colis n'enregistre qu'un nom complet, tandis que la saisie se fait en deux champs. La
+ * coupure se fait au PREMIER espace, comme le recollage : « Mamadou Saliou Bah » redonne
+ * « Mamadou » + « Saliou Bah », ce qui n'est pas forcément le découpage d'origine — mais recollé,
+ * c'est exactement la même chaîne. Un agent qui ouvre une fiche pour corriger un téléphone ne
+ * change donc jamais le nom sans le vouloir, quelle qu'ait été la saisie initiale.
+ */
+function prenomEtNom(complet) {
+  const propre = String(complet || "").trim().replace(/\s+/g, " ");
+  const espace = propre.indexOf(" ");
+  if (espace < 0) return { prenom: propre, nom: "" };
+  return { prenom: propre.slice(0, espace), nom: propre.slice(espace + 1) };
+}
+
+function recollerNom(prenom, nom) {
+  return `${String(prenom || "").trim()} ${String(nom || "").trim()}`.trim();
+}
+
+function StepIndicator({ step, onStepClick, etapes = WIZARD_STEPS }) {
   return (
     <div style={{ display: "flex", alignItems: "center", marginBottom: 22 }}>
-      {WIZARD_STEPS.map((s, i) => (
+      {etapes.map((s, i) => (
         <React.Fragment key={s.key}>
           <button type="button" onClick={(e) => { e.preventDefault(); e.stopPropagation(); onStepClick?.(i); }} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6, background: "none", border: "none", padding: "6px 8px", margin: "-6px -8px", cursor: onStepClick ? "pointer" : "default", WebkitTapHighlightColor: "transparent", touchAction: "manipulation" }}>
             <div style={{
@@ -13979,7 +14009,7 @@ function StepIndicator({ step, onStepClick }) {
             }}>{i < step ? <CheckCircle2 size={16} /> : <s.icon size={15} />}</div>
             <div style={{ fontSize: 10.5, color: i <= step ? "var(--text)" : "var(--muted)", fontWeight: 600, whiteSpace: "nowrap", pointerEvents: "none" }}>{s.label}</div>
           </button>
-          {i < WIZARD_STEPS.length - 1 && <div style={{ flex: 1, height: 2, background: i < step ? "#3D63FF" : "var(--surface2)", margin: "0 6px 18px" }} />}
+          {i < etapes.length - 1 && <div style={{ flex: 1, height: 2, background: i < step ? "#3D63FF" : "var(--surface2)", margin: "0 6px 18px" }} />}
         </React.Fragment>
       ))}
     </div>
@@ -16907,6 +16937,16 @@ function EncaisserGroupeModal({ data, session, onEncaisser, onClose }) {
   );
 }
 
+/** Une ligne du résumé : libellé à gauche, valeur à droite, sur la même ligne. */
+function LigneResume({ libelle, valeur }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 14, flexWrap: "wrap" }}>
+      <span style={{ color: "var(--muted)" }}>{libelle}</span>
+      <strong style={{ color: "var(--text)", textAlign: "end" }}>{valeur}</strong>
+    </div>
+  );
+}
+
 function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeConfig, categories, session, partenaire }) {
   /*
    * Modifier un colis partenaire n'est pas modifier un colis ordinaire.
@@ -16927,13 +16967,38 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
    * rendre à la caisse. L'administrateur peut désormais le détacher — le colis retrouve alors
    * le tarif du catalogue, son prix, son reste à payer, et l'encaissement redevient possible.
    */
+  /*
+   * Deux gestes de cet écran restent à l'Administrateur, alors que la fiche s'ouvre maintenant à
+   * tout agent qui a le droit de modifier un colis :
+   *
+   *   — CORRIGER LE MONTANT ENCAISSÉ, parce qu'à la baisse cela retire de l'argent de la caisse
+   *     d'un autre agent, celui qui l'avait encaissé ;
+   *   — DÉTACHER OU RATTACHER À UN PARTENAIRE, parce que cela décide si l'entreprise facture ce
+   *     colis ou pas.
+   *
+   * Le reste — noms, téléphones, adresses, poids, articles, rabais — est déjà entre les mains de
+   * l'agent au moment où il crée le colis. Le lui refuser à la correction n'aurait protégé de
+   * rien : cela l'obligeait seulement à faire réparer par un administrateur la faute de frappe
+   * qu'il venait de faire.
+   */
+  const estAdmin = session?.role === "Administrateur";
   const [rattacheAuPartenaire, setRattacheAuPartenaire] = useState(estColisPartenaire(colis));
   const estPartenaire = rattacheAuPartenaire && !!partenaire;
   const contratPartenaire = estPartenaire ? tarifPartenairePourPays(partenaire, colis.pays) : null;
   // Un colis déjà porté sur une facture partenaire ne se détache pas : la facture est émise, et
   // la retirer d'un colis laisserait une ligne réclamée qui ne correspond plus à rien.
   const detacheBloqueParFacture = !!colis.facturePartenaireId;
-  const [expediteur, setExpediteur] = useState(colis.expediteur);
+  /*
+   * Prénom et nom, séparés — comme à la création.
+   *
+   * La modification n'offrait qu'un champ « Nom » où tenait le nom complet. L'agent qui corrigeait
+   * une orthographe devait retaper les deux d'un coup, et rien ne disait où finissait l'un et où
+   * commençait l'autre. Recollés, les deux champs redonnent exactement la chaîne d'origine : ouvrir
+   * une fiche pour corriger un téléphone ne renomme personne au passage.
+   */
+  const [expPrenom, setExpPrenom] = useState(() => prenomEtNom(colis.expediteur).prenom);
+  const [expNom, setExpNom] = useState(() => prenomEtNom(colis.expediteur).nom);
+  const expediteur = recollerNom(expPrenom, expNom);
   // Le téléphone et l'adresse de l'expéditeur, ainsi que l'e-mail et l'adresse complète du
   // destinataire, n'étaient pas repris dans le formulaire de modification — seuls le nom, le
   // téléphone du destinataire et la destination l'étaient. Un agent qui devait corriger une
@@ -16941,7 +17006,9 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   const [expediteurTelephone, setExpediteurTelephone] = useState(colis.expediteurTelephone || "");
   const [expediteurEmail, setExpediteurEmail] = useState(colis.expediteurEmail || "");
   const [expediteurAdresse, setExpediteurAdresse] = useState(colis.expediteurAdresse || "");
-  const [destinataire, setDestinataire] = useState(colis.destinataire);
+  const [destPrenom, setDestPrenom] = useState(() => prenomEtNom(colis.destinataire).prenom);
+  const [destNom, setDestNom] = useState(() => prenomEtNom(colis.destinataire).nom);
+  const destinataire = recollerNom(destPrenom, destNom);
   const [repere, setRepere] = useState(repereColis(colis));
   const [telephone, setTelephone] = useState(colis.telephone);
   const [destinataireEmail, setDestinataireEmail] = useState(colis.destinataireEmail || "");
@@ -16950,7 +17017,8 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   const [destinataireCodePostal, setDestinataireCodePostal] = useState(colis.destinataireCodePostal || "");
   const [pays, setPays] = useState(colis.pays);
   const [direction, setDirection] = useState(colis.direction || "export");
-  const [mode, setMode] = useState(colis.mode);
+  /* Le colis garde son mode : cet écran corrige, il ne rebascule pas un envoi d'avion en bateau. */
+  const mode = colis.mode;
   const expCurrency = COUNTRIES.find((c) => c.code === (colis.expediteurPays || "GN"))?.currency;
   const destCurrency = COUNTRIES.find((c) => c.code === (colis.destinatairePays || colis.pays))?.currency;
   const [poids, setPoids] = useState(String(colis.poids));
@@ -17005,6 +17073,56 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   // restent corrigibles à ce stade (numéro erroné, adresse à préciser...).
   const modifiableComplet = colis.status === "Enregistré";
   const auxPaliers = colis.tarification === "reception";
+
+  /*
+   * LES MÊMES ÉTAPES QU'À LA CRÉATION, ET LES MÊMES ICÔNES.
+   *
+   * Cet écran était une seule page de trente champs, où l'agent cherchait au défilement la ligne
+   * à corriger. La création, elle, avance étape par étape. Deux façons de saisir le même colis,
+   * dans la même application : celle qu'on connaît, et l'autre.
+   *
+   * Les étapes se composent selon ce que le colis autorise, plutôt que d'afficher des sections
+   * mortes. Un colis déjà expédié n'ouvre que l'expéditeur et le destinataire — sa route et son
+   * tarif figurent sur un bordereau déjà émis. Un colis sans article détaillé n'a pas d'étape
+   * « Produits ». Un colis partenaire n'a pas d'étape « Frais » : l'entreprise n'encaisse rien
+   * dessus, c'est le partenaire qui facture son client.
+   */
+  const etapesEdition = useMemo(() => {
+    const parCle = Object.fromEntries(WIZARD_STEPS.map((e) => [e.key, e]));
+    const liste = [];
+    if (modifiableComplet) liste.push(parCle.route);
+    liste.push(parCle.expediteur, parCle.destinataire);
+    if (modifiableComplet && produits.length > 0) liste.push(parCle.produits);
+    if (modifiableComplet && !estPartenaire) liste.push(parCle.frais);
+    liste.push(parCle.resume);
+    return liste;
+  }, [modifiableComplet, produits.length, estPartenaire]);
+
+  const [step, setStep] = useState(0);
+  /*
+   * Retirer le dernier article, ou rattacher le colis à un partenaire, fait disparaître une
+   * étape. Sans ce rappel, l'agent resterait sur un rang qui n'existe plus — donc devant une
+   * page vide, sans rien pour en sortir que le bouton « Précédent ».
+   */
+  useEffect(() => {
+    setStep((s) => Math.min(s, etapesEdition.length - 1));
+  }, [etapesEdition.length]);
+  const etapeCourante = etapesEdition[Math.min(step, etapesEdition.length - 1)]?.key;
+
+  /*
+   * « Suivant » ne vérifie que ce que l'étape quittée contenait.
+   *
+   * L'enregistrement, lui, revérifie tout — d'où qu'il parte. Ce contrôle-ci n'est là que pour
+   * dire l'erreur là où elle se corrige, plutôt qu'au bout du parcours.
+   */
+  function suivant() {
+    setErr("");
+    if (etapeCourante === "expediteur" && !expediteur) { setErr("Renseignez le prénom et le nom de l’expéditeur."); return; }
+    if (etapeCourante === "destinataire" && !destinataire) { setErr("Renseignez le prénom et le nom du destinataire."); return; }
+    if (etapeCourante === "destinataire" && !String(telephone || "").trim()) { setErr("Renseignez le téléphone du destinataire."); return; }
+    if (etapeCourante === "route" && !((montantSaisi(poids) ?? 0) > 0)) { setErr("Le poids doit être supérieur à 0 kg — écrivez par exemple 12,5."); return; }
+    setStep((s) => Math.min(s + 1, etapesEdition.length - 1));
+  }
   // La valeur des produits suit désormais l'état local `produits` (modifiable ci-dessous), et
   // non plus colis.produits figé : corriger le prix d'un article recalcule immédiatement le
   // total, exactement comme à la création.
@@ -17091,27 +17209,40 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
      * erreur, aucune modification. Le téléphone n'est donc plus exigé sur ces colis-là, et un
      * champ manquant se dit maintenant à voix haute.
      */
-    if (!expediteur.trim()) { setErr("Indiquez l’expéditeur."); return; }
-    if (!destinataire.trim()) { setErr("Indiquez le destinataire — la personne qui réceptionne le colis."); return; }
-    if (!telephone.trim() && !estPartenaire) { setErr("Indiquez le téléphone du destinataire."); return; }
+    /*
+     * Un refus emmène à l'étape où il se corrige.
+     *
+     * L'enregistrement est offert depuis n'importe quelle étape, et il revérifie tout. Le message
+     * seul suffisait tant que les trente champs tenaient sur une page ; maintenant, « choisissez
+     * une catégorie » affiché sous l'étape « Destinataire » désignerait un champ que l'agent ne
+     * voit pas — il relirait dix fois l'écran ouvert en cherchant ce qui cloche.
+     */
+    const refus = (message, cle) => {
+      setErr(message);
+      const rang = etapesEdition.findIndex((et) => et.key === cle);
+      if (rang >= 0) setStep(rang);
+    };
+    if (!expediteur.trim()) { refus("Indiquez l’expéditeur.", "expediteur"); return; }
+    if (!destinataire.trim()) { refus("Indiquez le destinataire — la personne qui réceptionne le colis.", "destinataire"); return; }
+    if (!telephone.trim() && !estPartenaire) { refus("Indiquez le téléphone du destinataire.", "destinataire"); return; }
     if (produits.some((p) => !p.nom || !(Number(p.poids) > 0) || !(Number(p.quantite) >= 1))) {
-      setErr("Chaque article doit avoir un nom, une quantité et un poids supérieur à 0."); return;
+      refus("Chaque article doit avoir un nom, une quantité et un poids supérieur à 0.", "produits"); return;
     }
     // Un article de colis partenaire relève des catégories du contrat, pas du catalogue : sans
     // catégorie choisie il retombe sur le tarif général, ce qui est un cas normal.
     if (!estPartenaire && produits.some((p) => !p.personnalise && !p.categorie)) {
-      setErr("Choisissez une catégorie pour chaque article (ou cochez « Prix personnalisé »)."); return;
+      refus("Choisissez une catégorie pour chaque article (ou cochez « Prix personnalisé »).", "produits"); return;
     }
     // Un colis de 0 kg n'existe pas : on refuse l'enregistrement plutôt que de créer une
     // ligne qui faussera ensuite les totaux de poids, le chiffre d'affaires et les commissions.
     // « 12,5 » est la façon normale d'écrire douze kilos et demi : Number() y voit NaN, et le
     // colis se refusait avec un message parlant d'un poids nul que l'agent venait pourtant de saisir.
-    if (!((montantSaisi(poids) ?? 0) > 0)) { setErr("Le poids doit être supérieur à 0 kg — écrivez par exemple 12,5."); return; }
+    if (!((montantSaisi(poids) ?? 0) > 0)) { refus("Le poids doit être supérieur à 0 kg — écrivez par exemple 12,5.", "route"); return; }
     // Mêmes règles que sur l'encaissement d'un colis : on n'enregistre jamais plus que ce qui est
     // dû (le surplus est de la monnaie à rendre, pas une recette), et une somme retirée de la
     // caisse d'un agent doit être justifiée.
-    if (ecartPaye > 0 && payeNum > prix + 0.005) { setErr("Le montant encaissé ne peut pas dépasser le total à payer."); return; }
-    if (ecartPaye < 0 && !correctionMotif.trim()) { setErr("Indiquez le motif de la correction du montant encaissé."); return; }
+    if (ecartPaye > 0 && payeNum > prix + 0.005) { refus("Le montant encaissé ne peut pas dépasser le total à payer.", "frais"); return; }
+    if (ecartPaye < 0 && !correctionMotif.trim()) { refus("Indiquez le motif de la correction du montant encaissé.", "frais"); return; }
     const ajustement = ligneAjustement();
     onSave({
       expediteur, expediteurTelephone, expediteurEmail, expediteurAdresse,
@@ -17171,11 +17302,13 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
       rattacheAuPartenaire !== estColisPartenaire(colis) ||
       JSON.stringify(produits) !== JSON.stringify(colis.produits || [])
     }>
-      <form onSubmit={submit} style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14 }}>
+      <form onSubmit={submit}>
         {/*
           Le rattachement au partenaire, en tête : c'est lui qui décide si le colis se facture au
-          client ou pas, donc la première chose à vérifier quand un montant paraît faux.
+          client ou pas, donc la première chose à vérifier quand un montant paraît faux. Il reste
+          hors des étapes, visible tout du long, parce qu'il change le sens de toutes les autres.
         */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14, marginBottom: 18 }}>
         {!!colis.partenaireId && (
           <div style={{ gridColumn: "1 / -1", background: estPartenaire ? "var(--info-bg)" : "var(--ok-bg-soft)", border: `1px solid ${estPartenaire ? "var(--info-border)" : "var(--ok-border)"}`, borderRadius: 10, padding: "12px 14px" }}>
             <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55, marginBottom: 10 }}>
@@ -17199,6 +17332,10 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
                 Impossible de le détacher : il figure déjà sur une facture partenaire. Rouvrez cette
                 facture depuis Partenaires → Facturation, puis revenez ici.
               </div>
+            ) : !estAdmin ? (
+              <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 }}>
+                Seul un administrateur peut détacher ou rattacher un colis à un partenaire.
+              </div>
             ) : (
               <button type="button" onClick={() => setRattacheAuPartenaire((v) => !v)}
                 style={{ background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
@@ -17207,14 +17344,31 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
             )}
           </div>
         )}
+        </div>
+
+        <StepIndicator step={step} etapes={etapesEdition} onStepClick={(i) => { setErr(""); setStep(i); }} />
+
+        {!modifiableComplet && (
+          <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "var(--warn-fg)", marginBottom: 16, lineHeight: 1.5 }}>
+            Colis déjà expédié ({colis.status}) — le poids, le contenu, la route et le tarif ne sont plus modifiables ici, pour rester cohérents avec le bordereau et l’étiquette déjà émis. Seules les coordonnées expéditeur et destinataire restent corrigibles.
+          </div>
+        )}
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 14 }}>
+
+        {etapeCourante === "expediteur" && (<>
         <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Expéditeur</div>
-        <Field label="Nom"><input value={expediteur} onChange={(e) => setExpediteur(e.target.value)} style={inputStyle} /></Field>
+        <Field label="Prénom"><input value={expPrenom} onChange={(e) => setExpPrenom(e.target.value)} style={inputStyle} /></Field>
+        <Field label="Nom"><input value={expNom} onChange={(e) => setExpNom(e.target.value)} style={inputStyle} /></Field>
         <Field label="Téléphone"><PhoneInput value={expediteurTelephone} onChange={setExpediteurTelephone} /></Field>
         <Field label="E-mail (optionnel)"><input type="email" value={expediteurEmail} onChange={(e) => setExpediteurEmail(e.target.value)} style={inputStyle} /></Field>
         <Field label="Adresse (optionnel)"><input value={expediteurAdresse} onChange={(e) => setExpediteurAdresse(e.target.value)} style={inputStyle} /></Field>
+        </>)}
 
-        <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)", marginTop: 4 }}>Destinataire</div>
-        <Field label="Nom"><input value={destinataire} onChange={(e) => setDestinataire(e.target.value)} style={inputStyle} /></Field>
+        {etapeCourante === "destinataire" && (<>
+        <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Destinataire</div>
+        <Field label="Prénom"><input value={destPrenom} onChange={(e) => setDestPrenom(e.target.value)} style={inputStyle} /></Field>
+        <Field label="Nom"><input value={destNom} onChange={(e) => setDestNom(e.target.value)} style={inputStyle} /></Field>
         <Field label="Téléphone (WhatsApp)"><PhoneInput value={telephone} onChange={setTelephone} /></Field>
         {/*
           Le repère se corrige ici, et c'est indispensable : les colis enregistrés avant que le
@@ -17237,16 +17391,11 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
         <Field label="Adresse (optionnel)"><input value={destinataireAdresse} onChange={(e) => setDestinataireAdresse(e.target.value)} style={inputStyle} /></Field>
         <Field label="Ville (optionnel)"><input value={destinataireVille} onChange={(e) => setDestinataireVille(e.target.value)} style={inputStyle} /></Field>
         <Field label="Code postal (optionnel)"><input value={destinataireCodePostal} onChange={(e) => setDestinataireCodePostal(e.target.value)} style={inputStyle} /></Field>
+        </>)}
 
-        {!modifiableComplet && (
-          <div style={{ gridColumn: "1 / -1", background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "var(--warn-fg)", marginTop: 4 }}>
-            Colis déjà expédié ({colis.status}) — le poids, le contenu, la route et le tarif ne sont plus modifiables ici, pour rester cohérents avec le bordereau et l’étiquette déjà émis. Seules les coordonnées expéditeur et destinataire restent corrigibles.
-          </div>
-        )}
-
-        {modifiableComplet && (
+        {etapeCourante === "route" && (
           <>
-        <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)", marginTop: 4 }}>Route &amp; tarif</div>
+        <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Route &amp; tarif</div>
         <Field label="Destination"><select value={pays} onChange={(e) => setPays(e.target.value)} style={inputStyle}>{COUNTRIES.map((c) => <option key={c.code} value={c.code}>{c.name} — {c.city}</option>)}</select></Field>
         <div style={{ gridColumn: "1 / -1" }}>
           <Field label="Sens de la route">
@@ -17258,10 +17407,12 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
         </div>
         <Field label="Poids (kg)"><input value={poids} onChange={(e) => setPoids(e.target.value)} style={inputStyle} /></Field>
         <Field label="Volume (m³, optionnel)"><input value={volume} onChange={(e) => setVolume(e.target.value)} style={inputStyle} /></Field>
+          </>
+        )}
 
-        {produits.length > 0 && (
+        {etapeCourante === "produits" && (
           <>
-            <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)", marginTop: 4 }}>Contenu du colis</div>
+            <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Contenu du colis</div>
             <div style={{ gridColumn: "1 / -1" }}>
               {produits.map((p, idx) => (
                 <div key={p.id} style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 12 }}>
@@ -17335,20 +17486,20 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
               ))}
               <button type="button" onClick={addProduit} style={{ width: "100%", border: "1.5px dashed var(--border)", borderRadius: 12, padding: "12px 0", background: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>+ Ajouter un article</button>
             </div>
+            {estPartenaire && (
+              <div style={{ gridColumn: "1 / -1", background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 10, padding: "11px 13px" }}>
+                <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
+                  Colis partenaire : son coût suit les catégories du contrat ci-dessus et sera revu à la
+                  vérification. L’entreprise n’encaisse rien auprès du client final — ni rabais, ni
+                  paiement à corriger ici.
+                </div>
+              </div>
+            )}
           </>
         )}
 
-        {estPartenaire && (
-          <div style={{ gridColumn: "1 / -1", background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 10, padding: "11px 13px", marginTop: 4 }}>
-            <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
-              Colis partenaire : son coût suit les catégories du contrat ci-dessus et sera revu à la
-              vérification. L’entreprise n’encaisse rien auprès du client final — ni rabais, ni
-              paiement à corriger ici.
-            </div>
-          </div>
-        )}
-        {!estPartenaire && <>
-        <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)", marginTop: 4 }}>Frais</div>
+        {etapeCourante === "frais" && <>
+        <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Frais</div>
         <Field label="Montant du rabais"><input value={rabaisMontant} onChange={(e) => setRabaisMontant(e.target.value)} style={inputStyle} /></Field>
         <Field label="Devise du rabais">
           <select value={rabaisDevise} onChange={(e) => setRabaisDevise(e.target.value)} style={inputStyle}>
@@ -17366,7 +17517,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
                   : "Aucun paiement enregistré sur ce colis"}
               </div>
             </div>
-            {!correctionOuverte && (
+            {!correctionOuverte && estAdmin && (
               <button type="button" onClick={() => setCorrectionOuverte(true)} style={{ background: "var(--surface)", border: "1.5px solid var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, color: "var(--text)", cursor: "pointer" }}>
                 Corriger
               </button>
@@ -17374,10 +17525,12 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
           </div>
           {!correctionOuverte && (
             <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6 }}>
-              Pour encaisser normalement, utilisez « Encaisser » sur la fiche du colis. Cette correction est réservée aux erreurs de saisie.
+              {estAdmin
+                ? "Pour encaisser normalement, utilisez « Encaisser » sur la fiche du colis. Cette correction est réservée aux erreurs de saisie."
+                : "Pour encaisser, utilisez « Encaisser » sur la fiche du colis. Corriger un montant déjà encaissé touche à la caisse de l’agent qui l’a reçu : cela reste à un administrateur."}
             </div>
           )}
-          {correctionOuverte && (
+          {correctionOuverte && estAdmin && (
             <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "12px 14px", marginTop: 10 }}>
               <Field label="Nouveau total encaissé (EUR)">
                 <input type="number" step="0.01" min="0" value={paye} onChange={(e) => setPaye(e.target.value)} style={inputStyle} autoFocus />
@@ -17423,18 +17576,59 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
             </div>
           )}
         </div>
-        <div style={{ gridColumn: "1 / -1", background: "var(--surface2)", borderRadius: 12, padding: "12px 16px", display: "flex", justifyContent: "space-between" }}>
-          <div style={{ fontSize: 13, color: "var(--text)" }}>Total recalculé : <strong>{fmt(prix, "EUR")}</strong></div>
-          <div style={{ fontSize: 13, color: reste > 0 ? "var(--danger-fg)" : "var(--ok-fg)" }}>Reste à payer : <strong>{fmt(reste, "EUR")}</strong></div>
-        </div>
         </>}
-          </>
+
+        {etapeCourante === "resume" && (
+          <div style={{ gridColumn: "1 / -1" }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 12 }}>Résumé</div>
+            <div style={{ background: "var(--surface2)", borderRadius: 12, padding: "14px 16px", fontSize: 13, color: "var(--text)", lineHeight: 1.9 }}>
+              <LigneResume libelle="Expéditeur" valeur={expediteur || "—"} />
+              <LigneResume libelle="Destinataire" valeur={destinataire || "—"} />
+              {estPartenaire && repere.trim() && <LigneResume libelle="Repère" valeur={repere.trim()} />}
+              <LigneResume libelle="Téléphone" valeur={telephone || "—"} />
+              <LigneResume libelle="Route" valeur={`${direction === "export" ? "Conakry" : COUNTRIES.find((c) => c.code === pays)?.city || pays} → ${direction === "export" ? (COUNTRIES.find((c) => c.code === pays)?.city || pays) : "Conakry"}`} />
+              <LigneResume libelle="Poids" valeur={`${montantSaisi(poids) ?? 0} kg`} />
+              {produits.length > 0 && <LigneResume libelle="Articles" valeur={`${produits.length}`} />}
+            </div>
+            {/*
+              * Le total ne s'affiche que pour un colis de l'entreprise. Sur un colis partenaire il
+              * vaut zéro par construction — l'afficher laisserait croire à une erreur de calcul,
+              * alors que c'est le principe même : c'est le partenaire qui facture son client.
+              */}
+            {!estPartenaire && (
+              <div style={{ background: "var(--surface2)", borderRadius: 12, padding: "12px 16px", display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
+                <div style={{ fontSize: 13, color: "var(--text)" }}>Total recalculé : <strong>{fmt(prix, "EUR")}</strong></div>
+                <div style={{ fontSize: 13, color: reste > 0 ? "var(--danger-fg)" : "var(--ok-fg)" }}>Reste à payer : <strong>{fmt(reste, "EUR")}</strong></div>
+              </div>
+            )}
+          </div>
         )}
 
-        {err && <div style={{ gridColumn: "1 / -1", color: "var(--danger-fg)", fontSize: 12.5 }}>{err}</div>}
-        <div style={{ gridColumn: "1 / -1", display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 4 }}>
-          <button type="button" onClick={onClose} style={{ padding: "10px 18px", borderRadius: 8, border: "1.5px solid var(--border)", background: "var(--surface)", color: "var(--muted)", fontSize: 13.5, cursor: "pointer" }}>Annuler</button>
-          <button type="submit" style={{ padding: "10px 18px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>Enregistrer les modifications</button>
+        </div>
+
+        {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginTop: 14 }}>{err}</div>}
+        {/*
+          * « Enregistrer » reste offert à CHAQUE étape, contrairement à la création.
+          *
+          * On ouvre cette fiche pour corriger une chose — un numéro mal saisi, une orthographe.
+          * Obliger à traverser six étapes pour la sauver ferait de chaque correction une corvée,
+          * et la vérification complète a lieu de toute façon à l'enregistrement, quelle que soit
+          * l'étape d'où il part.
+          */}
+        <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginTop: 18, flexWrap: "wrap" }}>
+          <button type="button" onClick={step === 0 ? onClose : () => { setErr(""); setStep((s) => Math.max(s - 1, 0)); }}
+            style={{ padding: "10px 18px", borderRadius: 8, border: "1.5px solid var(--border)", background: "var(--surface)", color: "var(--muted)", fontSize: 13.5, cursor: "pointer" }}>
+            {step === 0 ? "Annuler" : "Précédent"}
+          </button>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            {step < etapesEdition.length - 1 && (
+              <button type="button" onClick={suivant}
+                style={{ padding: "10px 18px", borderRadius: 8, border: "1.5px solid var(--border)", background: "var(--surface)", color: "var(--text)", fontSize: 13.5, fontWeight: 600, cursor: "pointer" }}>
+                Suivant
+              </button>
+            )}
+            <button type="submit" style={{ padding: "10px 18px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>Enregistrer les modifications</button>
+          </div>
         </div>
       </form>
     </Modal>
@@ -17917,7 +18111,17 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
               Encaisser {fmtGNF(colis.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}
             </button>
           )}
-          {isAdmin && <button onClick={() => setEditing(true)} style={smallBtn}>Modifier</button>}
+          {/*
+            * « Modifier » suivait le rôle, pas la permission.
+            *
+            * La permission « colis.modifier » existe, elle est accordée à l'Agent par défaut, et
+            * elle apparaît dans l'écran des droits — mais ce bouton ne la lisait pas : il ne
+            * s'affichait que pour l'Administrateur. Un agent à qui l'on avait donné le droit ne
+            * pouvait pas s'en servir, et devait faire corriger par un administrateur le numéro
+            * qu'il venait lui-même de mal saisir. Un droit affiché et sans effet est pire que pas
+            * de droit du tout : personne ne cherche l'erreur là où le réglage dit que c'est bon.
+            */}
+          {effectivePermission(session, "colis.modifier") && <button onClick={() => setEditing(true)} style={smallBtn}>Modifier</button>}
 
           <div style={{ position: "relative" }}>
             <button ref={docBtnRef} onClick={toggleDocMenu} style={smallBtn}>Ticket d’envoi <ChevronDown size={13} /></button>
@@ -23374,10 +23578,17 @@ function DepartsPage({ data, persist, notify, onBack }) {
                     {COUNTRIES.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code] || ""} {c.city}</option>)}
                   </select>
                 </Field>
+                {/*
+                  * Un départ maritime déjà annoncé garde son libellé — on ne réécrit pas une
+                  * annonce faite aux clients. En revanche on n'en crée plus : l'entreprise
+                  * n'expédie que par avion pour le moment.
+                  */}
                 <Field label="Mode">
-                  <select value={d.mode} onChange={(e) => majDepart(i, "mode", e.target.value)} style={{ ...inputStyle, width: 110, marginBottom: 0 }}>
+                  <select value={d.mode} onChange={(e) => majDepart(i, "mode", e.target.value)}
+                    disabled={d.mode !== "mer"} title={d.mode !== "mer" ? "Voie maritime temporairement indisponible" : undefined}
+                    style={{ ...inputStyle, width: 110, marginBottom: 0, opacity: d.mode !== "mer" ? 0.7 : 1 }}>
                     <option value="air">Aérien</option>
-                    <option value="mer">Maritime</option>
+                    {d.mode === "mer" && <option value="mer">Maritime</option>}
                   </select>
                 </Field>
                 <Field label="Date limite de dépôt">

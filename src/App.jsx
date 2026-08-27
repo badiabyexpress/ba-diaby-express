@@ -2012,6 +2012,12 @@ const MODELE_PROMO_WHATSAPP = {
   ].join("\n"),
   pied: "Répondez STOP pour ne plus recevoir nos offres.",
   bouton: "Voir l’offre",
+  /*
+   * L'adresse du bouton se fige à l'approbation du modèle : elle fait partie de ce que Meta a
+   * validé. Elle est donc écrite ici, et non prise dans le champ « Lien du site » de l'écran — ce
+   * champ-là peut changer d'une campagne à l'autre, le bouton du modèle non.
+   */
+  boutonAdresse: "https://badiabyexpress.com",
 };
 
 /** Le nom du pays de destination, tel qu'il apparaît dans le message. */
@@ -18973,7 +18979,17 @@ function CampagnesPage({ data, persist, session, notify }) {
             pourVariableWhatsApp(offre),
             pourVariableWhatsApp(echeance) || "la fin du mois",
           ],
-          boutonUrl: lien,
+          /*
+           * PAS de `boutonUrl` ici, et c'est capital.
+           *
+           * Envoyer un paramètre de bouton à un modèle dont le bouton est FIXE est refusé par Meta
+           * aussi sûrement que l'inverse — le message revient en erreur, une fois par client, et la
+           * campagne entière échoue au premier envoi. Le bouton de `bde_promo` pointe vers le site
+           * une fois pour toutes, à l'approbation du modèle ; il n'a donc rien à recevoir.
+           *
+           * Le lien saisi plus haut sert à l'e-mail et au message hors modèle (dans les 24 h), où
+           * il peut changer d'une campagne à l'autre.
+           */
         });
         if (r.envoye) unEnvoi = true;
         else if (r.raison) raisons.set(r.raison, (raisons.get(r.raison) || 0) + 1);
@@ -19089,8 +19105,13 @@ function CampagnesPage({ data, persist, session, notify }) {
             Gestionnaire WhatsApp → Modèles de message → Créer. Nom exact&nbsp;: <strong>{MODELE_PROMO_WHATSAPP.nom}</strong>,
             catégorie <strong>{MODELE_PROMO_WHATSAPP.categorie}</strong>, langue <strong>Français</strong>.
             Recopiez le corps tel quel — les trois variables sont remplies par cet écran (nom du client,
-            votre offre, l’échéance). Ajoutez un bouton « {MODELE_PROMO_WHATSAPP.bouton} » de type URL
-            pointant vers {lien}.
+            votre offre, l’échéance).
+          </div>
+          <div style={{ fontSize: 12, color: "var(--text)", marginBottom: 10, lineHeight: 1.55 }}>
+            <strong>Le bouton :</strong> type <strong>« Visiter le site web »</strong>, libellé
+            « {MODELE_PROMO_WHATSAPP.bouton} », adresse <strong>statique</strong> — pas « dynamique » —
+            et vous y écrivez {MODELE_PROMO_WHATSAPP.boutonAdresse}. Une adresse dynamique attendrait
+            un paramètre que cet écran n’envoie pas, et <strong>chaque message serait refusé</strong>.
           </div>
           <pre style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: 12, fontSize: 12, color: "var(--text)", whiteSpace: "pre-wrap", margin: 0, fontFamily: "ui-monospace, monospace" }}>
 {MODELE_PROMO_WHATSAPP.corps}

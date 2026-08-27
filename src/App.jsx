@@ -2988,6 +2988,46 @@ async function ensureQRCodeLib() {
 }
 /** Charge jsQR (lecture de QR codes depuis une image/vidéo), utilisé en repli quand l’API
  * native BarcodeDetector n’est pas disponible sur le navigateur. */
+/**
+ * LE LECTEUR DE CODES-BARRES DE SECOURS — celui sans lequel un iPhone ne scanne rien.
+ *
+ * L'API native `BarcodeDetector` lit tout : QR, Code 128, Code 39. Mais elle n'existe que sur
+ * Chrome et Edge. Sur Safari — donc sur tous les iPhone — elle est absente, et le repli en place
+ * jusqu'ici, jsQR, ne lit QUE les codes carrés. Autrement dit : le code-barres d'une étiquette
+ * Shein, qui est une barre en Code 128, ne pouvait tout simplement PAS être lu depuis un iPhone.
+ * Le bouton s'ouvrait, la caméra tournait, et rien ne se passait jamais — sans un mot d'explication.
+ *
+ * ZXing comble ce trou. Il est chargé À LA DEMANDE, au premier scan seulement : personne ne paie
+ * son poids en ouvrant l'application, et l'agent qui scanne l'attend une fois par session.
+ */
+let lecteurZXing = null;
+async function chargerLecteurCodesBarres() {
+  if (lecteurZXing) return lecteurZXing;
+  try {
+    const zx = await import("@zxing/library");
+    const hints = new Map();
+    hints.set(zx.DecodeHintType.POSSIBLE_FORMATS, [
+      zx.BarcodeFormat.QR_CODE, zx.BarcodeFormat.CODE_128, zx.BarcodeFormat.CODE_39,
+      zx.BarcodeFormat.CODE_93, zx.BarcodeFormat.ITF, zx.BarcodeFormat.EAN_13,
+      zx.BarcodeFormat.EAN_8, zx.BarcodeFormat.UPC_A, zx.BarcodeFormat.CODABAR,
+    ]);
+    /* Le comptoir n'est pas un laboratoire : étiquettes froissées, lumière au néon, main qui bouge. */
+    hints.set(zx.DecodeHintType.TRY_HARDER, true);
+    lecteurZXing = {
+      lire(canvas) {
+        const source = new zx.HTMLCanvasElementLuminanceSource(canvas);
+        const reader = new zx.MultiFormatReader();
+        reader.setHints(hints);
+        return reader.decode(new zx.BinaryBitmap(new zx.HybridBinarizer(source))).getText();
+      },
+    };
+    return lecteurZXing;
+  } catch (e) {
+    console.error("Lecteur de codes-barres indisponible.", e);
+    return null;
+  }
+}
+
 async function ensureJsQR() {
   if (window.jsQR) return true;
   try { await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jsqr/1.4.0/jsQR.js"); return !!window.jsQR; }
@@ -4381,7 +4421,16 @@ function ScannerModal({ onClose, onScan, titre = "Scanner un colis", aide }) {
           try { detector = new window.BarcodeDetector({ formats: ["qr_code", "code_128"] }); } catch { /* repli jsQR ci-dessous */ }
         }
       }
-      if (!detector) await ensureJsQR();
+      /*
+       * Sans l'API native — Safari, donc tout iPhone — on charge ZXing, qui lit les codes en
+       * barres. jsQR reste en dernier recours : il ne lit que les QR, mais il est plus léger et
+       * suffit pour retrouver un colis par NOTRE étiquette.
+       */
+      let zxing = null;
+      if (!detector) {
+        zxing = await chargerLecteurCodesBarres();
+        if (!zxing) await ensureJsQR();
+      }
 
       const boucle = async () => {
         if (annule || !videoRef.current || videoRef.current.readyState < 2) { rafRef.current = requestAnimationFrame(boucle); return; }
@@ -4389,6 +4438,15 @@ function ScannerModal({ onClose, onScan, titre = "Scanner un colis", aide }) {
           if (detector) {
             const codes = await detector.detect(videoRef.current);
             if (codes.length > 0) { onScan(codes[0].rawValue); return; }
+          } else if (zxing) {
+            const canvas = canvasRef.current;
+            const w = videoRef.current.videoWidth, h = videoRef.current.videoHeight;
+            if (w && h) {
+              canvas.width = w; canvas.height = h;
+              canvas.getContext("2d").drawImage(videoRef.current, 0, 0, w, h);
+              const valeur = zxing.lire(canvas);
+              if (valeur) { onScan(valeur); return; }
+            }
           } else if (window.jsQR) {
             const canvas = canvasRef.current;
             const w = videoRef.current.videoWidth, h = videoRef.current.videoHeight;

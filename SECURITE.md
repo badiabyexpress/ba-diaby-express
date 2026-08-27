@@ -1071,4 +1071,63 @@ promettre une alerte qui n'arriverait jamais.
 
 Éprouvé par `testalerte` (31 cas), qui vérifie aussi qu'un nom de compte contenant du HTML ne
 devient pas du HTML dans le courriel.
+## Les verrous contre les automates
 
+Trois portes de ce site s'ouvrent sans mot de passe : la connexion, la création de compte, et le
+suivi public d'un colis. Les deux premières comptaient déjà les essais. La troisième donnait sans
+rien demander — et c'est la plus intéressante à aspirer, parce que les numéros de suivi se suivent :
+`BDE260801`, `BDE260802`, `BDE260803`. Un programme qui compte de un en un ramassait, colis après
+colis, le nom de l'expéditeur et du destinataire de toute l'entreprise. Aucune de ces requêtes
+n'est illégitime prise seule ; c'est leur nombre qui l'est.
+
+Deux plafonds, par connexion (`api/_verrou.js`) :
+
+- **trente recherches de suivi par dix minutes.** Une personne qui suit ses colis en consulte
+  quelques-uns, revient plus tard : la marge est très large. Un automate fait cela en trois
+  secondes ;
+- **dix numéros inconnus par dix minutes.** Chercher un numéro qui n'existe pas est normal — faute
+  de frappe, colis pas encore saisi. En chercher dix d'affilée qui n'existent pas, c'est un
+  balayage. On coupe donc plus tôt là-dessus, parce qu'un aspirateur en produit beaucoup et un
+  client presque aucun.
+
+La réponse à un numéro inconnu **ne change pas** : une liste vide, comme avant. Dire « ce numéro
+n'existe pas » apprendrait à l'automate où continuer. Le refus, lui, porte un `Retry-After` : les
+robots honnêtes le lisent et cessent de revenir en boucle.
+
+**Ce que ces verrous ne font pas, et il faut le dire.** Le compte est tenu en mémoire, dans
+l'instance qui répond. Vercel en lance plusieurs et les éteint : un automate patient, ou réparti sur
+plusieurs adresses, passera au travers. Ce n'est pas une barrière, c'est un plafond — il rend
+l'aspiration lente et voyante là où elle était instantanée et muette. Une vraie barrière demanderait
+un compteur partagé (base ou service dédié) ; c'est le pas d'après, et il se paie.
+
+### Les en-têtes de sécurité
+
+`vercel.json` pose désormais une **politique de sécurité de contenu** (CSP) et six en-têtes qui
+manquaient. La CSP est la seule qui change vraiment quelque chose : elle nomme les origines
+autorisées, de sorte qu'un script glissé dans une page ne peut ni s'exécuter depuis un domaine
+inconnu, ni renvoyer les données ailleurs (`connect-src`). S'y ajoutent HSTS, `nosniff`,
+`X-Frame-Options: DENY` et `frame-ancestors 'none'` (le site ne peut plus être encadré dans une page
+qui l'imite), `Referrer-Policy`, `Permissions-Policy` et `Cross-Origin-Opener-Policy`.
+
+Un seul endroit du site obligeait à laisser `script-src 'unsafe-inline'` — c'est-à-dire à laisser
+passer n'importe quel script inséré dans une page : l'attribut `onload=` de quatre mots qui
+promouvait la feuille de polices. Il est parti dans `public/polices.js`, de même origine. Pour un
+attribut, on renonçait à la protection principale.
+
+`style-src` garde `'unsafe-inline'`, et c'est assumé : toute l'interface est écrite en styles
+attribués (`style={{…}}`), il n'y a pas de moyen de faire autrement sans réécrire l'application.
+Le risque y est sans commune mesure avec celui des scripts.
+
+Une CSP ne casse rien à la compilation : elle casse le site chez le client, silencieusement, en
+refusant une police, un export PDF ou la connexion à la base. Elle est donc éprouvée par `testcsp`
+(7 cas) **sur le site compilé, derrière les vrais en-têtes** : la page s'affiche, la connexion
+fonctionne, les polices sont appliquées, le CDN des exports passe, un script venu d'ailleurs est
+refusé, et la navigation ordinaire ne déclenche aucun refus.
+
+`public/robots.txt` complète le tout en écartant `/api/`, la page de récupération et les URL de
+suivi nommées — indexer `?suivi=BDE260801` reviendrait à publier dans un moteur de recherche le nom
+de l'expéditeur et du destinataire. Ce fichier ne protège rien, il demande : c'est pour ceux qui
+l'ignorent que les verrous existent.
+
+Éprouvé par `testverrou` (24 cas), qui appelle la vraie fonction de suivi et vérifie qu'un client
+qui fait dix recherches d'affilée n'est jamais gêné.

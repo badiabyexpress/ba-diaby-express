@@ -31,7 +31,7 @@
  * GET ?etat=1 sert précisément à vérifier que tout est en place avant de fermer.
  */
 
-import { sessionDeLaRequete } from "./_session.js";
+import { sessionDeLaRequete, empreinteDuCompte } from "./_session.js";
 import {
   vueClient, fusionnerEcritureClient,
   vuePartenaire, fusionnerEcriturePartenaire, partenaireDuCompte,
@@ -40,6 +40,32 @@ import {
 import { envoyerAlerteEcrasement } from "./_alerte.js";
 
 const TABLE = "bde_data";
+
+/*
+ * LE JETON VAUT-IL ENCORE ?
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Un jeton signé prouve qu'on s'est connecté — pas qu'on a encore le droit d'entrer. Il valait
+ * douze heures quoi qu'il arrive : changer le mot de passe n'y faisait rien, supprimer le compte
+ * non plus. Pour un téléphone perdu ou quelqu'un qui part fâché, c'était une demi-journée d'accès
+ * complet APRÈS la décision de le lui retirer.
+ *
+ * On confronte donc l'empreinte que porte le jeton à celle du compte tel qu'il est maintenant.
+ * Trois refus possibles, et les trois comptent :
+ *
+ *   — le compte a disparu : il n'y a plus personne derrière ce jeton ;
+ *   — l'empreinte a changé : mot de passe changé, ou sessions révoquées à la main ;
+ *   — le jeton n'en porte aucune : il date d'avant cette protection. On le refuse plutôt que de
+ *     laisser une porte ouverte à ceux qui étaient déjà connectés — ils se reconnectent une fois.
+ */
+function jetonPerime(document, session) {
+  if (!document || typeof document !== "object") return null;   // rien à comparer : on ne bloque pas
+  const liste = session.role === "client" ? document.clientAccounts : document.users;
+  const compte = (Array.isArray(liste) ? liste : []).find((c) => c && c.id === session.sub);
+  if (!compte) return "Ce compte n’existe plus.";
+  if (!session.emp) return "Session ouverte avant la mise à jour de sécurité. Reconnectez-vous.";
+  if (session.emp !== empreinteDuCompte(compte)) return "Session révoquée. Reconnectez-vous.";
+  return null;
+}
 
 function configuration() {
   return {
@@ -179,7 +205,18 @@ export default async function handler(req, res) {
       const lignes = await reponse.json();
       const ligne = Array.isArray(lignes) ? lignes[0] : null;
       if (!ligne) return res.status(404).json({ error: "Donnée absente", cleAbsente: true });
+      /*
+       * La lecture d'entête est laissée passer sans contrôle, et c'est délibéré : elle ne rend
+       * qu'une date de dernière modification — rien qui appartienne à quiconque — et elle est
+       * demandée toutes les vingt secondes par chaque appareil connecté. La faire précéder d'une
+       * lecture du document entier coûterait bien plus qu'elle ne protège. Le premier vrai
+       * chargement, lui, est contrôlé, et c'est celui qui porte les données.
+       */
       if (tete) return res.status(200).json({ updated_at: ligne.updated_at || null });
+      if (clef === "bde-data") {
+        const perime = jetonPerime(ligne.value, session);
+        if (perime) return res.status(401).json({ error: perime, sessionRevoquee: true });
+      }
       const valeurLue = estClient ? vueClient(ligne.value, compteId)
         : estPartenaire ? vuePartenaire(ligne.value, partenaireDuCompte(ligne.value, compteId))
           : ligne.value;
@@ -233,6 +270,12 @@ export default async function handler(req, res) {
         const actuel = Array.isArray(lignesActuelles) ? lignesActuelles[0]?.value : null;
         // Première écriture d'une base neuve : il n'y a pas encore de règles à faire respecter.
         if (actuel) {
+          /*
+           * Le jeton est confronté au compte AVANT la fusion : un jeton révoqué ne doit pas
+           * pouvoir écrire, et c'est l'écriture qui fait le plus de dégâts.
+           */
+          const perime = jetonPerime(actuel, session);
+          if (perime) return res.status(401).json({ error: perime, sessionRevoquee: true });
           aEcrire = fusionnerEcritureEquipe(actuel, valeur, compteId, {
             appareil: req.headers["user-agent"] || "",
             adresse: String(req.headers["x-forwarded-for"] || "").split(",")[0].trim(),
@@ -264,6 +307,8 @@ export default async function handler(req, res) {
          * On refuse plutôt que de deviner.
          */
         if (!actuel) return res.status(409).json({ error: "Données introuvables — écriture refusée." });
+        const perime = jetonPerime(actuel, session);
+        if (perime) return res.status(401).json({ error: perime, sessionRevoquee: true });
         aEcrire = estClient
           ? fusionnerEcritureClient(actuel, valeur, compteId)
           : fusionnerEcriturePartenaire(actuel, valeur, partenaireDuCompte(actuel, compteId), compteId);

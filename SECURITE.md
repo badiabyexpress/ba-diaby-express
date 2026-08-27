@@ -1226,3 +1226,118 @@ Le champ de date rend au passage impossible une faute de frappe qui partirait ch
 à la fois — « 4 setpembre » était jusqu'ici recopié tel quel.
 
 Éprouvé par `t93` (11 cas) sur la vraie page publique, et par `testverrou` pour la porte serveur.
+
+## Une seule adresse publique, et jamais celle de l'hébergeur
+
+Le QR code d'une étiquette, le lien de suivi d'un message WhatsApp, le bouton d'un courriel, le reçu
+de paiement : tous portaient l'adresse **depuis laquelle l'agent travaillait**. Un agent connecté
+sur l'adresse technique de l'hébergeur (`…vercel.app`) imprimait donc des étiquettes qui y
+renvoient — et une étiquette collée sur un carton vit des mois.
+
+Deux raisons d'y mettre fin, dont une sérieuse.
+
+La marque, d'abord : ce qui arrive chez un client doit porter le nom de l'entreprise, pas celui d'un
+prestataire technique.
+
+**La réputation ensuite.** Les filtres anti-hameçonnage de WhatsApp, de Gmail et des opérateurs se
+méfient des sous-domaines partagés : n'importe qui peut ouvrir un `quelquechose.vercel.app`, et
+beaucoup s'en servent pour de faux sites. Un message d'entreprise qui pointe vers l'un d'eux part
+avec un handicap, et **une plainte contre un voisin suffit à faire tomber le domaine partagé tout
+entier** — sans que l'on y soit pour rien. Le domaine de l'entreprise, lui, n'engage qu'elle.
+
+Une seule fonction (`adressePublique`) décide, et tout en découle. Elle rend le domaine de
+l'entreprise dès que l'origine courante est celle d'un hébergeur mutualisé ; l'adresse locale de
+développement, elle, reste utilisée telle quelle, sans quoi rien ne serait vérifiable hors ligne.
+
+**Les liens déjà partis sont rattrapés.** Les étiquettes déjà collées, les messages déjà envoyés,
+les QR déjà imprimés continuent d'arriver sur l'adresse de l'hébergeur : la page les renvoie sur le
+domaine, en gardant le chemin et le numéro de suivi.
+
+**Sauf l'écran de connexion, et c'est délibéré.** Si le domaine venait à tomber — DNS expiré,
+certificat, erreur de configuration — l'adresse de l'hébergeur reste la porte de service par
+laquelle l'équipe entre pour réparer. Tout rediriger fermerait cette porte le jour où elle est la
+seule qui reste.
+
+Éprouvé par `t94` (9 cas), qui fait croire au navigateur qu'il est sur l'adresse de l'hébergeur et
+vérifie les trois cas : le vieux lien est rattrapé, la porte de service reste ouverte, et ce qu'un
+agent connecté là-bas fabrique porte quand même le domaine.
+
+## « Répondez STOP » — et quelqu'un qui écoute
+
+Chaque message de campagne se termine par « Répondez STOP pour ne plus recevoir nos offres ».
+C'était une promesse en l'air : personne ne lisait les réponses, et le client qui écrivait STOP
+continuait de recevoir.
+
+Ce n'est pas une question de politesse. Un client qui a demandé l'arrêt et qui reçoit quand même
+fait la seule chose qui lui reste : il **bloque** le numéro et le **signale**. Meta compte ces
+signalements, fait baisser la note de qualité de la ligne, puis en restreint l'usage — d'abord le
+nombre de messages par jour, ensuite tout. Un numéro d'entreprise restreint, c'est le suivi des
+colis qui s'arrête **pour tout le monde**, pas seulement les campagnes.
+
+Le désabonnement est donc pris **au moment où le message arrive** (`api/whatsapp-entrant.js`), sans
+attendre que quelqu'un ouvre l'application. Il ne coupe que les campagnes : les messages sur un
+colis que le client a lui-même déposé continuent — c'est ce qu'il attend, et ce n'est pas ce qu'il a
+refusé. Un « START » le fait revenir, et lui seul peut le demander.
+
+**On ne reconnaît qu'un message qui ne dit QUE ça** — « stop », « arrêt », « désabonner »,
+« unsubscribe », avec ou sans accent, majuscules ou non. « stop ce colis est en retard » n'est pas
+une demande d'arrêt, c'est une phrase. Se tromper dans ce sens prive quelqu'un des messages qu'il
+attend sur ses propres colis ; mieux vaut manquer une demande ambiguë que couper un client qui n'a
+rien demandé. Une image légendée « stop » ne compte pas non plus : seul le texte est lu.
+
+**La liste est protégée de la même façon que le journal.** Depuis que le serveur y écrit seul, une
+page ouverte depuis une heure l'effacerait en enregistrant — et l'on réécrirait à quelqu'un qui a
+demandé l'arrêt, c'est-à-dire exactement ce qui fait signaler un numéro. Les deux listes sont donc
+réunies. Réabonner reste possible mais doit être **dit** : l'application nomme le numéro dans
+`_reabonnements`, que le serveur applique puis efface — sans quoi chaque enregistrement suivant
+réabonnerait la même personne indéfiniment.
+
+Le « 00 » de tête d'un numéro est traité comme le « + » partout : c'est le même préfixe
+international écrit autrement, et un client désabonné sous `00224…` recevait encore les campagnes
+envoyées à `+224…`.
+
+Éprouvé par `teststop` (28 cas).
+
+## Une session qui se coupe pour de bon
+
+C'était le premier point resté ouvert à l'audit du 27 août. Un jeton signé prouve qu'on s'est
+connecté — pas qu'on a **encore** le droit d'entrer. Il valait douze heures quoi qu'il arrive :
+changer le mot de passe n'y faisait rien, supprimer le compte non plus. Pour un téléphone oublié
+dans un taxi ou quelqu'un qui part fâché, c'était une demi-journée d'accès complet aux données de
+l'entreprise **après** la décision de le lui retirer.
+
+Le jeton porte désormais une **empreinte du compte**, que le serveur recalcule à chaque appel depuis
+le compte tel qu'il est maintenant. Les deux diffèrent, et le jeton ne vaut plus rien à la seconde.
+Trois refus, et les trois comptent : le compte a disparu, l'empreinte a changé, ou le jeton n'en
+porte aucune — un jeton d'avant cette protection est refusé plutôt que de laisser une porte ouverte
+à ceux qui étaient déjà connectés ; ils se reconnectent une fois.
+
+**L'empreinte est dérivée du mot de passe, pas égale à lui.** Un jeton intercepté ne donne rien pour
+attaquer le compte.
+
+Ce choix évite surtout un compteur à tenir à jour. Une douzaine d'endroits changent un mot de passe
+dans l'application ; il aurait suffi d'en oublier un pour que la révocation ne marche pas là — et
+personne ne s'en serait aperçu avant d'en avoir besoin. En dérivant l'empreinte du mot de passe
+lui-même, **tout changement révoque, sans qu'aucun code n'ait à y penser**.
+
+Un bouton **« Déconnecter de tous les appareils »** est apparu à côté de chaque compte, dans
+Configuration → Utilisateurs. Il pose une date de révocation sans toucher au mot de passe : la
+personne garde son mot de passe et se reconnecte quand elle veut ; c'est l'appareil resté ouvert qui
+est fermé.
+
+**Une révocation ne recule jamais.** Une page ouverte avant ce geste ne connaît pas la date : son
+prochain enregistrement l'effacerait, et rouvrirait la porte au téléphone qu'on venait de fermer. Le
+serveur garde toujours la plus récente des deux — avancer est possible, revenir non.
+
+**La lecture d'entête reste libre, et c'est délibéré.** Elle ne rend qu'une date de dernière
+modification — rien qui appartienne à quiconque — et chaque appareil la demande toutes les vingt
+secondes. La faire précéder d'une lecture du document entier coûterait bien plus qu'elle ne
+protège. Le vrai chargement, celui qui porte les données, est contrôlé.
+
+**Ce qui n'est pas couvert, et il faut le dire :** les fonctions qui dépensent (WhatsApp, e-mail,
+l'assistant, les taux) vérifient toujours la session mais pas cette empreinte — les contrôler
+demanderait une lecture de la base à chaque message envoyé, ce qui pèserait lourd sur une campagne.
+Un jeton révoqué ne peut donc plus lire ni écrire vos données, mais pourrait encore faire partir un
+message pendant les heures restantes de sa validité.
+
+Éprouvé par `testdonnees` (247 cas, dont onze pour la révocation seule) et `testgardefou` (43).

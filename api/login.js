@@ -32,7 +32,7 @@
  */
 
 import crypto from "node:crypto";
-import { signerSession } from "./_session.js";
+import { signerSession, empreinteDuCompte } from "./_session.js";
 import { passage, adresseDe, refuser } from "./_verrou.js";
 
 /** Durée de validité du jeton. Assez longue pour une journée de travail, assez courte pour qu'un
@@ -283,6 +283,12 @@ export default async function handler(req, res) {
       userId: compte.id,
       identifiant: compte.identifiant,
       role: espaceClient ? "client" : (compte.role || ""),
+      /*
+       * L'empreinte du compte voyage dans le jeton. Le serveur la recalcule à chaque appel : si le
+       * mot de passe change, ou si l'on révoque les sessions, ce jeton cesse de valoir sur-le-champ
+       * au lieu de vivre ses douze heures.
+       */
+      empreinte: empreinteDuCompte(compte),
     }) || {};
 
     /*

@@ -1811,18 +1811,28 @@ const ETAPES_AVEC_TICKET = ["enregistrement", "modification"];
 
 const MODELES_WHATSAPP = {
   /*
-   * « Bonjour {{1}},
-   *   L'enregistrement de votre colis est confirmé.
-   *   Référence : {{2}}
-   *   Agence de dépôt : {{3}}
+   * « L'enregistrement de votre colis est confirmé.
+   *   Référence : {{1}}
+   *   Agence de dépôt : {{2}}
    *   Votre ticket d'envoi est joint à ce message. »
+   *
+   * CE MESSAGE NE NOMME PERSONNE, ET C'EST VOULU.
+   *
+   * Il part à DEUX personnes : celui qui dépose le colis et celui qui le recevra. Or un modèle se
+   * remplit une fois pour l'envoi, pas une fois par destinataire — les deux recevaient donc le même
+   * texte, ouvert sur le nom du DESTINATAIRE. L'expéditeur, qui venait pourtant de déposer son
+   * colis au comptoir, lisait « Bonjour Fatoumata » en parlant de lui-même.
+   *
+   * Deux façons de s'en sortir : nommer chacun correctement, ce qui demande de composer un envoi
+   * par personne, ou ne nommer personne. La seconde a été retenue — c'est celle qui est déposée
+   * chez Meta. Un message qui ne dit le nom de personne n'a jamais l'air de se tromper de
+   * personne ; un message qui dit le mauvais nom, si.
    */
   enregistrement: (colis, data) => {
     const depart = siteEnregistrementPourColis(colis, data);
     return {
       nom: "bde_enregistrement",
       variables: [
-        colis.destinataire || "cher client",
         colis.tracking,
         depart ? depart.nom : "départ",
       ],
@@ -2088,6 +2098,26 @@ function annonceEnCours(annonce, maintenant = new Date()) {
 }
 
 const TYPES_DE_CAMPAGNE = {
+  departs: {
+    cle: "departs",
+    libelle: "Annonce de départ",
+    modele: MODELE_DEPARTS_WHATSAPP,
+    objetParDefaut: "Prochain départ Ba-Diaby Express",
+    labelTexte: "Le ou les départs à annoncer",
+    /*
+     * L'exemple ne montre AUCUN prix, et c'est délibéré. Un départ est une information : mêler un
+     * tarif à l'exemple laissait croire qu'il en fallait un, alors que la plupart des annonces
+     * n'ont rien à annoncer d'autre que la date. Le prix reste possible — c'est du texte libre —
+     * mais il n'est pas ce qu'on vient dire.
+     */
+    exempleTexte: "ex : Conakry → Paris le 5 septembre. Ajoutez un tarif seulement s’il y en a un.",
+    labelDate: "Dépôt des colis jusqu’au",
+    exempleDate: "ex : 4 septembre",
+    dateParDefaut: "la veille du départ",
+    phraseFinale: (date) => `Dépôt des colis à l’agence jusqu’au ${date}. Écrivez-nous pour réserver votre place.`,
+    /* La ligne qui précède le texte libre, dans l'aperçu comme dans le corps validé. */
+    prefixe: "Prochain départ : ",
+  },
   promo: {
     cle: "promo",
     libelle: "Promotion",
@@ -2099,20 +2129,6 @@ const TYPES_DE_CAMPAGNE = {
     exempleDate: "ex : 30 septembre",
     dateParDefaut: "la fin du mois",
     phraseFinale: (date) => `Offre valable jusqu’au ${date}. Passez en agence ou écrivez-nous, nous nous occupons du reste.`,
-  },
-  departs: {
-    cle: "departs",
-    libelle: "Annonce de départ",
-    modele: MODELE_DEPARTS_WHATSAPP,
-    objetParDefaut: "Prochain départ Ba-Diaby Express",
-    labelTexte: "Le ou les départs à annoncer",
-    exempleTexte: "ex : Conakry → Paris le 5 septembre, le kilo à 10 € au lieu de 12 €.",
-    labelDate: "Dépôt des colis jusqu’au",
-    exempleDate: "ex : 4 septembre",
-    dateParDefaut: "la veille du départ",
-    phraseFinale: (date) => `Dépôt des colis à l’agence jusqu’au ${date}. Écrivez-nous pour réserver votre place.`,
-    /* La ligne qui précède le texte libre, dans l'aperçu comme dans le corps validé. */
-    prefixe: "Prochain départ : ",
   },
 };
 
@@ -2431,19 +2447,47 @@ function extractTrackingFromScan(raw) {
  * facture, ticket) pour qu’un client qui scanne avec l’appareil photo de son téléphone
  * arrive directement sur sa page de suivi, au lieu de lire un numéro brut inutilisable.
  * Le scanner interne accepte les deux formes (voir extractTrackingFromScan). */
+/*
+ * L'ADRESSE PUBLIQUE DE L'ENTREPRISE — UNE SEULE, ET JAMAIS CELLE DE L'HÉBERGEUR
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Tout ce qui sort d'ici et arrive chez un client — le QR code de l'étiquette, le lien de suivi
+ * d'un message WhatsApp, le bouton d'un courriel, le reçu de paiement — portait l'adresse depuis
+ * laquelle l'agent travaillait. Un agent connecté sur l'adresse technique de l'hébergeur
+ * (« …vercel.app ») imprimait donc des étiquettes qui y renvoient.
+ *
+ * Deux raisons de ne jamais laisser passer cette adresse-là :
+ *
+ *   — La MARQUE. Une étiquette collée sur un carton vit des mois et voyage entre plusieurs mains.
+ *     Elle doit porter le nom de l'entreprise, pas celui d'un prestataire technique.
+ *
+ *   — La RÉPUTATION, et c'est le point sérieux. Les filtres anti-hameçonnage de WhatsApp, de Gmail
+ *     et des opérateurs se méfient des sous-domaines partagés : n'importe qui peut ouvrir un
+ *     « quelquechose.vercel.app », et beaucoup s'en servent pour de faux sites. Un message
+ *     d'entreprise qui pointe vers l'un d'eux part avec un handicap, et une plainte suffit à faire
+ *     tomber tout le domaine partagé — sans que l'on y soit pour rien. Le domaine de l'entreprise,
+ *     lui, n'engage qu'elle.
+ *
+ * L'adresse locale de développement reste utilisée telle quelle : sans cela, rien ne serait
+ * vérifiable hors ligne.
+ */
+const ADRESSE_PUBLIQUE = "https://badiabyexpress.com";
+
+function estAdresseDHebergeur(origine) {
+  return /\.vercel\.app$|\.netlify\.app$|\.pages\.dev$/i.test(new URL(origine).hostname);
+}
+
+function adressePublique() {
+  if (typeof window === "undefined" || !window.location?.origin) return ADRESSE_PUBLIQUE;
+  const origine = window.location.origin;
+  if (origine.startsWith("file")) return ADRESSE_PUBLIQUE;
+  try {
+    if (estAdresseDHebergeur(origine)) return ADRESSE_PUBLIQUE;
+  } catch (e) { return ADRESSE_PUBLIQUE; }
+  return origine;
+}
+
 function trackingUrlFor(tracking) {
-  /*
-   * L'adresse suit celle depuis laquelle l'agent travaille : une étiquette imprimée depuis
-   * badiabyexpress.com porte un QR code vers badiabyexpress.com, sans rien avoir à changer ici.
-   *
-   * L'adresse écrite en dessous ne sert que si `window` n'existe pas — un rendu hors navigateur.
-   * C'est le domaine de l'entreprise ; l'adresse vercel.app d'origine reste valable, et les
-   * étiquettes déjà imprimées avec elle continuent donc de fonctionner.
-   */
-  const base = typeof window !== "undefined" && window.location?.origin && !window.location.origin.startsWith("file")
-    ? window.location.origin
-    : "https://badiabyexpress.com";
-  return `${base}/?suivi=1&code=${tracking}`;
+  return `${adressePublique()}/?suivi=1&code=${tracking}`;
 }
 
 function loadScript(src) {
@@ -2989,6 +3033,32 @@ function App() {
   const [pendingSync, setPendingSync] = useState(0);
   const [syncing, setSyncing] = useState(false);
   const [showLogin, setShowLogin] = useState(() => typeof window !== "undefined" && new URLSearchParams(window.location.search).has("connexion"));
+
+  /*
+   * UN CLIENT NE DOIT JAMAIS SE RETROUVER SUR L'ADRESSE DE L'HÉBERGEUR.
+   *
+   * Les liens fabriqués d'ici portent désormais le domaine de l'entreprise (voir adressePublique).
+   * Restent ceux d'avant : les étiquettes déjà collées sur des cartons, les messages déjà envoyés,
+   * les QR codes déjà imprimés. Ceux-là continuent d'arriver sur « …vercel.app », et le client y
+   * voit un site qui ne porte pas le nom de l'entreprise — quand son navigateur ne l'avertit pas
+   * carrément, ces sous-domaines partagés étant très surveillés.
+   *
+   * On les renvoie donc, en gardant le chemin et le numéro de suivi : la page demandée s'ouvre,
+   * simplement sur le bon domaine.
+   *
+   * L'ÉCRAN DE CONNEXION, LUI, N'EST PAS REDIRIGÉ, et c'est délibéré : si le domaine venait à
+   * tomber — DNS expiré, certificat, erreur de configuration — l'adresse de l'hébergeur reste la
+   * porte de service par laquelle l'équipe entre pour réparer. Rediriger tout le monde fermerait
+   * cette porte le jour où elle est la seule qui reste.
+   */
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (new URLSearchParams(window.location.search).has("connexion")) return;
+    let surHebergeur = false;
+    try { surHebergeur = estAdresseDHebergeur(window.location.origin); } catch (e) { return; }
+    if (!surHebergeur) return;
+    window.location.replace(`${ADRESSE_PUBLIQUE}${window.location.pathname}${window.location.search}${window.location.hash}`);
+  }, []);
   const [session, setSession] = useState(null);
   /*
    * Change à chaque fois qu'un jeton de session est installé : le canal temps réel se rouvre alors
@@ -12312,8 +12382,12 @@ function ColisView({ data, persist, verifier, session, notify, t, initialQuery, 
     // Notification automatique selon les préférences (Configuration → Notifications WhatsApp).
     // Sous la marque d'un partenaire, le client ne doit pas recevoir un message signé
     // Ba-Diaby Express : il a commandé chez le partenaire et ne nous connaît pas.
+    /*
+     * Le texte de secours ne nomme personne non plus, pour la même raison que le modèle : il part
+     * à l'expéditeur ET au destinataire, et le nommer revenait à donner à l'un le nom de l'autre.
+     */
     notifierEvenement(data, "enregistrement", colis,
-      `Bonjour ${colis.destinataire}, votre colis ${nomExpediteurPourClient(data, colis)} ${colis.tracking} a bien été enregistré`
+      `Votre colis ${nomExpediteurPourClient(data, colis)} ${colis.tracking} a bien été enregistré`
       + `${colis.poids ? ` (${colis.poids} kg)` : ""}. Suivez-le à tout moment sur notre plateforme.`)
       .then(({ traces }) => { if (traces?.length) persist((courant) => ({ ...courant, messagesWhatsApp: avecTraces(courant, traces) })); })
       .catch(() => { /* une notification ne bloque jamais l'enregistrement */ });
@@ -18652,8 +18726,15 @@ function paysDuNumero(telephone) {
 }
 
 /** Deux numéros désignent la même personne dès qu'ils ont les mêmes chiffres. */
+/*
+ * La clé d'un numéro : ses chiffres, et rien d'autre.
+ *
+ * Le « 00 » de tête est retiré comme le « + » : c'est le même préfixe international écrit
+ * autrement, et deux écritures du même numéro doivent se reconnaître. Sans cela, un client
+ * désabonné sous « 00224… » recevrait quand même les campagnes envoyées à « +224… ».
+ */
 function clefTelephone(telephone) {
-  return String(telephone || "").replace(/\D/g, "");
+  return String(telephone || "").replace(/\D/g, "").replace(/^00/, "");
 }
 
 /**
@@ -19009,9 +19090,13 @@ function CampagnesPage({ data, persist, session, notify }) {
    * Deux campagnes, deux modèles Meta. Changer de type change l'objet de l'e-mail proposé — mais
    * jamais un objet que l'utilisateur a déjà réécrit lui-même : on ne défait pas ce qu'il a tapé.
    */
-  const [typeCampagne, setTypeCampagne] = useState("promo");
-  const type = TYPES_DE_CAMPAGNE[typeCampagne] || TYPES_DE_CAMPAGNE.promo;
-  const [objet, setObjet] = useState(TYPES_DE_CAMPAGNE.promo.objetParDefaut);
+  /*
+   * L'annonce de départ d'abord, et par défaut : c'est la campagne qu'on écrit le plus souvent —
+   * un départ revient chaque semaine, une promotion beaucoup moins.
+   */
+  const [typeCampagne, setTypeCampagne] = useState("departs");
+  const type = TYPES_DE_CAMPAGNE[typeCampagne] || TYPES_DE_CAMPAGNE.departs;
+  const [objet, setObjet] = useState(TYPES_DE_CAMPAGNE.departs.objetParDefaut);
   function changerTypeCampagne(cle) {
     const suivant = TYPES_DE_CAMPAGNE[cle];
     if (!suivant) return;
@@ -19021,8 +19106,8 @@ function CampagnesPage({ data, persist, session, notify }) {
   }
   const [offre, setOffre] = useState("");
   const [echeance, setEcheance] = useState("");
-  const [lien, setLien] = useState(() => (typeof window !== "undefined" && window.location?.origin && !window.location.origin.startsWith("file")
-    ? window.location.origin : "https://badiabyexpress.com"));
+  /* Même règle que les QR codes : jamais l'adresse technique de l'hébergeur. */
+  const [lien, setLien] = useState(() => adressePublique());
   const [confirmation, setConfirmation] = useState(null);
   const [envoi, setEnvoi] = useState(null);           // { total, faits, envoyes, echecs, arret }
   const [bilan, setBilan] = useState(null);
@@ -19177,8 +19262,19 @@ function CampagnesPage({ data, persist, session, notify }) {
     setNumeroADesabonner("");
     notify?.("Numéro retiré des campagnes");
   }
+  /*
+   * Réabonner doit être DIT au serveur, pas seulement omis.
+   *
+   * Depuis que le serveur inscrit lui-même les clients qui répondent STOP, il réunit sa liste avec
+   * celle que la page envoie : un numéro simplement retiré reviendrait donc aussitôt. Le champ
+   * `_reabonnements` nomme ceux qu'on retire vraiment ; le serveur l'applique puis l'efface.
+   */
   function reabonner(telephone) {
-    persist({ ...data, desabonnesMarketing: (data.desabonnesMarketing || []).filter((t) => clefTelephone(t) !== clefTelephone(telephone)) });
+    persist({
+      ...data,
+      desabonnesMarketing: (data.desabonnesMarketing || []).filter((t) => clefTelephone(t) !== clefTelephone(telephone)),
+      _reabonnements: [telephone],
+    });
   }
 
   async function exporterSegment() {
@@ -27675,6 +27771,27 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
   const [showForm, setShowForm] = useState(false);
   const [editingUser, setEditingUser] = useState(null);
   function addUser(u) { persist({ ...data, users: [...data.users, u], activityLog: pushActivity(data, session, "Compte créé", `${u.prenom} ${u.nom} (${u.role})`) }); notify(`Compte créé pour ${u.prenom} ${u.nom}`); setShowForm(false); }
+
+  /*
+   * DÉCONNECTER QUELQU'UN DE TOUS SES APPAREILS, TOUT DE SUITE.
+   *
+   * Un téléphone oublié dans un taxi, un agent qui part fâché : jusqu'ici il n'y avait rien à
+   * faire. Changer son mot de passe ne coupait pas la session déjà ouverte, et supprimer le compte
+   * non plus — le jeton vivait ses douze heures, avec l'accès complet aux données.
+   *
+   * Poser cette date suffit : le serveur calcule l'empreinte du compte à chaque appel, et tout
+   * jeton signé avant cesse de valoir à la seconde. La personne garde son mot de passe et se
+   * reconnecte quand elle veut ; c'est l'appareil resté ouvert qui est fermé.
+   */
+  function deconnecterPartout(u) {
+    persist({
+      ...data,
+      users: (data.users || []).map((x) => (x.id === u.id ? { ...x, sessionsRevoqueesLe: new Date().toISOString() } : x)),
+      activityLog: pushActivity(data, session, "Sessions déconnectées",
+        `${u.prenom} ${u.nom} — tous ses appareils`),
+    });
+    notify(`${u.prenom} est déconnecté de tous ses appareils. Son mot de passe, lui, ne change pas.`);
+  }
   /*
    * Supprimer un compte.
    *
@@ -27782,7 +27899,7 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
                 </td>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{u.role === "Administrateur" ? "Tous les pays" : (u.paysAutorises?.length ? u.paysAutorises.map((c) => FLAGS[c]).join(" ") : "Tous les pays")}</td>
                 <td style={{ padding: "12px 16px", fontSize: 13, whiteSpace: "nowrap" }}>{u.twoFA ? <ShieldCheck size={15} color="var(--ok-fg)" /> : "—"}</td>
-                <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>{effectivePermission(session, "users.gerer") && <button onClick={() => setUtilisateurAReinit(u)} title="Réinitialiser le mot de passe" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><Key size={15} /></button>}{effectivePermission(session, "users.gerer") && (() => {
+                <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>{effectivePermission(session, "users.gerer") && <button onClick={() => deconnecterPartout(u)} title={`Déconnecter ${u.prenom} de tous ses appareils`} aria-label="Déconnecter de tous les appareils" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><LogOut size={15} /></button>}{effectivePermission(session, "users.gerer") && <button onClick={() => setUtilisateurAReinit(u)} title="Réinitialiser le mot de passe" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><Key size={15} /></button>}{effectivePermission(session, "users.gerer") && (() => {
                   const raison = raisonDeNePasSupprimer(u);
                   return (
                     <button onClick={() => (raison ? notify?.(raison) : setUtilisateurASupprimer(u))}

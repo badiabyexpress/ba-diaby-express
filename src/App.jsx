@@ -2063,6 +2063,30 @@ const MODELE_DEPARTS_WHATSAPP = {
  * libellés des champs suivent, parce qu'un champ nommé « Valable jusqu'au » sur une annonce de
  * départ se remplit avec la date du départ — et fait venir les gens le jour où l'avion part.
  */
+/*
+ * La date, telle qu'on l'écrit à un client.
+ *
+ * Elle est saisie dans un vrai champ de date — donc au format « 2026-09-04 » — pour deux raisons.
+ * D'abord parce qu'une date tapée à la main se trompe : « 4 setpembre » part tel quel chez tous les
+ * clients. Ensuite et surtout parce qu'une annonce doit DISPARAÎTRE toute seule du site le jour où
+ * elle expire, et qu'on ne peut pas comparer « la fin du mois » à aujourd'hui. Une offre encore
+ * affichée après sa fin est pire que pas d'offre du tout.
+ */
+function dateEnFrancais(iso) {
+  if (!iso) return "";
+  const d = new Date(`${iso}T12:00:00`);
+  if (Number.isNaN(d.getTime())) return String(iso);
+  return d.toLocaleDateString("fr-FR", { day: "numeric", month: "long" });
+}
+
+/** L'annonce est-elle encore d'actualité ? Le jour de l'échéance compte encore. */
+function annonceEnCours(annonce, maintenant = new Date()) {
+  if (!annonce || !annonce.texte) return false;
+  if (!annonce.jusquAu) return false;
+  const fin = new Date(`${annonce.jusquAu}T23:59:59`);
+  return !Number.isNaN(fin.getTime()) && fin.getTime() >= maintenant.getTime();
+}
+
 const TYPES_DE_CAMPAGNE = {
   promo: {
     cle: "promo",
@@ -6571,6 +6595,28 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
       <div style={{ maxWidth: 720, margin: "40px auto 0", padding: "0 24px", textAlign: "center" }}>
         <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: "clamp(26px, 5vw, 40px)", color: "var(--text)", margin: "0 0 12px", lineHeight: 1.2 }}>{tagline}</h1>
         <p style={{ fontSize: 15, color: "var(--muted)", marginBottom: 32 }}>Transport de colis rapide et fiable entre la Guinée et {destinations.length} destinations dans le monde.</p>
+
+        {/*
+          * L'ANNONCE EN COURS, EN HAUT ET SANS RIEN CLIQUER.
+          *
+          * Le message envoyé aux clients porte un bouton qui mène ici. S'il faut d'abord choisir un
+          * pays pour voir quoi que ce soit, le client arrive sur un site qui ne parle pas de ce
+          * qu'il vient de lire, et le bouton fait perdre confiance au lieu d'en donner. L'annonce
+          * s'affiche donc avant tout le reste, et disparaît d'elle-même à sa date.
+          */}
+        {annonceEnCours(data.annoncePublique) && (
+          <div style={{ maxWidth: 560, margin: "0 auto 32px", background: "var(--surface)", border: "1.5px solid var(--brand-solid)", borderRadius: 14, padding: "18px 20px", textAlign: "start" }}>
+            <div style={{ fontSize: 11.5, fontWeight: 700, letterSpacing: 0.6, textTransform: "uppercase", color: "var(--brand-solid)", marginBottom: 7 }}>
+              {data.annoncePublique.titre}
+            </div>
+            <div style={{ fontSize: 16, fontWeight: 600, color: "var(--text)", lineHeight: 1.5 }}>
+              {data.annoncePublique.texte}
+            </div>
+            <div style={{ fontSize: 13.5, color: "var(--muted)", marginTop: 8 }}>
+              {data.annoncePublique.phrase}
+            </div>
+          </div>
+        )}
 
         {trackingActif && (
           <form onSubmit={suivre} style={{ display: "flex", gap: 8, maxWidth: 460, margin: "0 auto 40px", flexWrap: "wrap", justifyContent: "center" }}>
@@ -19008,7 +19054,7 @@ function CampagnesPage({ data, persist, session, notify }) {
   const messagePourEmail = (nom) => [
     `<p>Bonjour ${nom || "cher client"},</p>`,
     `<p>${type.prefixe || ""}${(offre || "").replace(/\n/g, "<br>")}</p>`,
-    echeance ? `<p>${type.phraseFinale(echeance)}</p>` : "",
+    echeance ? `<p>${type.phraseFinale(dateEnFrancais(echeance))}</p>` : "",
     `<p><a href="${lien}" style="background:#D6273F;color:#fff;padding:11px 20px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">Voir l’offre</a></p>`,
     `<p style="color:#777;font-size:12px">Vous recevez ce message parce que vous êtes client de Ba-Diaby Express. Répondez « STOP » pour ne plus recevoir nos offres.</p>`,
   ].filter(Boolean).join("\n");
@@ -19062,7 +19108,7 @@ function CampagnesPage({ data, persist, session, notify }) {
           variables: [
             pourVariableWhatsApp(c.nom) || "cher client",
             pourVariableWhatsApp(offre),
-            pourVariableWhatsApp(echeance) || type.dateParDefaut,
+            pourVariableWhatsApp(dateEnFrancais(echeance)) || type.dateParDefaut,
           ],
           /*
            * PAS de `boutonUrl` ici, et c'est capital.
@@ -19087,12 +19133,33 @@ function CampagnesPage({ data, persist, session, notify }) {
       date: new Date().toISOString(),
       par: `${session?.prenom || ""} ${session?.nom || ""}`.trim(),
       canal, segments: choisis, objet, offre: offre.trim(), echeance, lien,
+      type: typeCampagne,
       destinataires: liste.length, envoyes, echecs,
       interrompue: arretRef.current,
     };
+    /*
+     * L'ANNONCE EST PUBLIÉE SUR LE SITE, ET C'EST INDISPENSABLE.
+     *
+     * Le message porte un bouton « Voir l’offre » qui mène à la page d’accueil. Si l’offre n’y est
+     * nulle part, le client arrive sur un site qui ne parle pas de ce qu’il vient de lire : le
+     * bouton fait perdre confiance au lieu d’en donner. Ce qu’on vient d’envoyer par message
+     * s’affiche donc au même moment sur la page publique.
+     *
+     * Elle s’efface d’elle-même à la date saisie — c’est pour cela que cette date est un vrai
+     * champ de date. Une offre encore affichée après sa fin est pire que pas d’offre du tout.
+     */
+    const annoncePublique = echeance ? {
+      type: typeCampagne,
+      titre: type.libelle,
+      texte: `${type.prefixe || ""}${offre.trim()}`,
+      phrase: type.phraseFinale(dateEnFrancais(echeance)),
+      jusquAu: echeance,
+      publieeLe: new Date().toISOString(),
+    } : (data.annoncePublique || null);
     persist({
       ...data,
       campagnes: [campagne, ...campagnes].slice(0, 100),
+      annoncePublique,
       activityLog: pushActivity(data, session, "Campagne envoyée",
         `${envoyes}/${liste.length} messages — ${choisis.join(", ")}`),
     });
@@ -19246,13 +19313,20 @@ function CampagnesPage({ data, persist, session, notify }) {
           </div>
         )}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <Field label={type.labelDate}><input value={echeance} onChange={(e) => setEcheance(e.target.value)} placeholder={type.exempleDate} style={inputStyle} /></Field>
+          <Field label={type.labelDate}>
+            <input type="date" value={echeance} onChange={(e) => setEcheance(e.target.value)} style={inputStyle} />
+          </Field>
           <Field label="Lien du site"><input value={lien} onChange={(e) => setLien(e.target.value)} style={inputStyle} /></Field>
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 4, marginBottom: 10 }}>
+          {echeance
+            ? `Cette annonce s’affichera sur la page d’accueil du site jusqu’au ${dateEnFrancais(echeance)}, puis disparaîtra toute seule. C’est là que mène le bouton du message.`
+            : "Sans date, l’annonce ne sera pas publiée sur le site — et le bouton du message mènera à une page qui n’en parle pas."}
         </div>
         <div style={{ background: "var(--surface2)", borderRadius: 10, padding: 14, marginTop: 6 }}>
           <div style={{ fontSize: 11.5, fontWeight: 700, color: "var(--muted)", marginBottom: 8 }}>APERÇU</div>
           <div style={{ fontSize: 13, color: "var(--text)", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>
-            {`Bonjour ${destinataires[0]?.nom || "Fatoumata Bah"},\n\n${type.prefixe || ""}${offre || "…"}\n\n${type.phraseFinale(echeance || "…")}\n${lien}`}
+            {`Bonjour ${destinataires[0]?.nom || "Fatoumata Bah"},\n\n${type.prefixe || ""}${offre || "…"}\n\n${type.phraseFinale(dateEnFrancais(echeance) || "…")}\n${lien}`}
           </div>
           <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8 }}>{type.modele.pied}</div>
         </div>

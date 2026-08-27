@@ -2437,19 +2437,47 @@ function extractTrackingFromScan(raw) {
  * facture, ticket) pour qu’un client qui scanne avec l’appareil photo de son téléphone
  * arrive directement sur sa page de suivi, au lieu de lire un numéro brut inutilisable.
  * Le scanner interne accepte les deux formes (voir extractTrackingFromScan). */
+/*
+ * L'ADRESSE PUBLIQUE DE L'ENTREPRISE — UNE SEULE, ET JAMAIS CELLE DE L'HÉBERGEUR
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Tout ce qui sort d'ici et arrive chez un client — le QR code de l'étiquette, le lien de suivi
+ * d'un message WhatsApp, le bouton d'un courriel, le reçu de paiement — portait l'adresse depuis
+ * laquelle l'agent travaillait. Un agent connecté sur l'adresse technique de l'hébergeur
+ * (« …vercel.app ») imprimait donc des étiquettes qui y renvoient.
+ *
+ * Deux raisons de ne jamais laisser passer cette adresse-là :
+ *
+ *   — La MARQUE. Une étiquette collée sur un carton vit des mois et voyage entre plusieurs mains.
+ *     Elle doit porter le nom de l'entreprise, pas celui d'un prestataire technique.
+ *
+ *   — La RÉPUTATION, et c'est le point sérieux. Les filtres anti-hameçonnage de WhatsApp, de Gmail
+ *     et des opérateurs se méfient des sous-domaines partagés : n'importe qui peut ouvrir un
+ *     « quelquechose.vercel.app », et beaucoup s'en servent pour de faux sites. Un message
+ *     d'entreprise qui pointe vers l'un d'eux part avec un handicap, et une plainte suffit à faire
+ *     tomber tout le domaine partagé — sans que l'on y soit pour rien. Le domaine de l'entreprise,
+ *     lui, n'engage qu'elle.
+ *
+ * L'adresse locale de développement reste utilisée telle quelle : sans cela, rien ne serait
+ * vérifiable hors ligne.
+ */
+const ADRESSE_PUBLIQUE = "https://badiabyexpress.com";
+
+function estAdresseDHebergeur(origine) {
+  return /\.vercel\.app$|\.netlify\.app$|\.pages\.dev$/i.test(new URL(origine).hostname);
+}
+
+function adressePublique() {
+  if (typeof window === "undefined" || !window.location?.origin) return ADRESSE_PUBLIQUE;
+  const origine = window.location.origin;
+  if (origine.startsWith("file")) return ADRESSE_PUBLIQUE;
+  try {
+    if (estAdresseDHebergeur(origine)) return ADRESSE_PUBLIQUE;
+  } catch (e) { return ADRESSE_PUBLIQUE; }
+  return origine;
+}
+
 function trackingUrlFor(tracking) {
-  /*
-   * L'adresse suit celle depuis laquelle l'agent travaille : une étiquette imprimée depuis
-   * badiabyexpress.com porte un QR code vers badiabyexpress.com, sans rien avoir à changer ici.
-   *
-   * L'adresse écrite en dessous ne sert que si `window` n'existe pas — un rendu hors navigateur.
-   * C'est le domaine de l'entreprise ; l'adresse vercel.app d'origine reste valable, et les
-   * étiquettes déjà imprimées avec elle continuent donc de fonctionner.
-   */
-  const base = typeof window !== "undefined" && window.location?.origin && !window.location.origin.startsWith("file")
-    ? window.location.origin
-    : "https://badiabyexpress.com";
-  return `${base}/?suivi=1&code=${tracking}`;
+  return `${adressePublique()}/?suivi=1&code=${tracking}`;
 }
 
 function loadScript(src) {
@@ -2995,6 +3023,32 @@ function App() {
   const [pendingSync, setPendingSync] = useState(0);
   const [syncing, setSyncing] = useState(false);
   const [showLogin, setShowLogin] = useState(() => typeof window !== "undefined" && new URLSearchParams(window.location.search).has("connexion"));
+
+  /*
+   * UN CLIENT NE DOIT JAMAIS SE RETROUVER SUR L'ADRESSE DE L'HÉBERGEUR.
+   *
+   * Les liens fabriqués d'ici portent désormais le domaine de l'entreprise (voir adressePublique).
+   * Restent ceux d'avant : les étiquettes déjà collées sur des cartons, les messages déjà envoyés,
+   * les QR codes déjà imprimés. Ceux-là continuent d'arriver sur « …vercel.app », et le client y
+   * voit un site qui ne porte pas le nom de l'entreprise — quand son navigateur ne l'avertit pas
+   * carrément, ces sous-domaines partagés étant très surveillés.
+   *
+   * On les renvoie donc, en gardant le chemin et le numéro de suivi : la page demandée s'ouvre,
+   * simplement sur le bon domaine.
+   *
+   * L'ÉCRAN DE CONNEXION, LUI, N'EST PAS REDIRIGÉ, et c'est délibéré : si le domaine venait à
+   * tomber — DNS expiré, certificat, erreur de configuration — l'adresse de l'hébergeur reste la
+   * porte de service par laquelle l'équipe entre pour réparer. Rediriger tout le monde fermerait
+   * cette porte le jour où elle est la seule qui reste.
+   */
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (new URLSearchParams(window.location.search).has("connexion")) return;
+    let surHebergeur = false;
+    try { surHebergeur = estAdresseDHebergeur(window.location.origin); } catch (e) { return; }
+    if (!surHebergeur) return;
+    window.location.replace(`${ADRESSE_PUBLIQUE}${window.location.pathname}${window.location.search}${window.location.hash}`);
+  }, []);
   const [session, setSession] = useState(null);
   /*
    * Change à chaque fois qu'un jeton de session est installé : le canal temps réel se rouvre alors
@@ -19031,8 +19085,8 @@ function CampagnesPage({ data, persist, session, notify }) {
   }
   const [offre, setOffre] = useState("");
   const [echeance, setEcheance] = useState("");
-  const [lien, setLien] = useState(() => (typeof window !== "undefined" && window.location?.origin && !window.location.origin.startsWith("file")
-    ? window.location.origin : "https://badiabyexpress.com"));
+  /* Même règle que les QR codes : jamais l'adresse technique de l'hébergeur. */
+  const [lien, setLien] = useState(() => adressePublique());
   const [confirmation, setConfirmation] = useState(null);
   const [envoi, setEnvoi] = useState(null);           // { total, faits, envoyes, echecs, arret }
   const [bilan, setBilan] = useState(null);

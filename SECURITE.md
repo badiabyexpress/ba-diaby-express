@@ -1226,3 +1226,38 @@ Le champ de date rend au passage impossible une faute de frappe qui partirait ch
 à la fois — « 4 setpembre » était jusqu'ici recopié tel quel.
 
 Éprouvé par `t93` (11 cas) sur la vraie page publique, et par `testverrou` pour la porte serveur.
+
+## Une seule adresse publique, et jamais celle de l'hébergeur
+
+Le QR code d'une étiquette, le lien de suivi d'un message WhatsApp, le bouton d'un courriel, le reçu
+de paiement : tous portaient l'adresse **depuis laquelle l'agent travaillait**. Un agent connecté
+sur l'adresse technique de l'hébergeur (`…vercel.app`) imprimait donc des étiquettes qui y
+renvoient — et une étiquette collée sur un carton vit des mois.
+
+Deux raisons d'y mettre fin, dont une sérieuse.
+
+La marque, d'abord : ce qui arrive chez un client doit porter le nom de l'entreprise, pas celui d'un
+prestataire technique.
+
+**La réputation ensuite.** Les filtres anti-hameçonnage de WhatsApp, de Gmail et des opérateurs se
+méfient des sous-domaines partagés : n'importe qui peut ouvrir un `quelquechose.vercel.app`, et
+beaucoup s'en servent pour de faux sites. Un message d'entreprise qui pointe vers l'un d'eux part
+avec un handicap, et **une plainte contre un voisin suffit à faire tomber le domaine partagé tout
+entier** — sans que l'on y soit pour rien. Le domaine de l'entreprise, lui, n'engage qu'elle.
+
+Une seule fonction (`adressePublique`) décide, et tout en découle. Elle rend le domaine de
+l'entreprise dès que l'origine courante est celle d'un hébergeur mutualisé ; l'adresse locale de
+développement, elle, reste utilisée telle quelle, sans quoi rien ne serait vérifiable hors ligne.
+
+**Les liens déjà partis sont rattrapés.** Les étiquettes déjà collées, les messages déjà envoyés,
+les QR déjà imprimés continuent d'arriver sur l'adresse de l'hébergeur : la page les renvoie sur le
+domaine, en gardant le chemin et le numéro de suivi.
+
+**Sauf l'écran de connexion, et c'est délibéré.** Si le domaine venait à tomber — DNS expiré,
+certificat, erreur de configuration — l'adresse de l'hébergeur reste la porte de service par
+laquelle l'équipe entre pour réparer. Tout rediriger fermerait cette porte le jour où elle est la
+seule qui reste.
+
+Éprouvé par `t94` (9 cas), qui fait croire au navigateur qu'il est sur l'adresse de l'hébergeur et
+vérifie les trois cas : le vieux lien est rattrapé, la porte de service reste ouverte, et ce qu'un
+agent connecté là-bas fabrique porte quand même le domaine.

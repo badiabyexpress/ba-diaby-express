@@ -2088,18 +2088,6 @@ function annonceEnCours(annonce, maintenant = new Date()) {
 }
 
 const TYPES_DE_CAMPAGNE = {
-  promo: {
-    cle: "promo",
-    libelle: "Promotion",
-    modele: MODELE_PROMO_WHATSAPP,
-    objetParDefaut: "Une offre Ba-Diaby Express pour vous",
-    labelTexte: "L’offre, en quelques lignes",
-    exempleTexte: "ex : Le kilo à 10 € au lieu de 12 € sur tous les envois Conakry → Paris.",
-    labelDate: "Valable jusqu’au",
-    exempleDate: "ex : 30 septembre",
-    dateParDefaut: "la fin du mois",
-    phraseFinale: (date) => `Offre valable jusqu’au ${date}. Passez en agence ou écrivez-nous, nous nous occupons du reste.`,
-  },
   departs: {
     cle: "departs",
     libelle: "Annonce de départ",
@@ -2113,6 +2101,18 @@ const TYPES_DE_CAMPAGNE = {
     phraseFinale: (date) => `Dépôt des colis à l’agence jusqu’au ${date}. Écrivez-nous pour réserver votre place.`,
     /* La ligne qui précède le texte libre, dans l'aperçu comme dans le corps validé. */
     prefixe: "Prochain départ : ",
+  },
+  promo: {
+    cle: "promo",
+    libelle: "Promotion",
+    modele: MODELE_PROMO_WHATSAPP,
+    objetParDefaut: "Une offre Ba-Diaby Express pour vous",
+    labelTexte: "L’offre, en quelques lignes",
+    exempleTexte: "ex : Le kilo à 10 € au lieu de 12 € sur tous les envois Conakry → Paris.",
+    labelDate: "Valable jusqu’au",
+    exempleDate: "ex : 30 septembre",
+    dateParDefaut: "la fin du mois",
+    phraseFinale: (date) => `Offre valable jusqu’au ${date}. Passez en agence ou écrivez-nous, nous nous occupons du reste.`,
   },
 };
 
@@ -19009,9 +19009,13 @@ function CampagnesPage({ data, persist, session, notify }) {
    * Deux campagnes, deux modèles Meta. Changer de type change l'objet de l'e-mail proposé — mais
    * jamais un objet que l'utilisateur a déjà réécrit lui-même : on ne défait pas ce qu'il a tapé.
    */
-  const [typeCampagne, setTypeCampagne] = useState("promo");
-  const type = TYPES_DE_CAMPAGNE[typeCampagne] || TYPES_DE_CAMPAGNE.promo;
-  const [objet, setObjet] = useState(TYPES_DE_CAMPAGNE.promo.objetParDefaut);
+  /*
+   * L'annonce de départ d'abord, et par défaut : c'est la campagne qu'on écrit le plus souvent —
+   * un départ revient chaque semaine, une promotion beaucoup moins.
+   */
+  const [typeCampagne, setTypeCampagne] = useState("departs");
+  const type = TYPES_DE_CAMPAGNE[typeCampagne] || TYPES_DE_CAMPAGNE.departs;
+  const [objet, setObjet] = useState(TYPES_DE_CAMPAGNE.departs.objetParDefaut);
   function changerTypeCampagne(cle) {
     const suivant = TYPES_DE_CAMPAGNE[cle];
     if (!suivant) return;

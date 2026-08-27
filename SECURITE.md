@@ -1003,3 +1003,34 @@ permet d'aller fermer l'onglet.
 
 Éprouvé par `testgardefou` (34 cas), qui rejoue l'envoi exact du 26 août et vérifie aussi que les
 trois suppressions légitimes passent toujours.
+
+## « Enregistré » ne se dit plus sur parole
+
+L'application annonçait « Colis enregistré » dès que l'appel au serveur n'avait pas levé d'erreur.
+Ce n'est pas la même chose que constater que le colis y est. Le 26 août, l'écriture qui a effacé la
+journée a répondu comme les autres : sans erreur.
+
+Toute création passe désormais par une **relecture du serveur**. On écrit, puis on relit la base et
+on y cherche ce qu'on vient d'écrire — le numéro de suivi du colis, l'identifiant du compte. Trois
+réponses, et la troisième n'existait pas avant :
+
+- **le serveur l'a gardé** → « enregistré et vérifié sur le serveur » ;
+- **le serveur est injoignable pour la relecture** → « en attente de synchronisation, ne fermez pas
+  cette page ». Ne pas pouvoir vérifier n'est pas constater une perte : on dit qu'on ne sait pas ;
+- **le serveur a répondu, et ce n'est pas là** → « NON ENREGISTRÉ — le serveur ne l'a pas gardé ».
+  Le formulaire **reste ouvert**, la saisie est intacte, et il n'y a rien à retaper.
+
+La relecture ne s'appuie jamais sur le cache du navigateur (`relireDuServeur` interroge le serveur
+et lui seul). C'est le piège central de ce garde-fou : l'écriture dépose le document dans le cache
+**avant** d'appeler le serveur, donc une relecture tolérante au cache retrouverait toujours ce
+qu'elle cherche et confirmerait un enregistrement qui n'a pas eu lieu. Ce serait pire que l'ancien
+comportement — une fausse certitude, au lieu d'une simple absence de vérification.
+
+Quatre endroits sont couverts : le formulaire de colis de l'équipe, celui de l'espace partenaire,
+l'import Excel (qui referme sa fenêtre seulement si le serveur a gardé les colis), et la création
+d'un compte client quand elle se fait sans le serveur d'inscription. Une alerte de ce genre ne doit
+pas s'effacer avant qu'on l'ait lue : le bandeau ordinaire dure 2,8 secondes, celui-ci quinze.
+
+Éprouvé par `t92` (16 cas), qui enregistre un colis par le vrai formulaire face à un serveur qui
+répond 200 sans rien garder — le cas du 26 août, enfin visible à l'écran.
+

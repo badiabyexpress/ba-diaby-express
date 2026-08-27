@@ -1457,3 +1457,48 @@ pire que pas de bilan du tout.
 
 Éprouvé par `testbilan` (25 cas), dont l'exactitude des chiffres — un bilan faux est pire qu'aucun
 bilan, on prend des décisions dessus.
+
+## Une copie qui survive à la perte du projet
+
+La sauvegarde de nuit écrit une copie du document dans la table `bde_data`, à côté de l'original.
+C'est ce qu'il faut contre une fausse manœuvre : on restaure la veille, on reprend le travail.
+
+**Ce n'est rien du tout contre la perte du projet lui-même.** Les quinze copies et le document
+vivant sont dans la même base, du même compte, chez le même hébergeur : une facture impayée, un
+compte fermé, une suppression, et l'on perd les données *et* leurs sauvegardes du même geste. Le
+compte est en formule gratuite, donc sans restauration dans le temps côté Supabase.
+
+Chaque nuit, après la sauvegarde interne, une copie complète part désormais **par courriel, en
+pièce jointe**. Ce choix n'est pas un pis-aller :
+
+- il ne demande aucun compte de plus, aucun secret de plus, aucune facture de plus — donc rien qui
+  puisse expirer sans qu'on s'en aperçoive ;
+- la boîte du destinataire est chez un autre fournisseur, ce qui est exactement le but ;
+- le fichier est un `.json` que l'application relit telle quelle par Configuration → Sauvegarde des
+  données → Restaurer. **Une copie qu'on ne sait pas restaurer n'est pas une copie.**
+
+Le document pèse aujourd'hui 253 ko. Au-delà de 20 Mo, l'envoi est refusé **et le motif est écrit
+dans le relevé de la tâche de nuit** : une sauvegarde hors site dont on ne sait pas si elle est
+partie ne protège de rien — on croit être couvert.
+
+### Ce que la pièce jointe contient, et pourquoi on ne l'allège pas
+
+Tout : les colis, les clients, la caisse, les comptes de l'équipe et les empreintes de leurs mots
+de passe. On pourrait retirer les empreintes pour rendre le fichier moins sensible — et l'on
+obtiendrait une copie qui, une fois restaurée, **enfermerait toute l'équipe dehors**. Une sauvegarde
+dont la restauration laisse l'entreprise à la porte n'est pas une sauvegarde.
+
+Ce fichier vaut donc l'accès à toute la plateforme, et le message le dit en toutes lettres plutôt
+que de le laisser croire anodin. Il part à une seule adresse :
+
+| Variable Vercel | Rôle |
+|---|---|
+| `SAUVEGARDE_EMAIL` | l'adresse dédiée, pour ne pas mêler ces pièces jointes aux alertes du quotidien |
+| `ALERTE_EMAIL` | à défaut |
+| — | à défaut, le premier administrateur du document |
+
+Rien n'est à configurer pour que cela fonctionne : sans réglage, la copie part à l'adresse de
+l'administrateur. `SAUVEGARDE_EMAIL` sert seulement à la ranger ailleurs.
+
+Éprouvé par `testcopie` (26 cas), dont la relecture effective de la pièce jointe — c'est la seule
+preuve qui compte.

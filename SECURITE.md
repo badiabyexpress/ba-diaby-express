@@ -1437,7 +1437,9 @@ colis au comptoir non retirés, dépôts de partenaire à vérifier, demandes de
 Le **courriel part déjà**, avec le détail complet, sans rien à faire. Le WhatsApp demande deux
 choses, parce que Meta n'autorise hors fenêtre que les modèles approuvés :
 
-1. **Déposer le modèle** `bde_bilan_quotidien`, catégorie **Utilitaire**, langue **Français**, corps :
+1. **Déposer le modèle** `bde_bilan_quotidien`, catégorie **Utilitaire**, langue **Français**,
+   sans en-tête et sans bouton — le code n'envoie que le corps, et un modèle qui attend autre chose
+   fait refuser chaque envoi. Corps :
 
    ```
    Bilan du {{1}}
@@ -1446,7 +1448,21 @@ choses, parce que Meta n'autorise hors fenêtre que les modèles approuvés :
    Caisse : {{3}}
 
    À traiter : {{4}}
+   Détail complet dans votre boîte mail.
    ```
+
+   **La dernière ligne n'est pas décorative.** Meta refuse un modèle qui commence ou se termine par
+   une variable — « Les variables ne peuvent pas se trouver au début ou à la fin du modèle ». Sans
+   ce texte fixe après `{{4}}`, le dépôt est rejeté avant même l'examen.
+
+   Les exemples que Meta réclame pour chaque variable, tels que le code les enverra :
+
+   | Variable | Exemple |
+   |---|---|
+   | `{{1}}` | `mercredi 26 août` |
+   | `{{2}}` | `3 enregistré(s), 2 livré(s)` |
+   | `{{3}}` | `65,00 EUR encaissés, 55,00 EUR restant dus` |
+   | `{{4}}` | `1 colis attendent d'être retirés · 1 dépôt(s) partenaire à vérifier` |
 
 2. **Ajouter la variable `BILAN_WHATSAPP`** dans Vercel — le numéro qui doit recevoir, avec son
    indicatif et sans espaces (`224612479339`).

@@ -15834,14 +15834,67 @@ async function downloadLabel(colis, data) {
  * L'étiquette n'a pas disparu pour autant : elle continue de s'imprimer depuis la fiche du colis,
  * là où elle a un sens.
  */
+/*
+ * LE NOM DU FICHIER NE DOIT PAS SE DEVINER.
+ *
+ * L'espace de stockage est public en lecture, et il doit l'être : Meta va chercher le document
+ * lui-même, sans identifiant, pour le joindre au message. Ce n'est pas ça, le danger.
+ *
+ * Le danger, c'était le NOM. La facture s'appelait `factures/BDE270808.pdf` — le numéro de suivi,
+ * tout simplement. Or ces numéros se suivent : BDE270801, BDE270802, BDE270803… Ils sont imprimés
+ * sur le carton, écrits dans chaque message WhatsApp, lus par tous ceux qui manipulent le colis.
+ * Quiconque en connaissait UN pouvait deviner tous les autres et télécharger la facture
+ * correspondante : nom du client, téléphone, adresse, contenu du colis, valeur déclarée. Aucune
+ * effraction, aucune trace — il suffisait de changer deux chiffres dans une adresse.
+ *
+ * Un jeton tiré au hasard referme cela sans rien changer au fonctionnement : Meta continue d'aller
+ * chercher la facture, le client la reçoit comme avant, mais l'adresse ne se déduit plus de rien.
+ * C'est déjà ce que fait `deposerImage` pour les photos ; la facture était la seule exception.
+ */
+function jetonDocument() {
+  const octets = new Uint8Array(12);
+  crypto.getRandomValues(octets);
+  return Array.from(octets).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Efface les versions précédentes de la facture d'un colis.
+ *
+ * Sans cela, chaque correction en laisserait une de plus dans le stockage, accessible pour
+ * toujours à qui aurait relevé l'ancienne adresse — y compris la version d'avant la correction,
+ * celle qui annonçait le mauvais montant.
+ *
+ * Le message déjà parti n'en souffre pas : WhatsApp garde sa propre copie du document une fois
+ * qu'il l'a récupéré. Un échec ici ne doit rien interrompre — la nouvelle facture est en place,
+ * c'est ce qui compte.
+ */
+async function effacerAnciennesFactures(tracking, cheminActuel) {
+  try {
+    const stockage = clientSupabase().storage.from("colis-documents");
+    const { data: fichiers } = await stockage.list("factures", { limit: 100, search: tracking });
+    /*
+     * `search` ne fait que dégrossir : c'est une recherche par morceau de nom, qui rapporterait
+     * aussi les fichiers d'un colis dont le numéro commence pareil. On ne retient donc que les
+     * deux formes qui appartiennent VRAIMENT à ce colis — l'ancien nom nu, hérité, et les noms à
+     * jeton. Effacer la facture d'un autre client serait pire que le désordre qu'on nettoie.
+     */
+    const perimes = (fichiers || [])
+      .filter((f) => f.name === `${tracking}.pdf` || f.name.startsWith(`${tracking}-`))
+      .map((f) => `factures/${f.name}`)
+      .filter((chemin) => chemin !== cheminActuel);
+    if (perimes.length) await stockage.remove(perimes);
+  } catch (e) { /* la facture du jour est en place : le reste n'est que du ménage */ }
+}
+
 async function genererUrlFacture(colis, data) {
   const blob = await downloadInvoice(colis, data, { blob: true });
-  const chemin = `factures/${colis.tracking}.pdf`;
+  const chemin = `factures/${colis.tracking}-${jetonDocument()}.pdf`;
   const { error: erreurUpload } = await clientSupabase().storage
     .from("colis-documents")
     .upload(chemin, blob, { contentType: "application/pdf", upsert: true });
   if (erreurUpload) throw erreurUpload;
   const { data: { publicUrl } } = clientSupabase().storage.from("colis-documents").getPublicUrl(chemin);
+  await effacerAnciennesFactures(colis.tracking, chemin);
   return publicUrl;
 }
 

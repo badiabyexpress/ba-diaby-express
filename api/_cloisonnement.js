@@ -573,6 +573,44 @@ function signatureDe(compte) {
   return `${compte.prenom || ""} ${compte.nom || ""}`.trim() || compte.identifiant || "Compte";
 }
 
+/*
+ * LES IDENTIFIANTS NE S'EFFACENT PAS PAR OMISSION
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Constaté en production le 27 août 2026 : sur trois comptes clients, deux n'avaient plus AUCUN
+ * mot de passe — ni empreinte, ni sel, ni rien. L'un gardait même l'algorithme et le nombre
+ * d'itérations, sans l'empreinte qu'ils servent à vérifier. Ces personnes ne pouvaient plus entrer,
+ * par aucun chemin, et rien ne le signalait : la connexion répondait « identifiant ou mot de passe
+ * incorrect », comme pour une faute de frappe.
+ *
+ * L'explication tient en une ligne : le document circule en entier, et il existe des copies dont
+ * les mots de passe ont été délibérément retirés — une sauvegarde téléchargée, par exemple, d'où
+ * l'on ôte les empreintes parce qu'elle voyage par courriel ou clé USB. Réimportée, cette copie
+ * écrase les vraies. L'omission n'était pas distinguée d'un effacement voulu.
+ *
+ * La règle : une écriture qui ne porte PAS d'empreinte pour un compte ne peut pas lui en retirer
+ * une. Changer de mot de passe, en revanche, se fait toujours — un vrai changement apporte une
+ * nouvelle empreinte, et celle-là gagne.
+ */
+const CHAMPS_IDENTIFIANTS = [
+  "motdepasse", "motdepasseSecure", "motdepasseSalt", "motdepasseIter", "motdepasseAlgo",
+];
+
+export function preserverIdentifiants(comptesBase, comptesSortie) {
+  const parId = new Map();
+  liste(comptesBase).forEach((c) => { if (c && c.id) parId.set(c.id, c); });
+  return liste(comptesSortie).map((compte) => {
+    if (!compte || !compte.id) return compte;
+    const ancien = parId.get(compte.id);
+    if (!ancien) return compte;                                   // compte nouveau : rien à reprendre
+    if (compte.motdepasseSecure || compte.motdepasse) return compte; // changement voulu : il gagne
+    const repris = { ...compte };
+    CHAMPS_IDENTIFIANTS.forEach((champ) => {
+      if (ancien[champ] !== undefined) repris[champ] = ancien[champ];
+    });
+    return repris;
+  });
+}
+
 function comptesDeLEquipe(base, envoye, moi, peut) {
   const gere = peut("users.gerer");
   const droitsDesAutres = peut("users.permissions");
@@ -749,13 +787,37 @@ export function collectionsQuiFondent(base, envoye) {
   return perdues;
 }
 
+/*
+ * Le nombre d'alertes d'écrasement conservées. Elles servent à comprendre ce qui s'est passé et à
+ * aller fermer l'onglet fautif : au-delà d'une vingtaine, elles ne racontent plus rien de neuf.
+ */
+export const MAX_ALERTES_ECRASEMENT = 20;
+
+/**
+ * Réunit les alertes d'écrasement de la base et celles renvoyées par la page.
+ *
+ * La base fait foi sur le contenu — une page ne réécrit pas une alerte qui la concerne. Elle a en
+ * revanche le droit de la marquer comme lue : c'est le seul geste qu'on lui laisse, et c'est celui
+ * qui fait disparaître le bandeau une fois l'onglet fautif fermé.
+ */
+export function reunirAlertesEcrasement(alertesBase, alertesEnvoyees) {
+  const vues = new Set(
+    (Array.isArray(alertesEnvoyees) ? alertesEnvoyees : [])
+      .filter((a) => a && a.vue && a.id).map((a) => a.id),
+  );
+  return (Array.isArray(alertesBase) ? alertesBase : [])
+    .filter((a) => a && a.id)
+    .map((a) => (vues.has(a.id) ? { ...a, vue: true } : a));
+}
+
 /**
  * Le document réel, augmenté de ce qu'un membre de l'équipe avait le droit de changer.
  *
- * Un compte introuvable dans la base ne peut rien : on rend le document tel qu'il est plutôt que
- * de deviner à quels droits il pourrait bien prétendre.
+ * `contexte` porte de quoi nommer l'appareil fautif dans l'alerte ({ appareil, adresse }) — sans
+ * lui, l'alerte dirait qu'un enregistrement a été refusé sans dire d'où il venait, et il n'y
+ * aurait rien à aller fermer.
  */
-export function fusionnerEcritureEquipe(actuel, propose, compteId) {
+export function fusionnerEcritureEquipe(actuel, propose, compteId, contexte = {}) {
   const base = actuel && typeof actuel === "object" && !Array.isArray(actuel) ? actuel : {};
   const envoye = propose && typeof propose === "object" && !Array.isArray(propose) ? propose : {};
   const moi = liste(base.users).find((u) => u && u.id === compteId);
@@ -782,7 +844,15 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId) {
     else sortie[cle] = base[cle];
   });
 
-  sortie.users = comptesDeLEquipe(base, envoye, moi, peut);
+  sortie.users = preserverIdentifiants(base.users, comptesDeLEquipe(base, envoye, moi, peut));
+  /*
+   * Les comptes clients ne passent par aucun tamis — l'équipe les gère entièrement. Ils ont donc
+   * besoin de la même protection, et ce sont eux qui l'ont payée : deux des trois comptes clients
+   * de la base n'avaient plus de mot de passe.
+   */
+  if (sortie.clientAccounts !== undefined) {
+    sortie.clientAccounts = preserverIdentifiants(base.clientAccounts, sortie.clientAccounts);
+  }
 
   /*
    * Le journal ne se réécrit pas, il s'ajoute.
@@ -812,6 +882,32 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId) {
     role: moi.role,
   }];
   sortie.activityLog = [...refus, ...ajouts, ...anciens].slice(0, 500);
+
+  /*
+   * L'alerte d'écrasement — la trace que quelqu'un doit VOIR, pas seulement retrouver.
+   *
+   * Le journal consigne le refus, mais personne ne lit le journal à l'heure où l'accident se
+   * produit. Cette liste-ci est celle que l'application affiche en bandeau rouge, et celle que le
+   * serveur transforme en courriel immédiat au responsable. Elle nomme le compte et l'appareil :
+   * sans cela on saurait qu'une page périmée tourne, sans savoir laquelle aller fermer.
+   */
+  const alertesBase = liste(base.alertesEcrasement);
+  const alertes = reunirAlertesEcrasement(alertesBase, envoye.alertesEcrasement);
+  if (fondues.length) {
+    alertes.unshift({
+      id: `ecrasement-${Date.now()}`,
+      le: new Date().toISOString(),
+      compte: signature,
+      compteId: moi.id,
+      role: moi.role,
+      collections: fondues,
+      appareil: typeof contexte?.appareil === "string" ? contexte.appareil.slice(0, 300) : "",
+      adresse: typeof contexte?.adresse === "string" ? contexte.adresse.slice(0, 60) : "",
+      vue: false,
+    });
+  }
+  if (alertes.length) sortie.alertesEcrasement = alertes.slice(0, MAX_ALERTES_ECRASEMENT);
+  else delete sortie.alertesEcrasement;
 
   /*
    * Les messages WhatsApp entrants ne se réécrivent pas non plus.

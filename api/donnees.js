@@ -37,6 +37,7 @@ import {
   vuePartenaire, fusionnerEcriturePartenaire, partenaireDuCompte,
   fusionnerEcritureEquipe,
 } from "./_cloisonnement.js";
+import { envoyerAlerteEcrasement } from "./_alerte.js";
 
 const TABLE = "bde_data";
 
@@ -135,6 +136,21 @@ export default async function handler(req, res) {
     }
 
     if (req.method === "DELETE") {
+      /*
+       * ON NE SUPPRIME QUE DES SAUVEGARDES.
+       *
+       * Cette porte acceptait n'importe quelle clé autorisée — y compris `bde-data`, c'est-à-dire
+       * le document de l'entreprise. Une seule requête, faite depuis n'importe quelle session
+       * d'équipe, effaçait tout : les colis, les clients, la caisse, le journal. Et elle passait
+       * à côté du garde-fou de _cloisonnement.js, qui ne protège que les ÉCRITURES — il n'y avait
+       * plus de document à protéger.
+       *
+       * Aucun écran n'en a besoin : la seule suppression que fait l'application est la rotation
+       * des vieilles sauvegardes. On la limite donc à ce qu'elle sert réellement.
+       */
+      if (!clef.startsWith("bde-backup-")) {
+        return res.status(403).json({ error: "Seules les sauvegardes peuvent être supprimées." });
+      }
       const reponse = await fetch(
         `${url}/rest/v1/${TABLE}?key=eq.${encodeURIComponent(clef)}`,
         { method: "DELETE", headers: { ...entetes, Prefer: "return=minimal" } },
@@ -201,6 +217,12 @@ export default async function handler(req, res) {
        * rotation automatique : la passer dans ce tamis n'aurait aucun sens.
        */
       let aEcrire = valeur;
+      /*
+       * L'alerte à envoyer, s'il y en a une. Elle est repérée ici mais expédiée APRÈS l'écriture :
+       * prévenir d'un refus avant d'avoir remis les données en place laisserait une fenêtre où le
+       * message dit « vos données sont intactes » alors que rien n'est encore enregistré.
+       */
+      let alerteAEnvoyer = null;
       if (!cloisonne && clef === "bde-data") {
         const lecture = await fetch(
           `${url}/rest/v1/${TABLE}?key=eq.${encodeURIComponent(clef)}&select=value`,
@@ -210,7 +232,23 @@ export default async function handler(req, res) {
         const lignesActuelles = await lecture.json();
         const actuel = Array.isArray(lignesActuelles) ? lignesActuelles[0]?.value : null;
         // Première écriture d'une base neuve : il n'y a pas encore de règles à faire respecter.
-        if (actuel) aEcrire = fusionnerEcritureEquipe(actuel, valeur, compteId);
+        if (actuel) {
+          aEcrire = fusionnerEcritureEquipe(actuel, valeur, compteId, {
+            appareil: req.headers["user-agent"] || "",
+            adresse: String(req.headers["x-forwarded-for"] || "").split(",")[0].trim(),
+          });
+          /*
+           * Une alerte est nouvelle si son identifiant n'était pas déjà en base. On la reconnaît
+           * ainsi plutôt qu'en comparant les longueurs : la page renvoie sa propre copie de la
+           * liste, et compter ne dirait rien de fiable.
+           */
+          const connues = new Set(
+            (Array.isArray(actuel.alertesEcrasement) ? actuel.alertesEcrasement : [])
+              .map((a) => a && a.id),
+          );
+          alerteAEnvoyer = (Array.isArray(aEcrire.alertesEcrasement) ? aEcrire.alertesEcrasement : [])
+            .find((a) => a && !connues.has(a.id)) || null;
+        }
       }
       if (cloisonne) {
         const lecture = await fetch(
@@ -243,6 +281,16 @@ export default async function handler(req, res) {
         const detail = await reponse.text().catch(() => "");
         console.error("Écriture impossible", reponse.status, detail);
         return res.status(502).json({ error: "Enregistrement impossible" });
+      }
+      /*
+       * Les données sont en place : on peut maintenant prévenir. L'envoi est attendu — quelques
+       * centaines de millisecondes — parce qu'une fonction serverless qui rend la main est
+       * arrêtée : un envoi lancé sans être attendu ne partirait pas une fois sur deux. Un échec
+       * du courriel ne change rien à la réponse : l'enregistrement, lui, a bien eu lieu.
+       */
+      if (alerteAEnvoyer) {
+        const envoi = await envoyerAlerteEcrasement(aEcrire, alerteAEnvoyer);
+        if (!envoi.envoye) console.error("Alerte d'écrasement non envoyée :", envoi.raison, envoi.detail || "");
       }
       return res.status(200).json({ ok: true });
     }

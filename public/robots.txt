@@ -1,0 +1,32 @@
+# Ba-Diaby Express
+#
+# Ce fichier ne protège rien : il demande. Un robot mal intentionné l'ignore, et c'est pour
+# celui-là que les verrous de api/_verrou.js existent. Il sert à ce que les robots honnêtes —
+# les moteurs de recherche, les aspirateurs d'entraînement — n'aillent pas indexer des pages qui
+# n'ont rien à faire dans un moteur de recherche.
+#
+# Ce qu'on écarte, et pourquoi :
+#   /api/           les fonctions serveur ; rien à indexer, et chaque appel coûte.
+#   /recuperation   la page de secours du 26 août ; elle lit la mémoire de l'appareil.
+#   ?suivi=         les pages de suivi d'un colis nommé. Indexer « BDE260801 » reviendrait à
+#                   publier dans Google le nom de l'expéditeur et du destinataire.
+
+User-agent: *
+Disallow: /api/
+Disallow: /recuperation.html
+Disallow: /*?suivi=
+Disallow: /*&suivi=
+Allow: /
+
+# Les robots d'entraînement des modèles de langage : rien de ce site ne leur est destiné.
+User-agent: GPTBot
+Disallow: /
+
+User-agent: CCBot
+Disallow: /
+
+User-agent: ClaudeBot
+Disallow: /
+
+User-agent: Google-Extended
+Disallow: /

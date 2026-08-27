@@ -499,3 +499,27 @@ export async function flushOutbox() {
 export function pendingSyncCount() {
   return getQueue().length;
 }
+
+/**
+ * Relire le document SUR LE SERVEUR, sans jamais se rabattre sur le cache.
+ *
+ * POURQUOI CETTE FONCTION EXISTE
+ * ------------------------------
+ * `storage.get` fait exactement l'inverse, et c'est voulu : quand le réseau tombe, mieux vaut la
+ * dernière version connue qu'un écran vide. Mais pour VÉRIFIER qu'une écriture est bien arrivée,
+ * ce repli est un piège — `storage.set` écrit le cache AVANT d'appeler le serveur, si bien qu'une
+ * relecture qui accepte le cache retrouverait toujours ce qu'on vient de saisir, même si le
+ * serveur n'en a jamais entendu parler. Elle confirmerait un enregistrement qui n'a pas eu lieu.
+ *
+ * Celle-ci ne répond donc que ce que le serveur a dit, et annonce franchement son échec.
+ *
+ * Retourne { valeur } si le serveur a répondu, { injoignable: true } sinon. Ne lève pas : ne pas
+ * pouvoir vérifier n'est pas une erreur de l'agent, et son colis est peut-être bien enregistré.
+ */
+export async function relireDuServeur(key = "bde-data") {
+  const parServeur = await appelServeur(`?cle=${encodeURIComponent(key)}`);
+  if (parServeur.indisponible) return { injoignable: true };
+  if (parServeur.corps?.cleAbsente) return { valeur: null };
+  if (!parServeur.ok) return { injoignable: true };
+  return { valeur: parServeur.corps?.value ?? null };
+}

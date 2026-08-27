@@ -33,6 +33,7 @@
 
 import crypto from "node:crypto";
 import { signerSession } from "./_session.js";
+import { passage, adresseDe, refuser } from "./_verrou.js";
 
 /** Durée de validité du jeton. Assez longue pour une journée de travail, assez courte pour qu'un
  *  jeton volé sur un téléphone perdu cesse de servir rapidement. */
@@ -134,6 +135,14 @@ export function comptesCorrespondants(liste, saisi) {
  * ce compteur n'est donc pas une protection absolue — c'est un ralentisseur, qui suffit à rendre
  * une attaque par dictionnaire inconfortable, en complément des 150 000 tours de PBKDF2.
  */
+/*
+ * Le plafond par connexion. Large : dans une agence, plusieurs personnes partagent la même sortie
+ * internet et se connectent le matin les unes après les autres, parfois en se trompant. Quarante
+ * essais en dix minutes ne gênent personne, et arrêtent net un balayage de mots de passe.
+ */
+const ESSAIS_PAR_CONNEXION = 40;
+const FENETRE_CONNEXION_MS = 10 * 60 * 1000;
+
 const essais = new Map();
 function tropDEssais(cle) {
   const maintenant = Date.now();
@@ -183,9 +192,28 @@ export default async function handler(req, res) {
      */
     const espaceClient = espace === "client";
 
-    const cleEssais = `${req.headers["x-forwarded-for"] || "?"}|${String(identifiant).toLowerCase()}`;
+    /*
+     * DEUX COMPTEURS, PARCE QU'IL Y A DEUX ATTAQUES.
+     *
+     * Le premier compte les essais sur UN compte : c'est ce qui arrête quelqu'un qui cherche le mot
+     * de passe d'une personne précise. Il ne voyait rien, en revanche, de l'attaque inverse — un
+     * seul mot de passe très courant essayé sur cent identifiants différents. Chaque compte n'était
+     * touché qu'une fois, donc aucun plafond n'était atteint, et c'est pourtant la manière dont on
+     * entre le plus souvent : il suffit d'une personne dans l'entreprise qui ait choisi « 123456 ».
+     *
+     * Le second compte donc les essais par CONNEXION, quel que soit l'identifiant visé.
+     */
+    const cleEssais = `${adresseDe(req)}|${String(identifiant).toLowerCase()}`;
     if (tropDEssais(cleEssais)) {
       return res.status(429).json({ error: "Trop de tentatives. Réessayez dans quelques minutes." });
+    }
+    const parConnexion = passage({
+      nature: "connexion", cle: adresseDe(req),
+      max: ESSAIS_PAR_CONNEXION, fenetreMs: FENETRE_CONNEXION_MS,
+    });
+    if (parConnexion.bloque) {
+      return refuser(res, parConnexion.dansSecondes,
+        "Trop de tentatives de connexion depuis cette connexion. Réessayez dans quelques minutes.");
     }
 
     const reponse = await fetch(`${url}/rest/v1/bde_data?key=eq.bde-data&select=value`, {

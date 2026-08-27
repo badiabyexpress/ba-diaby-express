@@ -22,11 +22,17 @@
       secours, et la vraie police prend le relais à son arrivée (display=swap).
     -->
     <link
+      id="polices"
       rel="preload"
       as="style"
       href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap"
-      onload="this.onload=null;this.rel='stylesheet'"
     />
+    <!--
+      La promotion en feuille de style se faisait par un attribut onload=, c'est-à-dire du
+      JavaScript écrit dans le HTML. C'était le seul endroit du site qui obligeait à ouvrir la
+      politique de sécurité aux scripts en ligne — voir public/polices.js.
+    -->
+    <script src="/polices.js" defer></script>
     <noscript>
       <link
         rel="stylesheet"

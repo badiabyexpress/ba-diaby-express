@@ -23,6 +23,8 @@
  * deviendra indispensable le jour où la base sera fermée au public — c'est le but de la manœuvre.
  */
 
+import { passage, adresseDe, refuser } from "./_verrou.js";
+
 const CLE_DONNEES = "bde-data";
 
 /** Les étapes visibles d'un colis, sans les commentaires internes des agents. */
@@ -96,10 +98,42 @@ async function lireBase() {
   return { donnees: valeur };
 }
 
+/*
+ * Les plafonds du suivi public.
+ *
+ * Une personne qui suit ses colis en consulte quelques-uns, revient plus tard, en consulte
+ * quelques autres : trente recherches en dix minutes lui laissent une marge très large. Un
+ * programme qui compte de un en un fait cela en trois secondes.
+ *
+ * Le second plafond vise l'aspiration elle-même. Chercher un numéro qui n'existe pas est normal
+ * (une faute de frappe, un colis pas encore saisi) ; en chercher dix qui n'existent pas d'affilée
+ * ne l'est pas — c'est ce que fait exactement un compteur qui balaie les numéros. On coupe donc
+ * plus tôt sur les recherches infructueuses que sur les autres, car un aspirateur en produit
+ * beaucoup et un client presque aucune.
+ */
+const SUIVIS_PAR_FENETRE = 30;
+const FENETRE_SUIVI_MS = 10 * 60 * 1000;
+const INTROUVABLES_PAR_FENETRE = 10;
+
 export default async function handler(req, res) {
   if (req.method !== "GET") return res.status(405).json({ error: "Méthode non autorisée" });
 
   const { suivi, vitrine, cgu } = req.query || {};
+
+  /*
+   * Le verrou est posé AVANT la lecture de la base : un refus doit coûter moins cher qu'une
+   * réponse, sinon limiter les appels revient à s'infliger la charge qu'on voulait éviter.
+   */
+  if (suivi !== undefined) {
+    const compte = passage({
+      nature: "suivi-public", cle: adresseDe(req),
+      max: SUIVIS_PAR_FENETRE, fenetreMs: FENETRE_SUIVI_MS,
+    });
+    if (compte.bloque) {
+      return refuser(res, compte.dansSecondes,
+        "Trop de recherches de suivi depuis cette connexion. Réessayez dans quelques minutes.");
+    }
+  }
 
   try {
     const { donnees, erreur } = await lireBase();
@@ -131,7 +165,23 @@ export default async function handler(req, res) {
       // Une recherche vide ne renvoie pas « tous les colis » : elle ne renvoie rien.
       if (!code) return res.status(200).json({ colis: [], users: [] });
       const trouve = (donnees.colis || []).find((c) => String(c.tracking || "").toUpperCase() === code);
-      if (!trouve) return res.status(200).json({ colis: [], users: [] });
+      if (!trouve) {
+        /*
+         * Un numéro introuvable ne coûte rien à celui qui s'est trompé, et beaucoup à celui qui
+         * balaie. On le compte donc à part, avec un plafond plus bas — et la réponse reste la
+         * même (une liste vide) pour ne pas apprendre à l'automate ce qui existe et ce qui n'existe
+         * pas.
+         */
+        const balayage = passage({
+          nature: "suivi-introuvable", cle: adresseDe(req),
+          max: INTROUVABLES_PAR_FENETRE, fenetreMs: FENETRE_SUIVI_MS,
+        });
+        if (balayage.bloque) {
+          return refuser(res, balayage.dansSecondes,
+            "Trop de numéros de suivi inconnus depuis cette connexion. Réessayez dans quelques minutes.");
+        }
+        return res.status(200).json({ colis: [], users: [] });
+      }
       const partenaire = trouve.partenaireId
         ? partenairePublic((donnees.users || []).find((u) => u.id === trouve.partenaireId))
         : null;

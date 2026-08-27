@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue, memo } from "react";
 import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, ChevronDown, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell, SlidersHorizontal, Copy, MoreHorizontal, Wallet } from "lucide-react";
 import { ROLES, PERMISSIONS_SCHEMA, ROLE_DEFAULT_PERMISSIONS, effectivePermission } from "../api/_permissions.js";
-import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree } from "./lib/storage.js";
+import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree, relireDuServeur } from "./lib/storage.js";
 
 /* ---------- design tokens ----------
 Identité : Navy #0A2647 · Rouge de marque #C8102E · Blanc #FFFFFF
@@ -3342,7 +3342,46 @@ function App() {
         return { queued: true, error: e };
       });
   }, [modeSecours]);
-  const notify = useCallback((msg) => { setToast(msg); setTimeout(() => setToast(null), 2800); }, []);
+  /**
+   * Enregistrer, PUIS relire le serveur pour vérifier que c'est bien arrivé.
+   *
+   * Le 26 août au soir, seize colis ont disparu d'un enregistrement. Le garde-fou empêche
+   * désormais qu'une page périmée les écrase, mais il restait ce trou-ci : l'application croyait
+   * le serveur sur parole. Elle annonçait « enregistré » parce que l'appel n'avait pas levé
+   * d'erreur — jamais parce qu'elle avait constaté que la ligne y était.
+   *
+   * Elle la constate maintenant. Trois réponses, et trois seulement :
+   *
+   *   confirme   — le serveur rend le document, et le colis y est. C'est le seul cas où l'on
+   *                peut dire « enregistré » sans mentir.
+   *   attente    — l'écriture est partie en file (hors ligne), ou le serveur n'a pas pu être
+   *                relu. On ne sait pas, et on le dit : la saisie n'est pas perdue pour autant.
+   *   absent     — le serveur a répondu, et la ligne N'Y EST PAS. C'est le cas grave, celui qu'on
+   *                n'avait aucun moyen de voir jusqu'ici.
+   *
+   * `verifier` reçoit le document du serveur et répond vrai si ce qu'on vient d'écrire s'y trouve.
+   */
+  const persisterEtVerifier = useCallback(async (suivant, verifier) => {
+    const resultat = await persist(suivant);
+    if (resultat?.refuse) return { etat: "refuse" };
+    if (resultat?.queued) return { etat: "attente", raison: "file" };
+    try {
+      const relu = await relireDuServeur("bde-data");
+      if (relu.injoignable) return { etat: "attente", raison: "injoignable" };
+      if (!relu.valeur) return { etat: "absent" };
+      return { etat: verifier(relu.valeur) ? "confirme" : "absent" };
+    } catch (e) {
+      /* Ne pas pouvoir vérifier n'est pas un échec d'enregistrement : on ne l'annonce pas comme tel. */
+      return { etat: "attente", raison: "injoignable" };
+    }
+  }, [persist]);
+
+  /*
+   * Le bandeau d'information. Deux secondes huit conviennent à « Colis enregistré » — pas à
+   * « le serveur ne l'a pas gardé » : cette phrase-là doit encore être à l'écran quand l'agent
+   * relève la tête, sinon l'alerte passe inaperçue et on retombe exactement sur le 26 août.
+   */
+  const notify = useCallback((msg, duree = 2800) => { setToast(msg); setTimeout(() => setToast(null), duree); }, []);
   function setLanguage(l) { setLang(l); persist({ ...data, lang: l }); }
   function toggleTheme() { const next = theme === "dark" ? "light" : "dark"; setTheme(next); persist({ ...data, theme: next }); }
   // Si une langue désactivée avait été enregistrée auparavant, on retombe sur le français
@@ -3616,8 +3655,9 @@ function App() {
             </div>
           )}
           <main style={{ flex: 1, padding: isMobile ? "16px 14px" : "28px 32px", overflowY: "auto", minWidth: 0 }}>
-            {view === "dashboard" && (session.role === "Partenaire" ? <PartnerDashboard data={data} session={session} persist={persist} notify={notify} onglet={ongletPartenaire} /> : <Dashboard data={data} session={session} onNavigate={setView} onNouveauColis={() => { setView("colis"); setOuvrirFormulaireColis((n) => n + 1); }} />)}
-            {view === "colis" && <ColisView data={data} persist={persist} session={session} notify={notify} t={t} initialQuery={colisInitialQuery} ouvrirFormulaire={ouvrirFormulaireColis} />}
+            <BandeauEcrasement data={data} persist={persist} session={session} />
+            {view === "dashboard" && (session.role === "Partenaire" ? <PartnerDashboard data={data} session={session} persist={persist} verifier={persisterEtVerifier} notify={notify} onglet={ongletPartenaire} /> : <Dashboard data={data} session={session} onNavigate={setView} onNouveauColis={() => { setView("colis"); setOuvrirFormulaireColis((n) => n + 1); }} />)}
+            {view === "colis" && <ColisView data={data} persist={persist} verifier={persisterEtVerifier} session={session} notify={notify} t={t} initialQuery={colisInitialQuery} ouvrirFormulaire={ouvrirFormulaireColis} />}
             {view === "centreclients" && (effectivePermission(session, "espaceclient.gerer")
               ? <CentreClientsPage data={data} persist={persist} notify={notify} session={session} />
               : <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>
@@ -4710,7 +4750,23 @@ function ClientRegisterForm({ data, persist, onRegistered, onCancel }) {
         id: `cli${Date.now()}`, nom, prenom, identifiant: identifiant.trim(), ...identifiants,
         telephone, adresse, email, createdAt: new Date().toISOString(),
       };
-      persist({ ...data, clientAccounts: [...(data.clientAccounts || []), account] });
+      /*
+       * Voie de secours : le serveur d'inscription n'a pas répondu, le compte est créé d'ici. On
+       * ne se contente pas de l'écrire — on relit la base et on vérifie que le compte y est.
+       * Sans cela, quelqu'un repartirait avec un identifiant, un mot de passe, et rien derrière :
+       * il ne s'en apercevrait qu'à sa prochaine connexion, refusée sans explication.
+       */
+      const ecriture = await persist({ ...data, clientAccounts: [...(data.clientAccounts || []), account] });
+      if (!ecriture?.queued) {
+        const relu = await relireDuServeur("bde-data").catch(() => ({ injoignable: true }));
+        const enregistre = relu.valeur
+          && (relu.valeur.clientAccounts || []).some((c) => c && c.id === account.id);
+        if (relu.valeur && !enregistre) {
+          setErr("Votre compte n’a pas été enregistré : le serveur ne l’a pas gardé. Réessayez dans un instant, ou contactez l’agence.");
+          setLoading(false);
+          return;
+        }
+      }
       onRegistered(account);
     } catch (ex) {
       console.error("Échec de la création du compte :", ex);
@@ -6750,6 +6806,62 @@ const StatCard = memo(function StatCard({ label, value, icon: Icon, tint, trend,
   );
 });
 
+/*
+ * LE BANDEAU D'ÉCRASEMENT
+ *
+ * Le serveur consigne dans `alertesEcrasement` chaque enregistrement qu'il a refusé parce qu'une
+ * page périmée allait effacer des collections entières. Le journal en garde trace, et un courriel
+ * part au responsable — mais celui qui travaille dans l'application, lui, ne va pas lire le
+ * journal. Ce bandeau est là pour qu'il l'apprenne sans le chercher.
+ *
+ * Il dit d'abord que les données sont intactes. Une alerte qui commence par annoncer une perte
+ * fait perdre une heure à celui qui la lit, alors que le refus est précisément ce qui a tout sauvé.
+ *
+ * Le bouton ne « supprime » pas l'alerte : il la marque lue. Elle reste dans le document, et le
+ * journal garde de toute façon la trace du refus — sinon il suffirait d'un clic pour effacer le
+ * seul indice qu'un appareil dangereux tourne quelque part.
+ */
+function BandeauEcrasement({ data, persist, session }) {
+  // Seuls les comptes de l'entreprise sont concernés : un partenaire n'a pas d'onglet à aller
+  // fermer chez quelqu'un d'autre, et le message ne lui apprendrait rien d'utile.
+  if (!session || session.role === "Partenaire") return null;
+  const alertes = (data?.alertesEcrasement || []).filter((a) => a && !a.vue);
+  if (!alertes.length) return null;
+
+  const marquerLues = () => {
+    const lues = new Set(alertes.map((a) => a.id));
+    persist({
+      ...data,
+      alertesEcrasement: (data.alertesEcrasement || []).map((a) => (lues.has(a.id) ? { ...a, vue: true } : a)),
+    });
+  };
+
+  return (
+    <div style={{ background: "var(--danger-bg)", border: "1.5px solid var(--danger-fg)", borderRadius: 12, padding: "14px 16px", marginBottom: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+        <AlertTriangle size={17} color="var(--danger-fg)" />
+        <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--danger-fg)" }}>
+          {alertes.length > 1 ? `${alertes.length} enregistrements refusés` : "Un enregistrement a été refusé"} — page périmée
+        </div>
+      </div>
+      <div style={{ fontSize: 13, color: "var(--text)", marginBottom: 10 }}>
+        Vos données sont intactes : le serveur a remis en place ce qui allait être effacé. Il reste à
+        fermer l’onglet fautif, sinon il réessaiera à chaque geste.
+      </div>
+      {alertes.slice(0, 3).map((a) => (
+        <div key={a.id} style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 4 }}>
+          {new Date(a.le).toLocaleString("fr-FR")} — <strong style={{ color: "var(--text)" }}>{a.compte || "compte inconnu"}</strong>
+          {" · "}
+          {(a.collections || []).map((c) => `${c.cle} : ${c.avant} → ${c.apres}`).join(" · ") || "—"}
+        </div>
+      ))}
+      <button onClick={marquerLues} style={{ marginTop: 10, background: "var(--danger-fg)", color: "#fff", border: "none", borderRadius: 8, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+        L’onglet est fermé — masquer
+      </button>
+    </div>
+  );
+}
+
 function Dashboard({ data, session, onNavigate, onNouveauColis }) {
   const stats = useMemo(() => {
     const colis = session.agence ? data.colis.filter((c) => (c.site || "Bambeto") === session.agence) : data.colis;
@@ -7086,7 +7198,7 @@ Dashboard = memo(Dashboard);
  * au tarif de son contrat, fixé par l'administrateur — colis par colis, puis regroupé sur ses
  * factures. Il dépose ses colis depuis cet écran ; un agent les vérifie ensuite un à un.
  */
-function PartnerDashboard({ data, session, persist, notify, onglet }) {
+function PartnerDashboard({ data, session, persist, verifier, notify, onglet }) {
   const [periode, setPeriode] = useState("mois");
   const [showForm, setShowForm] = useState(false);
   const [showAnnonce, setShowAnnonce] = useState(false);
@@ -7484,15 +7596,28 @@ function PartnerDashboard({ data, session, persist, notify, onglet }) {
     return provisoire;
   }
 
+  /*
+   * Un colis enregistré par un partenaire compte autant que les autres : il est relu sur le
+   * serveur avant qu'on annonce quoi que ce soit. Sans quoi le partenaire refermerait son
+   * formulaire sur un colis qui n'existe nulle part — et il n'a, lui, aucun moyen de s'en
+   * apercevoir avant que son client ne réclame.
+   */
   async function enregistrerColis(colis) {
-    const resultat = await persist({
-      ...data,
-      colis: [colis, ...data.colis],
-      activityLog: pushActivity(data, session, "Colis partenaire créé", `${colis.tracking} — ${colis.destinataire}`),
-    });
-    notify?.(resultat?.queued
-      ? `Colis ${colis.tracking} en attente de synchronisation — ne fermez pas cette page avant confirmation`
-      : `Colis ${colis.tracking} enregistré`);
+    const suite = await verifier(
+      {
+        ...data,
+        colis: [colis, ...data.colis],
+        activityLog: pushActivity(data, session, "Colis partenaire créé", `${colis.tracking} — ${colis.destinataire}`),
+      },
+      (document) => (document?.colis || []).some((c) => c && c.tracking === colis.tracking),
+    );
+    if (suite.etat === "absent") {
+      notify?.(`Colis ${colis.tracking} NON ENREGISTRÉ — le serveur ne l’a pas gardé. Réessayez, et prévenez si cela recommence.`, 15000);
+      return; // le formulaire reste ouvert : la saisie est encore là
+    }
+    notify?.(...(suite.etat === "confirme"
+      ? [`Colis ${colis.tracking} enregistré et vérifié sur le serveur`]
+      : [`Colis ${colis.tracking} en attente de synchronisation — ne fermez pas cette page avant confirmation`, 9000]));
     setShowForm(false);
   }
 
@@ -11848,7 +11973,7 @@ const ColisStatCard = memo(function ColisStatCard({ label, value, icon: Icon, ti
   );
 });
 
-function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirFormulaire }) {
+function ColisView({ data, persist, verifier, session, notify, t, initialQuery, ouvrirFormulaire }) {
   const [showForm, setShowForm] = useState(false);
   const [showFormPartenaire, setShowFormPartenaire] = useState(false);
   const [showAi, setShowAi] = useState(false);
@@ -12040,10 +12165,26 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
               recuPar: `${session.prenom} ${session.nom}`.trim() || session.identifiant }
           : p))
       : data.preAlertesPartenaire;
-    const resultat = await persist({ ...data, colis: [colisPropre, ...data.colis], preAlertes, preAlertesPartenaire, activityLog: logActivity("Colis créé", `${colis.tracking} — ${colis.destinataire}`) });
-    notify(resultat?.queued
-      ? `Colis ${colis.tracking} en attente de synchronisation — ne fermez pas cette page avant confirmation`
-      : `Colis ${colis.tracking} enregistré`);
+    /*
+     * On n'annonce plus « enregistré » parce que l'appel n'a pas levé d'erreur : on relit le
+     * serveur et on constate que le colis y est. C'est la seule façon de ne pas promettre à
+     * l'agent un enregistrement qui n'a pas eu lieu.
+     */
+    const suite = await verifier(
+      { ...data, colis: [colisPropre, ...data.colis], preAlertes, preAlertesPartenaire, activityLog: logActivity("Colis créé", `${colis.tracking} — ${colis.destinataire}`) },
+      (document) => (document?.colis || []).some((c) => c && c.tracking === colis.tracking),
+    );
+    if (suite.etat === "absent") {
+      /*
+       * Le serveur a répondu, et le colis n'y est pas. On ne ferme surtout pas le formulaire : la
+       * saisie reste à l'écran, et l'agent peut réessayer sans tout retaper.
+       */
+      notify(`Colis ${colis.tracking} NON ENREGISTRÉ — le serveur ne l’a pas gardé. Réessayez, et prévenez si cela recommence.`, 15000);
+      return;
+    }
+    notify(...(suite.etat === "confirme"
+      ? [`Colis ${colis.tracking} enregistré et vérifié sur le serveur`]
+      : [`Colis ${colis.tracking} en attente de synchronisation — ne fermez pas cette page avant confirmation`, 9000]));
     // Notification automatique selon les préférences (Configuration → Notifications WhatsApp).
     // Sous la marque d'un partenaire, le client ne doit pas recevoir un message signé
     // Ba-Diaby Express : il a commandé chez le partenaire et ne nous connaît pas.
@@ -12054,9 +12195,25 @@ function ColisView({ data, persist, session, notify, t, initialQuery, ouvrirForm
       .catch(() => { /* une notification ne bloque jamais l'enregistrement */ });
     setShowForm(false);
   }
-  function importerColisMany(nouveaux) {
-    persist({ ...data, colis: [...nouveaux, ...data.colis], activityLog: logActivity("Import Excel", `${nouveaux.length} colis importés`) });
-    notify(`${nouveaux.length} colis importés avec succès`);
+  /*
+   * Un import porte des dizaines de colis d'un coup : c'est l'écriture qu'on a le moins envie de
+   * croire sur parole, et celle dont la perte se remarque le plus tard. On relit donc le serveur
+   * et on y cherche le dernier des colis importés avant d'annoncer quoi que ce soit.
+   */
+  async function importerColisMany(nouveaux) {
+    const dernier = nouveaux[nouveaux.length - 1]?.tracking;
+    const suite = await verifier(
+      { ...data, colis: [...nouveaux, ...data.colis], activityLog: logActivity("Import Excel", `${nouveaux.length} colis importés`) },
+      (document) => !dernier || (document?.colis || []).some((c) => c && c.tracking === dernier),
+    );
+    if (suite.etat === "absent") {
+      notify(`Import NON ENREGISTRÉ — le serveur n’a gardé aucun des ${nouveaux.length} colis. Recommencez l’import, et prévenez si cela recommence.`, 15000);
+      return suite.etat;
+    }
+    notify(...(suite.etat === "confirme"
+      ? [`${nouveaux.length} colis importés et vérifiés sur le serveur`]
+      : [`${nouveaux.length} colis importés — en attente de synchronisation, ne fermez pas cette page`, 9000]));
+    return suite.etat;
   }
   function updateColis(tracking, patch) {
     const avant = data.colis.find((c) => c.tracking === tracking);
@@ -21976,7 +22133,7 @@ function ImportExcelModal({ onClose, onImportMany, data, session }) {
 
   const validRows = (rows || []).filter((r) => r.valide);
 
-  function importer() {
+  async function importer() {
     setImporting(true);
     const existingTrackings = (data.colis || []).map((c) => c.tracking);
     const nouveaux = validRows.map((r) => {
@@ -21999,8 +22156,13 @@ function ImportExcelModal({ onClose, onImportMany, data, session }) {
         createdAt: new Date().toISOString(), pod: null, signature: null, driverLoc: null,
       };
     });
-    onImportMany(nouveaux);
+    /*
+     * On attend le verdict du serveur avant de refermer : si l'import n'a pas été gardé, la
+     * fenêtre reste ouverte avec le fichier déjà lu, et un second essai est à un clic.
+     */
+    const etat = await onImportMany(nouveaux);
     setImporting(false);
+    if (etat === "absent") return;
     onClose();
   }
 

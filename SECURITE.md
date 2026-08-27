@@ -1003,3 +1003,202 @@ permet d'aller fermer l'onglet.
 
 Éprouvé par `testgardefou` (34 cas), qui rejoue l'envoi exact du 26 août et vérifie aussi que les
 trois suppressions légitimes passent toujours.
+
+## « Enregistré » ne se dit plus sur parole
+
+L'application annonçait « Colis enregistré » dès que l'appel au serveur n'avait pas levé d'erreur.
+Ce n'est pas la même chose que constater que le colis y est. Le 26 août, l'écriture qui a effacé la
+journée a répondu comme les autres : sans erreur.
+
+Toute création passe désormais par une **relecture du serveur**. On écrit, puis on relit la base et
+on y cherche ce qu'on vient d'écrire — le numéro de suivi du colis, l'identifiant du compte. Trois
+réponses, et la troisième n'existait pas avant :
+
+- **le serveur l'a gardé** → « enregistré et vérifié sur le serveur » ;
+- **le serveur est injoignable pour la relecture** → « en attente de synchronisation, ne fermez pas
+  cette page ». Ne pas pouvoir vérifier n'est pas constater une perte : on dit qu'on ne sait pas ;
+- **le serveur a répondu, et ce n'est pas là** → « NON ENREGISTRÉ — le serveur ne l'a pas gardé ».
+  Le formulaire **reste ouvert**, la saisie est intacte, et il n'y a rien à retaper.
+
+La relecture ne s'appuie jamais sur le cache du navigateur (`relireDuServeur` interroge le serveur
+et lui seul). C'est le piège central de ce garde-fou : l'écriture dépose le document dans le cache
+**avant** d'appeler le serveur, donc une relecture tolérante au cache retrouverait toujours ce
+qu'elle cherche et confirmerait un enregistrement qui n'a pas eu lieu. Ce serait pire que l'ancien
+comportement — une fausse certitude, au lieu d'une simple absence de vérification.
+
+Quatre endroits sont couverts : le formulaire de colis de l'équipe, celui de l'espace partenaire,
+l'import Excel (qui referme sa fenêtre seulement si le serveur a gardé les colis), et la création
+d'un compte client quand elle se fait sans le serveur d'inscription. Une alerte de ce genre ne doit
+pas s'effacer avant qu'on l'ait lue : le bandeau ordinaire dure 2,8 secondes, celui-ci quinze.
+
+Éprouvé par `t92` (16 cas), qui enregistre un colis par le vrai formulaire face à un serveur qui
+répond 200 sans rien garder — le cas du 26 août, enfin visible à l'écran.
+
+## Être prévenu pendant que ça arrive
+
+Le garde-fou empêche la perte et consigne son refus. Mais un refus consigné n'est vu que par celui
+qui va le chercher : le 26 août, la trace était dans le journal dès 21 h 41, et elle a été lue le
+lendemain matin. Le refus arrive maintenant par trois chemins, dont deux ne demandent d'aller rien
+chercher.
+
+**Le document garde une alerte nommée.** `alertesEcrasement` retient les vingt derniers refus avec
+la date, le compte, son rôle, ce qui allait disparaître, l'appareil (`User-Agent`) et l'adresse de
+connexion. Sans ces deux derniers, on saurait qu'une page périmée tourne quelque part sans savoir
+laquelle aller fermer — ce qui ne sert à rien.
+
+L'application peut **marquer une alerte lue**, et c'est tout ce qu'elle peut en faire. Elle ne peut
+ni la réécrire ni la supprimer : sinon un enregistrement venu de la page fautive effacerait le seul
+indice de son existence.
+
+**Un bandeau rouge s'affiche dans l'application**, sur toutes les pages, pour les comptes de
+l'entreprise. Il commence par dire que les données sont intactes — une alerte qui annonce d'abord
+une perte fait perdre une heure à celui qui la lit, alors que le refus est précisément ce qui a tout
+sauvé. Puis il nomme le compte, ce qui allait partir, et le geste à faire : fermer l'onglet, le
+rouvrir.
+
+**Un courriel part immédiatement au responsable** (`api/_alerte.js`), avant même que la fonction ne
+rende la main — un envoi non attendu ne partirait pas, une fonction serverless étant arrêtée dès sa
+réponse. Il est envoyé **après** l'écriture : prévenir avant laisserait une fenêtre où le message
+affirme que les données sont intactes alors que rien n'est encore enregistré. Un échec d'envoi ne
+transforme jamais un enregistrement réussi en erreur ; il est seulement consigné. Destinataire :
+`ALERTE_EMAIL` si elle est réglée, sinon le premier administrateur ayant une adresse.
+
+**Pas de WhatsApp, et ce n'est pas un oubli.** Hors de la fenêtre de vingt-quatre heures, Meta
+n'autorise que les modèles approuvés. Une alerte d'incident est par définition imprévisible : elle
+tomberait presque toujours hors fenêtre. Il faudrait d'abord faire approuver un modèle « alerte »
+dans WhatsApp Manager. Écrire aujourd'hui du code qui « enverrait un WhatsApp » reviendrait à
+promettre une alerte qui n'arriverait jamais.
+
+Éprouvé par `testalerte` (31 cas), qui vérifie aussi qu'un nom de compte contenant du HTML ne
+devient pas du HTML dans le courriel.
+## Les verrous contre les automates
+
+Trois portes de ce site s'ouvrent sans mot de passe : la connexion, la création de compte, et le
+suivi public d'un colis. Les deux premières comptaient déjà les essais. La troisième donnait sans
+rien demander — et c'est la plus intéressante à aspirer, parce que les numéros de suivi se suivent :
+`BDE260801`, `BDE260802`, `BDE260803`. Un programme qui compte de un en un ramassait, colis après
+colis, le nom de l'expéditeur et du destinataire de toute l'entreprise. Aucune de ces requêtes
+n'est illégitime prise seule ; c'est leur nombre qui l'est.
+
+Deux plafonds, par connexion (`api/_verrou.js`) :
+
+- **trente recherches de suivi par dix minutes.** Une personne qui suit ses colis en consulte
+  quelques-uns, revient plus tard : la marge est très large. Un automate fait cela en trois
+  secondes ;
+- **dix numéros inconnus par dix minutes.** Chercher un numéro qui n'existe pas est normal — faute
+  de frappe, colis pas encore saisi. En chercher dix d'affilée qui n'existent pas, c'est un
+  balayage. On coupe donc plus tôt là-dessus, parce qu'un aspirateur en produit beaucoup et un
+  client presque aucun.
+
+La réponse à un numéro inconnu **ne change pas** : une liste vide, comme avant. Dire « ce numéro
+n'existe pas » apprendrait à l'automate où continuer. Le refus, lui, porte un `Retry-After` : les
+robots honnêtes le lisent et cessent de revenir en boucle.
+
+**Ce que ces verrous ne font pas, et il faut le dire.** Le compte est tenu en mémoire, dans
+l'instance qui répond. Vercel en lance plusieurs et les éteint : un automate patient, ou réparti sur
+plusieurs adresses, passera au travers. Ce n'est pas une barrière, c'est un plafond — il rend
+l'aspiration lente et voyante là où elle était instantanée et muette. Une vraie barrière demanderait
+un compteur partagé (base ou service dédié) ; c'est le pas d'après, et il se paie.
+
+### Les en-têtes de sécurité
+
+`vercel.json` pose désormais une **politique de sécurité de contenu** (CSP) et six en-têtes qui
+manquaient. La CSP est la seule qui change vraiment quelque chose : elle nomme les origines
+autorisées, de sorte qu'un script glissé dans une page ne peut ni s'exécuter depuis un domaine
+inconnu, ni renvoyer les données ailleurs (`connect-src`). S'y ajoutent HSTS, `nosniff`,
+`X-Frame-Options: DENY` et `frame-ancestors 'none'` (le site ne peut plus être encadré dans une page
+qui l'imite), `Referrer-Policy`, `Permissions-Policy` et `Cross-Origin-Opener-Policy`.
+
+Un seul endroit du site obligeait à laisser `script-src 'unsafe-inline'` — c'est-à-dire à laisser
+passer n'importe quel script inséré dans une page : l'attribut `onload=` de quatre mots qui
+promouvait la feuille de polices. Il est parti dans `public/polices.js`, de même origine. Pour un
+attribut, on renonçait à la protection principale.
+
+`style-src` garde `'unsafe-inline'`, et c'est assumé : toute l'interface est écrite en styles
+attribués (`style={{…}}`), il n'y a pas de moyen de faire autrement sans réécrire l'application.
+Le risque y est sans commune mesure avec celui des scripts.
+
+Une CSP ne casse rien à la compilation : elle casse le site chez le client, silencieusement, en
+refusant une police, un export PDF ou la connexion à la base. Elle est donc éprouvée par `testcsp`
+(7 cas) **sur le site compilé, derrière les vrais en-têtes** : la page s'affiche, la connexion
+fonctionne, les polices sont appliquées, le CDN des exports passe, un script venu d'ailleurs est
+refusé, et la navigation ordinaire ne déclenche aucun refus.
+
+`public/robots.txt` complète le tout en écartant `/api/`, la page de récupération et les URL de
+suivi nommées — indexer `?suivi=BDE260801` reviendrait à publier dans un moteur de recherche le nom
+de l'expéditeur et du destinataire. Ce fichier ne protège rien, il demande : c'est pour ceux qui
+l'ignorent que les verrous existent.
+
+Éprouvé par `testverrou` (24 cas), qui appelle la vraie fonction de suivi et vérifie qu'un client
+qui fait dix recherches d'affilée n'est jamais gêné.
+
+## Ce que l'audit du 27 août a trouvé
+
+Trois défauts réels, dont deux constatés dans la base de production.
+
+### Les mots de passe s'effaçaient par omission
+
+Sur trois comptes clients, **deux n'avaient plus aucun mot de passe** — ni empreinte, ni sel. L'un
+gardait même l'algorithme et le nombre d'itérations, sans l'empreinte qu'ils servent à vérifier.
+Ces personnes ne pouvaient plus entrer, par aucun chemin, et rien ne le signalait : la connexion
+répondait « identifiant ou mot de passe incorrect », comme pour une faute de frappe.
+
+La cause tient en une ligne : le document circule en entier, et il existe des copies dont les
+empreintes ont été **délibérément retirées** — une sauvegarde téléchargée, par exemple, d'où l'on
+ôte les mots de passe parce qu'elle voyage par courriel ou clé USB. Réimportée, cette copie écrasait
+les vraies. L'omission n'était pas distinguée d'un effacement voulu.
+
+La règle est maintenant : une écriture qui ne porte pas d'empreinte pour un compte ne peut pas lui
+en retirer une. Changer de mot de passe continue de fonctionner — un vrai changement apporte une
+empreinte neuve, et celle-là gagne. Vaut pour l'équipe comme pour les clients.
+
+**Les deux comptes abîmés doivent être réparés à la main** : depuis Centre clients, réinitialiser
+l'accès de `Gourrasy` et de `MOUSTAPHA`, ou leur faire utiliser « mot de passe oublié ».
+
+### Une seule requête effaçait tout
+
+`DELETE /api/donnees` acceptait n'importe quelle clé autorisée — y compris `bde-data`, le document
+de l'entreprise. Une seule requête, faite depuis n'importe quelle session d'équipe, effaçait les
+colis, les clients, la caisse et le journal. Et elle passait à côté du garde-fou, qui ne protège que
+les **écritures** : il n'y avait plus de document à protéger.
+
+Aucun écran n'en avait besoin. La seule suppression que fait l'application est la rotation des
+vieilles sauvegardes ; la porte est désormais limitée aux clés `bde-backup-`.
+
+### Le balayage de mots de passe passait sous le radar
+
+La page de connexion comptait les essais sur **un compte** : elle arrêtait qui cherche le mot de
+passe d'une personne précise, et ne voyait rien de l'attaque inverse — un seul mot de passe très
+courant essayé sur cent identifiants. Chaque compte n'était touché qu'une fois, donc aucun plafond
+n'était atteint. C'est pourtant la manière dont on entre le plus souvent : il suffit d'une personne
+dans l'entreprise qui ait choisi « 123456 ». Un second compteur, par connexion et quel que soit
+l'identifiant visé, coupe au quarantième essai — un seuil que plusieurs personnes partageant la
+sortie internet d'une agence n'atteignent jamais.
+
+### Ce que l'audit n'a PAS trouvé
+
+La séparation des espaces tient : un client ou un partenaire ne peut lire ni les sauvegardes, ni la
+liste des clés, ni le document entier, et ce qu'il écrit est reposé sur le vrai document. Les mots
+de passe sont hachés en PBKDF2-SHA256, 150 000 tours, avec un sel par compte. La connexion répond
+la même chose pour un identifiant inconnu et un mot de passe faux, en calculant une empreinte même
+quand aucun compte ne correspond, pour que la durée ne trahisse rien. Les jetons de session sont
+signés et vérifiés à durée constante. Le webhook WhatsApp refuse tout appel non authentifié. La
+table est fermée par RLS sans aucune politique : seule la clé de service passe.
+
+### Ce qui reste ouvert, et qu'il faut savoir
+
+- **Une session vit douze heures et ne peut pas être révoquée.** Changer un mot de passe ou
+  supprimer un compte n'invalide pas le jeton déjà délivré : il reste valable jusqu'à son
+  expiration. Pour un téléphone perdu ou quelqu'un qui part, c'est une demi-journée d'accès. Le
+  remède demande un numéro de version par compte, vérifié à chaque appel.
+- **Le garde-fou est un anti-accident, pas un anti-malveillance.** Un compte d'équipe authentifié
+  peut poser lui-même la marque d'intention et remplacer le document : c'est précisément ce dont
+  une restauration a besoin. Il protège d'une page périmée, pas de quelqu'un qui veut nuire depuis
+  un compte valide.
+- **Les verrous comptent en mémoire** et ne survivent pas au redémarrage d'une instance (voir plus
+  haut).
+- **`CRON_SECRET` n'est toujours pas renseigné** : la sauvegarde de nuit ne tourne pas. Les
+  sauvegardes actuelles sont écrites par le navigateur, à la première ouverture de la journée —
+  elles dépendent donc de quelqu'un qui ouvre l'application.
+- **`WHATSAPP_APP_SECRET` reste facultatif.** Sans lui, le webhook n'est protégé que par le jeton
+  inscrit dans son adresse ; avec lui, chaque appel est vérifié par signature.

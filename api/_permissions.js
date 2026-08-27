@@ -50,6 +50,16 @@ export const PERMISSIONS_SCHEMA = [
     { key: "factures.consulter", label: "Consulter les factures" },
     { key: "factures.creer", label: "Générer une facture" },
     { key: "factures.modifier", label: "Encaisser / modifier un paiement" },
+    /*
+     * Sa propre caisse — ce qu'il a encaissé lui-même, et ce qu'il doit reverser.
+     *
+     * Cette permission était accordée à l'Agent et lue par le menu, mais elle ne figurait dans
+     * AUCUNE liste de droits : impossible de la voir, impossible de la retirer, et
+     * l'administrateur ne l'avait même pas (sa liste se déduit de ce tableau). Le menu « Caisse »
+     * ne s'ouvrait donc à lui que par un autre chemin — la comptabilité — et un rôle sur mesure
+     * qui aurait dû l'avoir ne pouvait pas l'obtenir.
+     */
+    { key: "paiements.voir_propres", label: "Voir sa propre caisse (ce qu’on a encaissé, ce qu’on doit reverser)" },
   ]},
   { group: "CLIENTS", permissions: [
     { key: "clients.consulter", label: "Consulter les clients" },

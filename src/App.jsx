@@ -7411,12 +7411,20 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
         </div>
       )}
 
+      {/*
+        * Les chiffres du tableau de bord suivent « stats.globales », ou à défaut
+        * « stats.personnelles » — deux permissions qui existaient et n'étaient lues nulle part.
+        * Un compte à qui l'on n'a ouvert ni l'une ni l'autre voyait quand même le chiffre
+        * d'affaires de l'entreprise dès la page d'accueil.
+        */}
+      {(effectivePermission(session, "stats.globales") || effectivePermission(session, "stats.personnelles")) && (
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 20 }}>
         <StatCard label="Volume total" value={total} icon={Package} tint="#3D63FF" trend={`+${thisMonth} ce mois`} trendColor="var(--ok-fg)" />
         <StatCard label="Revenus" value={fmt(ca, "EUR")} icon={DollarSign} tint="#16A163" trend={`${fmt(encaisse, "EUR")} encaissés`} trendColor="var(--ok-fg)" outline="#1E4430" />
         <StatCard label="En transit" value={enTransit} icon={Plane} tint="#5B8DEF" trend="Actuellement en cours" trendColor="var(--muted)" />
         <StatCard label="À expédier" value={aExpedier} icon={AlertTriangle} tint="var(--danger-fg)" trend={aExpedier > 0 ? "Nécessite action" : "Rien en attente"} trendColor={aExpedier > 0 ? "var(--danger-fg)" : "var(--muted)"} />
       </div>
+      )}
 
       {soldesCaisse.length > 0 && (
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: "16px 20px", marginBottom: 20 }}>
@@ -7546,7 +7554,8 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
         </div>
       )}
 
-      {parRoute.length > 0 && (
+      {/* La marge par route est une marge : elle suit « compta.marges », comme le résultat. */}
+      {parRoute.length > 0 && effectivePermission(session, "compta.marges") && (
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 20, marginBottom: 20 }}>
           <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14.5, marginBottom: 2 }}>Rentabilité par route</div>
           <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 }}>Marge = prix facturé moins les commissions d’agence. Les frais de transport, de douane et les charges fixes ne sont pas suivis par colis : ce n’est donc pas un résultat net, mais une base fiable pour comparer les routes entre elles.</div>
@@ -10040,26 +10049,81 @@ function calcPrice(countryCode, poids, volume, mode) {
   return +(5 + volKg * rate).toFixed(2);
 }
 
+/**
+ * Ce qu'on affiche à la place d'un écran qu'on n'a pas le droit d'ouvrir.
+ *
+ * Un écran vide, ou un retour muet au menu, laisse croire à une panne : on recommence, on
+ * s'énerve, on appelle. Dire « ce n'est pas votre droit, voici qui peut vous l'ouvrir » règle la
+ * question en une phrase.
+ */
+function AccesRefuse({ onBack }) {
+  return (
+    <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center" }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>Cet écran ne vous est pas ouvert</div>
+      <div style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.6, maxWidth: 460, margin: "0 auto 18px" }}>
+        Votre compte n’a pas le droit correspondant. Un administrateur peut vous l’accorder depuis
+        Configuration → Gestion Utilisateurs.
+      </div>
+      {onBack && (
+        <button onClick={onBack} style={{ background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 9, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+          Retour
+        </button>
+      )}
+    </div>
+  );
+}
+
 function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offline }) {
   const [sub, setSub] = useState(null);
   const back = () => setSub(null);
 
-  if (sub === "identite") return <IdentitePubliquePage data={data} persist={persist} notify={notify} onBack={back} />;
-  if (sub === "devises") return <GestionDevisesPage data={data} persist={persist} session={session} notify={notify} onBack={back} />;
-  if (sub === "commissions") return <CommissionsPage data={data} persist={persist} session={session} notify={notify} onBack={back} />;
-  if (sub === "reception") return <ReceptionTarifsPage data={data} persist={persist} notify={notify} onBack={back} />;
-  if (sub === "adresses") return <AdressesEtSitesPage data={data} persist={persist} notify={notify} onBack={back} />;
-  if (sub === "guide") return <GuidePage onBack={back} />;
-  if (sub === "categories") return <CategoriesProduitsPage data={data} persist={persist} session={session} notify={notify} onBack={back} />;
-  if (sub === "sauvegarde") return <SauvegardePage data={data} persist={persist} notify={notify} session={session} onBack={back} />;
-  if (sub === "notifwa") return <NotificationsWhatsAppPage data={data} persist={persist} notify={notify} onBack={back} />;
-  if (sub === "departs") return <DepartsPage data={data} persist={persist} notify={notify} onBack={back} />;
-  if (sub === "paiement") return <PaiementConfigPage data={data} persist={persist} notify={notify} onBack={back} />;
-  if (sub === "users") return <UtilisateursPage data={data} persist={persist} notify={notify} onBack={back} session={session} />;
-  if (sub === "performance") return <PerformanceAgentsPage data={data} onBack={back} />;
-  if (sub === "pointage") return <PointagePage data={data} persist={persist} notify={notify} onBack={back} session={session} />;
-  if (sub === "systeme") return <ParametresSystemePage data={data} persist={persist} notify={notify} onBack={back} offline={offline} />;
-  if (sub === "journal") return <JournalActivitePage data={data} onBack={back} />;
+  /*
+   * CHAQUE ÉCRAN DERRIÈRE SA PROPRE PERMISSION.
+   *
+   * Toutes ces cartes s'ouvraient sur le seul « config.acceder ». Le serveur, lui, exige déjà la
+   * permission précise pour écrire : api/_cloisonnement.js remet en place ce qui a été changé sans
+   * le droit correspondant. Le résultat était le pire des deux mondes — l'écran s'ouvrait,
+   * acceptait la saisie, annonçait « Tarifs mis à jour », et le serveur reposait silencieusement
+   * l'ancienne valeur. Personne n'apprenait qu'il n'avait pas le droit ; on croyait simplement que
+   * l'application perdait les réglages.
+   *
+   * Les permissions posées ici sont EXACTEMENT celles que le serveur vérifie, section par section.
+   */
+  const droit = (cle) => effectivePermission(session, cle);
+  const ecrans = {
+    identite: { permission: "config.acceder", rendu: () => <IdentitePubliquePage data={data} persist={persist} notify={notify} onBack={back} /> },
+    devises: { permission: "config.tarifs", rendu: () => <GestionDevisesPage data={data} persist={persist} session={session} notify={notify} onBack={back} /> },
+    commissions: { permission: "config.tarifs", rendu: () => <CommissionsPage data={data} persist={persist} session={session} notify={notify} onBack={back} /> },
+    reception: { permission: "config.tarifs", rendu: () => <ReceptionTarifsPage data={data} persist={persist} notify={notify} onBack={back} /> },
+    paiement: { permission: "config.tarifs", rendu: () => <PaiementConfigPage data={data} persist={persist} notify={notify} onBack={back} /> },
+    categories: { permission: "config.categories", rendu: () => <CategoriesProduitsPage data={data} persist={persist} session={session} notify={notify} onBack={back} /> },
+    adresses: { permission: "config.acceder", rendu: () => <AdressesEtSitesPage data={data} persist={persist} notify={notify} onBack={back} /> },
+    departs: { permission: "config.acceder", rendu: () => <DepartsPage data={data} persist={persist} notify={notify} onBack={back} /> },
+    notifwa: { permission: "config.acceder", rendu: () => <NotificationsWhatsAppPage data={data} persist={persist} notify={notify} onBack={back} /> },
+    systeme: { permission: "config.acceder", rendu: () => <ParametresSystemePage data={data} persist={persist} notify={notify} onBack={back} offline={offline} /> },
+    guide: { permission: "config.acceder", rendu: () => <GuidePage onBack={back} /> },
+    journal: { permission: "config.acceder", rendu: () => <JournalActivitePage data={data} onBack={back} /> },
+    /* Une sauvegarde, c'est le fichier entier de l'entreprise qui sort sur un appareil. */
+    sauvegarde: { permission: "stats.exporter", rendu: () => <SauvegardePage data={data} persist={persist} notify={notify} session={session} onBack={back} /> },
+    users: { permission: "users.consulter", rendu: () => <UtilisateursPage data={data} persist={persist} notify={notify} onBack={back} session={session} /> },
+    performance: { permission: "stats.globales", rendu: () => <PerformanceAgentsPage data={data} onBack={back} /> },
+    /* Ouverte à tous : celui qui ne tient pas la fiche de l'équipe voit la sienne, en lecture. */
+    pointage: { permission: null, rendu: () => <PointagePage data={data} persist={persist} notify={notify} onBack={back} session={session} /> },
+  };
+  /* Une carte ne se propose que si l'écran qu'elle ouvre accepterait de s'ouvrir. */
+  const ouvrable = (cle) => {
+    const ecran = ecrans[cle];
+    return !!ecran && (!ecran.permission || droit(ecran.permission));
+  };
+  const ecranDemande = sub ? ecrans[sub] : null;
+  /*
+   * La permission est revérifiée à l'ouverture, et pas seulement sur la carte. Un droit retiré
+   * pendant qu'un écran est ouvert doit le refermer, et non attendre le prochain chargement.
+   */
+  if (ecranDemande) {
+    if (ecranDemande.permission && !droit(ecranDemande.permission)) return <AccesRefuse onBack={back} />;
+    return ecranDemande.rendu();
+  }
 
   const Card = ({ icon: Icon, tint, title, desc, onClick }) => (
     <button onClick={onClick} style={{ display: "flex", gap: 16, textAlign: "start", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16, padding: 20, cursor: "pointer", boxShadow: "0 2px 10px rgba(10,38,71,0.05)" }}>
@@ -10100,24 +10164,24 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
       */}
       <SectionLabel>VOTRE ENTREPRISE</SectionLabel>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14, marginBottom: 26 }}>
-        <Card icon={Globe} tint="#3D63FF" title="Identité &amp; site public" desc="Votre nom, votre slogan et votre logo — dans l’application comme sur votre page d’accueil publique." onClick={() => setSub("identite")} />
-        <Card icon={MapPin} tint="#5B8DEF" title="Adresses &amp; sites" desc="Où vous enregistrez, où vous remettez, et les coordonnées qui s’impriment sur vos documents." onClick={() => setSub("adresses")} />
-        <Card icon={Plane} tint="#0EA5E9" title="Calendrier des départs" desc="Annoncez quand part le prochain envoi : vos clients cessent d’appeler pour le demander." onClick={() => setSub("departs")} />
+        {ouvrable("identite") && <Card icon={Globe} tint="#3D63FF" title="Identité &amp; site public" desc="Votre nom, votre slogan et votre logo — dans l’application comme sur votre page d’accueil publique." onClick={() => setSub("identite")} />}
+        {ouvrable("adresses") && <Card icon={MapPin} tint="#5B8DEF" title="Adresses &amp; sites" desc="Où vous enregistrez, où vous remettez, et les coordonnées qui s’impriment sur vos documents." onClick={() => setSub("adresses")} />}
+        {ouvrable("departs") && <Card icon={Plane} tint="#0EA5E9" title="Calendrier des départs" desc="Annoncez quand part le prochain envoi : vos clients cessent d’appeler pour le demander." onClick={() => setSub("departs")} />}
       </div>
 
       <SectionLabel>TARIFS &amp; ARGENT</SectionLabel>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14, marginBottom: 26 }}>
-        <Card icon={Receipt} tint="#E0794E" title="Catégories de Produits" desc="Configuration des types de marchandises et taxes." onClick={() => setSub("categories")} />
-        <Card icon={RefreshCw} tint="#0EA5E9" title="Gestion des devises" desc="Un taux par devise, partagé automatiquement par tous les pays concernés." onClick={() => setSub("devises")} />
-        <Card icon={Package} tint="var(--danger-fg)" title="Tarifs de réception client" desc="Le tarif au kg appliqué sur les bordereaux de réception, selon le poids du lot." onClick={() => setSub("reception")} />
-        <Card icon={Users} tint="#16A163" title="Commissions par Agence" desc="Définissez combien chaque agence gagne par kg et par unité vendue." onClick={() => setSub("commissions")} />
-        <Card icon={Wallet} tint="#5B8DEF" title="Paiement" desc="Configurez vos numéros pour accepter les paiements de vos clients." onClick={() => setSub("paiement")} />
+        {ouvrable("categories") && <Card icon={Receipt} tint="#E0794E" title="Catégories de Produits" desc="Configuration des types de marchandises et taxes." onClick={() => setSub("categories")} />}
+        {ouvrable("devises") && <Card icon={RefreshCw} tint="#0EA5E9" title="Gestion des devises" desc="Un taux par devise, partagé automatiquement par tous les pays concernés." onClick={() => setSub("devises")} />}
+        {ouvrable("reception") && <Card icon={Package} tint="var(--danger-fg)" title="Tarifs de réception client" desc="Le tarif au kg appliqué sur les bordereaux de réception, selon le poids du lot." onClick={() => setSub("reception")} />}
+        {ouvrable("commissions") && <Card icon={Users} tint="#16A163" title="Commissions par Agence" desc="Définissez combien chaque agence gagne par kg et par unité vendue." onClick={() => setSub("commissions")} />}
+        {ouvrable("paiement") && <Card icon={Wallet} tint="#5B8DEF" title="Paiement" desc="Configurez vos numéros pour accepter les paiements de vos clients." onClick={() => setSub("paiement")} />}
       </div>
 
       <SectionLabel>VOTRE ÉQUIPE</SectionLabel>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14, marginBottom: 26 }}>
-        <Card icon={Users} tint="#6366F1" title="Gestion Utilisateurs" desc="Accès, rôles et permissions de l’équipe." onClick={() => setSub("users")} />
-        <Card icon={LayoutDashboard} tint="#3D63FF" title="Performance des agents" desc="Colis enregistrés, chiffre d’affaires et paiements encaissés, par agent." onClick={() => setSub("performance")} />
+        {ouvrable("users") && <Card icon={Users} tint="#6366F1" title="Gestion Utilisateurs" desc="Accès, rôles et permissions de l’équipe." onClick={() => setSub("users")} />}
+        {ouvrable("performance") && <Card icon={LayoutDashboard} tint="#3D63FF" title="Performance des agents" desc="Colis enregistrés, chiffre d’affaires et paiements encaissés, par agent." onClick={() => setSub("performance")} />}
         {/*
           * La carte est ouverte à tous, mais pas au même écran : celui qui tient la fiche voit
           * toute l'équipe et corrige ; les autres n'ont accès qu'à la leur, en lecture. Un employé
@@ -10134,11 +10198,11 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
 
       <SectionLabel>SUIVI &amp; MAINTENANCE</SectionLabel>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 14 }}>
-        <Card icon={MessageCircle} tint="#16A163" title="Notifications" desc="Qui est prévenu automatiquement, et pour quel événement — clients, expéditeurs et partenaires." onClick={() => setSub("notifwa")} />
-        <Card icon={FileStack} tint="#5B8DEF" title="Journal d’activité" desc="Historique complet des actions effectuées par les utilisateurs." onClick={() => setSub("journal")} />
-        <Card icon={Download} tint="var(--danger-fg)" title="Sauvegarde des données" desc="Téléchargez une copie complète de votre plateforme. Le seul filet en cas de perte." onClick={() => setSub("sauvegarde")} />
-        <Card icon={Settings} tint="#6B7280" title="Paramètres Système" desc="Options avancées de la plateforme." onClick={() => setSub("systeme")} />
-        <Card icon={Sparkles} tint="#8B5CF6" title="Guide d’utilisation" desc="Explications des fonctionnalités récentes : comptes clients, pré-alertes, bordereau de réception, tarifs par palier..." onClick={() => setSub("guide")} />
+        {ouvrable("notifwa") && <Card icon={MessageCircle} tint="#16A163" title="Notifications" desc="Qui est prévenu automatiquement, et pour quel événement — clients, expéditeurs et partenaires." onClick={() => setSub("notifwa")} />}
+        {ouvrable("journal") && <Card icon={FileStack} tint="#5B8DEF" title="Journal d’activité" desc="Historique complet des actions effectuées par les utilisateurs." onClick={() => setSub("journal")} />}
+        {ouvrable("sauvegarde") && <Card icon={Download} tint="var(--danger-fg)" title="Sauvegarde des données" desc="Téléchargez une copie complète de votre plateforme. Le seul filet en cas de perte." onClick={() => setSub("sauvegarde")} />}
+        {ouvrable("systeme") && <Card icon={Settings} tint="#6B7280" title="Paramètres Système" desc="Options avancées de la plateforme." onClick={() => setSub("systeme")} />}
+        {ouvrable("guide") && <Card icon={Sparkles} tint="#8B5CF6" title="Guide d’utilisation" desc="Explications des fonctionnalités récentes : comptes clients, pré-alertes, bordereau de réception, tarifs par palier..." onClick={() => setSub("guide")} />}
       </div>
     </div>
   );
@@ -16937,16 +17001,6 @@ function EncaisserGroupeModal({ data, session, onEncaisser, onClose }) {
   );
 }
 
-/** Une ligne du résumé : libellé à gauche, valeur à droite, sur la même ligne. */
-function LigneResume({ libelle, valeur }) {
-  return (
-    <div style={{ display: "flex", justifyContent: "space-between", gap: 14, flexWrap: "wrap" }}>
-      <span style={{ color: "var(--muted)" }}>{libelle}</span>
-      <strong style={{ color: "var(--text)", textAlign: "end" }}>{valeur}</strong>
-    </div>
-  );
-}
-
 function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeConfig, categories, session, partenaire }) {
   /*
    * Modifier un colis partenaire n'est pas modifier un colis ordinaire.
@@ -17089,14 +17143,12 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
    */
   const etapesEdition = useMemo(() => {
     const parCle = Object.fromEntries(WIZARD_STEPS.map((e) => [e.key, e]));
-    const liste = [];
-    if (modifiableComplet) liste.push(parCle.route);
-    liste.push(parCle.expediteur, parCle.destinataire);
-    if (modifiableComplet && produits.length > 0) liste.push(parCle.produits);
+    const liste = [parCle.expediteur, parCle.destinataire];
+    if (modifiableComplet) liste.push(parCle.produits);
     if (modifiableComplet && !estPartenaire) liste.push(parCle.frais);
     liste.push(parCle.resume);
     return liste;
-  }, [modifiableComplet, produits.length, estPartenaire]);
+  }, [modifiableComplet, estPartenaire]);
 
   const [step, setStep] = useState(0);
   /*
@@ -17108,6 +17160,10 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
     setStep((s) => Math.min(s, etapesEdition.length - 1));
   }, [etapesEdition.length]);
   const etapeCourante = etapesEdition[Math.min(step, etapesEdition.length - 1)]?.key;
+  /* Les deux bouts de la route, tels qu'ils s'affichent au résumé. */
+  const villeDestination = COUNTRIES.find((c) => c.code === pays)?.city || pays;
+  const villeDepart = direction === "export" ? "Conakry" : villeDestination;
+  const villeArrivee = direction === "export" ? villeDestination : "Conakry";
 
   /*
    * « Suivant » ne vérifie que ce que l'étape quittée contenait.
@@ -17120,7 +17176,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
     if (etapeCourante === "expediteur" && !expediteur) { setErr("Renseignez le prénom et le nom de l’expéditeur."); return; }
     if (etapeCourante === "destinataire" && !destinataire) { setErr("Renseignez le prénom et le nom du destinataire."); return; }
     if (etapeCourante === "destinataire" && !String(telephone || "").trim()) { setErr("Renseignez le téléphone du destinataire."); return; }
-    if (etapeCourante === "route" && !((montantSaisi(poids) ?? 0) > 0)) { setErr("Le poids doit être supérieur à 0 kg — écrivez par exemple 12,5."); return; }
+    if (etapeCourante === "produits" && !((montantSaisi(poids) ?? 0) > 0)) { setErr("Le poids doit être supérieur à 0 kg — écrivez par exemple 12,5."); return; }
     setStep((s) => Math.min(s + 1, etapesEdition.length - 1));
   }
   // La valeur des produits suit désormais l'état local `produits` (modifiable ci-dessous), et
@@ -17237,7 +17293,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
     // ligne qui faussera ensuite les totaux de poids, le chiffre d'affaires et les commissions.
     // « 12,5 » est la façon normale d'écrire douze kilos et demi : Number() y voit NaN, et le
     // colis se refusait avec un message parlant d'un poids nul que l'agent venait pourtant de saisir.
-    if (!((montantSaisi(poids) ?? 0) > 0)) { refus("Le poids doit être supérieur à 0 kg — écrivez par exemple 12,5.", "route"); return; }
+    if (!((montantSaisi(poids) ?? 0) > 0)) { refus("Le poids doit être supérieur à 0 kg — écrivez par exemple 12,5.", "produits"); return; }
     // Mêmes règles que sur l'encaissement d'un colis : on n'enregistre jamais plus que ce qui est
     // dû (le surplus est de la monnaie à rendre, pas une recette), et une somme retirée de la
     // caisse d'un agent doit être justifiée.
@@ -17393,26 +17449,27 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
         <Field label="Code postal (optionnel)"><input value={destinataireCodePostal} onChange={(e) => setDestinataireCodePostal(e.target.value)} style={inputStyle} /></Field>
         </>)}
 
-        {etapeCourante === "route" && (
-          <>
-        <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Route &amp; tarif</div>
-        <Field label="Destination"><select value={pays} onChange={(e) => setPays(e.target.value)} style={inputStyle}>{COUNTRIES.map((c) => <option key={c.code} value={c.code}>{c.name} — {c.city}</option>)}</select></Field>
-        <div style={{ gridColumn: "1 / -1" }}>
-          <Field label="Sens de la route">
-            <div style={{ display: "flex", gap: 8 }}>
-              <button type="button" onClick={() => setDirection("export")} style={{ ...toggleBtn, ...(direction === "export" ? toggleActive : {}) }}>Conakry → {COUNTRIES.find(c=>c.code===pays)?.city}</button>
-              <button type="button" onClick={() => setDirection("import")} style={{ ...toggleBtn, ...(direction === "import" ? toggleActive : {}) }}>{COUNTRIES.find(c=>c.code===pays)?.city} → Conakry</button>
-            </div>
-          </Field>
-        </div>
-        <Field label="Poids (kg)"><input value={poids} onChange={(e) => setPoids(e.target.value)} style={inputStyle} /></Field>
-        <Field label="Volume (m³, optionnel)"><input value={volume} onChange={(e) => setVolume(e.target.value)} style={inputStyle} /></Field>
-          </>
-        )}
-
         {etapeCourante === "produits" && (
           <>
-            <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Contenu du colis</div>
+            {/*
+              * LA ROUTE NE SE REMODIFIE PAS ICI, ET LE VOLUME A DISPARU.
+              *
+              * La destination et le sens sont arrêtés au dépôt : ils décident du tarif appliqué,
+              * du bordereau sur lequel le colis part et de l'agence de retrait annoncée au
+              * client. Les rouvrir à la correction, c'était offrir de changer d'un geste ce qui
+              * est déjà imprimé — et ce n'est jamais ce qu'on vient corriger. La route reste
+              * lisible au résumé, pour vérifier qu'on est bien sur le bon colis.
+              *
+              * Le volume, lui, ne servait qu'à une chose : le poids volumétrique, un mètre cube
+              * comptant pour 167 kg. Un « 2 » saisi de travers dans ce champ facultatif faisait
+              * passer un colis de 2,8 kg à 334 kg facturés, sans un mot. Le champ est retiré ; la
+              * valeur déjà enregistrée sur un colis reste prise en compte telle quelle, pour ne
+              * pas changer le prix d'un envoi en cours.
+              */}
+            <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Poids &amp; contenu</div>
+            <Field label="Poids (kg)"><input value={poids} onChange={(e) => setPoids(e.target.value)} style={inputStyle} inputMode="decimal" /></Field>
+            <div style={{ gridColumn: "1 / -1" }} />
+            {produits.length > 0 && (
             <div style={{ gridColumn: "1 / -1" }}>
               {produits.map((p, idx) => (
                 <div key={p.id} style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 12 }}>
@@ -17486,6 +17543,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
               ))}
               <button type="button" onClick={addProduit} style={{ width: "100%", border: "1.5px dashed var(--border)", borderRadius: 12, padding: "12px 0", background: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>+ Ajouter un article</button>
             </div>
+            )}
             {estPartenaire && (
               <div style={{ gridColumn: "1 / -1", background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 10, padding: "11px 13px" }}>
                 <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
@@ -17580,27 +17638,100 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
 
         {etapeCourante === "resume" && (
           <div style={{ gridColumn: "1 / -1" }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 12 }}>Résumé</div>
-            <div style={{ background: "var(--surface2)", borderRadius: 12, padding: "14px 16px", fontSize: 13, color: "var(--text)", lineHeight: 1.9 }}>
-              <LigneResume libelle="Expéditeur" valeur={expediteur || "—"} />
-              <LigneResume libelle="Destinataire" valeur={destinataire || "—"} />
-              {estPartenaire && repere.trim() && <LigneResume libelle="Repère" valeur={repere.trim()} />}
-              <LigneResume libelle="Téléphone" valeur={telephone || "—"} />
-              <LigneResume libelle="Route" valeur={`${direction === "export" ? "Conakry" : COUNTRIES.find((c) => c.code === pays)?.city || pays} → ${direction === "export" ? (COUNTRIES.find((c) => c.code === pays)?.city || pays) : "Conakry"}`} />
-              <LigneResume libelle="Poids" valeur={`${montantSaisi(poids) ?? 0} kg`} />
-              {produits.length > 0 && <LigneResume libelle="Articles" valeur={`${produits.length}`} />}
-            </div>
             {/*
-              * Le total ne s'affiche que pour un colis de l'entreprise. Sur un colis partenaire il
-              * vaut zéro par construction — l'afficher laisserait croire à une erreur de calcul,
-              * alors que c'est le principe même : c'est le partenaire qui facture son client.
+              * LE RÉSUMÉ EST LA DERNIÈRE CHANCE DE VOIR L'ERREUR.
+              *
+              * C'est le seul écran où l'on relit le colis en entier avant de l'enregistrer. Une
+              * liste de couples « libellé : valeur » se parcourt sans rien voir : l'œil glisse.
+              * On sépare donc ce qui se vérifie séparément — qui envoie, qui reçoit, ce qui part —
+              * et l'on met en avant les deux chiffres qu'on relit vraiment : le poids et le total.
               */}
-            {!estPartenaire && (
-              <div style={{ background: "var(--surface2)", borderRadius: 12, padding: "12px 16px", display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginTop: 12 }}>
-                <div style={{ fontSize: 13, color: "var(--text)" }}>Total recalculé : <strong>{fmt(prix, "EUR")}</strong></div>
-                <div style={{ fontSize: 13, color: reste > 0 ? "var(--danger-fg)" : "var(--ok-fg)" }}>Reste à payer : <strong>{fmt(reste, "EUR")}</strong></div>
+            <div style={{ background: "var(--surface2)", borderRadius: 16, overflow: "hidden", border: "1px solid var(--border)" }}>
+
+              {/* La route, en bandeau : c'est elle qui dit de quel colis on parle. */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 12, padding: "16px 18px", background: "var(--surface)", borderBottom: "1px solid var(--border)", flexWrap: "wrap" }}>
+                <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{villeDepart}</span>
+                <span style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--muted)" }}>
+                  <span style={{ width: 26, height: 1, background: "var(--border)" }} />
+                  <Plane size={14} />
+                  <span style={{ width: 26, height: 1, background: "var(--border)" }} />
+                </span>
+                <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{villeArrivee}</span>
               </div>
-            )}
+
+              {/* Les deux chiffres qu'on relit vraiment. */}
+              <div style={{ display: "flex", borderBottom: "1px solid var(--border)" }}>
+                <div style={{ flex: 1, padding: "14px 18px", textAlign: "center" }}>
+                  <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.6 }}>POIDS</div>
+                  <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 20, fontWeight: 700, color: "var(--text)", marginTop: 3 }}>{montantSaisi(poids) ?? 0} kg</div>
+                </div>
+                {produits.length > 0 && (
+                  <div style={{ flex: 1, padding: "14px 18px", textAlign: "center", borderInlineStart: "1px solid var(--border)" }}>
+                    <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.6 }}>ARTICLES</div>
+                    <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 20, fontWeight: 700, color: "var(--text)", marginTop: 3 }}>{produits.length}</div>
+                  </div>
+                )}
+                {!estPartenaire && (
+                  <div style={{ flex: 1.4, padding: "14px 18px", textAlign: "center", borderInlineStart: "1px solid var(--border)" }}>
+                    <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.6 }}>TOTAL</div>
+                    <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 20, fontWeight: 700, color: "var(--text)", marginTop: 3 }}>{fmt(prix, "EUR")}</div>
+                  </div>
+                )}
+              </div>
+
+              {/* Qui envoie, qui reçoit — côte à côte, pour que l'inversion saute aux yeux. */}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))" }}>
+                <div style={{ padding: "16px 18px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 8 }}>
+                    <User size={13} color="var(--muted)" />
+                    <span style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.6 }}>EXPÉDITEUR</span>
+                  </div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: expediteur ? "var(--text)" : "var(--danger-fg)" }}>{expediteur || "à renseigner"}</div>
+                  {expediteurTelephone && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>{expediteurTelephone}</div>}
+                  {expediteurAdresse && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>{expediteurAdresse}</div>}
+                </div>
+                <div style={{ padding: "16px 18px", borderInlineStart: "1px solid var(--border)" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 8 }}>
+                    <MapPin size={13} color="var(--muted)" />
+                    <span style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.6 }}>DESTINATAIRE</span>
+                  </div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: destinataire ? "var(--text)" : "var(--danger-fg)" }}>{destinataire || "à renseigner"}</div>
+                  {telephone && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>{telephone}</div>}
+                  {[destinataireAdresse, destinataireVille, destinataireCodePostal].filter(Boolean).length > 0 && (
+                    <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
+                      {[destinataireAdresse, destinataireVille, destinataireCodePostal].filter(Boolean).join(", ")}
+                    </div>
+                  )}
+                  {estPartenaire && repere.trim() && (
+                    <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6 }}>
+                      Repère : <strong style={{ color: "var(--text)" }}>{repere.trim()}</strong>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/*
+                * Le reste à payer, seulement quand il en reste un. Une ligne « 0,00 EUR » sous un
+                * colis soldé n'apprend rien et noie celle qui compte.
+                */}
+              {!estPartenaire && reste > 0.005 && (
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "13px 18px", background: "var(--danger-bg)", borderTop: "1px solid var(--border)", flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 12.5, color: "var(--danger-fg)", fontWeight: 600 }}>Reste à payer</span>
+                  <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 17, fontWeight: 700, color: "var(--danger-fg)" }}>{fmt(reste, "EUR")}</span>
+                </div>
+              )}
+              {!estPartenaire && reste <= 0.005 && (
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: "13px 18px", background: "var(--ok-bg-soft)", borderTop: "1px solid var(--border)", flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 12.5, color: "var(--ok-fg)", fontWeight: 600 }}>Intégralement réglé</span>
+                  <CheckCircle2 size={16} color="var(--ok-fg)" />
+                </div>
+              )}
+              {estPartenaire && (
+                <div style={{ padding: "13px 18px", background: "var(--info-bg)", borderTop: "1px solid var(--border)", fontSize: 12, color: "var(--text)", lineHeight: 1.5 }}>
+                  Colis partenaire — l’entreprise n’encaisse rien auprès du client final.
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -18221,7 +18352,13 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
             )}
           </div>
 
-          {canManage && !isLast && colis.status !== "Annulé" && colis.status !== "Refusé" && (
+          {/*
+            * Faire avancer un colis suit « colis.changer_statut », pas le seul fait de ne pas être
+            * chauffeur. Un comptable, qui voit tous les colis pour les facturer, pouvait faire
+            * passer un colis d'« Enregistré » à « En transit » — donc partir une notification au
+            * client annonçant un départ qui n'a pas eu lieu.
+            */}
+          {effectivePermission(session, "colis.changer_statut") && !isLast && colis.status !== "Annulé" && colis.status !== "Refusé" && (
             <button onClick={onAdvance} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", borderRadius: 8, border: "none", background: "var(--brand-solid)", color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
               Statut suivant <ChevronRight size={14} />
             </button>
@@ -22552,8 +22689,16 @@ function ComptabilitePage({ data, persist, session, notify }) {
           <p style={{ color: "var(--muted)", fontSize: 14.5, margin: "5px 0 0" }}>Recettes, dépenses, salaires, commissions et bénéfices</p>
         </div>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <button onClick={exportRapport} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "11px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><Download size={16} /> Rapport CSV</button>
-          <button onClick={exportRapportPDF} disabled={pdfState === "loading"} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "11px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={16} /> {pdfState === "loading" ? "Génération…" : "Récapitulatif PDF"}</button>
+          {/*
+          * Un export, c'est le fichier de l'entreprise qui sort sur un appareil et n'y revient
+          * jamais. « stats.exporter » existe pour cela ; il n'était lu nulle part.
+          */}
+        {effectivePermission(session, "stats.exporter") && (
+        <button onClick={exportRapport} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "11px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><Download size={16} /> Rapport CSV</button>
+        )}
+          {effectivePermission(session, "stats.exporter") && (
+        <button onClick={exportRapportPDF} disabled={pdfState === "loading"} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "11px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={16} /> {pdfState === "loading" ? "Génération…" : "Récapitulatif PDF"}</button>
+        )}
           {pdfState === "error" && <span style={{ fontSize: 11, color: "var(--danger-fg)", alignSelf: "center" }}>Échec — réessayez</span>}
           {effectivePermission(session, "compta.gerer_depenses") && <button onClick={() => setForm({ type: "Dépense", nom: "", montant: "", date: new Date().toISOString().slice(0,10) })} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}><Plus size={16} /> Ajouter</button>}
         </div>
@@ -22580,13 +22725,22 @@ function ComptabilitePage({ data, persist, session, notify }) {
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 20 }}>
         <StatCard label="Recettes encaissées" value={fmt(recettes, devise)} icon={CheckCircle2} tint="#16A163" trend={`Facturé : ${fmt(facture, devise)}`} trendColor="var(--muted)" />
         <StatCard label="Dépenses" value={fmt(totalDepenses / gnfRate, devise)} icon={Receipt} tint="#E23F52" />
-        <StatCard label="Salaires" value={fmt(totalSalaires / gnfRate, devise)} icon={Users} tint="#B8801C" />
+        {/*
+          * La masse salariale suit « compta.charges_fixes ». Consulter la comptabilité et savoir
+          * ce que gagne l'équipe ne sont pas la même chose : un compte à qui l'on ouvre les
+          * recettes pour suivre son agence n'a pas à lire les salaires du même coup.
+          */}
+        {effectivePermission(session, "compta.charges_fixes") && (
+          <StatCard label="Salaires" value={fmt(totalSalaires / gnfRate, devise)} icon={Users} tint="#B8801C" />
+        )}
         {/* La tuile compte ce que le résultat compte : mentionner ce qui en est sorti évite de croire à une baisse d'activité. */}
         <StatCard label="Commissions" value={fmt(totalCommissions, devise)} icon={DollarSign} tint="#8B5CF6"
           trend={`dont auto : ${fmt(commissionsAuto, devise)}${commissionsAutoExclues > 0.005 ? ` · ${fmt(commissionsAutoExclues, devise)} hors bilan` : ""}`}
           trendColor="var(--muted)" />
       </div>
 
+      {/* Le bénéfice de l'entreprise suit « compta.marges » — c'est le chiffre qu'il désigne. */}
+      {effectivePermission(session, "compta.marges") && (
       <div style={{ background: benefice >= 0 ? "var(--ok-bg)" : "var(--danger-bg)", borderRadius: 14, padding: 20, marginBottom: 20, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div>
           <div style={{ fontSize: 13, color: "var(--text)", fontWeight: 700 }}>Résultat de la période</div>
@@ -22594,6 +22748,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
         </div>
         <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 22, fontWeight: 700, color: benefice >= 0 ? "var(--ok-fg)" : "var(--danger-fg)" }}>{fmt(benefice, devise)}</div>
       </div>
+      )}
 
       {paiementsPeriode.length > 0 && (
         <div style={{ display: "flex", gap: 20, flexWrap: "wrap", marginBottom: 20 }}>
@@ -27354,13 +27509,22 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
         />
       )}
 
+      {/*
+        * « factures.creer » et « factures.modifier » existaient sans que rien ne les lise : toute
+        * personne qui ouvrait l'écran Partenaires pouvait émettre une facture, la rouvrir, en
+        * corriger le montant ou annuler un règlement. Ces deux gestes-là engagent de l'argent
+        * réclamé à un tiers ; ils se distinguent du fait de consulter la facturation.
+        */}
       {onglet === "facturation" && partenaire && (
         <FacturationPartenaire
           partenaire={partenaire} aFacturer={aFacturer} factures={sesFactures}
-          colis={data.colis || []} onCreerFacture={creerFacture} onImprimer={imprimerFacture}
-          onCorriger={corrigerMontant} onRouvrir={rouvrirFacture}
-          onEncaisser={encaisserFacture} onAnnulerReglement={annulerReglement}
-          onRelancer={marquerRelance} onReleve={imprimerReleve}
+          colis={data.colis || []} onImprimer={imprimerFacture} onReleve={imprimerReleve}
+          onCreerFacture={effectivePermission(session, "factures.creer") ? creerFacture : null}
+          onCorriger={effectivePermission(session, "factures.modifier") ? corrigerMontant : null}
+          onRouvrir={effectivePermission(session, "factures.modifier") ? rouvrirFacture : null}
+          onEncaisser={effectivePermission(session, "factures.modifier") ? encaisserFacture : null}
+          onAnnulerReglement={effectivePermission(session, "factures.modifier") ? annulerReglement : null}
+          onRelancer={effectivePermission(session, "factures.modifier") ? marquerRelance : null}
         />
       )}
     </div>
@@ -28178,7 +28342,7 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
                         )}
                       </td>
                       <td style={{ padding: "10px 14px", textAlign: "right", whiteSpace: "nowrap" }}>
-                        {enCorrection !== c.tracking && (
+                        {enCorrection !== c.tracking && onCorriger && (
                           <button onClick={() => { setEnCorrection(c.tracking); setMontant(String(Number(c.prixPartenaire) || 0)); }}
                             title="Corriger le montant"
                             style={{ background: "none", border: "none", color: "var(--info-fg)", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>Corriger</button>
@@ -28212,10 +28376,10 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
                     {[...new Set([devise, "GNF", "EUR", "USD"])].map((d) => <option key={d} value={d}>{d}</option>)}
                   </select>
                 </div>
-                <button onClick={() => setConfirmation(true)} disabled={retenus.length === 0}
+                {onCreerFacture && <button onClick={() => setConfirmation(true)} disabled={retenus.length === 0}
                   style={{ display: "flex", alignItems: "center", gap: 7, background: retenus.length ? "var(--brand-solid)" : "var(--surface2)", color: retenus.length ? "#fff" : "var(--muted)", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: retenus.length ? "pointer" : "not-allowed" }}>
                   <Receipt size={16} /> Créer la facture
-                </button>
+                </button>}
               </div>
             </div>
           </>
@@ -28282,7 +28446,7 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
                       </div>
                     )}
                   </div>
-                  {reste > 0.005 && (
+                  {reste > 0.005 && onEncaisser && (
                     <button onClick={() => setAEncaisser(f)} style={{ display: "flex", alignItems: "center", gap: 6, background: "#16A163", border: "none", color: "#fff", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
                       <DollarSign size={14} /> Encaisser
                     </button>
@@ -28295,7 +28459,7 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
                   {retard > 0 && (
                     <a href={waLink(reglagesDuPartenaire.telephone, messageRelanceFacture(f, partenaire, retard))}
                       target="_blank" rel="noreferrer"
-                      onClick={() => onRelancer(f.id)}
+                      onClick={() => onRelancer?.(f.id)}
                       style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "#3ECB84", color: "#fff", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, textDecoration: "none" }}>
                       <MessageCircle size={14} /> Relancer
                     </a>
@@ -28303,9 +28467,9 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
                   <button onClick={() => onImprimer(f)} style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
                     <Printer size={14} /> PDF
                   </button>
-                  <button onClick={() => setARouvrir(f)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "1.5px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                  {onRouvrir && <button onClick={() => setARouvrir(f)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "1.5px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
                     <RefreshCw size={14} /> Rouvrir
-                  </button>
+                  </button>}
                 </div>
               </div>
               {versements.length > 0 && (
@@ -28317,10 +28481,10 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
                         {" — "}{r.mode || MODE_ESPECES}{r.reference ? ` · réf. ${r.reference}` : ""}
                         {" · "}{new Date(r.date).toLocaleDateString("fr-FR")}{r.par ? ` · reçu par ${r.par}` : ""}
                       </span>
-                      <button onClick={() => setReglementAAnnuler({ facture: f, reglement: r })}
+                      {onAnnulerReglement && <button onClick={() => setReglementAAnnuler({ facture: f, reglement: r })}
                         style={{ background: "none", border: "none", color: "var(--danger-fg)", fontSize: 11.5, fontWeight: 600, cursor: "pointer", padding: 0 }}>
                         Annuler
-                      </button>
+                      </button>}
                     </div>
                   ))}
                 </div>
@@ -28735,6 +28899,16 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
   const [permissionsOverride, setPermissionsOverride] = useState(user.permissionsOverride || {});
   const isAdmin = role === "Administrateur";
   const totalPermCount = PERMISSIONS_SCHEMA.reduce((s, g) => s + g.permissions.length, 0);
+  /*
+   * Régler les droits d'un collègue est un pouvoir à part, et il a sa propre permission :
+   * « users.permissions ». Elle était déclarée, affichée dans cet écran même — et jamais lue :
+   * quiconque pouvait ouvrir la fiche d'un compte pouvait aussi lui cocher « Administrateur ».
+   *
+   * Le serveur, lui, refusait déjà : CHAMPS_DE_POUVOIR remet en place le rôle et les droits
+   * envoyés par un compte qui n'y a pas droit. L'écran promettait donc un changement que la base
+   * annulait — sans le dire. On lit la règle du même côté que le serveur l'applique.
+   */
+  const peutReglerLesDroits = effectivePermission(session, "users.permissions");
 
   function toggleCountry(code) {
     setPaysAutorises((list) => (list.includes(code) ? list.filter((c) => c !== code) : [...list, code]));
@@ -28850,7 +29024,11 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
           )}
           <Field label="Téléphone"><PhoneInput value={telephone} onChange={setTelephone} /></Field>
           <Field label="Rôle">
-            <select value={role} onChange={(e) => setRole(e.target.value)} disabled={user.identifiant === "admin"} style={inputStyle}>
+            {/* Le rôle décide de tous les droits d'un coup : il suit la même permission qu'eux. */}
+            <select value={role} onChange={(e) => setRole(e.target.value)}
+              disabled={user.identifiant === "admin" || !peutReglerLesDroits}
+              title={peutReglerLesDroits ? undefined : "Changer le rôle demande la permission « Gérer les permissions des autres comptes »"}
+              style={{ ...inputStyle, opacity: peutReglerLesDroits ? 1 : 0.6 }}>
               {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
             </select>
           </Field>
@@ -28906,6 +29084,17 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
               Permissions héritées du rôle <strong style={{ color: "var(--text)" }}>{role}</strong>. Les modifications individuelles sont marquées d’un point <span style={{ color: "var(--info-fg)" }}>●</span>.
             </div>
           )}
+          {/*
+            * Sans le droit, la liste se lit mais ne se touche pas — et l'écran le dit. La masquer
+            * entièrement priverait un responsable d'équipe de savoir ce que ses collègues peuvent
+            * faire, ce qui est précisément la question qu'il se pose en ouvrant cette fiche.
+            */}
+          {!isAdmin && !peutReglerLesDroits && (
+            <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "var(--text)", marginBottom: 16, lineHeight: 1.5 }}>
+              Vous consultez ces droits sans pouvoir les changer : cela demande la permission
+              « Gérer les permissions des autres comptes ».
+            </div>
+          )}
           {PERMISSIONS_SCHEMA.map((g) => {
             const enabledCount = g.permissions.filter((p) => effectivePermission({ role, permissionsOverride }, p.key)).length;
             return (
@@ -28914,7 +29103,7 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
                   <div style={{ fontSize: 11, fontWeight: 700, color: "var(--muted)", letterSpacing: 0.5 }}>{g.group}</div>
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                     <span style={{ fontSize: 11, color: "var(--muted)" }}>{enabledCount}/{g.permissions.length}</span>
-                    {!isAdmin && (
+                    {!isAdmin && peutReglerLesDroits && (
                       <button onClick={() => toggleGroup(g, enabledCount < g.permissions.length)} style={{ width: 38, height: 22, borderRadius: 20, border: "none", background: enabledCount === g.permissions.length ? "#3ECB84" : "var(--surface)", position: "relative", cursor: "pointer", flexShrink: 0 }}>
                         <div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: enabledCount === g.permissions.length ? 19 : 3, transition: "left 0.15s" }} />
                       </button>
@@ -28927,7 +29116,7 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
                   return (
                     <div key={p.key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 16px", borderTop: "1px solid var(--border)" }}>
                       <div style={{ fontSize: 13, color: "var(--text)", display: "flex", alignItems: "center", gap: 6 }}>{p.label} {overridden && <span style={{ color: "var(--info-fg)", fontSize: 16, lineHeight: 0 }}>●</span>}</div>
-                      <button onClick={() => !isAdmin && togglePermission(p.key)} disabled={isAdmin} style={{ width: 38, height: 22, borderRadius: 20, border: "none", background: on ? "#3ECB84" : "var(--surface2)", position: "relative", cursor: isAdmin ? "default" : "pointer", flexShrink: 0, opacity: isAdmin ? 0.6 : 1 }}>
+                      <button onClick={() => !isAdmin && peutReglerLesDroits && togglePermission(p.key)} disabled={isAdmin || !peutReglerLesDroits} style={{ width: 38, height: 22, borderRadius: 20, border: "none", background: on ? "#3ECB84" : "var(--surface2)", position: "relative", cursor: (isAdmin || !peutReglerLesDroits) ? "default" : "pointer", flexShrink: 0, opacity: (isAdmin || !peutReglerLesDroits) ? 0.6 : 1 }}>
                         <div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: on ? 19 : 3, transition: "left 0.15s" }} />
                       </button>
                     </div>

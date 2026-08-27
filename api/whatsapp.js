@@ -602,6 +602,67 @@ export default async function handler(req, res) {
     }
   }
 
+  /*
+   * LES NUMÉROS DU COMPTE, ET LEQUEL ENVOIE.
+   *
+   * Changer la ligne qui envoie les messages ne se fait pas dans ce programme : elle est désignée
+   * par WHATSAPP_PHONE_ID, une variable de Vercel. Encore faut-il connaître l'identifiant du
+   * nouveau numéro — un nombre à quinze chiffres qui n'a rien à voir avec le numéro lui-même, et
+   * qu'on va chercher dans la console Meta en s'y perdant.
+   *
+   * Cette liste le donne. Elle nomme aussi celui qui envoie AUJOURD'HUI : sans cela, on recopie une
+   * variable sans savoir si l'on a changé quelque chose, et l'on découvre l'erreur au premier
+   * message parti du mauvais numéro — c'est-à-dire devant un client.
+   */
+  if (req.method === "GET" && req.query?.numeros !== undefined) {
+    const waba = process.env.WHATSAPP_WABA_ID;
+    if (!metaPret) return res.status(501).json({ error: "Meta n'est pas configuré.", configure: false });
+    if (!waba) {
+      return res.status(501).json({
+        error: "Ajoutez WHATSAPP_WABA_ID dans Vercel — c'est l'« ID du compte WhatsApp Business », "
+          + "affiché au-dessus de vos numéros dans la console Meta.",
+        manquant: "WHATSAPP_WABA_ID",
+      });
+    }
+    try {
+      const champs = "id,display_phone_number,verified_name,quality_rating,status,code_verification_status";
+      const reponse = await fetch(
+        `https://graph.facebook.com/${VERSION_GRAPH}/${encodeURIComponent(waba)}/phone_numbers?fields=${champs}&limit=50`,
+        { headers: { Authorization: `Bearer ${meta.jeton}` } },
+      );
+      const corps = await reponse.json();
+      if (!reponse.ok) {
+        const code = corps?.error?.code;
+        return res.status(reponse.status).json({
+          error: EXPLICATIONS_META[code] || corps?.error?.message || "Meta n'a pas répondu.",
+          code: code || null,
+        });
+      }
+      const numeros = (corps.data || []).map((n) => ({
+        id: n.id,
+        numero: n.display_phone_number || "",
+        nom: n.verified_name || "",
+        qualite: n.quality_rating || null,
+        etat: n.status || null,
+        verifie: n.code_verification_status || null,
+        /* Celui par lequel les messages partent en ce moment. */
+        actif: String(n.id) === String(meta.numeroId),
+      }));
+      return res.status(200).json({
+        numeros,
+        /*
+         * L'identifiant configuré est rendu tel quel : ce n'est pas un secret — il désigne une
+         * ligne, il n'ouvre rien. Le jeton, lui, ne sort jamais d'ici.
+         */
+        actuel: meta.numeroId || null,
+        /* Vrai quand la variable désigne une ligne qui n'est plus sur ce compte. */
+        actuelInconnu: !!meta.numeroId && !numeros.some((n) => n.actif),
+      });
+    } catch (e) {
+      return res.status(502).json({ error: "Impossible de joindre Meta." });
+    }
+  }
+
   if (req.method === "GET" && req.query?.modeles !== undefined) {
     const waba = process.env.WHATSAPP_WABA_ID;
     if (!metaPret) return res.status(501).json({ error: "Meta n'est pas configuré.", configure: false });

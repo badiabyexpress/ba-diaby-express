@@ -1811,18 +1811,28 @@ const ETAPES_AVEC_TICKET = ["enregistrement", "modification"];
 
 const MODELES_WHATSAPP = {
   /*
-   * « Bonjour {{1}},
-   *   L'enregistrement de votre colis est confirmé.
-   *   Référence : {{2}}
-   *   Agence de dépôt : {{3}}
+   * « L'enregistrement de votre colis est confirmé.
+   *   Référence : {{1}}
+   *   Agence de dépôt : {{2}}
    *   Votre ticket d'envoi est joint à ce message. »
+   *
+   * CE MESSAGE NE NOMME PERSONNE, ET C'EST VOULU.
+   *
+   * Il part à DEUX personnes : celui qui dépose le colis et celui qui le recevra. Or un modèle se
+   * remplit une fois pour l'envoi, pas une fois par destinataire — les deux recevaient donc le même
+   * texte, ouvert sur le nom du DESTINATAIRE. L'expéditeur, qui venait pourtant de déposer son
+   * colis au comptoir, lisait « Bonjour Fatoumata » en parlant de lui-même.
+   *
+   * Deux façons de s'en sortir : nommer chacun correctement, ce qui demande de composer un envoi
+   * par personne, ou ne nommer personne. La seconde a été retenue — c'est celle qui est déposée
+   * chez Meta. Un message qui ne dit le nom de personne n'a jamais l'air de se tromper de
+   * personne ; un message qui dit le mauvais nom, si.
    */
   enregistrement: (colis, data) => {
     const depart = siteEnregistrementPourColis(colis, data);
     return {
       nom: "bde_enregistrement",
       variables: [
-        colis.destinataire || "cher client",
         colis.tracking,
         depart ? depart.nom : "départ",
       ],
@@ -12372,8 +12382,12 @@ function ColisView({ data, persist, verifier, session, notify, t, initialQuery, 
     // Notification automatique selon les préférences (Configuration → Notifications WhatsApp).
     // Sous la marque d'un partenaire, le client ne doit pas recevoir un message signé
     // Ba-Diaby Express : il a commandé chez le partenaire et ne nous connaît pas.
+    /*
+     * Le texte de secours ne nomme personne non plus, pour la même raison que le modèle : il part
+     * à l'expéditeur ET au destinataire, et le nommer revenait à donner à l'un le nom de l'autre.
+     */
     notifierEvenement(data, "enregistrement", colis,
-      `Bonjour ${colis.destinataire}, votre colis ${nomExpediteurPourClient(data, colis)} ${colis.tracking} a bien été enregistré`
+      `Votre colis ${nomExpediteurPourClient(data, colis)} ${colis.tracking} a bien été enregistré`
       + `${colis.poids ? ` (${colis.poids} kg)` : ""}. Suivez-le à tout moment sur notre plateforme.`)
       .then(({ traces }) => { if (traces?.length) persist((courant) => ({ ...courant, messagesWhatsApp: avecTraces(courant, traces) })); })
       .catch(() => { /* une notification ne bloque jamais l'enregistrement */ });

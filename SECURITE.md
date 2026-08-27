@@ -1377,3 +1377,83 @@ modification du programme pour y remédier.
 Ils lisent maintenant les données : le site du pays dans Configuration → Agences, à défaut le numéro
 de l'entreprise. Un bouton dont le numéro n'est pas renseigné ne s'affiche pas : mieux vaut pas de
 bouton qu'un bouton qui appelle dans le vide.
+
+## Le journal des accès, et l'alerte de connexion inhabituelle
+
+Le journal d'activité consigne ce qu'on **fait** une fois entré : un colis créé, un paiement
+encaissé, un compte modifié. Il ne dit rien de l'entrée elle-même. Quelqu'un qui obtient un mot de
+passe — noté sur un carnet, réutilisé ailleurs, deviné — entre, regarde tout, et repart sans laisser
+la moindre trace : il n'a rien modifié.
+
+Chaque connexion, réussie ou refusée, est désormais consignée par le serveur : le compte, l'espace,
+l'heure, l'adresse, et une empreinte de douze caractères calculée sur ce que le navigateur annonce
+de lui-même. Rien du navigateur n'y est lisible, et rien qui suivrait quelqu'un ailleurs n'est
+conservé — ce journal sert à repérer une entrée anormale, pas à surveiller le travail de l'équipe.
+Il se consulte dans Configuration → Journal des accès, et garde les 400 dernières entrées.
+
+**Il ne se réécrit pas depuis un navigateur, pas même par un administrateur.** C'est ce qui lui
+donne sa valeur : il consigne des entrées qu'on n'a pas faites soi-même, et un journal qu'on peut
+effacer ne prouve rien. Seul `api/login.js` y ajoute, ligne à ligne.
+
+### Quand l'alerte part, et surtout quand elle ne part pas
+
+La première chose qu'on apprend d'une alerte qui crie tout le temps, c'est à ne plus la lire.
+
+| Situation | Alerte |
+|---|---|
+| Aucune entrée réussie antérieure pour ce compte | **Non** — ce n'est pas « inhabituel », c'est « on ne sait pas encore » |
+| Même appareil, adresse différente | **Non** — une adresse mobile change à chaque reconnexion en Guinée |
+| Autre appareil, même adresse | **Non** — on change de poste au bureau sans changer de réseau |
+| Appareil inconnu **et** adresse inconnue | **Oui** |
+
+Une tentative refusée n'installe pas un appareil comme habituel : sinon il suffirait d'échouer une
+fois avant d'entrer.
+
+L'alerte part par **courriel**, et dit le geste qui referme — réinitialiser le mot de passe et
+déconnecter le compte de tous ses appareils, deux boutons sur la même ligne de Gestion
+Utilisateurs. Pas par WhatsApp : hors de la fenêtre de vingt-quatre heures, Meta n'autorise que les
+modèles approuvés, et une connexion inhabituelle est par nature imprévisible.
+
+Éprouvé par `testacces` (23 cas).
+
+## Le bilan quotidien
+
+Pour savoir combien de colis sont partis hier et combien d'argent est entré, il fallait ouvrir
+l'application, aller à la Caisse, choisir la bonne période, puis à la Comptabilité, puis aux Colis.
+Quatre écrans, tous les matins, pour cinq chiffres — donc on ne le fait pas, et l'on découvre au
+bout d'une semaine qu'une agence n'a rien versé.
+
+La tâche de nuit calcule maintenant ces chiffres après la sauvegarde, et les envoie. Dans cet ordre
+et pas l'inverse : la sauvegarde protège l'entreprise, le bilan est un confort — un envoi qui échoue
+ne doit jamais faire échouer la copie de la nuit.
+
+Ce qui est compté est ce sur quoi on peut agir le lendemain matin : colis enregistrés, colis livrés,
+encaissé (ligne de paiement par ligne de paiement, jamais « somme des colis payés » — un colis
+déposé lundi et soldé jeudi appartient à la caisse de jeudi), reste dû, et ce qui attend un geste :
+colis au comptoir non retirés, dépôts de partenaire à vérifier, demandes de l'Espace Client.
+
+### Pour le recevoir sur WhatsApp
+
+Le **courriel part déjà**, avec le détail complet, sans rien à faire. Le WhatsApp demande deux
+choses, parce que Meta n'autorise hors fenêtre que les modèles approuvés :
+
+1. **Déposer le modèle** `bde_bilan_quotidien`, catégorie **Utilitaire**, langue **Français**, corps :
+
+   ```
+   Bilan du {{1}}
+
+   Colis : {{2}}
+   Caisse : {{3}}
+
+   À traiter : {{4}}
+   ```
+
+2. **Ajouter la variable `BILAN_WHATSAPP`** dans Vercel — le numéro qui doit recevoir, avec son
+   indicatif et sans espaces (`224612479339`).
+
+Tant que le modèle n'existe pas, Meta refuse l'envoi et le refus est **rapporté tel quel** dans le
+relevé de la tâche de nuit, jamais masqué : un bilan qu'on croit recevoir et qui n'arrive pas est
+pire que pas de bilan du tout.
+
+Éprouvé par `testbilan` (25 cas), dont l'exactitude des chiffres — un bilan faux est pire qu'aucun
+bilan, on prend des décisions dessus.

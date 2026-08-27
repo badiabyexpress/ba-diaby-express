@@ -2020,6 +2020,78 @@ const MODELE_PROMO_WHATSAPP = {
   boutonAdresse: "https://badiabyexpress.com",
 };
 
+/*
+ * LE MODÈLE D'ANNONCE DE DÉPART
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Un départ n'est pas une promotion, et le message ne se ressemble pas.
+ *
+ * Une promotion propose et laisse le temps ; une annonce de départ FIXE UNE ÉCHÉANCE : après la
+ * date de dépôt, le camion ou l'avion est parti, et le client qui arrive le lendemain a manqué son
+ * envoi. Le message doit donc dire ce qui part, quand, et surtout jusqu'à quand on peut déposer —
+ * c'est cette dernière date qui compte, et c'est celle qu'un client confond avec la date du départ
+ * si on ne la nomme pas séparément.
+ *
+ * Le nom ne peut pas être « bde_depart » : ce nom-là est déjà pris par le message de service qui
+ * annonce qu'UN colis précis est parti. Deux modèles homonymes chez Meta, et l'on enverrait un jour
+ * l'un pour l'autre.
+ *
+ * {{2}} accueille aussi bien un départ que plusieurs : « Conakry → Paris le 5 septembre » ou
+ * « Conakry → Paris le 5, Conakry → Bruxelles le 12 ». Une liste à puces serait plus lisible, mais
+ * Meta refuse les retours à la ligne dans une variable — on écrit donc à la suite.
+ */
+const MODELE_DEPARTS_WHATSAPP = {
+  nom: "bde_departs_a_venir",
+  langue: "fr",
+  categorie: "MARKETING",
+  corps: [
+    "Bonjour {{1}},",
+    "",
+    "Prochain départ : {{2}}",
+    "",
+    "Dépôt des colis à l’agence jusqu’au {{3}}. Écrivez-nous pour réserver votre place.",
+  ].join("\n"),
+  pied: "Répondez STOP pour ne plus recevoir nos annonces.",
+  bouton: "Voir les départs",
+  boutonAdresse: "https://badiabyexpress.com",
+};
+
+/*
+ * Les deux campagnes possibles, et ce que chacune demande à l'écran.
+ *
+ * Elles ne diffèrent pas par le ton mais par la QUESTION posée au client : une promotion lui
+ * demande de venir profiter, une annonce de départ lui demande de déposer avant une date. Les
+ * libellés des champs suivent, parce qu'un champ nommé « Valable jusqu'au » sur une annonce de
+ * départ se remplit avec la date du départ — et fait venir les gens le jour où l'avion part.
+ */
+const TYPES_DE_CAMPAGNE = {
+  promo: {
+    cle: "promo",
+    libelle: "Promotion",
+    modele: MODELE_PROMO_WHATSAPP,
+    objetParDefaut: "Une offre Ba-Diaby Express pour vous",
+    labelTexte: "L’offre, en quelques lignes",
+    exempleTexte: "ex : Le kilo à 10 € au lieu de 12 € sur tous les envois Conakry → Paris.",
+    labelDate: "Valable jusqu’au",
+    exempleDate: "ex : 30 septembre",
+    dateParDefaut: "la fin du mois",
+    phraseFinale: (date) => `Offre valable jusqu’au ${date}. Passez en agence ou écrivez-nous, nous nous occupons du reste.`,
+  },
+  departs: {
+    cle: "departs",
+    libelle: "Annonce de départ",
+    modele: MODELE_DEPARTS_WHATSAPP,
+    objetParDefaut: "Prochain départ Ba-Diaby Express",
+    labelTexte: "Le ou les départs à annoncer",
+    exempleTexte: "ex : Conakry → Paris le 5 septembre, le kilo à 10 € au lieu de 12 €.",
+    labelDate: "Dépôt des colis jusqu’au",
+    exempleDate: "ex : 4 septembre",
+    dateParDefaut: "la veille du départ",
+    phraseFinale: (date) => `Dépôt des colis à l’agence jusqu’au ${date}. Écrivez-nous pour réserver votre place.`,
+    /* La ligne qui précède le texte libre, dans l'aperçu comme dans le corps validé. */
+    prefixe: "Prochain départ : ",
+  },
+};
+
 /** Le nom du pays de destination, tel qu'il apparaît dans le message. */
 function paysDuColis(colis) {
   const p = COUNTRIES.find((x) => x.code === (colis?.destinatairePays || colis?.pays));
@@ -18887,7 +18959,20 @@ function CampagnesPage({ data, persist, session, notify }) {
 
   const [choisis, setChoisis] = useState([]);
   const [canal, setCanal] = useState("email");
-  const [objet, setObjet] = useState("Une offre Ba-Diaby Express pour vous");
+  /*
+   * Deux campagnes, deux modèles Meta. Changer de type change l'objet de l'e-mail proposé — mais
+   * jamais un objet que l'utilisateur a déjà réécrit lui-même : on ne défait pas ce qu'il a tapé.
+   */
+  const [typeCampagne, setTypeCampagne] = useState("promo");
+  const type = TYPES_DE_CAMPAGNE[typeCampagne] || TYPES_DE_CAMPAGNE.promo;
+  const [objet, setObjet] = useState(TYPES_DE_CAMPAGNE.promo.objetParDefaut);
+  function changerTypeCampagne(cle) {
+    const suivant = TYPES_DE_CAMPAGNE[cle];
+    if (!suivant) return;
+    const objetsParDefaut = Object.values(TYPES_DE_CAMPAGNE).map((t) => t.objetParDefaut);
+    if (objetsParDefaut.includes(objet)) setObjet(suivant.objetParDefaut);
+    setTypeCampagne(cle);
+  }
   const [offre, setOffre] = useState("");
   const [echeance, setEcheance] = useState("");
   const [lien, setLien] = useState(() => (typeof window !== "undefined" && window.location?.origin && !window.location.origin.startsWith("file")
@@ -18922,8 +19007,8 @@ function CampagnesPage({ data, persist, session, notify }) {
 
   const messagePourEmail = (nom) => [
     `<p>Bonjour ${nom || "cher client"},</p>`,
-    `<p>${(offre || "").replace(/\n/g, "<br>")}</p>`,
-    echeance ? `<p>Offre valable jusqu’au ${echeance}.</p>` : "",
+    `<p>${type.prefixe || ""}${(offre || "").replace(/\n/g, "<br>")}</p>`,
+    echeance ? `<p>${type.phraseFinale(echeance)}</p>` : "",
     `<p><a href="${lien}" style="background:#D6273F;color:#fff;padding:11px 20px;border-radius:8px;text-decoration:none;font-weight:700;display:inline-block">Voir l’offre</a></p>`,
     `<p style="color:#777;font-size:12px">Vous recevez ce message parce que vous êtes client de Ba-Diaby Express. Répondez « STOP » pour ne plus recevoir nos offres.</p>`,
   ].filter(Boolean).join("\n");
@@ -18972,12 +19057,12 @@ function CampagnesPage({ data, persist, session, notify }) {
         else if (r.raison) raisons.set(r.raison, (raisons.get(r.raison) || 0) + 1);
       }
       if ((canal === "whatsapp" || canal === "les_deux") && c.segment !== SEGMENT_SANS_INDICATIF) {
-        const r = await envoyerWhatsApp(c.telephone, `${offre}\n${lien}`, null, {
-          nom: MODELE_PROMO_WHATSAPP.nom,
+        const r = await envoyerWhatsApp(c.telephone, `${type.prefixe || ""}${offre}\n${lien}`, null, {
+          nom: type.modele.nom,
           variables: [
             pourVariableWhatsApp(c.nom) || "cher client",
             pourVariableWhatsApp(offre),
-            pourVariableWhatsApp(echeance) || "la fin du mois",
+            pourVariableWhatsApp(echeance) || type.dateParDefaut,
           ],
           /*
            * PAS de `boutonUrl` ici, et c'est capital.
@@ -19049,8 +19134,8 @@ function CampagnesPage({ data, persist, session, notify }) {
         partenaires n’y figurent jamais — leur fichier reste le leur. Un client désabonné est exclu
         même si son pays est coché.
         <br /><br />
-        <strong>WhatsApp</strong> exige un modèle promotionnel approuvé par Meta ({MODELE_PROMO_WHATSAPP.nom},
-        catégorie {MODELE_PROMO_WHATSAPP.categorie}) : tant qu’il n’est pas validé, les envois échoueront
+        <strong>WhatsApp</strong> exige un modèle approuvé par Meta ({type.modele.nom},
+        catégorie {type.modele.categorie}) : tant qu’il n’est pas validé, les envois échoueront
         et l’écran vous le dira. L’<strong>e-mail</strong>, lui, fonctionne dès maintenant.
       </div>
 
@@ -19084,7 +19169,25 @@ function CampagnesPage({ data, persist, session, notify }) {
       </div>
 
       <div style={carteStyle}>
-        <div style={{ fontWeight: 700, fontSize: 14, color: "var(--text)", marginBottom: 10 }}>2. Par quel canal ?</div>
+        <div style={{ fontWeight: 700, fontSize: 14, color: "var(--text)", marginBottom: 4 }}>2. Qu’annoncez-vous ?</div>
+        <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>
+          Chaque type a son propre modèle chez Meta : une annonce de départ fixe une date de dépôt,
+          une promotion fixe une date de fin. Ce n’est pas la même phrase, et ce n’est pas le même
+          modèle à faire approuver.
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {Object.values(TYPES_DE_CAMPAGNE).map((t) => (
+            <button key={t.cle} onClick={() => changerTypeCampagne(t.cle)} aria-pressed={typeCampagne === t.cle}
+              style={{ padding: "8px 16px", borderRadius: 20, cursor: "pointer", fontSize: 13, fontWeight: 700,
+                       border: "1.5px solid " + (typeCampagne === t.cle ? "var(--brand-solid)" : "var(--border)"),
+                       background: typeCampagne === t.cle ? "var(--brand-solid)" : "var(--surface)",
+                       color: typeCampagne === t.cle ? "#fff" : "var(--muted)" }}>{t.libelle}</button>
+          ))}
+        </div>
+      </div>
+
+      <div style={carteStyle}>
+        <div style={{ fontWeight: 700, fontSize: 14, color: "var(--text)", marginBottom: 10 }}>3. Par quel canal ?</div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {[["email", "E-mail"], ["whatsapp", "WhatsApp"], ["les_deux", "Les deux"]].map(([k, label]) => (
             <button key={k} onClick={() => setCanal(k)}
@@ -19102,34 +19205,38 @@ function CampagnesPage({ data, persist, session, notify }) {
             Le modèle à déposer chez Meta, une fois pour toutes
           </div>
           <div style={{ fontSize: 12, color: "var(--text)", marginBottom: 10, lineHeight: 1.55 }}>
-            Gestionnaire WhatsApp → Modèles de message → Créer. Nom exact&nbsp;: <strong>{MODELE_PROMO_WHATSAPP.nom}</strong>,
-            catégorie <strong>{MODELE_PROMO_WHATSAPP.categorie}</strong>, langue <strong>Français</strong>.
+            Gestionnaire WhatsApp → Modèles de message → Créer. Nom exact&nbsp;: <strong>{type.modele.nom}</strong>,
+            catégorie <strong>{type.modele.categorie}</strong>, langue <strong>Français</strong>.
             Recopiez le corps tel quel — les trois variables sont remplies par cet écran (nom du client,
-            votre offre, l’échéance).
+            votre texte, la date).
           </div>
           <div style={{ fontSize: 12, color: "var(--text)", marginBottom: 10, lineHeight: 1.55 }}>
             <strong>Le bouton :</strong> type <strong>« Visiter le site web »</strong>, libellé
-            « {MODELE_PROMO_WHATSAPP.bouton} », adresse <strong>statique</strong> — pas « dynamique » —
-            et vous y écrivez {MODELE_PROMO_WHATSAPP.boutonAdresse}. Une adresse dynamique attendrait
+            « {type.modele.bouton} », adresse <strong>statique</strong> — pas « dynamique » —
+            et vous y écrivez {type.modele.boutonAdresse}. Une adresse dynamique attendrait
             un paramètre que cet écran n’envoie pas, et <strong>chaque message serait refusé</strong>.
           </div>
           <pre style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: 12, fontSize: 12, color: "var(--text)", whiteSpace: "pre-wrap", margin: 0, fontFamily: "ui-monospace, monospace" }}>
-{MODELE_PROMO_WHATSAPP.corps}
+{type.modele.corps}
           </pre>
           <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8 }}>
-            Pied de page du modèle : « {MODELE_PROMO_WHATSAPP.pied} »
+            Pied de page du modèle : « {type.modele.pied} »
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8 }}>
+            Les deux types ont chacun leur modèle, à déposer séparément — Meta les approuve un par un.
+            Changez de type ci-dessus pour lire le second.
           </div>
         </div>
       )}
 
       <div style={carteStyle}>
-        <div style={{ fontWeight: 700, fontSize: 14, color: "var(--text)", marginBottom: 10 }}>3. Votre message</div>
+        <div style={{ fontWeight: 700, fontSize: 14, color: "var(--text)", marginBottom: 10 }}>4. Votre message</div>
         {(canal === "email" || canal === "les_deux") && (
           <Field label="Objet de l’e-mail"><input value={objet} onChange={(e) => setObjet(e.target.value)} style={inputStyle} /></Field>
         )}
-        <Field label="L’offre, en quelques lignes">
+        <Field label={type.labelTexte}>
           <textarea value={offre} onChange={(e) => setOffre(e.target.value)} rows={4}
-            placeholder="ex : Départ Conakry → Paris le 5 septembre. Le kilo à 10 € au lieu de 12 € pour les colis déposés avant le départ."
+            placeholder={type.exempleTexte}
             style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }} />
         </Field>
         {(canal === "whatsapp" || canal === "les_deux") && /\n/.test(offre) && (
@@ -19139,15 +19246,15 @@ function CampagnesPage({ data, persist, session, notify }) {
           </div>
         )}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <Field label="Valable jusqu’au"><input value={echeance} onChange={(e) => setEcheance(e.target.value)} placeholder="ex : 30 septembre" style={inputStyle} /></Field>
+          <Field label={type.labelDate}><input value={echeance} onChange={(e) => setEcheance(e.target.value)} placeholder={type.exempleDate} style={inputStyle} /></Field>
           <Field label="Lien du site"><input value={lien} onChange={(e) => setLien(e.target.value)} style={inputStyle} /></Field>
         </div>
         <div style={{ background: "var(--surface2)", borderRadius: 10, padding: 14, marginTop: 6 }}>
           <div style={{ fontSize: 11.5, fontWeight: 700, color: "var(--muted)", marginBottom: 8 }}>APERÇU</div>
           <div style={{ fontSize: 13, color: "var(--text)", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>
-            {`Bonjour ${destinataires[0]?.nom || "Fatoumata Bah"},\n\n${offre || "…"}\n\nOffre valable jusqu’au ${echeance || "…"}. Passez en agence ou écrivez-nous, nous nous occupons du reste.\n${lien}`}
+            {`Bonjour ${destinataires[0]?.nom || "Fatoumata Bah"},\n\n${type.prefixe || ""}${offre || "…"}\n\n${type.phraseFinale(echeance || "…")}\n${lien}`}
           </div>
-          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8 }}>{MODELE_PROMO_WHATSAPP.pied}</div>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8 }}>{type.modele.pied}</div>
         </div>
       </div>
 

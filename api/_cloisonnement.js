@@ -238,6 +238,26 @@ const CHAMPS_EMPLOYE_MODIFIABLES = [
   "motdepasseSecure", "motdepasseSalt", "motdepasseIter", "motdepasseAlgo",
 ];
 
+/**
+ * Efface le mot de passe hérité quand une empreinte moderne vient d'être posée.
+ *
+ * `motdepasse` est le champ des comptes repris de l'ancienne plateforme : mot de passe en clair,
+ * ou haché sans sel. Il n'est PAS dans la liste ci-dessus, et c'est volontaire — personne ne doit
+ * pouvoir en poser un depuis un navigateur.
+ *
+ * Mais cette fusion part de la fiche telle que la base la porte, et n'y remplace que les champs
+ * envoyés. Un partenaire qui changeait son mot de passe recevait bien sa nouvelle empreinte
+ * PBKDF2 — et gardait l'ancien mot de passe en clair à côté, indéfiniment. La connexion prenant
+ * l'empreinte en premier, rien ne se voyait : l'ancien mot de passe dormait simplement dans la
+ * base, prêt à resservir le jour où l'empreinte viendrait à manquer.
+ */
+function sansMotDePasseHerite(retenu, envoye) {
+  if (!envoye || !envoye.motdepasseSecure) return retenu;
+  if (retenu.motdepasse === undefined) return retenu;
+  const { motdepasse, ...propre } = retenu;
+  return propre;
+}
+
 /*
  * Ce qu'un partenaire ne pose jamais sur un colis, même à sa création.
  *
@@ -404,7 +424,7 @@ export function fusionnerEcriturePartenaire(actuel, propose, partenaireId, compt
        * et marquer comme lus ceux qu'il a lus.
        */
       if (Array.isArray(envoyeU.partenaireMessages)) retenu.partenaireMessages = envoyeU.partenaireMessages;
-      users.push(retenu);
+      users.push(u.id === compteId ? sansMotDePasseHerite(retenu, envoyeU) : retenu);
       return;
     }
 
@@ -426,7 +446,7 @@ export function fusionnerEcriturePartenaire(actuel, propose, partenaireId, compt
         if (champ === "voitLesMontants" && !titulaire) return;
         retenu[champ] = envoyeU[champ];
       });
-      users.push({ ...retenu, role: "Partenaire", partenaireParent: partenaireId });
+      users.push({ ...sansMotDePasseHerite(retenu, envoyeU), role: "Partenaire", partenaireParent: partenaireId });
       return;
     }
 

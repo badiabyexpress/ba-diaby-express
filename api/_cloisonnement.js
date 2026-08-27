@@ -602,8 +602,20 @@ export function preserverIdentifiants(comptesBase, comptesSortie) {
     if (!compte || !compte.id) return compte;
     const ancien = parId.get(compte.id);
     if (!ancien) return compte;                                   // compte nouveau : rien à reprendre
-    if (compte.motdepasseSecure || compte.motdepasse) return compte; // changement voulu : il gagne
     const repris = { ...compte };
+    /*
+     * UNE RÉVOCATION NE RECULE JAMAIS.
+     *
+     * « Déconnecter de tous les appareils » pose une date sur le compte, et c'est elle qui invalide
+     * les jetons déjà délivrés. Une page ouverte avant ce geste ne la connaît pas : son prochain
+     * enregistrement l'effacerait, et rouvrirait la porte au téléphone qu'on venait de fermer.
+     * On garde donc toujours la date la PLUS RÉCENTE des deux — avancer est possible, revenir non.
+     */
+    const dateBase = Date.parse(ancien.sessionsRevoqueesLe || "") || 0;
+    const dateEnvoyee = Date.parse(compte.sessionsRevoqueesLe || "") || 0;
+    if (dateBase > dateEnvoyee) repris.sessionsRevoqueesLe = ancien.sessionsRevoqueesLe;
+
+    if (compte.motdepasseSecure || compte.motdepasse) return repris; // changement voulu : il gagne
     CHAMPS_IDENTIFIANTS.forEach((champ) => {
       if (ancien[champ] !== undefined) repris[champ] = ancien[champ];
     });

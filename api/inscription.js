@@ -22,7 +22,7 @@
 
 import { baseConfiguree, modifierDocument } from "./_base.js";
 import { identifiantsMotDePasse } from "./_motdepasse.js";
-import { signerSession } from "./_session.js";
+import { signerSession, empreinteDuCompte } from "./_session.js";
 
 const LONGUEUR_MOT_DE_PASSE = 8;
 
@@ -116,7 +116,10 @@ export default async function handler(req, res) {
     }
     if (!compte) return res.status(502).json({ error: "Création impossible pour le moment." });
 
-    const session = signerSession({ userId: compte.id, identifiant: compte.identifiant, role: "client" }) || {};
+    const session = signerSession({
+      userId: compte.id, identifiant: compte.identifiant, role: "client",
+      empreinte: empreinteDuCompte(compte),
+    }) || {};
     const {
       motdepasseSecure: _s, motdepasseSalt: _sel, motdepasseIter: _i, motdepasseAlgo: _a, ...compteSur
     } = compte;

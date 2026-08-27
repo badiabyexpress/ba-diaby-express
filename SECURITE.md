@@ -1297,3 +1297,47 @@ international écrit autrement, et un client désabonné sous `00224…` recevai
 envoyées à `+224…`.
 
 Éprouvé par `teststop` (28 cas).
+
+## Une session qui se coupe pour de bon
+
+C'était le premier point resté ouvert à l'audit du 27 août. Un jeton signé prouve qu'on s'est
+connecté — pas qu'on a **encore** le droit d'entrer. Il valait douze heures quoi qu'il arrive :
+changer le mot de passe n'y faisait rien, supprimer le compte non plus. Pour un téléphone oublié
+dans un taxi ou quelqu'un qui part fâché, c'était une demi-journée d'accès complet aux données de
+l'entreprise **après** la décision de le lui retirer.
+
+Le jeton porte désormais une **empreinte du compte**, que le serveur recalcule à chaque appel depuis
+le compte tel qu'il est maintenant. Les deux diffèrent, et le jeton ne vaut plus rien à la seconde.
+Trois refus, et les trois comptent : le compte a disparu, l'empreinte a changé, ou le jeton n'en
+porte aucune — un jeton d'avant cette protection est refusé plutôt que de laisser une porte ouverte
+à ceux qui étaient déjà connectés ; ils se reconnectent une fois.
+
+**L'empreinte est dérivée du mot de passe, pas égale à lui.** Un jeton intercepté ne donne rien pour
+attaquer le compte.
+
+Ce choix évite surtout un compteur à tenir à jour. Une douzaine d'endroits changent un mot de passe
+dans l'application ; il aurait suffi d'en oublier un pour que la révocation ne marche pas là — et
+personne ne s'en serait aperçu avant d'en avoir besoin. En dérivant l'empreinte du mot de passe
+lui-même, **tout changement révoque, sans qu'aucun code n'ait à y penser**.
+
+Un bouton **« Déconnecter de tous les appareils »** est apparu à côté de chaque compte, dans
+Configuration → Utilisateurs. Il pose une date de révocation sans toucher au mot de passe : la
+personne garde son mot de passe et se reconnecte quand elle veut ; c'est l'appareil resté ouvert qui
+est fermé.
+
+**Une révocation ne recule jamais.** Une page ouverte avant ce geste ne connaît pas la date : son
+prochain enregistrement l'effacerait, et rouvrirait la porte au téléphone qu'on venait de fermer. Le
+serveur garde toujours la plus récente des deux — avancer est possible, revenir non.
+
+**La lecture d'entête reste libre, et c'est délibéré.** Elle ne rend qu'une date de dernière
+modification — rien qui appartienne à quiconque — et chaque appareil la demande toutes les vingt
+secondes. La faire précéder d'une lecture du document entier coûterait bien plus qu'elle ne
+protège. Le vrai chargement, celui qui porte les données, est contrôlé.
+
+**Ce qui n'est pas couvert, et il faut le dire :** les fonctions qui dépensent (WhatsApp, e-mail,
+l'assistant, les taux) vérifient toujours la session mais pas cette empreinte — les contrôler
+demanderait une lecture de la base à chaque message envoyé, ce qui pèserait lourd sur une campagne.
+Un jeton révoqué ne peut donc plus lire ni écrire vos données, mais pourrait encore faire partir un
+message pendant les heures restantes de sa validité.
+
+Éprouvé par `testdonnees` (247 cas, dont onze pour la révocation seule) et `testgardefou` (43).

@@ -27757,6 +27757,27 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
   const [showForm, setShowForm] = useState(false);
   const [editingUser, setEditingUser] = useState(null);
   function addUser(u) { persist({ ...data, users: [...data.users, u], activityLog: pushActivity(data, session, "Compte créé", `${u.prenom} ${u.nom} (${u.role})`) }); notify(`Compte créé pour ${u.prenom} ${u.nom}`); setShowForm(false); }
+
+  /*
+   * DÉCONNECTER QUELQU'UN DE TOUS SES APPAREILS, TOUT DE SUITE.
+   *
+   * Un téléphone oublié dans un taxi, un agent qui part fâché : jusqu'ici il n'y avait rien à
+   * faire. Changer son mot de passe ne coupait pas la session déjà ouverte, et supprimer le compte
+   * non plus — le jeton vivait ses douze heures, avec l'accès complet aux données.
+   *
+   * Poser cette date suffit : le serveur calcule l'empreinte du compte à chaque appel, et tout
+   * jeton signé avant cesse de valoir à la seconde. La personne garde son mot de passe et se
+   * reconnecte quand elle veut ; c'est l'appareil resté ouvert qui est fermé.
+   */
+  function deconnecterPartout(u) {
+    persist({
+      ...data,
+      users: (data.users || []).map((x) => (x.id === u.id ? { ...x, sessionsRevoqueesLe: new Date().toISOString() } : x)),
+      activityLog: pushActivity(data, session, "Sessions déconnectées",
+        `${u.prenom} ${u.nom} — tous ses appareils`),
+    });
+    notify(`${u.prenom} est déconnecté de tous ses appareils. Son mot de passe, lui, ne change pas.`);
+  }
   /*
    * Supprimer un compte.
    *
@@ -27864,7 +27885,7 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
                 </td>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{u.role === "Administrateur" ? "Tous les pays" : (u.paysAutorises?.length ? u.paysAutorises.map((c) => FLAGS[c]).join(" ") : "Tous les pays")}</td>
                 <td style={{ padding: "12px 16px", fontSize: 13, whiteSpace: "nowrap" }}>{u.twoFA ? <ShieldCheck size={15} color="var(--ok-fg)" /> : "—"}</td>
-                <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>{effectivePermission(session, "users.gerer") && <button onClick={() => setUtilisateurAReinit(u)} title="Réinitialiser le mot de passe" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><Key size={15} /></button>}{effectivePermission(session, "users.gerer") && (() => {
+                <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>{effectivePermission(session, "users.gerer") && <button onClick={() => deconnecterPartout(u)} title={`Déconnecter ${u.prenom} de tous ses appareils`} aria-label="Déconnecter de tous les appareils" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><LogOut size={15} /></button>}{effectivePermission(session, "users.gerer") && <button onClick={() => setUtilisateurAReinit(u)} title="Réinitialiser le mot de passe" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><Key size={15} /></button>}{effectivePermission(session, "users.gerer") && (() => {
                   const raison = raisonDeNePasSupprimer(u);
                   return (
                     <button onClick={() => (raison ? notify?.(raison) : setUtilisateurASupprimer(u))}

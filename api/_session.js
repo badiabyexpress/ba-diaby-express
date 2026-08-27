@@ -38,12 +38,44 @@ function base64url(donnees) {
     .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+/*
+ * L'EMPREINTE QUI REND UNE SESSION RÉVOCABLE
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Un jeton valait douze heures, et rien ne pouvait l'arrêter. Changer le mot de passe n'y faisait
+ * rien ; supprimer le compte non plus. Pour un téléphone perdu ou quelqu'un qui part fâché, c'était
+ * une demi-journée d'accès complet aux données de l'entreprise APRÈS la décision de le lui retirer.
+ *
+ * L'empreinte est calculée à partir de ce qui, dans le compte, ne survit pas à une reprise en
+ * main : l'empreinte du mot de passe, et une date de révocation posée à la demande. Elle voyage
+ * dans le jeton, et le serveur la recalcule à chaque appel depuis le compte tel qu'il est
+ * MAINTENANT. Les deux diffèrent ? Le jeton ne vaut plus rien, à la seconde.
+ *
+ * Elle est dérivée, jamais l'empreinte elle-même : un jeton intercepté ne donne pas de quoi
+ * attaquer le mot de passe.
+ *
+ * Ce choix évite surtout un compteur à tenir à jour. Une douzaine d'endroits changent un mot de
+ * passe dans l'application ; il aurait suffi d'en oublier un pour que la révocation ne marche pas
+ * là — et personne ne s'en serait aperçu avant d'en avoir besoin.
+ */
+export function empreinteDuCompte(compte) {
+  const matiere = [
+    compte?.motdepasseSecure || compte?.motdepasse || "",
+    compte?.motdepasseSalt || "",
+    compte?.sessionsRevoqueesLe || "",
+  ].join("|");
+  return crypto.createHash("sha256").update(`bde-emp-v1|${matiere}`).digest("hex").slice(0, 16);
+}
+
 /** Signe une charge utile. Retourne null si aucun secret n'est disponible (serveur non configuré). */
-export function signerSession({ userId, identifiant, role }) {
+export function signerSession({ userId, identifiant, role, empreinte }) {
   const secret = secretDeSignature();
   if (!secret) return null;
   const maintenant = Math.floor(Date.now() / 1000);
-  const charge = { sub: userId, identifiant, role: role || "", iat: maintenant, exp: maintenant + DUREE_SESSION_SECONDES };
+  const charge = {
+    sub: userId, identifiant, role: role || "",
+    ...(empreinte ? { emp: empreinte } : {}),
+    iat: maintenant, exp: maintenant + DUREE_SESSION_SECONDES,
+  };
   const corps = base64url(JSON.stringify(charge));
   const signature = crypto.createHmac("sha256", secret).update(corps).digest("base64")
     .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");

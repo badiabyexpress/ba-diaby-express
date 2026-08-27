@@ -318,6 +318,15 @@ function nomSiteParDefaut(data) {
 function colisDeLAgence(colis, agence) {
   const sienne = String(agence || "").trim();
   if (!sienne) return true;
+  /*
+   * UN COLIS D'ACHAT EN LIGNE EST VISIBLE DE TOUTE L'ÉQUIPE.
+   *
+   * Il est créé à Paris, où la commande arrive, mais c'est à Conakry qu'on le remet au client :
+   * l'agente qui le cherche au comptoir n'est jamais celle qui l'a enregistré. Le filtrer par
+   * agence le rendrait invisible à la seule personne qui en a besoin — c'est exactement ce qui a
+   * fait qu'une agente ne voyait que 10 colis sur 21.
+   */
+  if (colis?.achatEnLigne) return true;
   const site = String(colis?.site || "").trim();
   if (!site) return true;
   return site.toLowerCase() === sienne.toLowerCase();
@@ -1703,6 +1712,28 @@ function calcReceptionFee(poidsTotal, tarifs) {
  * facture annoncent « Conakry → Conakry ».
  */
 const PAYS_DEPART_EN_LIGNE = "FR";
+
+/**
+ * QUI PEUT CRÉER UN COLIS D'ACHAT EN LIGNE.
+ *
+ * Ces colis naissent là où les commandes arrivent : à l'entrepôt de Paris. Un agent de Conakry qui
+ * en créerait un enregistrerait un colis qu'il n'a jamais eu entre les mains, sans l'avoir pesé —
+ * or ici le poids EST le prix. Seuls les agents d'un site d'opération à l'étranger le peuvent,
+ * plus l'administrateur, qui doit pouvoir corriger de n'importe où.
+ *
+ * Ce n'est pas la même question que « qui peut les VOIR » : une fois créés, ils sont visibles de
+ * toute l'équipe, à Conakry comme à Paris — c'est à Conakry qu'on les remet aux clients.
+ */
+function sitesOperationEtranger(data) {
+  return (data?.sites || []).filter((s) => s && (s.pays || "GN") !== "GN");
+}
+function peutCreerColisEnLigne(session, data) {
+  if (!session) return false;
+  if (session.role === "Administrateur") return true;
+  const sienne = String(session.agence || "").trim().toLowerCase();
+  if (!sienne) return false;
+  return sitesOperationEtranger(data).some((s) => String(s.nom || "").trim().toLowerCase() === sienne);
+}
 
 function tarifAchatEnLigne(poidsTotal, tarifs) {
   const poids = Math.max(Number(poidsTotal) || 0, 0);
@@ -11440,8 +11471,8 @@ function ContactClientPartenaire({ telephone, acces, onReveler }) {
   );
 }
 
-const Field = memo(function Field({ label, children }) {
-  return <div style={{ marginBottom: 14 }}><div style={{ fontSize: 12, fontWeight: 600, color: MUTED, marginBottom: 6 }}>{label}</div>{children}</div>;
+const Field = memo(function Field({ label, children, style }) {
+  return <div style={{ marginBottom: 14, ...style }}><div style={{ fontSize: 12, fontWeight: 600, color: MUTED, marginBottom: 6 }}>{label}</div>{children}</div>;
 });
 
 /**
@@ -16491,7 +16522,239 @@ async function downloadBonSortie(colis) {
  *
  * `options.retourner` renvoie le PDF en base64 au lieu de l'ouvrir, pour l'envoi par e-mail.
  */
+/**
+ * LA FACTURE D'UNE COMMANDE EN LIGNE — un document à elle, tenu comme celui des partenaires.
+ *
+ * Le ticket d'envoi standard raconte un envoi : un expéditeur qui dépose, un destinataire qui
+ * reçoit, une valeur déclarée, un prix par catégorie de marchandise. Une commande en ligne n'a
+ * rien de tout cela. Personne n'a déposé le colis à un comptoir ; il n'y a pas d'expéditeur, pas
+ * de catégorie tarifée, et le prix ne vient que du poids. Remplir ce ticket-là avec ces données
+ * donnait le document reçu en retour : une case « Commande en ligne » collée à la place de
+ * l'expéditeur, trois lignes d'articles toutes à « 0 GNF » — parce qu'aucune n'a de prix propre —
+ * et un total qui semblait sorti de nulle part.
+ *
+ * Celle-ci est bâtie comme la facture des partenaires : page blanche, filets fins, un tableau
+ * sobre et un total en rouge. C'est le même genre de pièce — une prestation d'acheminement
+ * facturée au poids, et non la vente d'un contenu — et le même genre de lecteur : quelqu'un qui
+ * vérifie une somme, pas quelqu'un qui suit un colis.
+ *
+ * TROIS COLONNES, PAS QUATRE. Référence, quantité, poids. Pas de désignation : sur une commande
+ * en ligne, c'est la référence qui identifie l'article — le nom que le client lui donne varie d'un
+ * site à l'autre et ne sert à personne au moment de payer.
+ *
+ * LE NUMÉRO DE SUIVI EST AU MILIEU, seul, entre deux filets. C'est la seule chose de ce document
+ * que le client aura à ressortir : pour suivre son colis, pour le réclamer au comptoir, pour nous
+ * appeler. Le noyer dans une colonne de tableau, c'est le rendre introuvable au moment où il sert.
+ */
+async function downloadFactureEnLigne(colis, data, options = {}) {
+  const jspdf = await loadJsPDF();
+  const doc = preparerDocPdf(new jspdf.jsPDF());
+  const W = 210, M = 16;
+  const NAVY = [10, 38, 71], RED = [214, 39, 63], INK = [17, 20, 26], MUTED = [122, 130, 142], LINE = [225, 228, 234];
+
+  const gnf = LIVE_RATES.GNF || CURRENCIES.GNF;
+  const montantGNF = Math.round((Number(colis.prix) || 0) * gnf);
+  const payeGNF = Math.round((Number(colis.paye) || 0) * gnf);
+  const resteGNF = Math.max(montantGNF - payeGNF, 0);
+  const produits = Array.isArray(colis.produits) ? colis.produits : [];
+  const poidsTotal = Number(colis.poids) || produits.reduce((s, p) => s + (Number(p.poids) || 0), 0);
+  const bareme = tarifAchatEnLigne(poidsTotal, data?.receptionTarifs);
+  const nbArticles = produits.reduce((s, p) => s + Math.max(Number(p.quantite) || 1, 1), 0);
+
+  const couper = (texte, largeur) => {
+    let t = String(texte ?? "");
+    if (doc.getTextWidth(t) <= largeur) return t;
+    while (t.length > 1 && doc.getTextWidth(`${t}…`) > largeur) t = t.slice(0, -1);
+    return `${t}…`;
+  };
+
+  // ── En-tête ───────────────────────────────────────────────────────────────
+  try { doc.addImage(DEFAULT_LOGO, "PNG", M, 14, 18, 18); } catch (e) { /* un logo illisible ne casse pas la facture */ }
+  doc.setFont(undefined, "bold"); doc.setFontSize(15); doc.setTextColor(...NAVY);
+  doc.text("BA-DIABY", M + 22, 22);
+  doc.setTextColor(...RED); doc.text("EXPRESS", M + 22, 29);
+  doc.setFont(undefined, "bold"); doc.setFontSize(19); doc.setTextColor(...INK);
+  doc.text("FACTURE", W - M, 22, { align: "right" });
+  /*
+   * « Achat en ligne » prend la place du numéro de commande. Ce numéro-là appartient à Shein ou à
+   * Amazon, il ne veut rien dire chez nous, et il changeait de forme à chaque site. Ce qui compte
+   * ici est la NATURE de la prestation ; les références des articles figurent dans le tableau.
+   */
+  doc.setFont(undefined, "normal"); doc.setFontSize(10); doc.setTextColor(...MUTED);
+  doc.text("Achat en ligne", W - M, 29, { align: "right" });
+  doc.setDrawColor(...LINE); doc.setLineWidth(0.4); doc.line(M, 38, W - M, 38);
+
+  // ── Le client, et la date ─────────────────────────────────────────────────
+  doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...MUTED);
+  doc.text("FACTURÉ À", M, 47);
+  doc.setFont(undefined, "bold"); doc.setFontSize(12); doc.setTextColor(...INK);
+  doc.text(couper(colis.destinataire || "—", 86), M, 54);
+  doc.setFont(undefined, "normal"); doc.setFontSize(9.5); doc.setTextColor(...MUTED);
+  let y = 60;
+  [colis.destinataireAdresse, colis.telephone, colis.destinataireEmail]
+    .filter(Boolean).forEach((ligne) => { doc.text(couper(String(ligne), 86), M, y); y += 5; });
+
+  doc.setFont(undefined, "normal"); doc.setFontSize(9.5); doc.setTextColor(...MUTED);
+  doc.text(`Émise le ${new Date(colis.createdAt || Date.now()).toLocaleDateString("fr-FR")}`, W - M, 47, { align: "right" });
+  doc.text(`${nbArticles} article(s) · ${poidsTotal.toFixed(2)} kg`, W - M, 52, { align: "right" });
+  doc.text("Paris - Conakry, par avion", W - M, 57, { align: "right" });
+  if (colis.agentCreation) doc.text(`Par ${colis.agentCreation}`, W - M, 62, { align: "right" });
+
+  // ── Le numéro de suivi, au milieu ─────────────────────────────────────────
+  /*
+   * Seul, centré, entre deux filets qui s'arrêtent avant lui. C'est la seule chose de ce document
+   * que le client aura à ressortir — pour suivre son colis, le réclamer au comptoir, ou nous
+   * appeler. Rangé dans une colonne, il serait introuvable au moment précis où il sert.
+   */
+  y = Math.max(y + 10, 82);
+  doc.setFont(undefined, "normal"); doc.setFontSize(8); doc.setTextColor(...MUTED);
+  doc.text("NUMÉRO DE SUIVI", W / 2, y, { align: "center" });
+  doc.setFont(undefined, "bold"); doc.setFontSize(22); doc.setTextColor(...NAVY);
+  doc.text(String(colis.tracking || "—"), W / 2, y + 10, { align: "center" });
+  const demiLargeur = doc.getTextWidth(String(colis.tracking || "—")) / 2;
+  doc.setDrawColor(...LINE); doc.setLineWidth(0.4);
+  doc.line(M, y + 6, W / 2 - demiLargeur - 8, y + 6);
+  doc.line(W / 2 + demiLargeur + 8, y + 6, W - M, y + 6);
+  doc.setFont(undefined, "normal"); doc.setFontSize(8); doc.setTextColor(...MUTED);
+  doc.text("Conservez ce numéro pour suivre votre colis", W / 2, y + 15.5, { align: "center" });
+
+  // ── Les articles ──────────────────────────────────────────────────────────
+  /*
+   * Pas de colonne « Prix », et c'est le fond du sujet : aucun article n'a de prix propre. Le
+   * montant naît du poids TOTAL et du palier qu'il atteint. Une colonne de prix ne pouvait
+   * afficher que des zéros — c'est ce que montrait la facture précédente, trois lignes à « 0 GNF »
+   * sous un total de 1 900 000.
+   */
+  y = Math.max(y + 26, 112);
+  doc.setFillColor(...NAVY); doc.rect(M, y, W - 2 * M, 8, "F");
+  doc.setFont(undefined, "bold"); doc.setFontSize(8.5); doc.setTextColor(255, 255, 255);
+  const colX = [M + 3, W - M - 46, W - M - 3];
+  doc.text("RÉFÉRENCE", colX[0], y + 5.4);
+  doc.text("QUANTITÉ", colX[1], y + 5.4, { align: "right" });
+  doc.text("POIDS", colX[2], y + 5.4, { align: "right" });
+  y += 8;
+
+  doc.setFont(undefined, "normal"); doc.setFontSize(9);
+  produits.forEach((p, i) => {
+    if (y > 236) { doc.addPage(); y = 24; }
+    if (i % 2 === 1) { doc.setFillColor(247, 249, 252); doc.rect(M, y, W - 2 * M, 8, "F"); }
+    /*
+     * La boutique accompagne la référence dans la même colonne plutôt que d'en ouvrir une
+     * cinquième : trois colonnes suffisent à vérifier une somme, et « SHEIN-001 · Shein » se lit
+     * d'un seul tenant.
+     */
+    doc.setTextColor(...INK);
+    const ref = String(p?.reference || p?.commande || p?.nom || "—");
+    doc.text(couper(ref, 92), colX[0], y + 5.4);
+    if (p?.commande && p?.reference) {
+      doc.setTextColor(...MUTED); doc.setFontSize(8);
+      doc.text(couper(String(p.commande), 34), colX[0] + doc.getTextWidth(couper(ref, 92)) + 3, y + 5.4);
+      doc.setFontSize(9);
+    }
+    doc.setTextColor(...MUTED);
+    doc.text(String(Math.max(Number(p?.quantite) || 1, 1)), colX[1], y + 5.4, { align: "right" });
+    doc.text(`${(Number(p?.poids) || 0).toFixed(2)} kg`, colX[2], y + 5.4, { align: "right" });
+    y += 8;
+  });
+  doc.setDrawColor(...LINE); doc.setLineWidth(0.4); doc.line(M, y, W - M, y);
+  doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...INK);
+  doc.text(`${produits.length} référence(s)`, colX[0], y + 6);
+  doc.text(`${poidsTotal.toFixed(2)} kg`, colX[2], y + 6, { align: "right" });
+
+  // ── Le calcul, puis le total ──────────────────────────────────────────────
+  /*
+   * LE CALCUL EST ÉCRIT, PAS SEULEMENT SON RÉSULTAT. « 14 kg × 95 000 GNF/kg » se vérifie devant
+   * le client ; « 1 330 000 GNF » se conteste. C'est la même exigence qu'à l'écran de l'agent.
+   */
+  y += 16;
+  if (y > 244) { doc.addPage(); y = 30; }
+  doc.setFont(undefined, "normal"); doc.setFontSize(9.5); doc.setTextColor(...MUTED);
+  doc.text(`Poids constaté à la réception : ${poidsTotal.toFixed(2)} kg`, W / 2, y, { align: "left" });
+  doc.text(`${bareme.tauxParKg.toLocaleString("fr-FR")} GNF/kg`, W - M, y, { align: "right" });
+  y += 5;
+  doc.text(`Tarif${bareme.degressif ? " dégressif" : ""}, palier jusqu’à ${bareme.palier?.max} kg`, W / 2, y, { align: "left" });
+  y += 4;
+  doc.setDrawColor(...LINE); doc.line(W / 2, y, W - M, y);
+  y += 8;
+
+  doc.setFont(undefined, "bold"); doc.setFontSize(12); doc.setTextColor(...INK);
+  doc.text(payeGNF > 0 ? "RESTE À RÉGLER" : "TOTAL À RÉGLER", W / 2, y);
+  doc.setFontSize(15); doc.setTextColor(...RED);
+  doc.text(fmtGNF(payeGNF > 0 ? resteGNF : montantGNF), W - M, y, { align: "right" });
+  /*
+   * L'euro en dessous, en petit, comme sur la facture partenaire. Le colis part de Paris et le
+   * client y raisonne en euros, mais le barème et la caisse sont en francs : l'afficher au même
+   * rang laisserait croire qu'on peut régler l'un OU l'autre, et l'écart de change se découvrirait
+   * à l'encaissement.
+   */
+  doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(...MUTED);
+  doc.text(`soit ${fmt(((payeGNF > 0 ? resteGNF : montantGNF) / gnf), "EUR")}`, W - M, y + 5.4, { align: "right" });
+  y += 11;
+  if (payeGNF > 0) {
+    doc.setFont(undefined, "normal"); doc.setFontSize(9.5); doc.setTextColor(...MUTED);
+    doc.text("Déjà versé", W / 2, y);
+    doc.text(fmtGNF(payeGNF), W - M, y, { align: "right" });
+    y += 6;
+  }
+
+  // ── Ce qu'il faut savoir ensuite ──────────────────────────────────────────
+  /*
+   * Le bloc de retrait suit le total plutôt que de s'ancrer en bas de page : figé à 246, il
+   * laissait un tiers de feuille blanche sur une facture de trois articles. Le garde-fou n'est là
+   * que pour une facture longue, dont le tableau descendrait jusque-là.
+   */
+  y += 16;
+  if (y > 250) { doc.addPage(); y = 30; }
+  const siteRetrait = siteRetraitPourColis(colis, data);
+  doc.setFont(undefined, "bold"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
+  doc.text("RETRAIT À", M, y);
+  doc.setFont(undefined, "bold"); doc.setFontSize(9.5); doc.setTextColor(...INK);
+  doc.text(couper(siteRetrait?.nom || "Nos bureaux à Conakry", 84), M, y + 5.5);
+  doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(...MUTED);
+  let yr = y + 10.5;
+  [siteRetrait?.adresse, siteRetrait?.telephone, siteRetrait?.horaires].filter(Boolean)
+    .forEach((ligne) => { doc.text(couper(String(ligne), 84), M, yr); yr += 4.5; });
+
+  doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
+  const note = doc.splitTextToSize(
+    "Montant calculé au poids constaté à la réception de votre commande à notre entrepôt de Paris, "
+    + "selon le barème au kilo en vigueur. Le montant dû est exprimé en francs guinéens.", 84);
+  doc.text(note, W / 2 + 6, y + 1);
+
+  // ── Pied de page ──────────────────────────────────────────────────────────
+  const PIED = 288;
+  doc.setDrawColor(...LINE); doc.line(M, PIED - 8, W - M, PIED - 8);
+  doc.setFont(undefined, "normal"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
+  /*
+   * L'invitation ne va qu'à ceux à qui elle sert. La servir à un client déjà inscrit la ferait
+   * passer pour de la réclame, et l'on cesserait de la lire.
+   */
+  const fiche = (data?.clientAccounts || []).find((c) => c.id === colis.clientAccountId);
+  const compteAOuvrir = fiche && fiche.compteOuvert === false;
+  doc.text(compteAOuvrir
+    ? `Suivez ce colis et tous les suivants depuis votre espace : ouvrez votre compte sur ${lienEspaceClient()}`
+    : "Conservez cette facture jusqu’à la remise du colis. Vous serez prévenu par WhatsApp à chaque étape.", M, PIED - 3);
+  const entreprise = data?.entreprise || {};
+  const societe = ["BA-DIABY EXPRESS", entreprise.telephone || telephonePourPays(data, "GN"), entreprise.email || "badiabyexpress.bde@gmail.com"]
+    .filter(Boolean).join(" · ");
+  doc.text(couper(societe, W - 2 * M - 24), M, PIED + 1.5);
+
+  if (options.blob) return doc.output("blob");
+  if (options.retourner) {
+    return { nom: `facture-${colis.tracking}.pdf`, contenu: doc.output("datauristring").split(",")[1] };
+  }
+  openPdf(doc, `facture-${colis.tracking}.pdf`);
+}
 async function downloadInvoice(colis, data, options = {}) {
+  /*
+   * Une commande en ligne n'est pas un envoi : pas d'expéditeur, pas de catégorie tarifée, un prix
+   * qui ne vient que du poids. Elle a sa propre facture. On aiguille ici plutôt qu'au niveau de
+   * chaque appelant : le bouton de la fiche, la pièce jointe WhatsApp et l'envoi par courriel
+   * passent tous par cette fonction, et doivent tous donner le même document.
+   */
+  if (colis?.achatEnLigne || colis?.expediteur === "Commande en ligne") {
+    return downloadFactureEnLigne(colis, data, options);
+  }
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF());
   const W = 210, H = 297, M = 16;
@@ -22936,7 +23199,7 @@ async function downloadImportTemplate() {
  * l'air incomplète. C'est la boutique qui tient ce rôle, et elle se dit d'un mot.
  */
 function ligneArticleEnLigne() {
-  return { id: `a${Date.now()}${Math.random().toString(36).slice(2, 5)}`, reference: "", designation: "", quantite: "1", poids: "" };
+  return { id: `a${Date.now()}${Math.random().toString(36).slice(2, 5)}`, reference: "", commande: "", quantite: "1", poids: "" };
 }
 
 ComptabilitePage = memo(ComptabilitePage);
@@ -22955,8 +23218,47 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
   const [onglet, setOnglet] = useState("articles");
   const [articles, setArticles] = useState([ligneArticleEnLigne()]);
   const [erreurArticles, setErreurArticles] = useState("");
+  /*
+   * Le comptoir se tient souvent sur un téléphone. On mesure la fenêtre plutôt que de deviner :
+   * une media query CSS n'était pas possible ici, les styles étant écrits en ligne.
+   */
+  const [etroit, setEtroit] = useState(() => (typeof window !== "undefined" ? window.innerWidth < 560 : false));
+  useEffect(() => {
+    const mesurer = () => setEtroit(window.innerWidth < 560);
+    window.addEventListener("resize", mesurer);
+    return () => window.removeEventListener("resize", mesurer);
+  }, []);
 
   const tarifs = data.receptionTarifs || { paliers: [{ max: 10, tarif: 100000 }, { max: 40, tarif: 95000 }, { max: 100, tarif: 92000 }] };
+  /*
+   * Ces colis naissent là où les commandes arrivent. Un agent de Conakry qui en créerait un
+   * enregistrerait un colis qu'il n'a jamais eu entre les mains, sans l'avoir pesé — or ici le
+   * poids EST le prix. Voir n'est pas créer : la liste, elle, reste ouverte à toute l'équipe.
+   */
+  const peutCreer = peutCreerColisEnLigne(session, data);
+
+  /*
+   * LE COMPTE RECONNU PENDANT LA SAISIE.
+   *
+   * L'agent ne sait pas si la personne devant lui a déjà un compte — elle-même l'a souvent oublié.
+   * Plutôt que de lui faire retaper une fiche qui existe déjà, on rapproche à la volée sur le
+   * numéro et sur l'e-mail : deux repères qu'on saisit de toute façon. Le colis se rattache alors
+   * au compte existant, et le client retrouve tout son historique au même endroit.
+   *
+   * On ne bascule jamais tout seul : on le PROPOSE. Basculer sans le dire ferait enregistrer un
+   * colis au nom de quelqu'un d'autre le jour où deux personnes partagent un téléphone.
+   */
+  const compteReconnu = useMemo(() => {
+    if (compte) return null;
+    const clef = clefTelephone(nouveau.telephone);
+    const courriel = nouveau.email.trim().toLowerCase();
+    if (!clef && !courriel) return null;
+    return (data.clientAccounts || []).find((c) => {
+      if (!c) return false;
+      if (clef && clefTelephone(c.telephone) === clef) return true;
+      return !!courriel && String(c.email || "").trim().toLowerCase() === courriel;
+    }) || null;
+  }, [compte, nouveau.telephone, nouveau.email, data.clientAccounts]);
 
   const comptesTrouves = recherche.trim().length >= 2
     ? (data.clientAccounts || []).filter((c) => pourRecherche(`${c.prenom} ${c.nom} ${c.telephone || ""}`).includes(pourRecherche(recherche.trim())))
@@ -22967,8 +23269,16 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
   const poidsTotal = colisSelectionnes.reduce((s, c) => s + (Number(c.poids) || 0), 0);
   const { tauxParKg, total, palier } = calcReceptionFee(poidsTotal, tarifs);
 
-  /* Le poids et le prix du colis en cours de saisie, recalculés à chaque frappe. */
-  const poidsSaisi = articles.reduce((s, a) => s + (Number(a.poids) || 0) * Math.max(Number(a.quantite) || 1, 1), 0);
+  /*
+   * Le poids et le prix du colis en cours de saisie, recalculés à chaque frappe.
+   *
+   * LE POIDS D'UNE LIGNE EST CELUI DE LA LIGNE, PAS CELUI D'UNE UNITÉ. L'agent pèse ce qu'il a
+   * sous la main : « 6 kg » de chaussures, que le carton en contienne deux paires ou dix. Le
+   * multiplier par la quantité gonflait la facture — sur la capture reçue, 5 + 3 + 6 kg réellement
+   * pesés étaient facturés 20 kg parce qu'une ligne portait « ×2 ». La quantité sert à décrire le
+   * contenu et à le compter en douane ; elle n'entre pas dans le prix.
+   */
+  const poidsSaisi = articles.reduce((s, a) => s + (Number(a.poids) || 0), 0);
   const tarification = tarifAchatEnLigne(poidsSaisi, tarifs);
   const prixEUR = tarification.totalGNF / (LIVE_RATES.GNF || CURRENCIES.GNF);
 
@@ -23002,7 +23312,12 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
     if (!telephone) { setErreurClient("Le téléphone est nécessaire : c’est par lui qu’on prévient le client de l’arrivée."); return; }
 
     const clef = clefTelephone(telephone);
-    const existant = (data.clientAccounts || []).find((c) => clefTelephone(c.telephone) && clefTelephone(c.telephone) === clef);
+    const courriel = nouveau.email.trim().toLowerCase();
+    const existant = (data.clientAccounts || []).find((c) => {
+      if (!c) return false;
+      if (clef && clefTelephone(c.telephone) === clef) return true;
+      return !!courriel && String(c.email || "").trim().toLowerCase() === courriel;
+    });
     if (existant) {
       setCompte(existant);
       setModeClient(null);
@@ -23038,9 +23353,10 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
    * écraserait le montant en silence — c'est déjà arrivé, un colis y est passé de 26 à 125 EUR.
    */
   function creerColis() {
+    if (!peutCreer) { notify?.("La création d’un colis commandé en ligne se fait au site d’opération à l’étranger."); return; }
     const propres = articles
       .map((a) => ({ ...a, poids: Number(a.poids) || 0, quantite: Math.max(Number(a.quantite) || 1, 1) }))
-      .filter((a) => a.poids > 0 || a.reference.trim() || a.designation.trim());
+      .filter((a) => a.poids > 0 || a.reference.trim() || a.commande);
     if (propres.length === 0) { setErreurArticles("Ajoutez au moins un article."); setOnglet("articles"); return; }
     const sansPoids = propres.find((a) => a.poids <= 0);
     if (sansPoids) { setErreurArticles("Chaque article doit porter son poids : c’est lui qui fait le prix."); setOnglet("articles"); return; }
@@ -23065,8 +23381,8 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
       destinataireVille: "", destinataireCodePostal: "", destinatairePays: "GN",
       pays: PAYS_DEPART_EN_LIGNE, direction: "import", mode: "air",
       produits: propres.map((a) => ({
-        id: a.id, nom: a.designation.trim() || a.reference.trim() || "Article commandé",
-        reference: a.reference.trim(), quantite: String(a.quantite), poids: String(a.poids),
+        id: a.id, nom: a.commande || a.reference.trim() || "Article commandé",
+        reference: a.reference.trim(), commande: a.commande, quantite: String(a.quantite), poids: String(a.poids),
         categorie: "", personnalise: false, montant: "", devise: "GNF", typePrix: "unitaire",
       })),
       poids: +poidsSaisi.toFixed(2), volume: 0, valeurDeclaree: 0,
@@ -23077,7 +23393,9 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
       notesInternes: `Achat en ligne · ${propres.length} article(s)${references.length ? ` · réf. ${references.join(", ")}` : ""} · ${poidsSaisi.toFixed(2)} kg à ${fmtGNF(tarification.tauxParKg)}/kg`,
       tarification: "reception",
       achatEnLigne: true,
-      clientAccountId: compte.id, provenance: null,
+      clientAccountId: compte.id,
+      /* `provenance` alimente déjà le comptage par boutique : autant qu'il serve. */
+      provenance: boutiqueCommune || propres.map((a) => a.commande).find(Boolean) || null,
       status: "Enregistré", historique: [{ status: "Enregistré", date: maintenant }],
       agentCreation: session ? `${session.prenom} ${session.nom}`.trim() || session.identifiant : "",
       createdAt: maintenant, pod: null, signature: null, driverLoc: null,
@@ -23088,6 +23406,20 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
       activityLog: pushActivity(data, session, "Colis d’achat en ligne créé", `${tracking} — ${compte.prenom} ${compte.nom} — ${poidsSaisi.toFixed(2)} kg`),
     });
     notify?.(`Colis ${tracking} créé — ${fmtGNF(tarification.totalGNF)} à payer`);
+    /*
+     * LE CLIENT EST PRÉVENU, COMME POUR N'IMPORTE QUEL COLIS.
+     *
+     * Ce chemin-ci ne prévenait personne : le colis apparaissait dans l'espace du client sans un
+     * mot, et sa facture — celle qui porte le montant à régler et, pour un non-inscrit, le lien
+     * pour ouvrir son compte — ne partait jamais. On passe donc par le même `notifierEvenement`
+     * que le formulaire général : les réglages de Configuration → Notifications WhatsApp
+     * s'appliquent, le ticket est joint, et un échec d'envoi ne remet jamais en cause le colis.
+     */
+    notifierEvenement({ ...data, colis: [nouveauColis, ...data.colis] }, "enregistrement", nouveauColis,
+      `Votre colis ${nouveauColis.tracking} a bien été enregistré`
+      + `${nouveauColis.poids ? ` (${nouveauColis.poids} kg)` : ""}. Suivez-le à tout moment sur notre plateforme.`)
+      .then(({ traces }) => { if (traces?.length) persist((courant) => ({ ...courant, messagesWhatsApp: avecTraces(courant, traces) })); })
+      .catch(() => { /* une notification ne bloque jamais l’enregistrement */ });
     setSelection((s) => [...s, tracking]);
     setArticles([ligneArticleEnLigne()]);
     setOnglet("articles");
@@ -23100,6 +23432,22 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
     catch (e) { console.error(e); }
     setGeneration(false);
   }
+
+  /*
+   * LA BOUTIQUE, EN UN CLIC.
+   *
+   * Un colis correspond presque toujours à UNE commande, chez une seule boutique : Shein, Temu,
+   * Amazon, AliExpress. Faire retaper le nom sur chaque ligne, c'est quatre fois la même saisie et
+   * quatre orthographes différentes dans la base — « Shein », « shein », « SHEIN », « chein » —
+   * qui rendent ensuite tout comptage impossible. Un bouton la pose sur toutes les lignes d'un
+   * coup ; la liste par ligne reste là pour le colis qui mêle deux commandes.
+   */
+  function poserCommandePartout(boutique) {
+    setArticles((l) => l.map((a) => ({ ...a, commande: boutique })));
+    setErreurArticles("");
+  }
+  const boutiqueCommune = articles.length > 0 && articles.every((a) => a.commande && a.commande === articles[0].commande)
+    ? articles[0].commande : "";
 
   const carte = (titre, desc, icone, actif, onClick) => (
     <button onClick={onClick} style={{
@@ -23171,10 +23519,32 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 12 }}>
                 <Field label="Prénom *"><input value={nouveau.prenom} onChange={(e) => { setNouveau({ ...nouveau, prenom: e.target.value }); setErreurClient(""); }} style={{ ...inputStyle, marginBottom: 0 }} autoFocus /></Field>
                 <Field label="Nom *"><input value={nouveau.nom} onChange={(e) => { setNouveau({ ...nouveau, nom: e.target.value }); setErreurClient(""); }} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
-                <Field label="Téléphone *"><input value={nouveau.telephone} onChange={(e) => { setNouveau({ ...nouveau, telephone: e.target.value }); setErreurClient(""); }} style={{ ...inputStyle, marginBottom: 0 }} placeholder="+224…" /></Field>
-                <Field label="E-mail"><input value={nouveau.email} onChange={(e) => setNouveau({ ...nouveau, email: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
+                {/*
+                  * Le même champ que partout ailleurs : l'indicatif se choisit au drapeau et ne
+                  * peut pas être oublié. Un numéro sans indicatif ne sert à rien — ni WhatsApp ni
+                  * un appel depuis la Guinée n'aboutissent sur « 620999888 ».
+                  */}
+                <Field label="Téléphone *">
+                  <PhoneInput value={nouveau.telephone} defaultDial={indicatifDuPays("GN")}
+                    onChange={(v) => { setNouveau((n) => ({ ...n, telephone: v })); setErreurClient(""); }} />
+                </Field>
+                <Field label="E-mail"><input value={nouveau.email} onChange={(e) => { setNouveau({ ...nouveau, email: e.target.value }); setErreurClient(""); }} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
                 <Field label="Adresse"><input value={nouveau.adresse} onChange={(e) => setNouveau({ ...nouveau, adresse: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
               </div>
+              {compteReconnu && (
+                <div style={{ display: "flex", gap: 10, alignItems: "flex-start", background: "var(--info-bg)", color: "var(--info-fg)", border: "1px solid var(--border)", borderRadius: 10, padding: "11px 13px", fontSize: 12.5, marginTop: 12 }}>
+                  <User size={15} style={{ flexShrink: 0, marginTop: 1 }} />
+                  <div style={{ flex: 1 }}>
+                    <strong>{compteReconnu.prenom} {compteReconnu.nom} a déjà une fiche</strong> à ce{" "}
+                    {clefTelephone(nouveau.telephone) && clefTelephone(compteReconnu.telephone) === clefTelephone(nouveau.telephone) ? "numéro" : "courriel"}.
+                    Reprenez-la pour que ses colis restent au même endroit.
+                  </div>
+                  <button onClick={() => { setCompte(compteReconnu); setModeClient(null); setNouveau({ prenom: "", nom: "", telephone: "", email: "", adresse: "" }); }}
+                    style={{ background: "var(--info-fg)", color: "#fff", border: "none", borderRadius: 7, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>
+                    Reprendre
+                  </button>
+                </div>
+              )}
               {erreurClient && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginTop: 10 }}>{erreurClient}</div>}
               <div style={{ fontSize: 11.5, color: "var(--muted)", margin: "12px 0 12px", lineHeight: 1.5 }}>
                 Aucun mot de passe n’est demandé ici : on ne choisit pas les identifiants de quelqu’un d’autre.
@@ -23201,12 +23571,34 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
 
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
             <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>Colis disponibles ({colisDisponibles.length})</div>
-            <button onClick={() => { setCreation((c) => !c); setOnglet("articles"); }} style={{ background: creation ? "var(--surface2)" : "#3D63FF", color: creation ? "var(--text)" : "#fff", border: creation ? "1px solid var(--border)" : "none", borderRadius: 8, padding: "7px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
-              {creation ? "Annuler" : "+ Nouveau colis"}
-            </button>
+            {/*
+              * Le bouton reste visible, éteint, avec son motif : disparu, il se lirait comme une
+              * panne — l'agent réessaie, téléphone, et finit par faire créer le colis par
+              * quelqu'un d'autre, ce qui contourne la règle au lieu de l'appliquer.
+              */}
+            {peutCreer ? (
+              <button onClick={() => { setCreation((c) => !c); setOnglet("articles"); }} style={{ background: creation ? "var(--surface2)" : "#3D63FF", color: creation ? "var(--text)" : "#fff", border: creation ? "1px solid var(--border)" : "none", borderRadius: 8, padding: "7px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                {creation ? "Annuler" : "+ Nouveau colis"}
+              </button>
+            ) : (
+              <button disabled title="Création réservée aux agents du site d’opération à l’étranger" style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", color: "var(--muted)", border: "1.5px dashed var(--border)", borderRadius: 8, padding: "7px 14px", fontSize: 12, fontWeight: 700, cursor: "not-allowed" }}>
+                <Lock size={13} /> Création à Paris
+              </button>
+            )}
           </div>
 
-          {creation && (
+          {!peutCreer && (
+            <div style={{ display: "flex", gap: 10, alignItems: "flex-start", background: "var(--surface2)", color: "var(--muted)", border: "1px solid var(--border)", borderRadius: 10, padding: "11px 13px", fontSize: 12, marginBottom: 14 }}>
+              <Lock size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+              <div>
+                Les colis commandés en ligne s’enregistrent au site d’opération à l’étranger, où les
+                commandes arrivent et où elles sont pesées — le poids fait le prix. Vous voyez et
+                remettez ici tous ceux qui sont déjà enregistrés.
+              </div>
+            </div>
+          )}
+
+          {creation && peutCreer && (
             <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 18 }}>
               <div style={{ display: "flex", gap: 20, borderBottom: "1px solid var(--border)", marginBottom: 16, flexWrap: "wrap" }}>
                 {ongletBouton("client", "Client", 1)}
@@ -23231,26 +23623,55 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
               {onglet === "articles" && (
                 <div>
                   <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 12 }}>
-                    Un article par ligne, tel qu’il figure sur la commande. Le poids de chaque ligne s’entend par unité.
+                    Un article par ligne, tel qu’il figure sur la commande. Le poids est celui pesé pour la ligne
+                    entière — la quantité décrit le contenu, elle ne multiplie pas le poids.
+                  </div>
+                  <div style={{ display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
+                    <span style={{ fontSize: 11.5, color: "var(--muted)" }}>Commande passée sur :</span>
+                    {["Shein", "Temu", "Amazon", "AliExpress"].map((v) => (
+                      <button key={v} onClick={() => poserCommandePartout(v)} style={{
+                        background: boutiqueCommune === v ? "var(--info-fg)" : "var(--surface)",
+                        color: boutiqueCommune === v ? "#fff" : "var(--text)",
+                        border: `1px solid ${boutiqueCommune === v ? "var(--info-fg)" : "var(--border)"}`,
+                        borderRadius: 999, padding: "5px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer",
+                      }}>{v}</button>
+                    ))}
                   </div>
                   {articles.map((a, i) => (
-                    <div key={a.id} style={{ display: "grid", gridTemplateColumns: "minmax(110px,1fr) minmax(130px,1.4fr) 78px 92px 32px", gap: 8, alignItems: "end", marginBottom: 10 }}>
-                      <Field label={i === 0 ? "Référence" : ""}><input value={a.reference} onChange={(e) => majArticle(a.id, { reference: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="SHEIN-XYZ" /></Field>
-                      <Field label={i === 0 ? "Désignation" : ""}><input value={a.designation} onChange={(e) => majArticle(a.id, { designation: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="Vêtements" /></Field>
-                      <Field label={i === 0 ? "Qté" : ""}><input type="number" min="1" value={a.quantite} onChange={(e) => majArticle(a.id, { quantite: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
-                      <Field label={i === 0 ? "Poids (kg)" : ""}><input type="number" min="0" step="0.1" value={a.poids} onChange={(e) => majArticle(a.id, { poids: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="3.5" /></Field>
+                    /*
+                      * Sur un téléphone, cinq colonnes fixes débordaient hors de l'écran : la
+                      * dernière ligne — le poids, c'est-à-dire le prix — se saisissait à
+                      * l'aveugle en faisant glisser la page. Les articles se replient donc en deux
+                      * colonnes sous 560 px, et chaque ligne devient une petite fiche.
+                      */
+                    <div key={a.id} style={{ display: "grid", gridTemplateColumns: etroit ? "1fr 1fr" : "minmax(110px,1fr) minmax(130px,1.4fr) 78px 92px 32px", gap: 8, alignItems: "end", marginBottom: etroit ? 16 : 10, paddingBottom: etroit ? 12 : 0, borderBottom: etroit && articles.length > 1 ? "1px solid var(--border)" : "none" }}>
+                      <Field label={etroit || i === 0 ? "Référence" : ""} style={etroit ? { gridColumn: "1 / -1" } : undefined}><input value={a.reference} onChange={(e) => majArticle(a.id, { reference: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="SHEIN-XYZ" /></Field>
+                      <Field label={etroit || i === 0 ? "Commande" : ""} style={etroit ? { gridColumn: "1 / -1" } : undefined}>
+                        <select value={a.commande} onChange={(e) => majArticle(a.id, { commande: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }}>
+                          <option value="">Boutique…</option>
+                          {VENDEURS_EN_LIGNE.map((v) => <option key={v} value={v}>{v}</option>)}
+                        </select>
+                      </Field>
+                      <Field label={etroit || i === 0 ? "Qté" : ""}><input type="number" min="1" value={a.quantite} onChange={(e) => majArticle(a.id, { quantite: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
+                      <Field label={etroit || i === 0 ? "Poids (kg)" : ""}><input type="number" min="0" step="0.1" value={a.poids} onChange={(e) => majArticle(a.id, { poids: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="3.5" /></Field>
                       <button
                         onClick={() => setArticles((l) => (l.length > 1 ? l.filter((x) => x.id !== a.id) : l))}
                         disabled={articles.length === 1}
                         title={`Retirer l’article ${i + 1}`}
                         aria-label={`Retirer l’article ${i + 1}`}
-                        style={{ background: "none", border: "none", color: articles.length === 1 ? "var(--border)" : "var(--danger-fg)", cursor: articles.length === 1 ? "not-allowed" : "pointer", paddingBottom: 10 }}>
-                        <X size={15} />
+                        /* Sur un téléphone la croix se retrouvait seule au milieu d'une ligne vide : on la rend à droite, et on la nomme. */
+                        style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 5, gridColumn: etroit ? "1 / -1" : "auto", justifySelf: etroit ? "end" : "auto", background: "none", border: "none", color: articles.length === 1 ? "var(--border)" : "var(--danger-fg)", cursor: articles.length === 1 ? "not-allowed" : "pointer", paddingBottom: etroit ? 0 : 10, fontSize: 12, fontWeight: 600 }}>
+                        <X size={15} />{etroit ? "Retirer" : null}
                       </button>
                     </div>
                   ))}
                   {erreurArticles && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10 }}>{erreurArticles}</div>}
-                  <button onClick={() => setArticles((l) => [...l, ligneArticleEnLigne()])} style={{ background: "none", border: "1px dashed var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>
+                  {/*
+                    * La nouvelle ligne hérite de la boutique déjà choisie. Sans cela, l'agent qui
+                    * clique « Shein » puis ajoute un article se retrouve avec une ligne vide au
+                    * milieu d'une commande d'un seul tenant — et ne s'en aperçoit qu'à la facture.
+                    */}
+                  <button onClick={() => setArticles((l) => [...l, { ...ligneArticleEnLigne(), commande: boutiqueCommune }])} style={{ background: "none", border: "1px dashed var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>
                     + Ajouter un article
                   </button>
                 </div>
@@ -23259,14 +23680,14 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
               {onglet === "prix" && (
                 <div>
                   <div style={{ border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden", marginBottom: 14 }}>
-                    {articles.filter((a) => Number(a.poids) > 0 || a.reference.trim() || a.designation.trim()).map((a) => (
+                    {articles.filter((a) => Number(a.poids) > 0 || a.reference.trim() || a.commande).map((a) => (
                       <div key={a.id} style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "8px 12px", borderTop: "1px solid var(--border)", fontSize: 12.5 }}>
                         <span style={{ color: "var(--text)" }}>
-                          {a.designation.trim() || a.reference.trim() || "Article"}
-                          {a.reference.trim() && a.designation.trim() ? <span style={{ color: "var(--muted)" }}> · {a.reference.trim()}</span> : null}
+                          {a.reference.trim() || a.commande || "Article"}
+                          {a.reference.trim() && a.commande ? <span style={{ color: "var(--muted)" }}> · {a.commande}</span> : null}
                           <span style={{ color: "var(--muted)" }}> × {Math.max(Number(a.quantite) || 1, 1)}</span>
                         </span>
-                        <span style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>{((Number(a.poids) || 0) * Math.max(Number(a.quantite) || 1, 1)).toFixed(2)} kg</span>
+                        <span style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>{(Number(a.poids) || 0).toFixed(2)} kg</span>
                       </div>
                     ))}
                   </div>

@@ -1683,6 +1683,32 @@ function calcReceptionFee(poidsTotal, tarifs) {
   const tauxParKg = palier.tarif;
   return { tauxParKg, total: Math.round(poidsTotal * tauxParKg), palier };
 }
+
+/**
+ * LE BARÈME ACHAT EN LIGNE, ET CE QU'IL FAUT EN DIRE À L'AGENT.
+ *
+ * Un colis d'achat en ligne n'a pas de catégorie de produit : le client a commandé sur Shein ou
+ * Amazon, il n'y a rien à tarifer article par article. Son prix ne vient donc que du poids, par
+ * paliers dégressifs — c'est le barème déjà réglé dans Configuration → Tarifs de réception client,
+ * celui qui servait aux colis annoncés depuis l'Espace Client. Il ne change pas ; il s'applique
+ * simplement à tous les colis créés au comptoir de réception, que le client ait un compte ou non.
+ *
+ * Rend aussi de quoi l'EXPLIQUER à l'écran. Un montant qui apparaît sans qu'on sache d'où il sort
+ * ne se défend pas devant le client qui le conteste au comptoir : l'agent doit pouvoir lire « 24 kg,
+ * palier 11–40 kg, 95 000 GNF/kg ».
+ */
+function tarifAchatEnLigne(poidsTotal, tarifs) {
+  const poids = Math.max(Number(poidsTotal) || 0, 0);
+  const { tauxParKg, total, palier } = calcReceptionFee(poids, tarifs);
+  const sorted = [...(tarifs?.paliers || [])].sort((a, b) => a.max - b.max);
+  const premier = sorted[0];
+  return {
+    poids, tauxParKg, totalGNF: poids > 0 ? total : 0, palier,
+    /* Le seuil n'est pas un réglage de plus : c'est le plafond du premier palier. */
+    seuil: premier ? Number(premier.max) || 0 : 10,
+    degressif: !!premier && poids > (Number(premier.max) || 0),
+  };
+}
 /** Ajoute une entrée au journal d’activité global (les 500 dernières actions sont conservées). */
 function pushActivity(data, session, action, detail) {
   const entry = { id: `log${Date.now()}${Math.random().toString(36).slice(2,5)}`, action, detail, date: new Date().toISOString(), utilisateur: `${session.prenom} ${session.nom}`, role: session.role };
@@ -5261,17 +5287,38 @@ function ClientRegisterForm({ data, persist, onRegistered, onCancel }) {
         setErr("Cet identifiant est déjà utilisé. Choisissez-en un autre."); setLoading(false); return;
       }
       const identifiants = await creerIdentifiantsMotDePasse(motdepasse);
-      const account = {
-        id: `cli${Date.now()}`, nom, prenom, identifiant: identifiant.trim(), ...identifiants,
-        telephone, adresse, email, createdAt: new Date().toISOString(),
-      };
+      /*
+       * Même règle que sur le serveur : la fiche ouverte au comptoir est REPRISE, pas doublée.
+       * Sans cela, le client qui suit l'invitation de sa facture se connecterait à un espace vide,
+       * ses colis étant restés sur la première fiche — et conclurait que le suivi ne marche pas.
+       * Une fiche déjà pourvue d'identifiants n'est jamais reprise : ce serait s'emparer d'un
+       * compte existant en connaissant un simple numéro.
+       */
+      const clefTel = clefTelephone(telephone);
+      const aReprendre = clefTel
+        ? (data.clientAccounts || []).find((c) => c && !c.identifiant && !c.motdepasseSecure && !c.motdepasse
+            && clefTelephone(c.telephone) === clefTel)
+        : null;
+      const account = aReprendre
+        ? { ...aReprendre, nom, prenom, identifiant: identifiant.trim(), ...identifiants,
+            telephone, adresse: adresse || aReprendre.adresse || "", email: email || aReprendre.email || "",
+            compteOuvert: true, ouvertLe: new Date().toISOString() }
+        : {
+          id: `cli${Date.now()}`, nom, prenom, identifiant: identifiant.trim(), ...identifiants,
+          telephone, adresse, email, createdAt: new Date().toISOString(),
+        };
       /*
        * Voie de secours : le serveur d'inscription n'a pas répondu, le compte est créé d'ici. On
        * ne se contente pas de l'écrire — on relit la base et on vérifie que le compte y est.
        * Sans cela, quelqu'un repartirait avec un identifiant, un mot de passe, et rien derrière :
        * il ne s'en apercevrait qu'à sa prochaine connexion, refusée sans explication.
        */
-      const ecriture = await persist({ ...data, clientAccounts: [...(data.clientAccounts || []), account] });
+      const ecriture = await persist({
+        ...data,
+        clientAccounts: aReprendre
+          ? (data.clientAccounts || []).map((c) => (c.id === aReprendre.id ? account : c))
+          : [...(data.clientAccounts || []), account],
+      });
       if (!ecriture?.queued) {
         const relu = await relireDuServeur("bde-data").catch(() => ({ injoignable: true }));
         const enregistre = relu.valeur
@@ -15834,14 +15881,67 @@ async function downloadLabel(colis, data) {
  * L'étiquette n'a pas disparu pour autant : elle continue de s'imprimer depuis la fiche du colis,
  * là où elle a un sens.
  */
+/*
+ * LE NOM DU FICHIER NE DOIT PAS SE DEVINER.
+ *
+ * L'espace de stockage est public en lecture, et il doit l'être : Meta va chercher le document
+ * lui-même, sans identifiant, pour le joindre au message. Ce n'est pas ça, le danger.
+ *
+ * Le danger, c'était le NOM. La facture s'appelait `factures/BDE270808.pdf` — le numéro de suivi,
+ * tout simplement. Or ces numéros se suivent : BDE270801, BDE270802, BDE270803… Ils sont imprimés
+ * sur le carton, écrits dans chaque message WhatsApp, lus par tous ceux qui manipulent le colis.
+ * Quiconque en connaissait UN pouvait deviner tous les autres et télécharger la facture
+ * correspondante : nom du client, téléphone, adresse, contenu du colis, valeur déclarée. Aucune
+ * effraction, aucune trace — il suffisait de changer deux chiffres dans une adresse.
+ *
+ * Un jeton tiré au hasard referme cela sans rien changer au fonctionnement : Meta continue d'aller
+ * chercher la facture, le client la reçoit comme avant, mais l'adresse ne se déduit plus de rien.
+ * C'est déjà ce que fait `deposerImage` pour les photos ; la facture était la seule exception.
+ */
+function jetonDocument() {
+  const octets = new Uint8Array(12);
+  crypto.getRandomValues(octets);
+  return Array.from(octets).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Efface les versions précédentes de la facture d'un colis.
+ *
+ * Sans cela, chaque correction en laisserait une de plus dans le stockage, accessible pour
+ * toujours à qui aurait relevé l'ancienne adresse — y compris la version d'avant la correction,
+ * celle qui annonçait le mauvais montant.
+ *
+ * Le message déjà parti n'en souffre pas : WhatsApp garde sa propre copie du document une fois
+ * qu'il l'a récupéré. Un échec ici ne doit rien interrompre — la nouvelle facture est en place,
+ * c'est ce qui compte.
+ */
+async function effacerAnciennesFactures(tracking, cheminActuel) {
+  try {
+    const stockage = clientSupabase().storage.from("colis-documents");
+    const { data: fichiers } = await stockage.list("factures", { limit: 100, search: tracking });
+    /*
+     * `search` ne fait que dégrossir : c'est une recherche par morceau de nom, qui rapporterait
+     * aussi les fichiers d'un colis dont le numéro commence pareil. On ne retient donc que les
+     * deux formes qui appartiennent VRAIMENT à ce colis — l'ancien nom nu, hérité, et les noms à
+     * jeton. Effacer la facture d'un autre client serait pire que le désordre qu'on nettoie.
+     */
+    const perimes = (fichiers || [])
+      .filter((f) => f.name === `${tracking}.pdf` || f.name.startsWith(`${tracking}-`))
+      .map((f) => `factures/${f.name}`)
+      .filter((chemin) => chemin !== cheminActuel);
+    if (perimes.length) await stockage.remove(perimes);
+  } catch (e) { /* la facture du jour est en place : le reste n'est que du ménage */ }
+}
+
 async function genererUrlFacture(colis, data) {
   const blob = await downloadInvoice(colis, data, { blob: true });
-  const chemin = `factures/${colis.tracking}.pdf`;
+  const chemin = `factures/${colis.tracking}-${jetonDocument()}.pdf`;
   const { error: erreurUpload } = await clientSupabase().storage
     .from("colis-documents")
     .upload(chemin, blob, { contentType: "application/pdf", upsert: true });
   if (erreurUpload) throw erreurUpload;
   const { data: { publicUrl } } = clientSupabase().storage.from("colis-documents").getPublicUrl(chemin);
+  await effacerAnciennesFactures(colis.tracking, chemin);
   return publicUrl;
 }
 
@@ -16490,7 +16590,20 @@ async function downloadInvoice(colis, data, options = {}) {
     doc.text(tel || "—", x, y + 13);
     doc.text(pays || "—", x, y + 18.5);
   };
-  partie("Expéditeur", colis.expediteur, colis.expediteurTelephone, origine?.name, M);
+  /*
+   * UN ACHAT EN LIGNE N'A PAS D'EXPÉDITEUR — et une case « Expéditeur » vide fait une facture qui
+   * a l'air ratée. Personne n'a déposé ce colis à un comptoir : il vient d'une boutique. C'est donc
+   * la commande qui prend cette place, avec sa référence, et nous en dessous — puisque c'est nous
+   * qui l'avons réceptionné et que le client doit savoir qui joindre.
+   */
+  const enLigne = !!colis.achatEnLigne || colis.expediteur === "Commande en ligne";
+  if (enLigne) {
+    const reference = colis.referenceCommande || (colis.produits || []).map((p) => p?.reference).find(Boolean) || "";
+    const contact = data?.entreprise?.telephone || telephonePourPays(data, "GN") || "";
+    partie("Commande en ligne", reference || "Achat en ligne", contact, "Réceptionné par Ba-Diaby Express", M);
+  } else {
+    partie("Expéditeur", colis.expediteur, colis.expediteurTelephone, origine?.name, M);
+  }
   partie("Destinataire", colis.destinataire, colis.telephone, dest?.name, W / 2 + 2);
 
   // ── Numéro de suivi mis en avant ──────────────────────────────────────────
@@ -16634,8 +16747,24 @@ async function downloadInvoice(colis, data, options = {}) {
   // ── Pied de page ──────────────────────────────────────────────────────────
   doc.setDrawColor(...LINE); doc.line(M, Z.pied - 8, W - M, Z.pied - 8);
   doc.setFont(undefined, "normal"); doc.setFontSize(7); doc.setTextColor(...MUTED);
-  doc.text("Conservez ce ticket jusqu'à la remise du colis. Vous serez prévenu par WhatsApp à chaque étape.", M, Z.pied - 3);
-  doc.text("BA-DIABY EXPRESS · badiabyexpress.bde@gmail.com", M, Z.pied + 1.5);
+  /*
+   * L'INVITATION À OUVRIR UN COMPTE — pour ceux qui n'en ont pas.
+   *
+   * Le client qui a refusé d'en ouvrir un au comptoir n'a rien refusé du service : il a refusé de
+   * remplir un formulaire pendant qu'on tenait son colis. Chez lui, avec sa facture en main et son
+   * numéro de suivi dessus, la proposition prend un tout autre sens — c'est là qu'elle a sa place.
+   * On ne la met qu'à ceux à qui elle sert : la répéter à un client déjà inscrit la ferait passer
+   * pour de la réclame.
+   */
+  const clientInscrit = (data?.clientAccounts || []).find((c) => c.id === colis.clientAccountId);
+  const compteAOuvrir = clientInscrit && clientInscrit.compteOuvert === false;
+  doc.text(compteAOuvrir
+    ? `Suivez ce colis et tous les suivants depuis votre espace : ouvrez votre compte sur ${lienEspaceClient()}`
+    : "Conservez ce ticket jusqu'à la remise du colis. Vous serez prévenu par WhatsApp à chaque étape.", M, Z.pied - 3);
+  const entreprise = data?.entreprise || {};
+  const ligneSociete = ["BA-DIABY EXPRESS", entreprise.telephone || telephonePourPays(data, "GN"), entreprise.email || "badiabyexpress.bde@gmail.com"]
+    .filter(Boolean).join(" · ");
+  doc.text(couper(ligneSociete, W - 2 * M - 24), M, Z.pied + 1.5);
   doc.text("Page 1 / 1", W - M, Z.pied + 1.5, { align: "right" });
 
   if (options.blob) return doc.output("blob");
@@ -22767,20 +22896,52 @@ async function downloadImportTemplate() {
  * tarif dégressif au kg s’applique automatiquement selon le poids total du lot sélectionné.
  */
 
+/*
+ * LE COMPTOIR DE RÉCEPTION — LÀ OÙ NAISSENT LES COLIS D'ACHAT EN LIGNE
+ * ────────────────────────────────────────────────────────────────────
+ * Ici, tout colis est un achat en ligne. Le client a commandé sur Shein, Amazon ou Temu, la
+ * commande est arrivée à l'entrepôt, on la pèse et on la rattache à quelqu'un. C'est la seule
+ * chose qui se fasse à ce comptoir — l'écran n'a donc pas à poser la question, ni même à
+ * prononcer le mot : il applique le barème au poids, et c'est tout.
+ *
+ * CE QUI BLOQUAIT. Ce barème dégressif existait déjà (Configuration → Tarifs de réception client),
+ * mais il ne servait qu'aux colis annoncés depuis l'Espace Client — donc uniquement aux clients
+ * ayant ouvert un compte. Or beaucoup refusent d'en ouvrir un : ils veulent qu'on prenne leur
+ * colis, pas remplir un formulaire. Leurs colis repartaient alors vers le formulaire général,
+ * tarifé à la catégorie de produit, qui n'est pas fait pour eux. Le compte n'a jamais été ce qui
+ * détermine le prix ; il était seulement le seul chemin qui menait au bon barème. On ouvre l'autre.
+ *
+ * L'agent ne choisit donc plus qu'une chose : le client est inscrit, ou il ne l'est pas.
+ *
+ * PAS D'EXPÉDITEUR. Personne n'a déposé ce colis au comptoir : il vient d'une boutique en ligne.
+ * Un champ « expéditeur » n'aurait rien à recevoir, et le laisser vide ferait une facture qui a
+ * l'air incomplète. C'est la boutique qui tient ce rôle, et elle se dit d'un mot.
+ */
+function ligneArticleEnLigne() {
+  return { id: `a${Date.now()}${Math.random().toString(36).slice(2, 5)}`, reference: "", designation: "", quantite: "1", poids: "" };
+}
+
 ComptabilitePage = memo(ComptabilitePage);
 function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
   const [recherche, setRecherche] = useState("");
   const [compte, setCompte] = useState(null);
+  /* Inscrit ou non : le seul choix qui reste à faire. */
+  const [modeClient, setModeClient] = useState(null);
+  const [nouveau, setNouveau] = useState({ prenom: "", nom: "", telephone: "", email: "", adresse: "" });
+  const [erreurClient, setErreurClient] = useState("");
   const [selection, setSelection] = useState([]);
   const [generation, setGeneration] = useState(false);
-  const [showAjout, setShowAjout] = useState(false);
-  const [refColis, setRefColis] = useState("");
-  const [poidsAjout, setPoidsAjout] = useState("");
-  const [articlesAjout, setArticlesAjout] = useState("1");
+
+  /* Le formulaire de création, en trois onglets. */
+  const [creation, setCreation] = useState(false);
+  const [onglet, setOnglet] = useState("articles");
+  const [articles, setArticles] = useState([ligneArticleEnLigne()]);
+  const [erreurArticles, setErreurArticles] = useState("");
+
   const tarifs = data.receptionTarifs || { paliers: [{ max: 10, tarif: 100000 }, { max: 40, tarif: 95000 }, { max: 100, tarif: 92000 }] };
 
   const comptesTrouves = recherche.trim().length >= 2
-    ? (data.clientAccounts || []).filter((c) => pourRecherche(`${c.prenom} ${c.nom}`).includes(pourRecherche(recherche.trim())))
+    ? (data.clientAccounts || []).filter((c) => pourRecherche(`${c.prenom} ${c.nom} ${c.telephone || ""}`).includes(pourRecherche(recherche.trim())))
     : [];
 
   const colisDisponibles = compte ? data.colis.filter((c) => c.clientAccountId === compte.id && c.status === "Arrivé") : [];
@@ -22788,39 +22949,126 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
   const poidsTotal = colisSelectionnes.reduce((s, c) => s + (Number(c.poids) || 0), 0);
   const { tauxParKg, total, palier } = calcReceptionFee(poidsTotal, tarifs);
 
+  /* Le poids et le prix du colis en cours de saisie, recalculés à chaque frappe. */
+  const poidsSaisi = articles.reduce((s, a) => s + (Number(a.poids) || 0) * Math.max(Number(a.quantite) || 1, 1), 0);
+  const tarification = tarifAchatEnLigne(poidsSaisi, tarifs);
+  const prixEUR = tarification.totalGNF / (LIVE_RATES.GNF || CURRENCIES.GNF);
+
   function toggle(tracking) {
     setSelection((s) => (s.includes(tracking) ? s.filter((t) => t !== tracking) : [...s, tracking]));
   }
 
-  function enregistrerColisRecu() {
-    const poids = Number(poidsAjout) || 0;
-    if (poids <= 0) return;
-    const tracking = genTracking((data.colis || []).map((c) => c.tracking));
-    const tarification = calcReceptionFee(poids, data.receptionTarifs);
-    const prixEUR = tarification.total / (LIVE_RATES.GNF || CURRENCIES.GNF);
-    const nouveauColis = {
-      tracking, expediteur: "Réception directe", expediteurTelephone: "", expediteurEmail: "", expediteurAdresse: "", expediteurPays: "GN",
-      destinataire: `${compte.prenom} ${compte.nom}`, telephone: compte.telephone, destinataireEmail: compte.email || "", destinataireAdresse: compte.adresse || "", destinataireVille: "", destinataireCodePostal: "", destinatairePays: "GN",
-      pays: "GN", direction: "import", mode: "air",
-      produits: [{ id: `p${Date.now()}`, nom: refColis || "Colis reçu", quantite: String(Number(articlesAjout) || 1), poids: String(poids), categorie: "", personnalise: false, montant: "", devise: "GNF", typePrix: "unitaire" }],
-      poids, volume: 0, valeurDeclaree: 0, site: agence || nomSiteParDefaut(data),
-      // Le prix est calculé dès l'enregistrement, à partir du poids et des paliers de réception.
-      // Auparavant il restait à 0 : le client voyait « Reste à payer 0,00 » alors qu'il devait payer.
-      prixBrut: prixEUR, discountLoyalty: 0, rabaisMontant: 0, rabaisDevise: "GNF", rabaisEUR: 0,
-      prix: prixEUR, paye: 0, reste: prixEUR, photos: [],
-      paiements: [], referenceCommande: refColis || null,
-      notesInternes: `${refColis ? `Référence : ${refColis} · ` : ""}${poids} kg à ${fmtGNF(tarification.tauxParKg)}/kg`,
-      clientAccountId: compte.id, provenance: null,
-      // Le colis démarre à "Enregistré" (vu du client : « Reçu à l'entrepôt »). Il ne passera aux
-      // étapes suivantes que sur action explicite d'un agent, via le bordereau.
-      status: "Enregistré", historique: [{ status: "Enregistré", date: new Date().toISOString() }],
-      agentCreation: session ? `${session.prenom} ${session.nom}`.trim() || session.identifiant : "",
-      createdAt: new Date().toISOString(), pod: null, signature: null, driverLoc: null,
+  function majArticle(id, patch) {
+    const propre = { ...patch };
+    if ("poids" in propre && propre.poids !== "" && Number(propre.poids) < 0) propre.poids = "0";
+    if ("quantite" in propre && propre.quantite !== "" && Number(propre.quantite) < 1) propre.quantite = "1";
+    setArticles((l) => l.map((a) => (a.id === id ? { ...a, ...propre } : a)));
+    setErreurArticles("");
+  }
+
+  /**
+   * Enregistre le client que l'agent vient de saisir.
+   *
+   * SANS MOT DE PASSE, ET C'EST VOULU. L'agent ne choisit pas les identifiants de quelqu'un
+   * d'autre : le client ouvrira son compte lui-même, depuis le lien porté par sa facture. La fiche
+   * créée ici sert à rattacher le colis et à le retrouver au comptoir, rien de plus.
+   *
+   * Un même numéro ne crée jamais deux fiches : le client qui revient trois fois n'a pas trois
+   * dossiers, sans quoi ses colis se répartiraient entre eux et aucune liste ne serait complète.
+   */
+  async function enregistrerClient() {
+    const prenom = nouveau.prenom.trim();
+    const nom = nouveau.nom.trim();
+    const telephone = nouveau.telephone.trim();
+    if (!prenom || !nom) { setErreurClient("Le prénom et le nom sont nécessaires pour retrouver le client."); return; }
+    if (!telephone) { setErreurClient("Le téléphone est nécessaire : c’est par lui qu’on prévient le client de l’arrivée."); return; }
+
+    const clef = clefTelephone(telephone);
+    const existant = (data.clientAccounts || []).find((c) => clefTelephone(c.telephone) && clefTelephone(c.telephone) === clef);
+    if (existant) {
+      setCompte(existant);
+      setModeClient(null);
+      notify?.(`${existant.prenom} ${existant.nom} avait déjà une fiche à ce numéro — elle est reprise.`);
+      return;
+    }
+
+    const fiche = {
+      id: `cli${Date.now()}`, prenom, nom, telephone,
+      email: nouveau.email.trim(), adresse: nouveau.adresse.trim(),
+      createdAt: new Date().toISOString(),
+      /* Ce que l'écran doit savoir : la fiche existe, le compte n'est pas encore ouvert. */
+      inscritParAgent: true, compteOuvert: false,
+      creePar: session ? `${session.prenom} ${session.nom}`.trim() || session.identifiant : "",
     };
-    persist({ ...data, colis: [nouveauColis, ...data.colis], activityLog: pushActivity(data, session, "Colis reçu enregistré", `${tracking} — ${compte.prenom} ${compte.nom}`) });
-    notify?.(`Colis ${tracking} — ${fmtGNF(tarification.total)} à payer`);
+    await persist({
+      ...data,
+      clientAccounts: [...(data.clientAccounts || []), fiche],
+      activityLog: pushActivity(data, session, "Fiche client créée au comptoir", `${prenom} ${nom} — ${telephone}`),
+    });
+    setCompte(fiche);
+    setModeClient(null);
+    setNouveau({ prenom: "", nom: "", telephone: "", email: "", adresse: "" });
+    notify?.(`Fiche créée pour ${prenom} ${nom}`);
+  }
+
+  /**
+   * Crée le colis d'achat en ligne.
+   *
+   * Le prix ne vient que du poids : un colis commandé en ligne n'a pas de catégorie à tarifer.
+   * La base de tarification est mémorisée sur la fiche (`tarification: "reception"`), sans quoi
+   * rouvrir le colis pour corriger un numéro de téléphone le recalculerait au barème export et
+   * écraserait le montant en silence — c'est déjà arrivé, un colis y est passé de 26 à 125 EUR.
+   */
+  function creerColis() {
+    const propres = articles
+      .map((a) => ({ ...a, poids: Number(a.poids) || 0, quantite: Math.max(Number(a.quantite) || 1, 1) }))
+      .filter((a) => a.poids > 0 || a.reference.trim() || a.designation.trim());
+    if (propres.length === 0) { setErreurArticles("Ajoutez au moins un article."); setOnglet("articles"); return; }
+    const sansPoids = propres.find((a) => a.poids <= 0);
+    if (sansPoids) { setErreurArticles("Chaque article doit porter son poids : c’est lui qui fait le prix."); setOnglet("articles"); return; }
+
+    const maintenant = new Date().toISOString();
+    const tracking = genTracking((data.colis || []).map((c) => c.tracking));
+    const references = propres.map((a) => a.reference.trim()).filter(Boolean);
+    const nouveauColis = {
+      tracking,
+      /*
+       * La boutique tient lieu d'expéditeur. Les champs restent présents et vides plutôt
+       * qu'absents : le reste de l'application les lit sans se demander s'ils existent.
+       */
+      expediteur: "Commande en ligne", expediteurTelephone: "", expediteurEmail: "", expediteurAdresse: "", expediteurPays: "",
+      destinataire: `${compte.prenom} ${compte.nom}`, telephone: compte.telephone,
+      destinataireEmail: compte.email || "", destinataireAdresse: compte.adresse || "",
+      destinataireVille: "", destinataireCodePostal: "", destinatairePays: "GN",
+      pays: "GN", direction: "import", mode: "air",
+      produits: propres.map((a) => ({
+        id: a.id, nom: a.designation.trim() || a.reference.trim() || "Article commandé",
+        reference: a.reference.trim(), quantite: String(a.quantite), poids: String(a.poids),
+        categorie: "", personnalise: false, montant: "", devise: "GNF", typePrix: "unitaire",
+      })),
+      poids: +poidsSaisi.toFixed(2), volume: 0, valeurDeclaree: 0,
+      site: session?.agence || nomSiteParDefaut(data),
+      prixBrut: prixEUR, discountLoyalty: 0, rabaisMontant: 0, rabaisDevise: "GNF", rabaisEUR: 0,
+      prix: prixEUR, paye: 0, reste: prixEUR, photos: [], paiements: [],
+      referenceCommande: references[0] || null,
+      notesInternes: `Achat en ligne · ${propres.length} article(s)${references.length ? ` · réf. ${references.join(", ")}` : ""} · ${poidsSaisi.toFixed(2)} kg à ${fmtGNF(tarification.tauxParKg)}/kg`,
+      tarification: "reception",
+      achatEnLigne: true,
+      clientAccountId: compte.id, provenance: null,
+      status: "Enregistré", historique: [{ status: "Enregistré", date: maintenant }],
+      agentCreation: session ? `${session.prenom} ${session.nom}`.trim() || session.identifiant : "",
+      createdAt: maintenant, pod: null, signature: null, driverLoc: null,
+    };
+    persist({
+      ...data,
+      colis: [nouveauColis, ...data.colis],
+      activityLog: pushActivity(data, session, "Colis d’achat en ligne créé", `${tracking} — ${compte.prenom} ${compte.nom} — ${poidsSaisi.toFixed(2)} kg`),
+    });
+    notify?.(`Colis ${tracking} créé — ${fmtGNF(tarification.totalGNF)} à payer`);
     setSelection((s) => [...s, tracking]);
-    setRefColis(""); setPoidsAjout(""); setArticlesAjout("1"); setShowAjout(false);
+    setArticles([ligneArticleEnLigne()]);
+    setOnglet("articles");
+    setCreation(false);
   }
 
   async function generer() {
@@ -22830,48 +23078,202 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
     setGeneration(false);
   }
 
+  const carte = (titre, desc, icone, actif, onClick) => (
+    <button onClick={onClick} style={{
+      display: "flex", gap: 12, alignItems: "flex-start", textAlign: "start", flex: "1 1 220px",
+      background: actif ? "var(--info-bg)" : "var(--surface2)", border: `1.5px solid ${actif ? "var(--info-fg)" : "var(--border)"}`,
+      borderRadius: 12, padding: "14px 16px", cursor: "pointer",
+    }}>
+      {icone}
+      <div>
+        <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>{titre}</div>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3, lineHeight: 1.45 }}>{desc}</div>
+      </div>
+    </button>
+  );
+
+  const ongletBouton = (cle, libelle, numero) => (
+    <button key={cle} onClick={() => setOnglet(cle)} style={{
+      display: "flex", alignItems: "center", gap: 7, background: "none", border: "none", cursor: "pointer",
+      padding: "9px 2px", borderBottom: `2px solid ${onglet === cle ? "var(--info-fg)" : "transparent"}`,
+      color: onglet === cle ? "var(--text)" : "var(--muted)", fontSize: 12.5, fontWeight: onglet === cle ? 700 : 600,
+    }}>
+      <span style={{
+        width: 19, height: 19, borderRadius: "50%", fontSize: 10.5, display: "inline-flex", alignItems: "center", justifyContent: "center",
+        background: onglet === cle ? "var(--info-fg)" : "var(--surface2)", color: onglet === cle ? "#fff" : "var(--muted)",
+      }}>{numero}</span>
+      {libelle}
+    </button>
+  );
+
   return (
     <Modal onClose={onClose} title="Bordereau de réception client" wide>
       {!compte ? (
         <>
-          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>Recherchez le client dont les colis sont disponibles à la récupération.</div>
-          <input value={recherche} onChange={(e) => setRecherche(e.target.value)} style={inputStyle} placeholder="Nom du client..." autoFocus />
-          {comptesTrouves.length > 0 && (
-            <div style={{ border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden", marginTop: 10 }}>
-              {comptesTrouves.map((c) => (
-                <button key={c.id} onClick={() => setCompte(c)} style={{ display: "block", width: "100%", textAlign: "start", padding: "10px 14px", background: "var(--surface2)", border: "none", borderTop: "1px solid var(--border)", cursor: "pointer", fontSize: 13, color: "var(--text)" }}>
-                  {c.prenom} {c.nom} <span style={{ color: "var(--muted)" }}>· {c.telephone}</span>
-                </button>
-              ))}
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>
+            Le client est-il déjà inscrit chez nous ?
+          </div>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: modeClient ? 18 : 0 }}>
+            {carte("Client inscrit", "Il a déjà une fiche ou un compte. On la retrouve par son nom ou son numéro.",
+              <Search size={18} color="var(--info-fg)" style={{ flexShrink: 0, marginTop: 2 }} />,
+              modeClient === "inscrit", () => { setModeClient("inscrit"); setErreurClient(""); })}
+            {carte("Client non inscrit", "Première fois. On saisit ses informations ; il ouvrira son compte lui-même depuis sa facture.",
+              <User size={18} color="var(--info-fg)" style={{ flexShrink: 0, marginTop: 2 }} />,
+              modeClient === "nouveau", () => { setModeClient("nouveau"); setErreurClient(""); })}
+          </div>
+
+          {modeClient === "inscrit" && (
+            <>
+              <input value={recherche} onChange={(e) => setRecherche(e.target.value)} style={inputStyle} placeholder="Nom du client, ou son numéro…" autoFocus />
+              {recherche.trim().length >= 2 && comptesTrouves.length === 0 && (
+                <div style={{ fontSize: 12.5, color: "var(--muted)", padding: "10px 2px" }}>
+                  Personne à ce nom. C’est peut-être un nouveau client — revenez en arrière et choisissez « Client non inscrit ».
+                </div>
+              )}
+              {comptesTrouves.length > 0 && (
+                <div style={{ border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden", marginTop: 10 }}>
+                  {comptesTrouves.map((c) => (
+                    <button key={c.id} onClick={() => setCompte(c)} style={{ display: "block", width: "100%", textAlign: "start", padding: "10px 14px", background: "var(--surface2)", border: "none", borderTop: "1px solid var(--border)", cursor: "pointer", fontSize: 13, color: "var(--text)" }}>
+                      {c.prenom} {c.nom} <span style={{ color: "var(--muted)" }}>· {c.telephone}</span>
+                      {c.compteOuvert === false && <span style={{ color: "var(--muted)", fontSize: 11 }}> · compte non ouvert</span>}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
+          {modeClient === "nouveau" && (
+            <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: 16 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 12 }}>
+                <Field label="Prénom *"><input value={nouveau.prenom} onChange={(e) => { setNouveau({ ...nouveau, prenom: e.target.value }); setErreurClient(""); }} style={{ ...inputStyle, marginBottom: 0 }} autoFocus /></Field>
+                <Field label="Nom *"><input value={nouveau.nom} onChange={(e) => { setNouveau({ ...nouveau, nom: e.target.value }); setErreurClient(""); }} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
+                <Field label="Téléphone *"><input value={nouveau.telephone} onChange={(e) => { setNouveau({ ...nouveau, telephone: e.target.value }); setErreurClient(""); }} style={{ ...inputStyle, marginBottom: 0 }} placeholder="+224…" /></Field>
+                <Field label="E-mail"><input value={nouveau.email} onChange={(e) => setNouveau({ ...nouveau, email: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
+                <Field label="Adresse"><input value={nouveau.adresse} onChange={(e) => setNouveau({ ...nouveau, adresse: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
+              </div>
+              {erreurClient && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginTop: 10 }}>{erreurClient}</div>}
+              <div style={{ fontSize: 11.5, color: "var(--muted)", margin: "12px 0 12px", lineHeight: 1.5 }}>
+                Aucun mot de passe n’est demandé ici : on ne choisit pas les identifiants de quelqu’un d’autre.
+                Sa facture portera le lien pour ouvrir son compte et suivre ses colis lui-même.
+              </div>
+              <button onClick={enregistrerClient} style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "10px 18px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                Enregistrer le client
+              </button>
             </div>
           )}
         </>
       ) : (
         <>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
             <div>
               <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)" }}>{compte.prenom} {compte.nom}</div>
-              <div style={{ fontSize: 12, color: "var(--muted)" }}>{compte.telephone}</div>
+              <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                {compte.telephone}
+                {compte.compteOuvert === false && " · compte client pas encore ouvert"}
+              </div>
             </div>
-            <button onClick={() => { setCompte(null); setSelection([]); setRecherche(""); }} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--muted)", cursor: "pointer" }}>Changer de client</button>
+            <button onClick={() => { setCompte(null); setSelection([]); setRecherche(""); setModeClient(null); setCreation(false); }} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--muted)", cursor: "pointer" }}>Changer de client</button>
           </div>
 
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
             <div style={{ fontSize: 12.5, fontWeight: 600, color: "var(--text)" }}>Colis disponibles ({colisDisponibles.length})</div>
-            <button onClick={() => setShowAjout((s) => !s)} style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 12px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>
-              {showAjout ? "Annuler" : "+ Enregistrer un colis reçu"}
+            <button onClick={() => { setCreation((c) => !c); setOnglet("articles"); }} style={{ background: creation ? "var(--surface2)" : "#3D63FF", color: creation ? "var(--text)" : "#fff", border: creation ? "1px solid var(--border)" : "none", borderRadius: 8, padding: "7px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+              {creation ? "Annuler" : "+ Nouveau colis"}
             </button>
           </div>
 
-          {showAjout && (
-            <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: 14, marginBottom: 16 }}>
-              <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 10 }}>Pour un colis arrivé physiquement, identifié par le nom ou une référence inscrite dessus — pas besoin de repasser par le formulaire complet.</div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(140px,1fr))", gap: 10, marginBottom: 10 }}>
-                <Field label="Référence sur le colis (optionnel)"><input value={refColis} onChange={(e) => setRefColis(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }} placeholder="ex: SHEIN-XYZ" /></Field>
-                <Field label="Nombre d’articles"><input type="number" min="1" value={articlesAjout} onChange={(e) => setArticlesAjout(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
-                <Field label="Poids total (kg) *"><input type="number" step="0.1" value={poidsAjout} onChange={(e) => setPoidsAjout(e.target.value)} style={{ ...inputStyle, marginBottom: 0 }} placeholder="ex: 3.5" /></Field>
+          {creation && (
+            <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 18 }}>
+              <div style={{ display: "flex", gap: 20, borderBottom: "1px solid var(--border)", marginBottom: 16, flexWrap: "wrap" }}>
+                {ongletBouton("client", "Client", 1)}
+                {ongletBouton("articles", "Articles", 2)}
+                {ongletBouton("prix", "Récapitulatif", 3)}
               </div>
-              <button onClick={enregistrerColisRecu} disabled={!poidsAjout || Number(poidsAjout) <= 0} style={{ background: Number(poidsAjout) > 0 ? "#3D63FF" : "var(--surface)", color: "#fff", border: "none", borderRadius: 8, padding: "9px 16px", fontSize: 12.5, fontWeight: 700, cursor: Number(poidsAjout) > 0 ? "pointer" : "not-allowed" }}>Enregistrer et rattacher à {compte.prenom}</button>
+
+              {onglet === "client" && (
+                <div>
+                  <div style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600, marginBottom: 4 }}>{compte.prenom} {compte.nom}</div>
+                  <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.6 }}>
+                    {compte.telephone}
+                    {compte.email ? <><br />{compte.email}</> : null}
+                    {compte.adresse ? <><br />{compte.adresse}</> : null}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 12 }}>
+                    Le colis sera enregistré à ce nom. Pour un autre client, utilisez « Changer de client » plus haut.
+                  </div>
+                </div>
+              )}
+
+              {onglet === "articles" && (
+                <div>
+                  <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 12 }}>
+                    Un article par ligne, tel qu’il figure sur la commande. Le poids de chaque ligne s’entend par unité.
+                  </div>
+                  {articles.map((a, i) => (
+                    <div key={a.id} style={{ display: "grid", gridTemplateColumns: "minmax(110px,1fr) minmax(130px,1.4fr) 78px 92px 32px", gap: 8, alignItems: "end", marginBottom: 10 }}>
+                      <Field label={i === 0 ? "Référence" : ""}><input value={a.reference} onChange={(e) => majArticle(a.id, { reference: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="SHEIN-XYZ" /></Field>
+                      <Field label={i === 0 ? "Désignation" : ""}><input value={a.designation} onChange={(e) => majArticle(a.id, { designation: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="Vêtements" /></Field>
+                      <Field label={i === 0 ? "Qté" : ""}><input type="number" min="1" value={a.quantite} onChange={(e) => majArticle(a.id, { quantite: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
+                      <Field label={i === 0 ? "Poids (kg)" : ""}><input type="number" min="0" step="0.1" value={a.poids} onChange={(e) => majArticle(a.id, { poids: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="3.5" /></Field>
+                      <button
+                        onClick={() => setArticles((l) => (l.length > 1 ? l.filter((x) => x.id !== a.id) : l))}
+                        disabled={articles.length === 1}
+                        title={`Retirer l’article ${i + 1}`}
+                        aria-label={`Retirer l’article ${i + 1}`}
+                        style={{ background: "none", border: "none", color: articles.length === 1 ? "var(--border)" : "var(--danger-fg)", cursor: articles.length === 1 ? "not-allowed" : "pointer", paddingBottom: 10 }}>
+                        <X size={15} />
+                      </button>
+                    </div>
+                  ))}
+                  {erreurArticles && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10 }}>{erreurArticles}</div>}
+                  <button onClick={() => setArticles((l) => [...l, ligneArticleEnLigne()])} style={{ background: "none", border: "1px dashed var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12, color: "var(--text)", cursor: "pointer" }}>
+                    + Ajouter un article
+                  </button>
+                </div>
+              )}
+
+              {onglet === "prix" && (
+                <div>
+                  <div style={{ border: "1px solid var(--border)", borderRadius: 10, overflow: "hidden", marginBottom: 14 }}>
+                    {articles.filter((a) => Number(a.poids) > 0 || a.reference.trim() || a.designation.trim()).map((a) => (
+                      <div key={a.id} style={{ display: "flex", justifyContent: "space-between", gap: 10, padding: "8px 12px", borderTop: "1px solid var(--border)", fontSize: 12.5 }}>
+                        <span style={{ color: "var(--text)" }}>
+                          {a.designation.trim() || a.reference.trim() || "Article"}
+                          {a.reference.trim() && a.designation.trim() ? <span style={{ color: "var(--muted)" }}> · {a.reference.trim()}</span> : null}
+                          <span style={{ color: "var(--muted)" }}> × {Math.max(Number(a.quantite) || 1, 1)}</span>
+                        </span>
+                        <span style={{ color: "var(--muted)", whiteSpace: "nowrap" }}>{((Number(a.poids) || 0) * Math.max(Number(a.quantite) || 1, 1)).toFixed(2)} kg</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: "var(--muted)", marginBottom: 6 }}>
+                    <span>Poids total</span><span style={{ color: "var(--text)", fontWeight: 600 }}>{poidsSaisi.toFixed(2)} kg</span>
+                  </div>
+                  {/*
+                    * On dit d'où sort le montant. Un prix qui apparaît sans explication ne se défend
+                    * pas devant le client qui le conteste au comptoir.
+                    */}
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, color: "var(--muted)", marginBottom: 10 }}>
+                    <span>Tarif appliqué {tarification.degressif ? `(au-delà de ${tarification.seuil} kg, palier jusqu’à ${tarification.palier?.max} kg)` : `(palier jusqu’à ${tarification.palier?.max} kg)`}</span>
+                    <span style={{ color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{tarification.tauxParKg.toLocaleString("fr-FR")} GNF/kg</span>
+                  </div>
+                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: 10, display: "flex", justifyContent: "space-between", fontSize: 16, fontWeight: 700, color: "var(--text)", marginBottom: 14 }}>
+                    <span>Montant à payer</span><span>{fmtGNF(tarification.totalGNF)}</span>
+                  </div>
+                  <button onClick={creerColis} disabled={poidsSaisi <= 0} style={{ width: "100%", background: poidsSaisi > 0 ? "#3ECB84" : "var(--surface)", color: poidsSaisi > 0 ? "#0A2647" : "var(--muted)", border: "none", borderRadius: 8, padding: "12px 0", fontSize: 14, fontWeight: 700, cursor: poidsSaisi > 0 ? "pointer" : "not-allowed" }}>
+                    Créer le colis
+                  </button>
+                </div>
+              )}
+
+              {onglet !== "prix" && (
+                <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
+                  <button onClick={() => setOnglet(onglet === "client" ? "articles" : "prix")} style={{ display: "flex", alignItems: "center", gap: 6, background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "9px 16px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                    Suivant <ChevronRight size={14} />
+                  </button>
+                </div>
+              )}
             </div>
           )}
 
@@ -22885,7 +23287,7 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
                     <input type="checkbox" checked={selection.includes(c.tracking)} onChange={() => toggle(c.tracking)} />
                     <div style={{ flex: 1 }}>
                       <div style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>{c.tracking} — {c.destinataire}</div>
-                      <div style={{ fontSize: 11, color: "var(--muted)" }}>{c.expediteur === "Réception directe" ? "Enregistré directement à la réception" : routeLabel(c.pays, c.direction)}{c.notesInternes ? ` · ${c.notesInternes}` : ""}</div>
+                      <div style={{ fontSize: 11, color: "var(--muted)" }}>{c.expediteur === "Réception directe" || c.expediteur === "Commande en ligne" ? "Commande en ligne" : routeLabel(c.pays, c.direction)}{c.notesInternes ? ` · ${c.notesInternes}` : ""}</div>
                     </div>
                     <div style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>{c.poids} kg</div>
                   </label>

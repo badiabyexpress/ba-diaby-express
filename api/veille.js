@@ -30,6 +30,7 @@ import { configurationBase, baseConfiguree, lireCle, ecrireCle, modifierDocument
 import { ENTETE_INTERNE, jetonInterne, refusSaufEquipe } from "./_session.js";
 import { chiffresDuJour, envoyerBilanEmail, envoyerBilanWhatsApp } from "./_bilan.js";
 import { envoyerCopieHorsBase } from "./_copie.js";
+import { purgerDocumentsDevinables } from "./_documents.js";
 import crypto from "node:crypto";
 
 const PREFIXE = "bde-backup-";
@@ -166,6 +167,29 @@ export default async function handler(req, res) {
     });
   }
 
+  /*
+   * LE MÉNAGE DES DOCUMENTS DONT L'ADRESSE SE DEVINE — avant tout le reste.
+   *
+   * Les factures et les étiquettes déposées avant le correctif portaient le numéro de suivi pour
+   * seul nom, dans un espace public en lecture : qui en connaissait un pouvait deviner les autres
+   * et lire nom, téléphone, adresse et contenu du colis. Les nouvelles portent un jeton tiré au
+   * sort, mais les anciennes ne partiront pas d'elles-mêmes — un colis déjà remis ne fait plus
+   * repasser personne dessus.
+   *
+   * Il tourne AVANT la sauvegarde, et donc aussi les jours où la copie du jour existe déjà : sans
+   * cela, un membre de l'équipe qui déclenche la tâche à midi pour refermer la fuite repartirait
+   * avec « déjà faite » et rien d'effacé.
+   *
+   * Rien n'est perdu : une facture se regénère depuis la fiche du colis, et la pièce déjà envoyée
+   * vit dans la conversation WhatsApp, qui en garde sa propre copie.
+   */
+  let documents = null;
+  try {
+    documents = await purgerDocumentsDevinables();
+  } catch (e) {
+    documents = { fait: false, raison: "exception", detail: String(e?.message || e).slice(0, 160) };
+  }
+
   const clef = cleDuJour();
 
   try {
@@ -179,7 +203,7 @@ export default async function handler(req, res) {
     const dejaLa = await lireCle(clef);
     if (dejaLa.valeur !== null && dejaLa.valeur !== undefined) {
       await noterVeille({ etat: "deja-faite", clef });
-      return res.status(200).json({ ok: true, etat: "deja-faite", clef, ecrite: false });
+      return res.status(200).json({ ok: true, etat: "deja-faite", clef, ecrite: false, documents });
     }
 
     const vivant = await lireCle("bde-data");
@@ -254,13 +278,17 @@ export default async function handler(req, res) {
       horsBase: copieHorsBase?.envoye
         ? { envoyee: true, octets: copieHorsBase.octets }
         : { envoyee: false, raison: copieHorsBase?.raison || "inconnue" },
+      /* Un ménage dont on ne sait pas s'il a eu lieu ne referme rien : on croit la fuite fermée. */
+      documents: documents?.fait
+        ? { effaces: documents.effaces }
+        : { effaces: 0, raison: documents?.raison || "inconnue" },
       bilan: bilan && bilan.chiffres
         ? { jour: bilan.chiffres.jour, email: !!bilan.parEmail?.envoye, whatsapp: !!bilan.parWhatsApp?.envoye,
           raisonWhatsApp: bilan.parWhatsApp?.envoye ? null : bilan.parWhatsApp?.raison || null }
         : bilan,
     };
     await noterVeille(compte);
-    return res.status(200).json({ ok: true, ...compte, ecrite: true, bilan, copieHorsBase });
+    return res.status(200).json({ ok: true, ...compte, ecrite: true, bilan, copieHorsBase, documents });
   } catch (e) {
     await noterVeille({ etat: "echec", clef, raison: String(e?.message || e).slice(0, 120) });
     return res.status(502).json({ ok: false, etat: "echec", error: "Sauvegarde impossible.", detail: String(e?.message || e).slice(0, 200) });

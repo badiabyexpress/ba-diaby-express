@@ -1697,6 +1697,13 @@ function calcReceptionFee(poidsTotal, tarifs) {
  * ne se défend pas devant le client qui le conteste au comptoir : l'agent doit pouvoir lire « 24 kg,
  * palier 11–40 kg, 95 000 GNF/kg ».
  */
+/*
+ * D'où partent les colis commandés en ligne. Les commandes sont livrées à l'entrepôt de Paris,
+ * puis acheminées vers Conakry : c'est la route qu'il faut inscrire, sinon le bordereau et la
+ * facture annoncent « Conakry → Conakry ».
+ */
+const PAYS_DEPART_EN_LIGNE = "FR";
+
 function tarifAchatEnLigne(poidsTotal, tarifs) {
   const poids = Math.max(Number(poidsTotal) || 0, 0);
   const { tauxParKg, total, palier } = calcReceptionFee(poids, tarifs);
@@ -16504,8 +16511,20 @@ async function downloadInvoice(colis, data, options = {}) {
    * import qui arrive en Guinée, la devise du pays étranger pour un export. Les deux ne sont
    * affichées ensemble que si elles diffèrent.
    */
-  const primaryCur = COUNTRIES.find((c) => c.code === (colis.expediteurPays || "GN"))?.currency || "GNF";
-  const secondaryCur = dest?.currency || "EUR";
+  /*
+   * SUR UN ACHAT EN LIGNE, C'EST LE FRANC GUINÉEN QUI COMMANDE.
+   *
+   * Le colis part bien de Paris, et l'euro serait la devise « logique » du pays de départ. Mais le
+   * barème est réglé en GNF/kg, la caisse tient ses comptes en GNF, et l'euro bouge tous les jours :
+   * facturer en euros ferait dépendre le montant du taux de change à la seconde où la facture est
+   * éditée, et deux tirages du même colis n'annonceraient pas le même prix. On facture donc dans la
+   * devise du barème, et l'euro s'affiche à côté — les deux références sont là, une seule fait foi.
+   */
+  const enLigne = !!colis.achatEnLigne || colis.expediteur === "Commande en ligne";
+  const primaryCur = enLigne ? "GNF" : (COUNTRIES.find((c) => c.code === (colis.expediteurPays || "GN"))?.currency || "GNF");
+  const secondaryCur = enLigne
+    ? (COUNTRIES.find((c) => c.code === (colis.pays || "FR"))?.currency || "EUR")
+    : (dest?.currency || "EUR");
   const fmtMontant = (eurValue, cur) => (cur === "GNF" ? fmtGNF(eurValue * gnf) : fmt(eurValue, cur));
 
   // Zones fixes : chaque bloc sait où il commence, aucun décalage cumulé possible.
@@ -16596,7 +16615,6 @@ async function downloadInvoice(colis, data, options = {}) {
    * la commande qui prend cette place, avec sa référence, et nous en dessous — puisque c'est nous
    * qui l'avons réceptionné et que le client doit savoir qui joindre.
    */
-  const enLigne = !!colis.achatEnLigne || colis.expediteur === "Commande en ligne";
   if (enLigne) {
     const reference = colis.referenceCommande || (colis.produits || []).map((p) => p?.reference).find(Boolean) || "";
     const contact = data?.entreprise?.telephone || telephonePourPays(data, "GN") || "";
@@ -23036,11 +23054,16 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
        * La boutique tient lieu d'expéditeur. Les champs restent présents et vides plutôt
        * qu'absents : le reste de l'application les lit sans se demander s'ils existent.
        */
-      expediteur: "Commande en ligne", expediteurTelephone: "", expediteurEmail: "", expediteurAdresse: "", expediteurPays: "",
+      expediteur: "Commande en ligne", expediteurTelephone: "", expediteurEmail: "", expediteurAdresse: "",
+      /*
+       * La commande part de Paris : c'est la route réelle du colis, et c'est elle qui doit figurer
+       * sur le bordereau comme sur la facture. La laisser vide affichait « Conakry → Conakry ».
+       */
+      expediteurPays: PAYS_DEPART_EN_LIGNE,
       destinataire: `${compte.prenom} ${compte.nom}`, telephone: compte.telephone,
       destinataireEmail: compte.email || "", destinataireAdresse: compte.adresse || "",
       destinataireVille: "", destinataireCodePostal: "", destinatairePays: "GN",
-      pays: "GN", direction: "import", mode: "air",
+      pays: PAYS_DEPART_EN_LIGNE, direction: "import", mode: "air",
       produits: propres.map((a) => ({
         id: a.id, nom: a.designation.trim() || a.reference.trim() || "Article commandé",
         reference: a.reference.trim(), quantite: String(a.quantite), poids: String(a.poids),
@@ -23258,8 +23281,21 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
                     <span>Tarif appliqué {tarification.degressif ? `(au-delà de ${tarification.seuil} kg, palier jusqu’à ${tarification.palier?.max} kg)` : `(palier jusqu’à ${tarification.palier?.max} kg)`}</span>
                     <span style={{ color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{tarification.tauxParKg.toLocaleString("fr-FR")} GNF/kg</span>
                   </div>
-                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: 10, display: "flex", justifyContent: "space-between", fontSize: 16, fontWeight: 700, color: "var(--text)", marginBottom: 14 }}>
-                    <span>Montant à payer</span><span>{fmtGNF(tarification.totalGNF)}</span>
+                  {/*
+                    * Les deux références, une seule qui fait foi.
+                    *
+                    * Le colis part de Paris, donc l'euro parle à qui règle là-bas. Mais le barème
+                    * est en GNF, la caisse tient ses comptes en GNF, et le taux bouge tous les
+                    * jours : c'est le franc qui est facturé, l'euro n'est qu'une indication. Le
+                    * dire ainsi évite qu'on encaisse un jour l'euro affiché la veille.
+                    */}
+                  <div style={{ borderTop: "1px solid var(--border)", paddingTop: 10, marginBottom: 14 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: 16, fontWeight: 700, color: "var(--text)" }}>
+                      <span>Montant à payer</span><span>{fmtGNF(tarification.totalGNF)}</span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, fontSize: 11.5, color: "var(--muted)", marginTop: 3 }}>
+                      <span>≈ {fmt(prixEUR, "EUR")} au taux du jour — le montant facturé reste en francs</span>
+                    </div>
                   </div>
                   <button onClick={creerColis} disabled={poidsSaisi <= 0} style={{ width: "100%", background: poidsSaisi > 0 ? "#3ECB84" : "var(--surface)", color: poidsSaisi > 0 ? "#0A2647" : "var(--muted)", border: "none", borderRadius: 8, padding: "12px 0", fontSize: 14, fontWeight: 700, cursor: poidsSaisi > 0 ? "pointer" : "not-allowed" }}>
                     Créer le colis

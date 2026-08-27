@@ -2478,6 +2478,16 @@ function extractTrackingFromScan(raw) {
     const url = new URL(raw);
     const code = url.searchParams.get("code");
     if (code) return code;
+    /*
+     * Le chemin court « /suivi/BDE… » est reconnu ici aussi. Aucun QR ne le porte aujourd'hui,
+     * mais un agent scanne parfois un lien copié à la main ou reçu d'ailleurs : sans ce cas, la
+     * fonction rendrait l'adresse entière comme numéro de colis, et la recherche ne trouverait
+     * rien sans qu'on comprenne pourquoi.
+     */
+    const segments = segmentsDuChemin(url.pathname);
+    if (CHEMINS_COURTS.suivi.includes((segments[0] || "").toLowerCase()) && segments[1]) {
+      return decodeURIComponent(segments[1]);
+    }
   } catch { /* pas une URL — on suppose que c’est directement le numéro */ }
   return raw.trim();
 }
@@ -2525,8 +2535,83 @@ function adressePublique() {
   return origine;
 }
 
+/*
+ * Cette adresse-là NE CHANGE PAS DE FORME, et c'est délibéré.
+ *
+ * Le modèle WhatsApp validé par Meta porte « …/?suivi=1&code={{1}} » : sa réécriture demanderait
+ * une nouvelle validation, plusieurs jours pendant lesquels les notifications de colis ne
+ * partiraient plus. Et surtout, ce lien est déjà imprimé en QR code sur des cartons qui voyagent
+ * en ce moment. Le chemin court « /suivi/BDE… » est reconnu à l'arrivée (voir codeSuiviDemande),
+ * mais rien ne le fabrique : on n'a rien à gagner à changer une adresse qui circule déjà.
+ */
 function trackingUrlFor(tracking) {
   return `${adressePublique()}/?suivi=1&code=${tracking}`;
+}
+
+/*
+ * LES ADRESSES COURTES.
+ *
+ * Chaque page publique de ce site se demandait par un paramètre : « …/?client », « …/?suivi=1&
+ * code=BDE2608 », « …/?cgu ». C'est lisible pour un programme, pas pour un client.
+ *
+ * Une adresse se donne à l'oral, s'imprime sur un flyer, se tape sur un téléphone à une main dans
+ * un taxi. « badiabyexpress.com barre oblique client » se dicte ; « point-d'interrogation client »
+ * ne se dicte pas — le point d'interrogation ne se prononce pas naturellement, il ne figure sur
+ * aucun clavier de téléphone en première page, et un client qui le rate atterrit sur la page
+ * d'accueil générale, exactement là où on ne voulait pas l'envoyer.
+ *
+ * Les chemins courts sont donc reconnus EN PLUS des paramètres, jamais à leur place : les liens
+ * déjà partis — messages envoyés, QR codes déjà imprimés sur des cartons qui voyagent encore —
+ * continuent de fonctionner. Une adresse publiée ne se reprend pas.
+ *
+ * Cela ne tient que parce que vercel.json réécrit tout ce qui n'est pas /api/ vers index.html :
+ * sans cette règle, « /client » serait un fichier introuvable et répondrait 404.
+ */
+const CHEMINS_COURTS = {
+  client: ["client", "espace-client", "espaceclient", "mon-compte"],
+  suivi: ["suivi", "colis"],
+  cgu: ["cgu", "conditions"],
+  connexion: ["connexion"],
+};
+
+function segmentsDuChemin(chemin) {
+  return String(chemin || "").split("/").filter(Boolean);
+}
+
+/**
+ * La page demandée, qu'elle soit écrite en chemin court ou en paramètre.
+ *
+ * `emplacement` n'est là que pour les vérifications : en usage réel c'est toujours l'adresse de
+ * la fenêtre. Hors navigateur, on ne demande aucune page — l'application ne s'y affiche pas.
+ */
+function pageDemandee(nom, emplacement) {
+  const lieu = emplacement || (typeof window !== "undefined" ? window.location : null);
+  if (!lieu) return false;
+  if (new URLSearchParams(lieu.search || "").has(nom)) return true;
+  const premier = (segmentsDuChemin(lieu.pathname)[0] || "").toLowerCase();
+  return (CHEMINS_COURTS[nom] || []).includes(premier);
+}
+
+/**
+ * Le numéro de colis demandé, en chemin court comme en paramètre.
+ *
+ * « /suivi/BDE2608 » et « /?suivi=1&code=BDE2608 » désignent le même colis. Le numéro n'est pas
+ * mis en majuscules ici : c'est le serveur qui décide ce qu'il reconnaît, et le corriger au
+ * passage masquerait un numéro réellement mal recopié.
+ */
+function codeSuiviDemande(emplacement) {
+  const lieu = emplacement || (typeof window !== "undefined" ? window.location : null);
+  if (!lieu) return "";
+  const parParametre = new URLSearchParams(lieu.search || "").get("code");
+  if (parParametre) return parParametre;
+  const segments = segmentsDuChemin(lieu.pathname);
+  if (!CHEMINS_COURTS.suivi.includes((segments[0] || "").toLowerCase())) return "";
+  try { return decodeURIComponent(segments[1] || ""); } catch (e) { return segments[1] || ""; }
+}
+
+/** L'adresse à donner aux clients pour qu'ils arrivent droit sur leur espace. */
+function lienEspaceClient() {
+  return `${adressePublique()}/client`;
 }
 
 function loadScript(src) {
@@ -2765,13 +2850,13 @@ function defaultSeed() {
       parDefaut: false, commissionRate: null, ...c,
     })),
     sites: [
-      { id: "site-bambeto", nom: "Conakry", adresse: "Bambeto Park, Conakry", telephone: "+224621764596", horaires: "Lun–Sam 8h–18h", paiements: "Espèces, Orange Money", stockage: "Retrait sous 7 jours" },
-      { id: "site-madina", nom: "Madina", adresse: "Madina, Conakry", telephone: "+224621764596", horaires: "Lun–Sam 8h–18h", paiements: "Espèces, Orange Money", stockage: "Retrait sous 7 jours" },
+      { id: "site-bambeto", nom: "Conakry", adresse: "Bambeto Park, Conakry", telephone: "+224612479339", horaires: "Lun–Sam 8h–18h", paiements: "Espèces, Orange Money", stockage: "Retrait sous 7 jours" },
+      { id: "site-madina", nom: "Madina", adresse: "Madina, Conakry", telephone: "+224612479339", horaires: "Lun–Sam 8h–18h", paiements: "Espèces, Orange Money", stockage: "Retrait sous 7 jours" },
     ],
     agencesReception: {
       FR: { adresse: "26 rue Saint Blaise, 75020 Paris", telephone: "+33767562963", horaires: "" },
     },
-    entreprise: { adresseSiege: "Bambeto, Conakry, Guinée", telephone: "+224621764596", telephone2: "+224612479349", email: "badiabyexpress.bde@gmail.com", siteWeb: "www.ba-diaby-express.com" },
+    entreprise: { adresseSiege: "Bambeto, Conakry, Guinée", telephone: "+224612479339", telephone2: "+224621764596", email: "badiabyexpress.bde@gmail.com", siteWeb: "www.ba-diaby-express.com" },
     commissionConfig: { parKg: 2, parUnite: 5 }, // EUR — modifiable par l’Administrateur uniquement
   };
 }
@@ -3071,7 +3156,7 @@ function App() {
   const [isOnline, setIsOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine : true);
   const [pendingSync, setPendingSync] = useState(0);
   const [syncing, setSyncing] = useState(false);
-  const [showLogin, setShowLogin] = useState(() => typeof window !== "undefined" && new URLSearchParams(window.location.search).has("connexion"));
+  const [showLogin, setShowLogin] = useState(() => pageDemandee("connexion"));
 
   /*
    * UN CLIENT NE DOIT JAMAIS SE RETROUVER SUR L'ADRESSE DE L'HÉBERGEUR.
@@ -3092,7 +3177,7 @@ function App() {
    */
   useEffect(() => {
     if (typeof window === "undefined") return;
-    if (new URLSearchParams(window.location.search).has("connexion")) return;
+    if (pageDemandee("connexion")) return;
     let surHebergeur = false;
     try { surHebergeur = estAdresseDHebergeur(window.location.origin); } catch (e) { return; }
     if (!surHebergeur) return;
@@ -3190,14 +3275,13 @@ function App() {
    */
   const [baseDemandee, setBaseDemandee] = useState(() => {
     if (typeof window === "undefined") return true;
-    const p = new URLSearchParams(window.location.search);
-    if (p.has("suivi") || p.has("cgu")) return false;
+    if (pageDemandee("suivi") || pageDemandee("cgu")) return false;
     /*
      * L'espace client suit désormais la même règle : sa page de connexion n'a pas besoin de la
      * base, et la réclamer avant l'identification était un obstacle autant qu'une fuite — une
      * fois la base fermée, le portail n'aurait tout simplement plus rien reçu.
      */
-    if (p.has("client")) return !!lireSessionClient();
+    if (pageDemandee("client")) return !!lireSessionClient();
     return !!lireSessionEnregistree();
   });
   const [donneesPubliques, setDonneesPubliques] = useState(null);
@@ -3601,15 +3685,15 @@ function App() {
   const t = T[langueActive];
   const rtl = langueActive === "ar";
 
-  const isPublicTracking = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("suivi");
+  const isPublicTracking = pageDemandee("suivi");
   if (isPublicTracking) {
     return <Shell rtl={false} theme={theme}><PublicTrackingPage /></Shell>;
   }
-  const isClientPortal = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("client");
+  const isClientPortal = pageDemandee("client");
   if (isClientPortal) {
     return <Shell rtl={false} theme={theme}><ClientPortalPage data={data} loading={loading} persist={persist} onBesoinBase={() => setBaseDemandee(true)} /></Shell>;
   }
-  const isCguPage = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("cgu");
+  const isCguPage = pageDemandee("cgu");
   if (isCguPage) {
     return <Shell rtl={false} theme={theme}><CguPage /></Shell>;
   }
@@ -4272,7 +4356,7 @@ function CguPage() {
       // complète avec un numéro générique qu'une page vide.
       .catch(() => {});
   }, []);
-  const entreprise = data?.entreprise?.adresseSiege ? data.entreprise : { adresseSiege: "Conakry, Guinée", telephone: "+224621764596", telephone2: "+224612479349", email: "badiabyexpress.bde@gmail.com", siteWeb: "www.ba-diaby-express.com" };
+  const entreprise = data?.entreprise?.adresseSiege ? data.entreprise : { adresseSiege: "Conakry, Guinée", telephone: "+224612479339", telephone2: "+224621764596", email: "badiabyexpress.bde@gmail.com", siteWeb: "www.ba-diaby-express.com" };
   const telephonesSiege = [entreprise.telephone, entreprise.telephone2].filter(Boolean).join(" ou au ");
   const section = (titre, children) => (
     <div style={{ marginBottom: 26 }}>
@@ -4630,11 +4714,12 @@ function ClientLangSwitch({ lang, onChange }) {
 function PublicTrackingPage() {
   const [lang, setLang] = useClientLang();
   const T = (x) => tc(x, lang);
-  const params = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
-  const [code, setCode] = useState(params?.get("code") || "");
-  const [searched, setSearched] = useState(!!params?.get("code"));
+  /* « /suivi/BDE2608 » comme « /?suivi=1&code=BDE2608 » : le numéro est lu des deux écritures. */
+  const codeDemande = codeSuiviDemande();
+  const [code, setCode] = useState(codeDemande);
+  const [searched, setSearched] = useState(!!codeDemande);
   const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(!!params?.get("code"));
+  const [loading, setLoading] = useState(!!codeDemande);
   const [panne, setPanne] = useState(false);
 
   /*
@@ -4658,7 +4743,7 @@ function PublicTrackingPage() {
   }, []);
 
   useEffect(() => {
-    if (params?.get("code")) chercher(params.get("code"));
+    if (codeDemande) chercher(codeDemande);
     // Une seule fois, au chargement : les recherches suivantes passent par le formulaire.
   }, []);
 
@@ -22831,6 +22916,128 @@ function AiCard({ title, text }) {
  * des installations existantes — l'écran le dit et montre celle qu'il s'apprête à généraliser,
  * plutôt que d'en écraser une en silence.
  */
+/**
+ * Le lien de l'Espace Client, prêt à donner.
+ *
+ * Jusqu'ici, envoyer un client vers son espace demandait de connaître « /?client » — une adresse
+ * qu'aucun agent ne retient et qu'aucun client ne tape correctement. Faute de mieux, on envoyait
+ * l'adresse générale, et le client atterrissait sur la page d'accueil : il devait y trouver
+ * l'entrée tout seul, ce que beaucoup ne font pas.
+ *
+ * Trois façons de le transmettre, parce que trois situations différentes :
+ *
+ *   — LE LIEN, à coller dans un message WhatsApp ou un e-mail.
+ *   — LE QR CODE, à imprimer et poser sur le comptoir de l'agence, ou à mettre sur un flyer :
+ *     le client sort son téléphone, il vise, il y est. Rien à taper, donc rien à mal taper.
+ *   — LA PHRASE toute faite, parce qu'un agent pressé colle le lien sans rien écrire autour, et
+ *     qu'un lien nu dans WhatsApp ressemble beaucoup à un lien d'escroquerie.
+ *
+ * Le QR est fabriqué dans le navigateur : l'adresse de l'entreprise ne passe par aucun service
+ * extérieur, et l'écran fonctionne sans réseau une fois la page ouverte.
+ */
+function CarteLienEspaceClient() {
+  const lien = lienEspaceClient();
+  const [qr, setQr] = useState(null);
+  const [qrEchec, setQrEchec] = useState(false);
+  const [copie, setCopie] = useState("");
+
+  const phrase = `Bonjour, voici votre Espace Client Ba-Diaby Express : vous y suivez vos colis, vous téléchargez vos factures et vous voyez ce qu’il reste à régler.\n${lien}`;
+
+  useEffect(() => {
+    let vivant = true;
+    generateQRDataUrl(lien, 320)
+      .then((url) => { if (vivant) setQr(url); })
+      .catch(() => { if (vivant) setQrEchec(true); });
+    return () => { vivant = false; };
+  }, [lien]);
+
+  /*
+   * `navigator.clipboard` n'existe pas partout — un navigateur ancien, ou une page servie sans
+   * HTTPS. Sans ce repli, le bouton ne ferait rien du tout et l'agent croirait avoir copié.
+   */
+  async function copier(texte, quoi) {
+    try {
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(texte);
+      else {
+        const champ = document.createElement("textarea");
+        champ.value = texte;
+        champ.style.position = "fixed";
+        champ.style.opacity = "0";
+        document.body.appendChild(champ);
+        champ.select();
+        document.execCommand("copy");
+        document.body.removeChild(champ);
+      }
+      setCopie(quoi);
+      setTimeout(() => setCopie(""), 2000);
+    } catch (e) {
+      setCopie("echec");
+      setTimeout(() => setCopie(""), 3000);
+    }
+  }
+
+  const bouton = {
+    background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)",
+    borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 600, cursor: "pointer",
+  };
+
+  return (
+    <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, maxWidth: 620, border: "1px solid var(--border)", marginBottom: 20 }}>
+      <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Le lien de l’Espace Client</div>
+      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16, lineHeight: 1.55 }}>
+        À donner à vos clients. Il ouvre directement leur espace, sans passer par la page d’accueil.
+      </div>
+
+      <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "flex-start" }}>
+        <div style={{ flex: "1 1 280px", minWidth: 240 }}>
+          <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: "12px 14px", fontSize: 15, fontWeight: 700, color: "var(--text)", wordBreak: "break-all", marginBottom: 10 }}>
+            {lien}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={() => copier(lien, "lien")} style={bouton}>
+              {copie === "lien" ? "✓ Lien copié" : "Copier le lien"}
+            </button>
+            <button onClick={() => copier(phrase, "phrase")} style={bouton}>
+              {copie === "phrase" ? "✓ Message copié" : "Copier le message tout prêt"}
+            </button>
+          </div>
+          {copie === "echec" && (
+            <div style={{ fontSize: 11.5, color: "var(--danger-fg)", marginTop: 8 }}>
+              La copie a échoué — sélectionnez le lien ci-dessus et copiez-le à la main.
+            </div>
+          )}
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 12, lineHeight: 1.55 }}>
+            L’ancienne adresse en « /?client » continue de fonctionner : les messages déjà envoyés
+            ne sont pas cassés.
+          </div>
+        </div>
+
+        <div style={{ textAlign: "center" }}>
+          {qr ? (
+            <>
+              <img src={qr} alt={`QR code vers ${lien}`} style={{ width: 160, height: 160, borderRadius: 10, border: "1px solid var(--border)", background: "#fff" }} />
+              <div style={{ marginTop: 8 }}>
+                <a href={qr} download="espace-client-ba-diaby-express.png" style={{ ...bouton, textDecoration: "none", display: "inline-block" }}>
+                  Télécharger le QR
+                </a>
+              </div>
+              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 8, maxWidth: 170, lineHeight: 1.5 }}>
+                À imprimer pour le comptoir de l’agence.
+              </div>
+            </>
+          ) : qrEchec ? (
+            <div style={{ width: 160, fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 }}>
+              Le QR code n’a pas pu être généré — le lien ci-contre reste utilisable tel quel.
+            </div>
+          ) : (
+            <div style={{ width: 160, height: 160, borderRadius: 10, background: "var(--surface2)" }} />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function IdentitePubliquePage({ data, persist, notify, onBack }) {
   const b = data.branding || {};
   const site = data.siteVitrine || {};
@@ -22901,6 +23108,8 @@ function IdentitePubliquePage({ data, persist, notify, onBack }) {
           documents imprimés.
         </div>
       </div>
+
+      <CarteLienEspaceClient />
 
       <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, maxWidth: 460, border: "1px solid var(--border)", marginBottom: 20 }}>
         <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 14 }}>Page d’accueil publique</div>
@@ -23487,7 +23696,7 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
             </div>
             <div style={{ display: "flex", gap: 8, marginTop: 9, flexWrap: "wrap", alignItems: "center" }}>
               <input value={numeroEssai} onChange={(e) => setNumeroEssai(e.target.value)}
-                inputMode="tel" placeholder="+224621764596" aria-label="Numéro d’essai"
+                inputMode="tel" placeholder="+224612479339" aria-label="Numéro d’essai"
                 style={{ ...inputStyle, marginBottom: 0, width: 190 }} />
               <button onClick={envoyerEssai} disabled={numeroEssai.replace(/\D/g, "").length < 8 || essaiEnCours}
                 style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "10px 16px", fontSize: 12.5, fontWeight: 600, cursor: essaiEnCours ? "wait" : "pointer" }}>

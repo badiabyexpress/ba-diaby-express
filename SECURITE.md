@@ -1202,3 +1202,27 @@ table est fermée par RLS sans aucune politique : seule la clé de service passe
   elles dépendent donc de quelqu'un qui ouvre l'application.
 - **`WHATSAPP_APP_SECRET` reste facultatif.** Sans lui, le webhook n'est protégé que par le jeton
   inscrit dans son adresse ; avec lui, chaque appel est vérifié par signature.
+
+## L'annonce que le bouton va chercher
+
+Le message d'une campagne porte un bouton « Voir l'offre » qui ramène sur la page d'accueil. L'offre
+n'y était nulle part : le client arrivait sur un site qui ne parlait pas de ce qu'il venait de lire,
+et devait en plus cliquer sur un pays pour voir un départ. Un bouton qui mène à une page muette fait
+perdre confiance au lieu d'en donner.
+
+Ce qui part par message s'affiche donc au même moment sur la page publique, **en haut, avant le
+suivi de colis**, sans rien à cliquer.
+
+Elle **s'efface d'elle-même** à sa date. C'est pour cela que l'échéance est un vrai champ de date et
+non du texte libre : on ne peut pas comparer « la fin du mois » à aujourd'hui, et personne ne va
+retirer une offre périmée à la main — c'est précisément ce qu'on oublie. Une offre encore affichée
+après sa fin est pire que pas d'offre du tout : le client se déplace pour rien. Le jour de
+l'échéance compte encore ; le lendemain, elle a disparu.
+
+L'échéance est vérifiée **au serveur** (`api/public.js`) et pas seulement dans la page. Une offre
+périmée qui quitte le serveur reste affichée chez qui a gardé sa page ouverte.
+
+Le champ de date rend au passage impossible une faute de frappe qui partirait chez tous les clients
+à la fois — « 4 setpembre » était jusqu'ici recopié tel quel.
+
+Éprouvé par `t93` (11 cas) sur la vraie page publique, et par `testverrou` pour la porte serveur.

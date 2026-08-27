@@ -149,10 +149,19 @@ export default async function handler(req, res) {
        * réponse — le tri final reste à la charge de la page, qui connaît le pays choisi.
        */
       const maintenant = Date.now();
+      /*
+       * L'annonce en cours part avec la vitrine — c'est ce que le bouton « Voir l'offre » des
+       * messages vient chercher. Son échéance est vérifiée ICI et pas seulement dans la page :
+       * une offre périmée ne doit pas quitter le serveur, sinon elle reste affichée chez qui a
+       * gardé la page ouverte.
+       */
+      const annonce = donnees.annoncePublique;
+      const finAnnonce = annonce?.jusquAu ? new Date(`${annonce.jusquAu}T23:59:59`).getTime() : 0;
       return res.status(200).json({
         branding: donnees.branding || {},
         siteVitrine: donnees.siteVitrine || {},
         departs: (donnees.departs || []).filter((d) => d.dateLimite && new Date(d.dateLimite).getTime() >= maintenant),
+        ...(annonce?.texte && finAnnonce >= maintenant ? { annoncePublique: annonce } : {}),
       });
     }
 

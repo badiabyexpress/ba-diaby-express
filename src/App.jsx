@@ -18922,6 +18922,22 @@ function CampagnesPage({ data, persist, session, notify }) {
     `<p style="color:#777;font-size:12px">Vous recevez ce message parce que vous êtes client de Ba-Diaby Express. Répondez « STOP » pour ne plus recevoir nos offres.</p>`,
   ].filter(Boolean).join("\n");
 
+  /*
+   * CE QU'ON A LE DROIT DE METTRE DANS UNE VARIABLE DE MODÈLE
+   *
+   * Meta refuse une variable qui contient un retour à la ligne, une tabulation ou quatre espaces
+   * d'affilée : le message revient en erreur 132000, « Parameter format does not match ». Et il
+   * revient AUTANT DE FOIS QU'IL Y A DE CLIENTS — la campagne WhatsApp échoue en entier, alors que
+   * l'e-mail, lui, sera passé sans rien dire.
+   *
+   * Or la zone de saisie de l'offre est une zone de texte de quatre lignes : elle invite à écrire
+   * un paragraphe, puis un autre. Le piège était donc posé par l'écran lui-même.
+   *
+   * On aplatit pour WhatsApp, et pour WhatsApp seulement : l'e-mail garde les paragraphes tels
+   * qu'ils ont été écrits, puisqu'il n'a pas cette contrainte.
+   */
+  const pourVariableWhatsApp = (texte) => String(texte || "").replace(/\s+/g, " ").trim();
+
   const pret = choisis.length > 0 && offre.trim().length > 0 && destinataires.length > 0;
 
   /*
@@ -18952,7 +18968,11 @@ function CampagnesPage({ data, persist, session, notify }) {
       if ((canal === "whatsapp" || canal === "les_deux") && c.segment !== SEGMENT_SANS_INDICATIF) {
         const r = await envoyerWhatsApp(c.telephone, `${offre}\n${lien}`, null, {
           nom: MODELE_PROMO_WHATSAPP.nom,
-          variables: [c.nom || "cher client", offre.trim(), echeance || "la fin du mois"],
+          variables: [
+            pourVariableWhatsApp(c.nom) || "cher client",
+            pourVariableWhatsApp(offre),
+            pourVariableWhatsApp(echeance) || "la fin du mois",
+          ],
           boutonUrl: lien,
         });
         if (r.envoye) unEnvoi = true;
@@ -19088,9 +19108,15 @@ function CampagnesPage({ data, persist, session, notify }) {
         )}
         <Field label="L’offre, en quelques lignes">
           <textarea value={offre} onChange={(e) => setOffre(e.target.value)} rows={4}
-            placeholder="ex : -20 % sur tous les envois Paris → Conakry jusqu’à la fin du mois."
+            placeholder="ex : Départ Conakry → Paris le 5 septembre. Le kilo à 10 € au lieu de 12 € pour les colis déposés avant le départ."
             style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }} />
         </Field>
+        {(canal === "whatsapp" || canal === "les_deux") && /\n/.test(offre) && (
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -8, marginBottom: 10 }}>
+            WhatsApp n’accepte pas les retours à la ligne dans une offre : le message partira en un
+            seul paragraphe. L’e-mail, lui, gardera votre mise en forme.
+          </div>
+        )}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           <Field label="Valable jusqu’au"><input value={echeance} onChange={(e) => setEcheance(e.target.value)} placeholder="ex : 30 septembre" style={inputStyle} /></Field>
           <Field label="Lien du site"><input value={lien} onChange={(e) => setLien(e.target.value)} style={inputStyle} /></Field>

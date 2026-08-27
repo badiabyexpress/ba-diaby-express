@@ -1261,3 +1261,39 @@ seule qui reste.
 Éprouvé par `t94` (9 cas), qui fait croire au navigateur qu'il est sur l'adresse de l'hébergeur et
 vérifie les trois cas : le vieux lien est rattrapé, la porte de service reste ouverte, et ce qu'un
 agent connecté là-bas fabrique porte quand même le domaine.
+
+## « Répondez STOP » — et quelqu'un qui écoute
+
+Chaque message de campagne se termine par « Répondez STOP pour ne plus recevoir nos offres ».
+C'était une promesse en l'air : personne ne lisait les réponses, et le client qui écrivait STOP
+continuait de recevoir.
+
+Ce n'est pas une question de politesse. Un client qui a demandé l'arrêt et qui reçoit quand même
+fait la seule chose qui lui reste : il **bloque** le numéro et le **signale**. Meta compte ces
+signalements, fait baisser la note de qualité de la ligne, puis en restreint l'usage — d'abord le
+nombre de messages par jour, ensuite tout. Un numéro d'entreprise restreint, c'est le suivi des
+colis qui s'arrête **pour tout le monde**, pas seulement les campagnes.
+
+Le désabonnement est donc pris **au moment où le message arrive** (`api/whatsapp-entrant.js`), sans
+attendre que quelqu'un ouvre l'application. Il ne coupe que les campagnes : les messages sur un
+colis que le client a lui-même déposé continuent — c'est ce qu'il attend, et ce n'est pas ce qu'il a
+refusé. Un « START » le fait revenir, et lui seul peut le demander.
+
+**On ne reconnaît qu'un message qui ne dit QUE ça** — « stop », « arrêt », « désabonner »,
+« unsubscribe », avec ou sans accent, majuscules ou non. « stop ce colis est en retard » n'est pas
+une demande d'arrêt, c'est une phrase. Se tromper dans ce sens prive quelqu'un des messages qu'il
+attend sur ses propres colis ; mieux vaut manquer une demande ambiguë que couper un client qui n'a
+rien demandé. Une image légendée « stop » ne compte pas non plus : seul le texte est lu.
+
+**La liste est protégée de la même façon que le journal.** Depuis que le serveur y écrit seul, une
+page ouverte depuis une heure l'effacerait en enregistrant — et l'on réécrirait à quelqu'un qui a
+demandé l'arrêt, c'est-à-dire exactement ce qui fait signaler un numéro. Les deux listes sont donc
+réunies. Réabonner reste possible mais doit être **dit** : l'application nomme le numéro dans
+`_reabonnements`, que le serveur applique puis efface — sans quoi chaque enregistrement suivant
+réabonnerait la même personne indéfiniment.
+
+Le « 00 » de tête d'un numéro est traité comme le « + » partout : c'est le même préfixe
+international écrit autrement, et un client désabonné sous `00224…` recevait encore les campagnes
+envoyées à `+224…`.
+
+Éprouvé par `teststop` (28 cas).

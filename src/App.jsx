@@ -18712,8 +18712,15 @@ function paysDuNumero(telephone) {
 }
 
 /** Deux numéros désignent la même personne dès qu'ils ont les mêmes chiffres. */
+/*
+ * La clé d'un numéro : ses chiffres, et rien d'autre.
+ *
+ * Le « 00 » de tête est retiré comme le « + » : c'est le même préfixe international écrit
+ * autrement, et deux écritures du même numéro doivent se reconnaître. Sans cela, un client
+ * désabonné sous « 00224… » recevrait quand même les campagnes envoyées à « +224… ».
+ */
 function clefTelephone(telephone) {
-  return String(telephone || "").replace(/\D/g, "");
+  return String(telephone || "").replace(/\D/g, "").replace(/^00/, "");
 }
 
 /**
@@ -19241,8 +19248,19 @@ function CampagnesPage({ data, persist, session, notify }) {
     setNumeroADesabonner("");
     notify?.("Numéro retiré des campagnes");
   }
+  /*
+   * Réabonner doit être DIT au serveur, pas seulement omis.
+   *
+   * Depuis que le serveur inscrit lui-même les clients qui répondent STOP, il réunit sa liste avec
+   * celle que la page envoie : un numéro simplement retiré reviendrait donc aussitôt. Le champ
+   * `_reabonnements` nomme ceux qu'on retire vraiment ; le serveur l'applique puis l'efface.
+   */
   function reabonner(telephone) {
-    persist({ ...data, desabonnesMarketing: (data.desabonnesMarketing || []).filter((t) => clefTelephone(t) !== clefTelephone(telephone)) });
+    persist({
+      ...data,
+      desabonnesMarketing: (data.desabonnesMarketing || []).filter((t) => clefTelephone(t) !== clefTelephone(telephone)),
+      _reabonnements: [telephone],
+    });
   }
 
   async function exporterSegment() {

@@ -753,6 +753,15 @@ const FENETRE_INTENTION_MS = 10 * 60 * 1000;
 
 export const CHAMP_INTENTION = "_remplacementVolontaire";
 
+/*
+ * Le champ par lequel l'application dit qu'elle réabonne quelqu'un. Il ne s'installe jamais dans le
+ * document : le laisser s'y écrire ferait réabonner à chaque enregistrement suivant.
+ */
+export const CHAMP_REABONNEMENTS = "_reabonnements";
+
+/** Voir la même règle dans api/whatsapp-entrant.js : le « 00 » de tête vaut le « + ». */
+const clefDuTelephone = (telephone) => String(telephone || "").replace(/\D/g, "").replace(/^00/, "");
+
 /** Le document envoyé porte-t-il une intention de remplacement, et est-elle fraîche ? */
 export function intentionDeRemplacement(envoye, maintenant = Date.now()) {
   const marque = envoye?.[CHAMP_INTENTION];
@@ -919,6 +928,32 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId, contexte = {}
    * listes par identifiant, en laissant l'application décider de ce qui est lu et de ce qu'elle
    * a répondu.
    */
+  /*
+   * LES DÉSABONNÉS NE SE PERDENT PAS PAR OMISSION.
+   *
+   * Depuis que le serveur inscrit lui-même un client qui répond STOP (api/whatsapp-entrant.js),
+   * cette liste grandit sans que les pages ouvertes le sachent. Sans la réunion ci-dessous, le
+   * premier enregistrement venu d'un onglet un peu ancien effacerait un désabonnement pris entre
+   * temps — et l'on réécrirait à quelqu'un qui a demandé l'arrêt. C'est précisément ce qui fait
+   * signaler un numéro chez Meta, et restreindre la ligne pour tout le monde.
+   *
+   * Réabonner reste possible, mais jamais par omission : l'application doit le DIRE, en envoyant
+   * les numéros concernés dans `reabonnements`. Ce champ ne s'écrit jamais dans le document — il
+   * vaut pour cette écriture-ci, comme l'intention de remplacement.
+   */
+  const desabonnesBase = liste(base.desabonnesMarketing);
+  const desabonnesEnvoyes = liste(envoye.desabonnesMarketing);
+  const reabonnes = new Set(liste(envoye[CHAMP_REABONNEMENTS]).map(clefDuTelephone).filter(Boolean));
+  delete sortie[CHAMP_REABONNEMENTS];
+  if (desabonnesBase.length || desabonnesEnvoyes.length) {
+    const parClef = new Map();
+    [...desabonnesBase, ...desabonnesEnvoyes].forEach((t) => {
+      const clef = clefDuTelephone(t);
+      if (clef && !reabonnes.has(clef)) parClef.set(clef, t);
+    });
+    sortie.desabonnesMarketing = [...parClef.values()];
+  }
+
   const messagesBase = liste(base.messagesWhatsApp);
   const messagesEnvoyes = liste(envoye.messagesWhatsApp);
   if (messagesBase.length || messagesEnvoyes.length) {

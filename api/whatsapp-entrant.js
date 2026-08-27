@@ -180,6 +180,70 @@ function messagesDeLaNotification(corps) {
   return sortie;
 }
 
+/*
+ * « RÉPONDEZ STOP » — ET QUELQU'UN QUI ÉCOUTE
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Chaque message de campagne se termine par « Répondez STOP pour ne plus recevoir nos offres ».
+ * C'était une promesse en l'air : personne ne lisait les réponses, et le client qui écrivait STOP
+ * continuait de recevoir.
+ *
+ * Ce n'est pas une question de politesse. Un client qui a demandé l'arrêt et qui reçoit quand même
+ * fait la seule chose qui lui reste : il BLOQUE le numéro et le SIGNALE. Meta compte ces
+ * signalements, fait baisser la note de qualité de la ligne, puis en restreint l'usage — d'abord le
+ * nombre de messages, ensuite tout. Un numéro d'entreprise restreint, c'est le suivi des colis qui
+ * s'arrête pour tout le monde, pas seulement les campagnes.
+ *
+ * Le désabonnement est donc pris ICI, au moment où le message arrive, sans attendre que quelqu'un
+ * ouvre l'application. Il ne coupe QUE les campagnes : les messages de suivi d'un colis que le
+ * client a lui-même déposé continuent — c'est ce qu'il attend, et ce n'est pas ce qu'il a refusé.
+ */
+const MOTS_DARRET = /^\s*(stop|arret|arrêt|stopper|desabonner|désabonner|unsubscribe|stop\s*pub)\s*[.!]?\s*$/i;
+const MOTS_DE_RETOUR = /^\s*(start|unstop|reprendre|abonner|oui\s*pub)\s*[.!]?\s*$/i;
+
+/*
+ * La clé d'un numéro : ses chiffres, et rien d'autre.
+ *
+ * Le « 00 » de tête est retiré comme le « + » : c'est le même préfixe international écrit
+ * autrement, et deux écritures du même numéro doivent se reconnaître. Sans cela, un client
+ * désabonné sous « 00224… » recevrait quand même les campagnes envoyées à « +224… ».
+ */
+function clefTelephone(telephone) {
+  return String(telephone || "").replace(/\D/g, "").replace(/^00/, "");
+}
+
+/**
+ * Ce que les messages reçus changent aux désabonnements.
+ *
+ * Rend `{ ajouts, retraits }`. On ne traite que les messages de TEXTE : une photo légendée « stop »
+ * n'est pas une demande d'arrêt, et une pièce jointe dont le nom contient « stop » encore moins.
+ */
+export function desabonnementsDemandes(messages) {
+  const ajouts = [];
+  const retraits = [];
+  (Array.isArray(messages) ? messages : []).forEach((m) => {
+    if (!m || m.type !== "text") return;
+    const clef = clefTelephone(m.de);
+    if (!clef) return;
+    if (MOTS_DARRET.test(m.texte || "")) ajouts.push(m.de);
+    else if (MOTS_DE_RETOUR.test(m.texte || "")) retraits.push(m.de);
+  });
+  return { ajouts, retraits };
+}
+
+/**
+ * La liste des désabonnés, mise à jour.
+ *
+ * Le retrait ne se fait que sur demande expresse du client lui-même : « START » après « STOP ».
+ * Personne d'autre ne peut le réinscrire depuis ici.
+ */
+export function appliquerDesabonnements(liste, { ajouts, retraits }) {
+  const clefs = new Map();
+  (Array.isArray(liste) ? liste : []).forEach((t) => { const c = clefTelephone(t); if (c) clefs.set(c, t); });
+  (retraits || []).forEach((t) => clefs.delete(clefTelephone(t)));
+  (ajouts || []).forEach((t) => { const c = clefTelephone(t); if (c) clefs.set(c, t); });
+  return [...clefs.values()];
+}
+
 /**
  * Le numéro que Meta déclare servir dans cette notification.
  *
@@ -349,12 +413,44 @@ export default async function handler(req, res) {
         dernierContenu: messages.length ? "message" : (statuts.length ? "accuse" : "vide"),
         ...(numeroServi ? { numero: numeroServi } : {}),
       };
+      /*
+       * Le désabonnement se prend maintenant, pas quand quelqu'un ouvrira l'application.
+       *
+       * Il porte sur les messages NOUVEAUX seulement : Meta réémet parfois une notification déjà
+       * traitée, et rejouer un « START » réinscrirait quelqu'un qui avait demandé l'arrêt.
+       */
+      const demandes = desabonnementsDemandes(nouveaux);
+      const bouge = demandes.ajouts.length || demandes.retraits.length;
+      const desabonnes = bouge
+        ? appliquerDesabonnements(document.desabonnesMarketing, demandes)
+        : document.desabonnesMarketing;
+
+      /*
+       * Et il se consigne. Sans trace, le jour où un client affirme avoir écrit STOP, personne ne
+       * peut dire si le message est arrivé — et c'est exactement le litige qui finit en
+       * signalement chez Meta.
+       */
+      const journal = Array.isArray(document.activityLog) ? document.activityLog : [];
+      const lignes = [
+        ...demandes.ajouts.map((t) => ({ quoi: "Désabonnement demandé par le client", qui: t })),
+        ...demandes.retraits.map((t) => ({ quoi: "Réabonnement demandé par le client", qui: t })),
+      ].map((e, i) => ({
+        id: `stop-${Date.now()}-${i}`,
+        date: new Date().toISOString(),
+        action: e.quoi,
+        detail: `${e.qui} — par message WhatsApp`,
+        utilisateur: "Client",
+        role: "client",
+      }));
+
       return {
         document: {
           ...document,
           receptionWhatsApp: reception,
           ...(nouveaux.length ? { messagesWhatsApp: [...nouveaux, ...existants].slice(0, MAX_MESSAGES) } : {}),
           ...(statuts.length ? { statutsWhatsApp: tailles } : {}),
+          ...(bouge ? { desabonnesMarketing: desabonnes } : {}),
+          ...(lignes.length ? { activityLog: [...lignes, ...journal].slice(0, 500) } : {}),
         },
         retour: nouveaux.length + statuts.length,
       };

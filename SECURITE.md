@@ -1131,3 +1131,74 @@ l'ignorent que les verrous existent.
 
 Éprouvé par `testverrou` (24 cas), qui appelle la vraie fonction de suivi et vérifie qu'un client
 qui fait dix recherches d'affilée n'est jamais gêné.
+
+## Ce que l'audit du 27 août a trouvé
+
+Trois défauts réels, dont deux constatés dans la base de production.
+
+### Les mots de passe s'effaçaient par omission
+
+Sur trois comptes clients, **deux n'avaient plus aucun mot de passe** — ni empreinte, ni sel. L'un
+gardait même l'algorithme et le nombre d'itérations, sans l'empreinte qu'ils servent à vérifier.
+Ces personnes ne pouvaient plus entrer, par aucun chemin, et rien ne le signalait : la connexion
+répondait « identifiant ou mot de passe incorrect », comme pour une faute de frappe.
+
+La cause tient en une ligne : le document circule en entier, et il existe des copies dont les
+empreintes ont été **délibérément retirées** — une sauvegarde téléchargée, par exemple, d'où l'on
+ôte les mots de passe parce qu'elle voyage par courriel ou clé USB. Réimportée, cette copie écrasait
+les vraies. L'omission n'était pas distinguée d'un effacement voulu.
+
+La règle est maintenant : une écriture qui ne porte pas d'empreinte pour un compte ne peut pas lui
+en retirer une. Changer de mot de passe continue de fonctionner — un vrai changement apporte une
+empreinte neuve, et celle-là gagne. Vaut pour l'équipe comme pour les clients.
+
+**Les deux comptes abîmés doivent être réparés à la main** : depuis Centre clients, réinitialiser
+l'accès de `Gourrasy` et de `MOUSTAPHA`, ou leur faire utiliser « mot de passe oublié ».
+
+### Une seule requête effaçait tout
+
+`DELETE /api/donnees` acceptait n'importe quelle clé autorisée — y compris `bde-data`, le document
+de l'entreprise. Une seule requête, faite depuis n'importe quelle session d'équipe, effaçait les
+colis, les clients, la caisse et le journal. Et elle passait à côté du garde-fou, qui ne protège que
+les **écritures** : il n'y avait plus de document à protéger.
+
+Aucun écran n'en avait besoin. La seule suppression que fait l'application est la rotation des
+vieilles sauvegardes ; la porte est désormais limitée aux clés `bde-backup-`.
+
+### Le balayage de mots de passe passait sous le radar
+
+La page de connexion comptait les essais sur **un compte** : elle arrêtait qui cherche le mot de
+passe d'une personne précise, et ne voyait rien de l'attaque inverse — un seul mot de passe très
+courant essayé sur cent identifiants. Chaque compte n'était touché qu'une fois, donc aucun plafond
+n'était atteint. C'est pourtant la manière dont on entre le plus souvent : il suffit d'une personne
+dans l'entreprise qui ait choisi « 123456 ». Un second compteur, par connexion et quel que soit
+l'identifiant visé, coupe au quarantième essai — un seuil que plusieurs personnes partageant la
+sortie internet d'une agence n'atteignent jamais.
+
+### Ce que l'audit n'a PAS trouvé
+
+La séparation des espaces tient : un client ou un partenaire ne peut lire ni les sauvegardes, ni la
+liste des clés, ni le document entier, et ce qu'il écrit est reposé sur le vrai document. Les mots
+de passe sont hachés en PBKDF2-SHA256, 150 000 tours, avec un sel par compte. La connexion répond
+la même chose pour un identifiant inconnu et un mot de passe faux, en calculant une empreinte même
+quand aucun compte ne correspond, pour que la durée ne trahisse rien. Les jetons de session sont
+signés et vérifiés à durée constante. Le webhook WhatsApp refuse tout appel non authentifié. La
+table est fermée par RLS sans aucune politique : seule la clé de service passe.
+
+### Ce qui reste ouvert, et qu'il faut savoir
+
+- **Une session vit douze heures et ne peut pas être révoquée.** Changer un mot de passe ou
+  supprimer un compte n'invalide pas le jeton déjà délivré : il reste valable jusqu'à son
+  expiration. Pour un téléphone perdu ou quelqu'un qui part, c'est une demi-journée d'accès. Le
+  remède demande un numéro de version par compte, vérifié à chaque appel.
+- **Le garde-fou est un anti-accident, pas un anti-malveillance.** Un compte d'équipe authentifié
+  peut poser lui-même la marque d'intention et remplacer le document : c'est précisément ce dont
+  une restauration a besoin. Il protège d'une page périmée, pas de quelqu'un qui veut nuire depuis
+  un compte valide.
+- **Les verrous comptent en mémoire** et ne survivent pas au redémarrage d'une instance (voir plus
+  haut).
+- **`CRON_SECRET` n'est toujours pas renseigné** : la sauvegarde de nuit ne tourne pas. Les
+  sauvegardes actuelles sont écrites par le navigateur, à la première ouverture de la journée —
+  elles dépendent donc de quelqu'un qui ouvre l'application.
+- **`WHATSAPP_APP_SECRET` reste facultatif.** Sans lui, le webhook n'est protégé que par le jeton
+  inscrit dans son adresse ; avec lui, chaque appel est vérifié par signature.

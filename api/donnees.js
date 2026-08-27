@@ -136,6 +136,21 @@ export default async function handler(req, res) {
     }
 
     if (req.method === "DELETE") {
+      /*
+       * ON NE SUPPRIME QUE DES SAUVEGARDES.
+       *
+       * Cette porte acceptait n'importe quelle clé autorisée — y compris `bde-data`, c'est-à-dire
+       * le document de l'entreprise. Une seule requête, faite depuis n'importe quelle session
+       * d'équipe, effaçait tout : les colis, les clients, la caisse, le journal. Et elle passait
+       * à côté du garde-fou de _cloisonnement.js, qui ne protège que les ÉCRITURES — il n'y avait
+       * plus de document à protéger.
+       *
+       * Aucun écran n'en a besoin : la seule suppression que fait l'application est la rotation
+       * des vieilles sauvegardes. On la limite donc à ce qu'elle sert réellement.
+       */
+      if (!clef.startsWith("bde-backup-")) {
+        return res.status(403).json({ error: "Seules les sauvegardes peuvent être supprimées." });
+      }
       const reponse = await fetch(
         `${url}/rest/v1/${TABLE}?key=eq.${encodeURIComponent(clef)}`,
         { method: "DELETE", headers: { ...entetes, Prefer: "return=minimal" } },

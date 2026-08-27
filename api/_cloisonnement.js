@@ -573,6 +573,44 @@ function signatureDe(compte) {
   return `${compte.prenom || ""} ${compte.nom || ""}`.trim() || compte.identifiant || "Compte";
 }
 
+/*
+ * LES IDENTIFIANTS NE S'EFFACENT PAS PAR OMISSION
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Constaté en production le 27 août 2026 : sur trois comptes clients, deux n'avaient plus AUCUN
+ * mot de passe — ni empreinte, ni sel, ni rien. L'un gardait même l'algorithme et le nombre
+ * d'itérations, sans l'empreinte qu'ils servent à vérifier. Ces personnes ne pouvaient plus entrer,
+ * par aucun chemin, et rien ne le signalait : la connexion répondait « identifiant ou mot de passe
+ * incorrect », comme pour une faute de frappe.
+ *
+ * L'explication tient en une ligne : le document circule en entier, et il existe des copies dont
+ * les mots de passe ont été délibérément retirés — une sauvegarde téléchargée, par exemple, d'où
+ * l'on ôte les empreintes parce qu'elle voyage par courriel ou clé USB. Réimportée, cette copie
+ * écrase les vraies. L'omission n'était pas distinguée d'un effacement voulu.
+ *
+ * La règle : une écriture qui ne porte PAS d'empreinte pour un compte ne peut pas lui en retirer
+ * une. Changer de mot de passe, en revanche, se fait toujours — un vrai changement apporte une
+ * nouvelle empreinte, et celle-là gagne.
+ */
+const CHAMPS_IDENTIFIANTS = [
+  "motdepasse", "motdepasseSecure", "motdepasseSalt", "motdepasseIter", "motdepasseAlgo",
+];
+
+export function preserverIdentifiants(comptesBase, comptesSortie) {
+  const parId = new Map();
+  liste(comptesBase).forEach((c) => { if (c && c.id) parId.set(c.id, c); });
+  return liste(comptesSortie).map((compte) => {
+    if (!compte || !compte.id) return compte;
+    const ancien = parId.get(compte.id);
+    if (!ancien) return compte;                                   // compte nouveau : rien à reprendre
+    if (compte.motdepasseSecure || compte.motdepasse) return compte; // changement voulu : il gagne
+    const repris = { ...compte };
+    CHAMPS_IDENTIFIANTS.forEach((champ) => {
+      if (ancien[champ] !== undefined) repris[champ] = ancien[champ];
+    });
+    return repris;
+  });
+}
+
 function comptesDeLEquipe(base, envoye, moi, peut) {
   const gere = peut("users.gerer");
   const droitsDesAutres = peut("users.permissions");
@@ -806,7 +844,15 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId, contexte = {}
     else sortie[cle] = base[cle];
   });
 
-  sortie.users = comptesDeLEquipe(base, envoye, moi, peut);
+  sortie.users = preserverIdentifiants(base.users, comptesDeLEquipe(base, envoye, moi, peut));
+  /*
+   * Les comptes clients ne passent par aucun tamis — l'équipe les gère entièrement. Ils ont donc
+   * besoin de la même protection, et ce sont eux qui l'ont payée : deux des trois comptes clients
+   * de la base n'avaient plus de mot de passe.
+   */
+  if (sortie.clientAccounts !== undefined) {
+    sortie.clientAccounts = preserverIdentifiants(base.clientAccounts, sortie.clientAccounts);
+  }
 
   /*
    * Le journal ne se réécrit pas, il s'ajoute.

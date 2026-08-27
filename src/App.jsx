@@ -255,13 +255,34 @@ function sitesLocaux(sites) {
  *
  * Ils lisent maintenant les données : Configuration → Agences pour le site du pays, à défaut le
  * numéro de l'entreprise. Changer de numéro redevient un réglage, pas un déploiement.
+ *
+ * L'entreprise peut tenir deux lignes dans le même pays — c'est le cas en Guinée. On les renvoie
+ * toutes, dédoublonnées : celui qui ne répond pas sur l'une doit pouvoir essayer l'autre sans
+ * chercher le numéro ailleurs. Un numéro vide ne produit pas de bouton : mieux vaut aucun contact
+ * qu'un contact qui n'aboutit pas.
  */
-function telephonePourPays(data, pays) {
+function numerosPourPays(data, pays) {
   const site = (data?.sites || []).find((s) => (s.pays || "GN") === pays && s.telephone);
-  if (site) return site.telephone;
+  const candidats = [];
+  if (site) candidats.push(site.telephone, site.telephone2);
   const reception = data?.agencesReception?.[pays];
-  if (reception?.telephone) return reception.telephone;
-  return data?.entreprise?.telephone || "";
+  if (reception?.telephone) candidats.push(reception.telephone, reception.telephone2);
+  /*
+   * Les lignes du siège ne servent de recours que pour la Guinée : le siège y est. Les proposer
+   * pour la France enverrait un client parisien appeler Conakry en croyant joindre l'agence de
+   * Saint-Blaise.
+   */
+  if (pays === "GN") candidats.push(data?.entreprise?.telephone, data?.entreprise?.telephone2);
+  const vus = new Set();
+  return candidats.filter((n) => {
+    const clef = clefTelephone(n);
+    if (!clef || vus.has(clef)) return false;
+    vus.add(clef);
+    return true;
+  });
+}
+function telephonePourPays(data, pays) {
+  return numerosPourPays(data, pays)[0] || "";
 }
 /**
  * Site où le destinataire vient retirer son colis.
@@ -2744,13 +2765,13 @@ function defaultSeed() {
       parDefaut: false, commissionRate: null, ...c,
     })),
     sites: [
-      { id: "site-bambeto", nom: "Conakry", adresse: "Bambeto Park, Conakry", telephone: "+224621654796", horaires: "Lun–Sam 8h–18h", paiements: "Espèces, Orange Money", stockage: "Retrait sous 7 jours" },
-      { id: "site-madina", nom: "Madina", adresse: "Madina, Conakry", telephone: "+224621654796", horaires: "Lun–Sam 8h–18h", paiements: "Espèces, Orange Money", stockage: "Retrait sous 7 jours" },
+      { id: "site-bambeto", nom: "Conakry", adresse: "Bambeto Park, Conakry", telephone: "+224621764596", horaires: "Lun–Sam 8h–18h", paiements: "Espèces, Orange Money", stockage: "Retrait sous 7 jours" },
+      { id: "site-madina", nom: "Madina", adresse: "Madina, Conakry", telephone: "+224621764596", horaires: "Lun–Sam 8h–18h", paiements: "Espèces, Orange Money", stockage: "Retrait sous 7 jours" },
     ],
     agencesReception: {
       FR: { adresse: "26 rue Saint Blaise, 75020 Paris", telephone: "+33767562963", horaires: "" },
     },
-    entreprise: { adresseSiege: "Bambeto, Conakry, Guinée", telephone: "+224621654796", email: "badiabyexpress.bde@gmail.com", siteWeb: "www.ba-diaby-express.com" },
+    entreprise: { adresseSiege: "Bambeto, Conakry, Guinée", telephone: "+224621764596", telephone2: "+224612479349", email: "badiabyexpress.bde@gmail.com", siteWeb: "www.ba-diaby-express.com" },
     commissionConfig: { parKg: 2, parUnite: 5 }, // EUR — modifiable par l’Administrateur uniquement
   };
 }
@@ -4251,7 +4272,8 @@ function CguPage() {
       // complète avec un numéro générique qu'une page vide.
       .catch(() => {});
   }, []);
-  const entreprise = data?.entreprise?.adresseSiege ? data.entreprise : { adresseSiege: "Conakry, Guinée", telephone: "+224621654796", email: "badiabyexpress.bde@gmail.com", siteWeb: "www.ba-diaby-express.com" };
+  const entreprise = data?.entreprise?.adresseSiege ? data.entreprise : { adresseSiege: "Conakry, Guinée", telephone: "+224621764596", telephone2: "+224612479349", email: "badiabyexpress.bde@gmail.com", siteWeb: "www.ba-diaby-express.com" };
+  const telephonesSiege = [entreprise.telephone, entreprise.telephone2].filter(Boolean).join(" ou au ");
   const section = (titre, children) => (
     <div style={{ marginBottom: 26 }}>
       <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>{titre}</div>
@@ -4267,7 +4289,7 @@ function CguPage() {
         <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", color: "var(--text)", fontSize: 24, marginBottom: 6 }}>Conditions générales & confidentialité</h1>
         <p style={{ color: "var(--muted)", fontSize: 12.5, marginBottom: 30 }}>Dernière mise à jour : {new Date().toLocaleDateString("fr-FR", { year: "numeric", month: "long" })}</p>
 
-        {section("1. Qui sommes-nous", <>Ba-Diaby Express est une entreprise de transport de colis entre la Guinée et plusieurs destinations internationales, dont le siège se trouve à {entreprise.adresseSiege}. Vous pouvez nous contacter au {entreprise.telephone} ou par e-mail à {entreprise.email}.</>)}
+        {section("1. Qui sommes-nous", <>Ba-Diaby Express est une entreprise de transport de colis entre la Guinée et plusieurs destinations internationales, dont le siège se trouve à {entreprise.adresseSiege}. Vous pouvez nous contacter au {telephonesSiege} ou par e-mail à {entreprise.email}.</>)}
 
         {section("2. Données que nous collectons", <>
           Lorsque vous créez un compte client, enregistrez une pré-alerte, ou qu’un colis est enregistré à votre nom, nous collectons : votre nom et prénom, votre numéro de téléphone, votre adresse postale, votre adresse e-mail (si fournie), ainsi que les informations liées à vos colis (poids, contenu déclaré, montants facturés et payés, historique de statut).
@@ -6566,12 +6588,16 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
                           * s'affiche pas si le numéro n'est pas renseigné : mieux vaut pas de
                           * bouton qu'un bouton qui appelle dans le vide.
                           */}
-                        {[["GN", "GN"], ["FR", "FR"]].map(([pays, libelle]) => {
-                          const numero = clefTelephone(telephonePourPays(data, pays));
-                          if (!numero) return null;
-                          return (
-                            <a key={pays} href={`https://wa.me/${numero}?text=${encodeURIComponent(`Bonjour, j’ai une question concernant mon colis ${c.tracking}.`)}`} target="_blank" rel="noopener noreferrer" style={{ background: "var(--ok-bg-soft)", border: "1px solid var(--ok-border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 600, color: "var(--ok-fg)", textDecoration: "none" }}>💬 {T("Contacter")} ({libelle})</a>
-                          );
+                        {[["GN", "GN"], ["FR", "FR"]].flatMap(([pays, libelle]) => {
+                          const numeros = numerosPourPays(data, pays);
+                          return numeros.map((brut, i) => {
+                            const numero = clefTelephone(brut);
+                            /* Une seule ligne garde son libellé nu ; deux se distinguent par un rang. */
+                            const etiquette = numeros.length > 1 ? `${libelle} ${i + 1}` : libelle;
+                            return (
+                              <a key={`${pays}-${numero}`} href={`https://wa.me/${numero}?text=${encodeURIComponent(`Bonjour, j’ai une question concernant mon colis ${c.tracking}.`)}`} target="_blank" rel="noopener noreferrer" style={{ background: "var(--ok-bg-soft)", border: "1px solid var(--ok-border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 600, color: "var(--ok-fg)", textDecoration: "none" }}>💬 {T("Contacter")} ({etiquette})</a>
+                            );
+                          });
                         })}
                       </div>
                     </div>
@@ -10017,7 +10043,7 @@ function AdressesEtSitesPage({ data, persist, notify, onBack }) {
 }
 
 function AgencesConfigPage({ data, persist, notify, onBack, sansEntete }) {
-  const [entreprise, setEntreprise] = useState(data.entreprise || { adresseSiege: "", telephone: "", email: "", siteWeb: "" });
+  const [entreprise, setEntreprise] = useState(data.entreprise || { adresseSiege: "", telephone: "", telephone2: "", email: "", siteWeb: "" });
   const [agences, setAgences] = useState(data.agencesReception || {});
 
   function updateAgence(code, key, value) {
@@ -10029,7 +10055,16 @@ function AgencesConfigPage({ data, persist, notify, onBack, sansEntete }) {
      * Sans indicatif, ils n'y servent à rien — et rien ne le signale. Chaque agence porte son
      * pays : celui du siège est la Guinée, celui d'une agence de réception est sa destination.
      */
-    const siege = { ...entreprise, telephone: telephoneAvecIndicatif(entreprise.telephone, "GN") };
+    const siege = {
+      ...entreprise,
+      telephone: telephoneAvecIndicatif(entreprise.telephone, "GN"),
+      /*
+       * La deuxième ligne est facultative : `telephoneAvecIndicatif` sur une chaîne vide
+       * fabriquerait « +224 » tout seul, un numéro qui s'afficherait partout sans joindre
+       * personne. On ne complète que ce qui a été saisi.
+       */
+      telephone2: entreprise.telephone2 ? telephoneAvecIndicatif(entreprise.telephone2, "GN") : "",
+    };
     const reception = Object.fromEntries(Object.entries(agences).map(([code, a]) =>
       [code, { ...a, telephone: telephoneAvecIndicatif(a?.telephone, code) }]));
     setEntreprise(siege);
@@ -10046,6 +10081,7 @@ function AgencesConfigPage({ data, persist, notify, onBack, sansEntete }) {
         <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 14 }}>Siège de l’entreprise</div>
         <Field label="Adresse du siège"><input value={entreprise.adresseSiege} onChange={(e) => setEntreprise({ ...entreprise, adresseSiege: e.target.value })} style={inputStyle} /></Field>
         <Field label="Téléphone"><input value={entreprise.telephone} onChange={(e) => setEntreprise({ ...entreprise, telephone: e.target.value })} style={inputStyle} /></Field>
+        <Field label="Deuxième ligne (facultatif)"><input value={entreprise.telephone2 || ""} onChange={(e) => setEntreprise({ ...entreprise, telephone2: e.target.value })} style={inputStyle} placeholder="Laissez vide s’il n’y en a qu’une" /></Field>
         <Field label="E-mail"><input value={entreprise.email} onChange={(e) => setEntreprise({ ...entreprise, email: e.target.value })} style={inputStyle} /></Field>
         <Field label="Site web"><input value={entreprise.siteWeb} onChange={(e) => setEntreprise({ ...entreprise, siteWeb: e.target.value })} style={inputStyle} /></Field>
       </div>
@@ -23451,7 +23487,7 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
             </div>
             <div style={{ display: "flex", gap: 8, marginTop: 9, flexWrap: "wrap", alignItems: "center" }}>
               <input value={numeroEssai} onChange={(e) => setNumeroEssai(e.target.value)}
-                inputMode="tel" placeholder="+224621654796" aria-label="Numéro d’essai"
+                inputMode="tel" placeholder="+224621764596" aria-label="Numéro d’essai"
                 style={{ ...inputStyle, marginBottom: 0, width: 190 }} />
               <button onClick={envoyerEssai} disabled={numeroEssai.replace(/\D/g, "").length < 8 || essaiEnCours}
                 style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "10px 16px", fontSize: 12.5, fontWeight: 600, cursor: essaiEnCours ? "wait" : "pointer" }}>

@@ -459,33 +459,70 @@ function clientTimelineIndex(status) {
 // d’où provient un colis (utile pour les pré-alertes et le suivi à la réception).
 const VENDEURS_EN_LIGNE = ["Shein", "Amazon", "Jumia", "AliExpress", "Temu", "Alibaba", "Autre"];
 
-// Parcours de validation d’un bordereau : 5 étapes, avec bouton "Statut suivant" fonctionnel.
-const BORDEREAU_STATUSES = ["Brouillon", "Acheminement", "Validé", "Arrivé", "Livré"];
+/*
+ * LE BORDEREAU PARLE LA MÊME LANGUE QUE LE COLIS.
+ *
+ * Il avait son vocabulaire à lui — Acheminement, Validé — et le colis le sien : En transit, Arrivé,
+ * Disponible au retrait. Deux échelles côte à côte pour décrire le même voyage, et personne pour
+ * dire laquelle correspondait à laquelle. L'agent qui voyait « Validé » sur le lot devait deviner
+ * où en étaient les colis dedans ; le client, lui, lisait un troisième vocabulaire encore.
+ *
+ * Le bordereau reprend donc les étapes du colis. Seul « Brouillon » lui reste en propre : c'est
+ * l'état d'avant tout envoi, celui où le lot n'est qu'une liste de travail — un colis, lui, existe
+ * déjà, il est « Enregistré ».
+ */
+const BORDEREAU_STATUSES = ["Brouillon", "En transit", "Arrivé", "Disponible au retrait", "Livré"];
 const BORDEREAU_STATUS_STYLE = {
   "Brouillon": { bg: "var(--surface2)", fg: "var(--neutral-fg)" },
-  "Acheminement": { bg: "var(--info-bg)", fg: "var(--info-fg)" },
-  "Validé": { bg: "var(--warn-bg)", fg: "var(--warn-fg)" },
-  "Arrivé": { bg: "var(--ok-bg-soft)", fg: "var(--ok-fg-alt)" },
+  "En transit": { bg: "var(--info-bg)", fg: "var(--info-fg)" },
+  "Arrivé": { bg: "var(--warn-bg)", fg: "var(--warn-fg)" },
+  "Disponible au retrait": { bg: "var(--ok-bg-soft)", fg: "var(--ok-fg-alt)" },
   "Livré": { bg: "var(--ok-bg)", fg: "var(--ok-fg)" },
 };
-/** Compatibilité avec les anciens bordereaux ("En cours" / "Reçu") créés avant ce nouveau parcours en 5 étapes. */
+/**
+ * Les bordereaux déjà en base portent l'ancien vocabulaire, et l'un d'eux est en cours de route.
+ * On les relit sans jamais les faire AVANCER : « Validé » était une étape administrative située
+ * entre l'acheminement et l'arrivée — la traduire par « Arrivé » annoncerait à des clients que
+ * leur colis est en Guinée alors qu'il vole encore.
+ */
 function normalizeBordereauStatut(statut) {
-  if (statut === "En cours") return "Acheminement";
-  if (statut === "Reçu") return "Livré";
-  return BORDEREAU_STATUSES.includes(statut) ? statut : "Brouillon";
+  const anciens = {
+    "En cours": "En transit",
+    "Acheminement": "En transit",
+    "Expédié": "En transit",
+    "Validé": "En transit",
+    /*
+     * « Reçu » était traduit de DEUX façons différentes dans ce fichier : « Livré » à la
+     * relecture du statut, « Arrivé » au calcul du statut des colis. Les deux échelles ne
+     * disaient donc pas la même chose du même bordereau. On tranche pour la lecture prudente :
+     * un lot reçu est arrivé — dire « Livré » affirmerait des remises dont on n'a aucune trace.
+     */
+    "Reçu": "Arrivé",
+  };
+  const traduit = anciens[statut] || statut;
+  return BORDEREAU_STATUSES.includes(traduit) ? traduit : "Brouillon";
 }
 /**
- * Correspondance entre le statut du bordereau (le lot entier) et le statut à appliquer aux
- * colis qu'il contient, quand on fait avancer le bordereau via "Statut suivant".
+ * Ce qu'une étape de bordereau dit du statut des colis qu'il porte.
  *
- * "Brouillon" et "Validé" n'ont pas d'équivalent colis (le premier précède tout envoi, le
- * second est une étape purement administrative) : ces deux-là n'entraînent aucun changement
- * de statut sur les colis. "Livré" au niveau du bordereau signifie que le lot est arrivé et
- * traité, pas que chaque client a déjà récupéré son colis — la remise finale à chaque client
- * reste une confirmation individuelle et volontaire (comme "Faire avancer les colis" le fait
- * déjà en s'arrêtant à "Disponible au retrait"), donc le bordereau ne force jamais "Livré".
+ * Depuis que les deux échelles partagent le même vocabulaire, la correspondance est directe : le
+ * lot est en transit, donc les colis le sont. Deux exceptions, et elles comptent.
+ *
+ * « Brouillon » ne dit rien : le lot n'est qu'une liste de travail, rien n'est parti, aucun client
+ * n'a été prévenu.
+ *
+ * « LIVRÉ » AU NIVEAU DU LOT NE VEUT PAS DIRE QUE CHAQUE CLIENT A SON COLIS. Il veut dire que le
+ * lot est arrivé et traité. La remise se fait client par client, avec sa signature et son
+ * règlement : déclarer « Livré » treize colis d'un coup, ce serait affirmer treize remises qui
+ * n'ont pas eu lieu — et perdre au passage les preuves qui vont avec. Le bordereau s'arrête donc à
+ * « Disponible au retrait », comme le fait déjà « Faire avancer les colis ».
  */
-const BORDEREAU_VERS_STATUT_COLIS = { "Acheminement": "En transit", "Arrivé": "Arrivé", "Livré": "Disponible au retrait" };
+const BORDEREAU_VERS_STATUT_COLIS = {
+  "En transit": "En transit",
+  "Arrivé": "Arrivé",
+  "Disponible au retrait": "Disponible au retrait",
+  "Livré": "Disponible au retrait",
+};
 
 /**
  * Le statut de colis qu'un bordereau impose, à l'étape où il est.
@@ -493,10 +530,13 @@ const BORDEREAU_VERS_STATUT_COLIS = { "Acheminement": "En transit", "Arrivé": "
  * « Validé » n'a pas d'équivalent propre — c'est une étape administrative — mais il vient APRÈS
  * l'acheminement : un colis d'un bordereau validé est en transit. Rendre `null` pour cette étape
  * ferait tomber le rattrapage exactement là, et c'est ce qui laissait des colis en arrière.
+ *
+ * Depuis l'harmonisation des vocabulaires, « Validé » n'existe plus comme étape : il est traduit en
+ * « En transit » à la relecture. La descente d'échelle reste, parce qu'une étape sans équivalent
+ * colis peut réapparaître, et parce que « Brouillon » en est une.
  */
 export function statutColisImposeParBordereau(statutBordereau) {
-  const normalise = { "En cours": "Acheminement", "Expédié": "Acheminement", "Reçu": "Arrivé" }[statutBordereau] || statutBordereau;
-  const rang = BORDEREAU_STATUSES.indexOf(normalise);
+  const rang = BORDEREAU_STATUSES.indexOf(normalizeBordereauStatut(statutBordereau));
   if (rang < 0) return null;
   /* On descend l'échelle du bordereau jusqu'à la première étape qui dise quelque chose du colis. */
   for (let i = rang; i >= 0; i--) {
@@ -544,7 +584,7 @@ export function synchroniserColisAvecBordereau(colis, bordereau, maintenant = ne
  * À PARTIR DE L'ACHEMINEMENT, UN BORDEREAU NE SE MODIFIE PLUS QU'EN ADMINISTRATEUR.
  *
  * Tant qu'il est en brouillon, un bordereau est une liste de travail : on y ajoute, on en retire,
- * personne n'a encore rien annoncé. Dès qu'il passe à l'acheminement, il devient autre chose : les
+ * personne n'a encore rien annoncé. Dès qu'il passe en transit, il devient autre chose : les
  * clients ont été prévenus que leur colis est parti, le manifeste a été imprimé, le transporteur
  * l'a en main. Retirer un colis d'un lot déjà parti, c'est faire mentir ce qui a été dit au client
  * et ce que porte le papier du transporteur — et rien ne le rattrape ensuite.
@@ -554,7 +594,7 @@ export function synchroniserColisAvecBordereau(colis, bordereau, maintenant = ne
  */
 export function bordereauVerrouille(statutBordereau) {
   const rang = BORDEREAU_STATUSES.indexOf(normalizeBordereauStatut(statutBordereau));
-  return rang >= BORDEREAU_STATUSES.indexOf("Acheminement");
+  return rang >= BORDEREAU_STATUSES.indexOf("En transit");
 }
 
 /**
@@ -3121,6 +3161,16 @@ async function lireTexteEtiquette(canvas, surProgres) {
     const trouve = lireEtiquette(data?.text || "");
     return { lu: true, ...trouve, texte: data?.text || "" };
   } catch (e) {
+    /*
+     * APRÈS UN ABANDON, ON REPART À NEUF.
+     *
+     * `Promise.race` rend la main, mais la lecture continue dans son fil d'exécution : le moteur
+     * reste occupé par un travail dont plus personne n'attend le résultat. La tentative suivante se
+     * mettrait dans sa file et dépasserait le délai à son tour — et l'agent conclurait que la
+     * lecture « ne marche jamais », alors qu'elle n'a échoué qu'une fois. On libère donc le moteur ;
+     * les fichiers restent en cache, le reprendre coûte une seconde.
+     */
+    libererLecteurTexte();
     return { lu: false, raison: "lecture", detail: String(e?.message || e).slice(0, 120) };
   }
 }
@@ -13826,7 +13876,7 @@ function BordereauxPage({ data, persist, session, notify }) {
   const [statutFiltreBord, setStatutFiltreBord] = useState(null);
   const bordereaux = data.bordereaux || [];
   const bordereauxParStatut = useMemo(() => {
-    const compte = { "Brouillon": 0, "Acheminement": 0, "Validé": 0, "Arrivé": 0, "Livré": 0 };
+    const compte = Object.fromEntries(BORDEREAU_STATUSES.map((s) => [s, 0]));
     bordereaux.forEach((b) => { compte[normalizeBordereauStatut(b.statut)]++; });
     return compte;
   }, [bordereaux]);
@@ -13945,7 +13995,7 @@ function BordereauxPage({ data, persist, session, notify }) {
             active={!statutFiltreBord} onFiltrer={statutFiltreBord ? () => setStatutFiltreBord(null) : null} />
           {BORDEREAU_STATUSES.map((s) => (
             <ColisStatCard key={s} label={s} value={bordereauxParStatut[s]} icon={FileStack}
-              tint={{ "Brouillon": "#6B7A99", "Acheminement": "#5B8DEF", "Validé": "#D6A22E", "Arrivé": "#16A163", "Livré": "#3ECB84" }[s]}
+              tint={{ "Brouillon": "#6B7A99", "En transit": "#5B8DEF", "Arrivé": "#D6A22E", "Disponible au retrait": "#16A163", "Livré": "#3ECB84" }[s]}
               active={statutFiltreBord === s} onFiltrer={() => setStatutFiltreBord(statutFiltreBord === s ? null : s)} />
           ))}
         </div>
@@ -15678,15 +15728,18 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   doc.setFontSize(8); doc.text(`Route : ${label} · Généré le ${new Date().toLocaleDateString("fr-FR")}`, 37, 25);
   if (bordereau?.statut) {
     /*
-     * Comparait autrefois à "Reçu", un statut disparu depuis le passage au parcours en 5
-     * étapes (Brouillon → Acheminement → Validé → Arrivé → Livré) : la pastille restait donc
-     * bleue en permanence, même sur un bordereau réellement Livré. On normalise le statut et
-     * on lui donne une couleur par étape, cohérente avec celle affichée dans l'application.
+     * Comparait autrefois à "Reçu", un statut disparu depuis : la pastille restait bleue en
+     * permanence, même sur un bordereau réellement livré. On normalise donc le statut, et on lui
+     * donne une couleur par étape — LES MÊMES QU'À L'ÉCRAN. Deux nuanciers pour une même échelle,
+     * c'est un agent qui compare le papier au téléphone et croit lire deux états différents.
      */
     const statutBadge = normalizeBordereauStatut(bordereau.statut);
     const COULEURS_STATUT_BORDEREAU = {
-      "Brouillon": [148, 156, 172], "Acheminement": [91, 141, 239], "Validé": [214, 158, 46],
-      "Arrivé": [61, 180, 140], "Livré": [62, 203, 132],
+      "Brouillon": [148, 156, 172],
+      "En transit": [91, 141, 239],
+      "Arrivé": [214, 158, 46],
+      "Disponible au retrait": [61, 180, 140],
+      "Livré": [62, 203, 132],
     };
     const [r, g, bl] = COULEURS_STATUT_BORDEREAU[statutBadge] || [91, 141, 239];
     doc.setFillColor(r, g, bl);

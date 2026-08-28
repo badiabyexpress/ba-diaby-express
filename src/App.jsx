@@ -2631,7 +2631,7 @@ function avecTraces(data, traces) {
   return [...traces, ...(data.messagesWhatsApp || [])].slice(0, 300);
 }
 
-async function envoyerWhatsApp(telephone, message, mediaUrl, gabarit) {
+async function envoyerWhatsApp(telephone, message, mediaUrl, gabarit, options = {}) {
   try {
     const reponse = await appelServeurQuiDepense("/api/whatsapp", {
       method: "POST",
@@ -2647,6 +2647,13 @@ async function envoyerWhatsApp(telephone, message, mediaUrl, gabarit) {
           ...(gabarit.boutonUrl ? { boutonUrl: gabarit.boutonUrl } : {}),
           ...(gabarit.document ? { document: gabarit.document } : {}),
         } : {}),
+        /*
+         * « Pas de modèle » doit pouvoir se dire. Sans ce drapeau, le serveur retombe sur le modèle
+         * configuré par défaut — celui du suivi de colis — et l'envoi d'une facture partirait sous
+         * la forme d'un message de suivi, sans ses variables : refusé par Meta, ou pire, reçu par
+         * le client à la place de ce qu'on voulait lui dire.
+         */
+        ...(options.texteLibre ? { texteLibre: true } : {}),
       }),
     });
     const data = await reponse.json().catch(() => ({}));
@@ -3017,6 +3024,18 @@ let moteurOcr = null;
 let ocrEnCours = null;
 
 /**
+ * Libère le moteur. Il occupe plusieurs dizaines de mégaoctets de mémoire vive — une place que les
+ * téléphones d'entrée de gamme n'ont pas de trop, et qui ferait décharger l'onglet dès qu'il passe
+ * en arrière-plan. Les fichiers, eux, restent dans le cache du navigateur : reprendre coûte une
+ * seconde, pas sept mégaoctets.
+ */
+async function libererLecteurTexte() {
+  const worker = moteurOcr;
+  moteurOcr = null;
+  if (worker) { try { await worker.terminate(); } catch (e) { /* rien à sauver ici */ } }
+}
+
+/**
  * Prépare le moteur, une seule fois. Rend `null` — jamais une exception — si quoi que ce soit
  * manque : la lecture est un confort, son absence ne doit pas empêcher de saisir un colis.
  */
@@ -3088,7 +3107,17 @@ async function lireTexteEtiquette(canvas, surProgres) {
   const worker = await chargerLecteurTexte(surProgres);
   if (!worker) return { lu: false, raison: "moteur-indisponible" };
   try {
-    const { data } = await worker.recognize(canvas);
+    /*
+     * UN DÉLAI MAXIMAL, PARCE QU'UN ÉCRAN QUI TOURNE SANS FIN EST PIRE QU'UN ÉCHEC.
+     *
+     * Sur un téléphone d'entrée de gamme la reconnaissance est mono-processeur : ce qui prend deux
+     * secondes sur un ordinateur peut en prendre quinze. Au-delà, l'agent a déjà lu le poids sur
+     * l'étiquette et attend pour rien. On abandonne, et le champ l'attend, vide et prêt.
+     */
+    const { data } = await Promise.race([
+      worker.recognize(canvas),
+      new Promise((_, rejeter) => setTimeout(() => rejeter(new Error("delai-depasse")), 25000)),
+    ]);
     const trouve = lireEtiquette(data?.text || "");
     return { lu: true, ...trouve, texte: data?.text || "" };
   } catch (e) {
@@ -16186,7 +16215,11 @@ async function envoyerFactureWhatsApp(colis, data) {
   // ne nous connaît pas.
   const marque = marquePartenaire(data, colis);
   const message = `Bonjour ${colis.destinataire}, voici la facture de votre colis ${nomExpediteurPourClient(data, colis)} (${colis.tracking}).`;
-  const resultat = await envoyerWhatsApp(colis.telephone, message, publicUrl);
+  /*
+   * Un envoi de facture n'est pas une étape de suivi : il ne passe par aucun modèle. On le dit,
+   * pour que le serveur ne lui applique pas le modèle par défaut.
+   */
+  const resultat = await envoyerWhatsApp(colis.telephone, message, publicUrl, null, { texteLibre: true });
   // Contrairement à notifierWhatsApp() (message texte), il n'existe pas de brouillon WhatsApp de
   // secours pour une pièce jointe — wa.me ne sait pré-remplir que du texte. Sans Twilio configuré,
   // il n'y a donc rien à faire automatiquement : on le dit clairement plutôt que de rester muet.
@@ -23430,6 +23463,8 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
     window.addEventListener("resize", mesurer);
     return () => window.removeEventListener("resize", mesurer);
   }, []);
+  /* En quittant le comptoir, on rend la mémoire du lecteur : le comptoir se tient sur un téléphone. */
+  useEffect(() => () => { libererLecteurTexte(); }, []);
 
   const tarifs = data.receptionTarifs || { paliers: [{ max: 10, tarif: 100000 }, { max: 40, tarif: 95000 }, { max: 100, tarif: 92000 }] };
   /*

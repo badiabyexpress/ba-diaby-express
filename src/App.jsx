@@ -2988,6 +2988,114 @@ async function ensureQRCodeLib() {
 }
 /** Charge jsQR (lecture de QR codes depuis une image/vidéo), utilisé en repli quand l’API
  * native BarcodeDetector n’est pas disponible sur le navigateur. */
+/* ============================================================================================
+ * LIRE CE QUI EST ÉCRIT SUR L'ÉTIQUETTE
+ *
+ * Le code-barres donne la référence, et rien d'autre : tout le reste — le poids, la référence
+ * client — n'est qu'imprimé. Sur une étiquette GOFO on lit « Poids:3.758 Kg » en clair, sous le
+ * code. Le recopier n'est pas long, mais c'est un chiffre de plus à saisir sur chaque colis, et
+ * c'est l'agent qui se trompe de virgule à la trentième ligne de la journée.
+ *
+ * CE QUE ÇA COÛTE, ET POURQUOI C'EST À LA DEMANDE. La reconnaissance de texte demande un moteur
+ * de calcul et un modèle de langue — près de sept mégaoctets, servis depuis notre propre domaine
+ * (le règlement de sécurité de la page interdit d'aller les chercher ailleurs). Ils ne sont
+ * téléchargés qu'au PREMIER usage, et le navigateur les garde ensuite. Personne ne paie ce poids
+ * en ouvrant simplement l'application ; l'agent qui s'en sert l'attend une fois.
+ *
+ * CE QUE LA LECTURE VAUT, ET CE QU'ELLE NE VAUT PAS. Sur une étiquette nette elle donne le poids
+ * en deux secondes. Sur une étiquette froissée — celle dont le code-barres lui-même ne passe pas —
+ * elle ne donne rien, et le dit. C'est pourquoi rien de ce qu'elle lit n'entre directement dans le
+ * formulaire : tout passe par un écran de vérification, où chaque valeur reste modifiable.
+ *
+ * ET SURTOUT : LE POIDS LU N'EST PAS LE POIDS FACTURÉ. Celui de l'étiquette est déclaré par la
+ * boutique ; la facture dit « poids constaté à la réception », et c'est la balance de l'agence qui
+ * fait foi. La lecture propose, la balance dispose — l'écran de vérification le dit en toutes
+ * lettres, sans quoi on facturerait sur la parole du vendeur.
+ * ========================================================================================== */
+
+let moteurOcr = null;
+let ocrEnCours = null;
+
+/**
+ * Prépare le moteur, une seule fois. Rend `null` — jamais une exception — si quoi que ce soit
+ * manque : la lecture est un confort, son absence ne doit pas empêcher de saisir un colis.
+ */
+async function chargerLecteurTexte(surProgres) {
+  if (moteurOcr) return moteurOcr;
+  if (ocrEnCours) return ocrEnCours;
+  ocrEnCours = (async () => {
+    try {
+      const { createWorker } = await import("tesseract.js");
+      const worker = await createWorker("eng", 1, {
+        /*
+         * Tout vient de notre domaine. Par défaut la librairie va chercher son moteur et son
+         * modèle sur un CDN — que la règle `connect-src 'self'` de la page bloque. L'agent aurait
+         * vu un échec sans cause, et personne n'aurait fait le lien avec l'en-tête de sécurité.
+         */
+        workerPath: "/ocr/worker.min.js",
+        corePath: "/ocr",
+        langPath: "/ocr",
+        gzip: true,
+        logger: (m) => { if (m?.status && surProgres) surProgres(m); },
+      });
+      moteurOcr = worker;
+      return worker;
+    } catch (e) {
+      console.error("Lecture de texte indisponible.", e);
+      return null;
+    } finally {
+      ocrEnCours = null;
+    }
+  })();
+  return ocrEnCours;
+}
+
+/**
+ * CE QU'ON CHERCHE SUR L'ÉTIQUETTE, ET RIEN D'AUTRE.
+ *
+ * On n'essaie pas de « comprendre » l'étiquette : on cherche trois motifs précis. Une lecture
+ * approximative du reste — une adresse, un nom de rue — n'apporterait rien et introduirait des
+ * erreurs dans des champs qui, eux, viennent du compte client.
+ *
+ * Les tolérances viennent de ce que la machine lit vraiment : « Kg » avec une majuscule, deux
+ * points collés au mot, une virgule à la place du point décimal, un « é » perdu dans « Réf ».
+ */
+function lireEtiquette(texte) {
+  const plat = String(texte || "").replace(/\s+/g, " ");
+  const poids = plat.match(/poids\s*[:;.]?\s*([0-9]+(?:[.,][0-9]+)?)\s*k\s*g/i);
+  const refClient = plat.match(/r[ée]?f\.?\s*client\s*[:;.]?\s*([A-Z0-9]{8,})/i);
+  const suivi = plat.match(/\b([A-Z]{2,4}[0-9]{10,})\b/);
+  const valeur = poids ? Number(poids[1].replace(",", ".")) : null;
+  return {
+    /*
+     * Un poids aberrant est écarté plutôt que proposé : au-delà de 200 kg ce n'est plus un colis
+     * de commande en ligne, c'est une lecture qui a confondu un chiffre avec autre chose.
+     */
+    poids: Number.isFinite(valeur) && valeur > 0 && valeur <= 200 ? valeur : null,
+    refClient: refClient ? refClient[1] : null,
+    suivi: suivi ? suivi[1] : null,
+  };
+}
+
+/**
+ * Lit une image d'étiquette. Rend toujours un compte rendu, jamais une exception.
+ *
+ * `raison` nomme l'échec quand il y en a un : sans cela l'agent voit « rien trouvé » sans savoir
+ * s'il doit réessayer en approchant, ou si la fonction est simplement indisponible sur son
+ * téléphone.
+ */
+async function lireTexteEtiquette(canvas, surProgres) {
+  const worker = await chargerLecteurTexte(surProgres);
+  if (!worker) return { lu: false, raison: "moteur-indisponible" };
+  try {
+    const { data } = await worker.recognize(canvas);
+    const trouve = lireEtiquette(data?.text || "");
+    return { lu: true, ...trouve, texte: data?.text || "" };
+  } catch (e) {
+    return { lu: false, raison: "lecture", detail: String(e?.message || e).slice(0, 120) };
+  }
+}
+
 /**
  * LE LECTEUR DE CODES-BARRES DE SECOURS — celui sans lequel un iPhone ne scanne rien.
  *
@@ -4407,6 +4515,24 @@ function ScannerModal({ onClose, onScan, titre = "Scanner un colis", aide }) {
       lancerBoucleDetection();
     }
 
+    /*
+     * L'image de l'instant où le code a été reconnu.
+     *
+     * C'est celle-là qu'il faut : elle est nette — sans quoi le code n'aurait pas été lu — et
+     * l'étiquette y est bien cadrée. Reprendre une image plus tard donnerait un cliché flou, pris
+     * pendant que l'agent baisse déjà son téléphone.
+     */
+    function imageCourante() {
+      try {
+        const video = videoRef.current;
+        if (!video || !video.videoWidth) return null;
+        const c = document.createElement("canvas");
+        c.width = video.videoWidth; c.height = video.videoHeight;
+        c.getContext("2d").drawImage(video, 0, 0, c.width, c.height);
+        return c;
+      } catch (e) { return null; }
+    }
+
     async function lancerBoucleDetection() {
       let detector = null;
       if ("BarcodeDetector" in window) {
@@ -4437,7 +4563,7 @@ function ScannerModal({ onClose, onScan, titre = "Scanner un colis", aide }) {
         try {
           if (detector) {
             const codes = await detector.detect(videoRef.current);
-            if (codes.length > 0) { onScan(codes[0].rawValue); return; }
+            if (codes.length > 0) { onScan(codes[0].rawValue, imageCourante()); return; }
           } else if (zxing) {
             const canvas = canvasRef.current;
             const w = videoRef.current.videoWidth, h = videoRef.current.videoHeight;
@@ -4445,7 +4571,7 @@ function ScannerModal({ onClose, onScan, titre = "Scanner un colis", aide }) {
               canvas.width = w; canvas.height = h;
               canvas.getContext("2d").drawImage(videoRef.current, 0, 0, w, h);
               const valeur = zxing.lire(canvas);
-              if (valeur) { onScan(valeur); return; }
+              if (valeur) { onScan(valeur, imageCourante()); return; }
             }
           } else if (window.jsQR) {
             const canvas = canvasRef.current;
@@ -4456,7 +4582,7 @@ function ScannerModal({ onClose, onScan, titre = "Scanner un colis", aide }) {
               ctx.drawImage(videoRef.current, 0, 0, w, h);
               const imgData = ctx.getImageData(0, 0, w, h);
               const resultat = window.jsQR(imgData.data, w, h, { inversionAttempts: "attemptBoth" });
-              if (resultat) { onScan(resultat.data); return; }
+              if (resultat) { onScan(resultat.data, imageCourante()); return; }
             }
           }
         } catch (e) { /* frame illisible, on continue */ }
@@ -23288,6 +23414,13 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
   const [erreurArticles, setErreurArticles] = useState("");
   const [scan, setScan] = useState(false);
   /*
+   * Rien de ce qui est SCANNÉ n'entre directement dans le formulaire : tout passe d'abord par un
+   * écran de vérification. Le code-barres est sûr, la lecture du texte ne l'est pas — et le poids
+   * lu sur l'étiquette est celui DÉCLARÉ par la boutique, jamais celui de notre balance.
+   */
+  const [verif, setVerif] = useState(null);
+  const [lecture, setLecture] = useState("");
+  /*
    * Le comptoir se tient souvent sur un téléphone. On mesure la fenêtre plutôt que de deviner :
    * une media query CSS n'était pas possible ici, les styles étant écrits en ligne.
    */
@@ -23527,7 +23660,7 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
    * que le prix se fonde : le reprendre de l'étiquette reviendrait à facturer sur la parole du
    * vendeur plutôt que sur la balance de l'agence.
    */
-  function referenceScannee(valeur) {
+  async function referenceScannee(valeur, image) {
     const brut = String(valeur || "").trim();
     setScan(false);
     if (!brut) return;
@@ -23540,14 +23673,52 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
     if (/^https?:\/\//i.test(brut)) {
       try { reference = new URL(brut).searchParams.get("code") || brut; } catch (e) { /* on garde le brut */ }
     }
+    if (articles.some((a) => a.reference.trim() === reference)) {
+      notify?.(`${reference} figure déjà dans la liste.`);
+      return;
+    }
+
+    /*
+     * On propose la fiche, on ne l'inscrit pas. L'agent voit ce qui a été lu, corrige ce qu'il
+     * faut, et confirme — c'est le seul moment où l'on peut encore rattraper une lecture fausse.
+     */
+    setVerif({ reference, commande: boutiqueCommune, quantite: "1", poids: "", poidsEtiquette: null, etat: image ? "lecture" : "pret" });
+
+    if (!image) return;
+    setLecture("Préparation de la lecture…");
+    const resultat = await lireTexteEtiquette(image, (m) => {
+      if (m.status === "loading tesseract core" || m.status === "loading language traineddata") {
+        setLecture(`Premier usage : téléchargement du lecteur (${Math.round((m.progress || 0) * 100)} %)…`);
+      } else if (m.status === "recognizing text") {
+        setLecture(`Lecture de l’étiquette (${Math.round((m.progress || 0) * 100)} %)…`);
+      }
+    });
+    setLecture("");
+    setVerif((v) => (v && v.reference === reference
+      ? {
+        ...v,
+        etat: "pret",
+        poidsEtiquette: resultat.lu ? resultat.poids : null,
+        poids: resultat.lu && resultat.poids ? String(resultat.poids) : "",
+        echecLecture: resultat.lu ? null : (resultat.raison || "lecture"),
+      }
+      : v));
+  }
+
+  /** Ce que l'agent a validé entre dans la liste des articles. */
+  function confirmerVerification() {
+    if (!verif) return;
+    const poids = Number(String(verif.poids).replace(",", "."));
+    if (!Number.isFinite(poids) || poids <= 0) { setVerif({ ...verif, erreur: "Pesez l’article : c’est le poids qui fait le prix." }); return; }
     setArticles((liste) => {
-      if (liste.some((a) => a.reference.trim() === reference)) return liste;
-      const vide = liste.findIndex((a) => !a.reference.trim());
-      if (vide >= 0) return liste.map((a, i) => (i === vide ? { ...a, reference } : a));
-      return [...liste, { ...ligneArticleEnLigne(), reference, commande: boutiqueCommune }];
+      const ligne = { ...ligneArticleEnLigne(), reference: verif.reference, commande: verif.commande || boutiqueCommune, quantite: String(Math.max(Number(verif.quantite) || 1, 1)), poids: String(poids) };
+      const vide = liste.findIndex((a) => !a.reference.trim() && !Number(a.poids));
+      if (vide >= 0) return liste.map((a, i) => (i === vide ? { ...ligne, id: a.id } : a));
+      return [...liste, ligne];
     });
     setErreurArticles("");
-    notify?.(`Référence ${reference} ajoutée — pesez l’article, puis scannez le suivant.`);
+    setVerif(null);
+    notify?.(`${verif.reference} ajouté — ${poids} kg.`);
   }
 
   function poserCommandePartout(boutique) {
@@ -23898,6 +24069,84 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
           )}
         </>
       )}
+      {verif && (
+        <Modal onClose={() => setVerif(null)} title="Vérifiez avant d’ajouter">
+          {verif.etat === "lecture" ? (
+            <div style={{ padding: "18px 0", fontSize: 13, color: "var(--muted)", lineHeight: 1.6 }}>
+              <div style={{ color: "var(--text)", fontWeight: 600, marginBottom: 6 }}>{lecture || "Lecture de l’étiquette…"}</div>
+              Le code-barres est lu. On cherche maintenant le poids imprimé sur l’étiquette.
+            </div>
+          ) : (
+            <>
+              <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.55 }}>
+                Voici ce qui a été lu sur l’étiquette. Corrigez ce qu’il faut, puis confirmez.
+              </div>
+
+              <Field label="Référence (lue sur le code-barres)">
+                <input value={verif.reference} onChange={(e) => setVerif({ ...verif, reference: e.target.value, erreur: "" })} style={{ ...inputStyle, marginBottom: 0 }} />
+              </Field>
+
+              <Field label="Commande passée sur">
+                <select value={verif.commande || ""} onChange={(e) => setVerif({ ...verif, commande: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }}>
+                  <option value="">Boutique…</option>
+                  {VENDEURS_EN_LIGNE.map((v) => <option key={v} value={v}>{v}</option>)}
+                </select>
+              </Field>
+              {/*
+                * La boutique n'est pas sur l'étiquette : celle-ci est imprimée par le
+                * transporteur, pas par le vendeur. C'est à l'agent de la dire — d'où le rappel,
+                * pour qu'il ne cherche pas une lecture qui ne viendra jamais.
+                */}
+              <div style={{ fontSize: 11.5, color: "var(--muted)", margin: "-6px 0 14px" }}>
+                L’étiquette est imprimée par le transporteur : elle ne dit pas chez qui la commande a été passée.
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: etroit ? "1fr" : "1fr 1fr", gap: 12 }}>
+                <Field label="Quantité">
+                  <input type="number" min="1" value={verif.quantite} onChange={(e) => setVerif({ ...verif, quantite: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} />
+                </Field>
+                <Field label="Poids pesé (kg) *">
+                  <input type="number" min="0" step="0.001" value={verif.poids} onChange={(e) => setVerif({ ...verif, poids: e.target.value, erreur: "" })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="ex : 3.758" />
+                </Field>
+              </div>
+
+              {/*
+                * LE POIDS LU EST UNE PROPOSITION, PAS UNE MESURE.
+                *
+                * Celui de l'étiquette est déclaré par la boutique ; la facture dit « poids
+                * constaté à la réception », et c'est la balance de l'agence qui fait foi. Le dire
+                * ici, à l'endroit exact où le chiffre s'affiche, est la seule façon d'éviter qu'on
+                * facture un jour sur la parole du vendeur.
+                */}
+              {verif.poidsEtiquette ? (
+                <div style={{ display: "flex", gap: 9, alignItems: "flex-start", background: "var(--warn-bg)", color: "var(--warn-fg)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 12px", fontSize: 12, marginTop: 4, lineHeight: 1.5 }}>
+                  <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                  <div>
+                    <strong>{verif.poidsEtiquette} kg lus sur l’étiquette.</strong> C’est le poids <em>déclaré par la boutique</em>.
+                    Le prix se calcule sur le poids constaté à la réception : confirmez-le à la balance avant d’ajouter.
+                  </div>
+                </div>
+              ) : (
+                <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 4, lineHeight: 1.5 }}>
+                  {verif.echecLecture === "moteur-indisponible"
+                    ? "La lecture du texte n’est pas disponible sur cet appareil. Saisissez le poids à la balance."
+                    : "Aucun poids n’a pu être lu sur l’étiquette — froissée, floue, ou absente. Pesez l’article."}
+                </div>
+              )}
+
+              {verif.erreur && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginTop: 10 }}>{verif.erreur}</div>}
+
+              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 18, flexWrap: "wrap" }}>
+                <button onClick={() => setVerif(null)} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 12.5, color: "var(--muted)", cursor: "pointer" }}>Annuler</button>
+                <button onClick={confirmerVerification} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 8, padding: "10px 18px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                  Confirmer et ajouter
+                </button>
+              </div>
+            </>
+          )}
+        </Modal>
+      )}
+
       {scan && (
         <ScannerModal
           titre="Scanner une étiquette"

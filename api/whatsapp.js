@@ -189,6 +189,18 @@ async function envoyerParMeta({ meta, destinataire, message, modele, variables, 
     });
   }
 
+  /*
+   * SANS MODÈLE, LE DOCUMENT PARTAIT QUAND MÊME — MAIS NULLE PART.
+   *
+   * Un message hors modèle se composait en `type: "text"` : les composants préparés au-dessus,
+   * en-tête document compris, étaient tout simplement abandonnés. Le client recevait « voici la
+   * facture de votre colis » et rien d'autre — un message qui annonce une pièce jointe absente,
+   * ce qui est pire que pas de message du tout : il attend, puis il rappelle.
+   *
+   * Dans la fenêtre de vingt-quatre heures, Meta accepte un message de type `document` avec une
+   * légende. C'est un seul message qui porte le texte ET le fichier, exactement ce qu'on voulait
+   * envoyer.
+   */
   const corps = modele
     ? {
       messaging_product: "whatsapp",
@@ -200,12 +212,27 @@ async function envoyerParMeta({ meta, destinataire, message, modele, variables, 
         ...(composants.length ? { components: composants } : {}),
       },
     }
-    : {
-      messaging_product: "whatsapp",
-      to: destinataire,
-      type: "text",
-      text: { preview_url: false, body: String(message) },
-    };
+    : (document && document.lien)
+      ? {
+        messaging_product: "whatsapp",
+        to: destinataire,
+        type: "document",
+        document: {
+          link: document.lien,
+          filename: document.nom || "document.pdf",
+          /*
+           * Meta plafonne la légende à 1024 caractères, et un dépassement fait refuser tout
+           * l'envoi. Nos messages sont courts, mais on ne laisse pas le hasard décider.
+           */
+          ...(message ? { caption: String(message).slice(0, 1024) } : {}),
+        },
+      }
+      : {
+        messaging_product: "whatsapp",
+        to: destinataire,
+        type: "text",
+        text: { preview_url: false, body: String(message) },
+      };
 
   const reponse = await fetch(
     `https://graph.facebook.com/${VERSION_GRAPH}/${encodeURIComponent(meta.numeroId)}/messages`,

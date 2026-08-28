@@ -16925,10 +16925,23 @@ async function downloadFactureEnLigne(colis, data, options = {}) {
      */
     doc.setTextColor(...INK);
     const ref = String(p?.reference || p?.commande || p?.nom || "—");
-    doc.text(couper(ref, 92), colX[0], y + 5.4);
-    if (p?.commande && p?.reference) {
+    /*
+     * LA LARGEUR DE LA RÉFÉRENCE SE MESURE À LA TAILLE OÙ ELLE EST ÉCRITE.
+     *
+     * Elle était mesurée après le passage en corps 8 — celui de la boutique — donc plus étroite
+     * qu'à l'impression : « Shein » venait se poser sur la fin de la référence, et les deux
+     * devenaient illisibles. Sur une facture, une référence à moitié couverte ne se devine pas :
+     * c'est elle que le client cherche chez la boutique et que nous cherchons dans le carton.
+     */
+    const avecBoutique = !!(p?.commande && p?.reference);
+    const refCoupee = couper(ref, avecBoutique ? 74 : 92);
+    doc.text(refCoupee, colX[0], y + 5.4);
+    if (avecBoutique) {
+      const finRef = colX[0] + doc.getTextWidth(refCoupee);
       doc.setTextColor(...MUTED); doc.setFontSize(8);
-      doc.text(couper(String(p.commande), 34), colX[0] + doc.getTextWidth(couper(ref, 92)) + 3, y + 5.4);
+      /* Ce qui reste avant la colonne « Quantité », et rien de plus. */
+      const dispo = colX[1] - 12 - (finRef + 3);
+      if (dispo > 5) doc.text(couper(String(p.commande), dispo), finRef + 3, y + 5.4);
       doc.setFontSize(9);
     }
     doc.setTextColor(...MUTED);

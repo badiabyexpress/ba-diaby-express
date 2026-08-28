@@ -16925,10 +16925,23 @@ async function downloadFactureEnLigne(colis, data, options = {}) {
      */
     doc.setTextColor(...INK);
     const ref = String(p?.reference || p?.commande || p?.nom || "—");
-    doc.text(couper(ref, 92), colX[0], y + 5.4);
-    if (p?.commande && p?.reference) {
+    /*
+     * LA LARGEUR DE LA RÉFÉRENCE SE MESURE À LA TAILLE OÙ ELLE EST ÉCRITE.
+     *
+     * Elle était mesurée après le passage en corps 8 — celui de la boutique — donc plus étroite
+     * qu'à l'impression : « Shein » venait se poser sur la fin de la référence, et les deux
+     * devenaient illisibles. Sur une facture, une référence à moitié couverte ne se devine pas :
+     * c'est elle que le client cherche chez la boutique et que nous cherchons dans le carton.
+     */
+    const avecBoutique = !!(p?.commande && p?.reference);
+    const refCoupee = couper(ref, avecBoutique ? 74 : 92);
+    doc.text(refCoupee, colX[0], y + 5.4);
+    if (avecBoutique) {
+      const finRef = colX[0] + doc.getTextWidth(refCoupee);
       doc.setTextColor(...MUTED); doc.setFontSize(8);
-      doc.text(couper(String(p.commande), 34), colX[0] + doc.getTextWidth(couper(ref, 92)) + 3, y + 5.4);
+      /* Ce qui reste avant la colonne « Quantité », et rien de plus. */
+      const dispo = colX[1] - 12 - (finRef + 3);
+      if (dispo > 5) doc.text(couper(String(p.commande), dispo), finRef + 3, y + 5.4);
       doc.setFontSize(9);
     }
     doc.setTextColor(...MUTED);
@@ -17996,6 +18009,34 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   // restent corrigibles à ce stade (numéro erroné, adresse à préciser...).
   const modifiableComplet = colis.status === "Enregistré";
   const auxPaliers = colis.tarification === "reception";
+  /*
+   * UN COLIS COMMANDÉ EN LIGNE SE CORRIGE COMME IL A ÉTÉ SAISI.
+   *
+   * Il n'a pas d'expéditeur — la boutique en tient lieu — et ses articles ne portent ni catégorie
+   * ni prix : le montant ne vient que du poids, par paliers. Cet écran lui présentait pourtant le
+   * formulaire général : une étape « Expéditeur » sans objet, des articles réclamant « Nom de
+   * l'article », « Catégorie » ou « Prix personnalisé », et un poids total à ressaisir à la main
+   * sous les lignes déjà pesées. L'enregistrement était même refusé tant qu'une catégorie n'était
+   * pas choisie sur chaque article — et cette catégorie prenait ensuite la main sur le palier :
+   * ouvrir la fiche pour corriger un numéro de téléphone changeait le prix du colis.
+   */
+  const enLigne = !!colis.achatEnLigne || colis.expediteur === "Commande en ligne";
+  /*
+   * LE POIDS D'UNE LIGNE EST CELUI DE LA LIGNE, PAS CELUI D'UNE UNITÉ — comme au comptoir. Sur un
+   * colis en ligne, le poids total n'est donc pas un champ à part : c'est la somme des lignes
+   * pesées. Deux champs pour une même grandeur, c'est un jour où ils se contredisent, et le prix
+   * qui suit celui que le client ne voit pas.
+   */
+  const poidsEnLigne = +produits.reduce((somme, p) => somme + (Number(p.poids) || 0), 0).toFixed(2);
+  const poidsRetenu = enLigne ? poidsEnLigne : (montantSaisi(poids) ?? 0);
+  const baremeEnLigne = enLigne ? tarifAchatEnLigne(poidsRetenu, tarifsReception) : null;
+  /* La boutique commune, quand toutes les lignes viennent du même site — comme au comptoir. */
+  const boutiqueCommune = produits.length > 0 && produits.every((p) => p.commande && p.commande === produits[0].commande)
+    ? produits[0].commande
+    : "";
+  function poserBoutiquePartout(valeur) {
+    setProduits((liste) => liste.map((p) => ({ ...p, commande: valeur })));
+  }
 
   /*
    * LES MÊMES ÉTAPES QU'À LA CRÉATION, ET LES MÊMES ICÔNES.
@@ -18012,12 +18053,18 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
    */
   const etapesEdition = useMemo(() => {
     const parCle = Object.fromEntries(WIZARD_STEPS.map((e) => [e.key, e]));
-    const liste = [parCle.expediteur, parCle.destinataire];
-    if (modifiableComplet) liste.push(parCle.produits);
+    /*
+     * Un colis commandé en ligne n'a pas d'expéditeur à corriger : on ouvre directement sur le
+     * client, et ses lignes s'appellent des articles de commande, pas des produits tarifés.
+     */
+    const liste = enLigne
+      ? [{ ...parCle.destinataire, label: "Client" }]
+      : [parCle.expediteur, parCle.destinataire];
+    if (modifiableComplet) liste.push(enLigne ? { ...parCle.produits, label: "Articles" } : parCle.produits);
     if (modifiableComplet && !estPartenaire) liste.push(parCle.frais);
     liste.push(parCle.resume);
     return liste;
-  }, [modifiableComplet, estPartenaire]);
+  }, [modifiableComplet, estPartenaire, enLigne]);
 
   const [step, setStep] = useState(0);
   /*
@@ -18045,7 +18092,12 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
     if (etapeCourante === "expediteur" && !expediteur) { setErr("Renseignez le prénom et le nom de l’expéditeur."); return; }
     if (etapeCourante === "destinataire" && !destinataire) { setErr("Renseignez le prénom et le nom du destinataire."); return; }
     if (etapeCourante === "destinataire" && !String(telephone || "").trim()) { setErr("Renseignez le téléphone du destinataire."); return; }
-    if (etapeCourante === "produits" && !((montantSaisi(poids) ?? 0) > 0)) { setErr("Le poids doit être supérieur à 0 kg — écrivez par exemple 12,5."); return; }
+    if (etapeCourante === "produits" && !(poidsRetenu > 0)) {
+      setErr(enLigne
+        ? "Chaque article doit porter son poids : c’est lui qui fait le prix."
+        : "Le poids doit être supérieur à 0 kg — écrivez par exemple 12,5.");
+      return;
+    }
     setStep((s) => Math.min(s + 1, etapesEdition.length - 1));
   }
   // La valeur des produits suit désormais l'état local `produits` (modifiable ci-dessous), et
@@ -18053,12 +18105,17 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   // total, exactement comme à la création.
   const valeurProduits = produits.reduce((somme, prod) => somme + produitValeurGNF(prod, categories || []), 0);
   const prixBrut = auxPaliers
-    ? +(calcReceptionFee(montantSaisi(poids) ?? 0, tarifsReception).total / (LIVE_RATES.GNF || CURRENCIES.GNF)).toFixed(2)
+    ? +(calcReceptionFee(poidsRetenu, tarifsReception).total / (LIVE_RATES.GNF || CURRENCIES.GNF)).toFixed(2)
     : valeurProduits > 0
       ? +(valeurProduits / (LIVE_RATES.GNF || CURRENCIES.GNF)).toFixed(2)
       : calcPrice(pays, poids, volume, mode);
   const discountLoyalty = colis.discountLoyalty || 0;
-  const discountVolume = remiseVolumePourcent(poids, remiseVolumeConfig);
+  /*
+   * Pas de remise au volume sur un achat en ligne : le palier EST déjà la remise au volume, et
+   * l'appliquer une seconde fois ferait dire à la correction un autre prix que la facture remise
+   * au client le jour de l'enregistrement.
+   */
+  const discountVolume = enLigne ? 0 : remiseVolumePourcent(poids, remiseVolumeConfig);
   const prixApresFidelite = +(prixBrut * (1 - discountLoyalty / 100) * (1 - discountVolume / 100)).toFixed(2);
   const rabaisEUR = +((Number(rabaisMontant) || 0) / (LIVE_RATES[rabaisDevise] || CURRENCIES[rabaisDevise] || 1)).toFixed(2);
   const prix = Math.max(+(prixApresFidelite - rabaisEUR).toFixed(2), 0);
@@ -18147,28 +18204,64 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
       const rang = etapesEdition.findIndex((et) => et.key === cle);
       if (rang >= 0) setStep(rang);
     };
-    if (!expediteur.trim()) { refus("Indiquez l’expéditeur.", "expediteur"); return; }
+    if (!enLigne && !expediteur.trim()) { refus("Indiquez l’expéditeur.", "expediteur"); return; }
     if (!destinataire.trim()) { refus("Indiquez le destinataire — la personne qui réceptionne le colis.", "destinataire"); return; }
     if (!telephone.trim() && !estPartenaire) { refus("Indiquez le téléphone du destinataire.", "destinataire"); return; }
-    if (produits.some((p) => !p.nom || !(Number(p.poids) > 0) || !(Number(p.quantite) >= 1))) {
-      refus("Chaque article doit avoir un nom, une quantité et un poids supérieur à 0.", "produits"); return;
-    }
-    // Un article de colis partenaire relève des catégories du contrat, pas du catalogue : sans
-    // catégorie choisie il retombe sur le tarif général, ce qui est un cas normal.
-    if (!estPartenaire && produits.some((p) => !p.personnalise && !p.categorie)) {
-      refus("Choisissez une catégorie pour chaque article (ou cochez « Prix personnalisé »).", "produits"); return;
+    /*
+     * Sur un achat en ligne, l'article se reconnaît à sa référence de commande — c'est ce que le
+     * client retrouve chez la boutique, et ce que porte sa facture. Il n'a pas de « nom » à
+     * remplir, et surtout pas de catégorie : son prix ne vient que du poids.
+     */
+    if (enLigne) {
+      if (produits.length === 0) { refus("Un colis d’achat en ligne porte au moins un article.", "produits"); return; }
+      if (produits.some((p) => !String(p.reference || "").trim() && !String(p.commande || "").trim())) {
+        refus("Chaque article doit porter sa référence de commande, ou au moins la boutique.", "produits"); return;
+      }
+      if (produits.some((p) => !(Number(p.poids) > 0))) {
+        refus("Chaque article doit porter son poids : c’est lui qui fait le prix.", "produits"); return;
+      }
+    } else {
+      if (produits.some((p) => !p.nom || !(Number(p.poids) > 0) || !(Number(p.quantite) >= 1))) {
+        refus("Chaque article doit avoir un nom, une quantité et un poids supérieur à 0.", "produits"); return;
+      }
+      // Un article de colis partenaire relève des catégories du contrat, pas du catalogue : sans
+      // catégorie choisie il retombe sur le tarif général, ce qui est un cas normal.
+      if (!estPartenaire && produits.some((p) => !p.personnalise && !p.categorie)) {
+        refus("Choisissez une catégorie pour chaque article (ou cochez « Prix personnalisé »).", "produits"); return;
+      }
     }
     // Un colis de 0 kg n'existe pas : on refuse l'enregistrement plutôt que de créer une
     // ligne qui faussera ensuite les totaux de poids, le chiffre d'affaires et les commissions.
     // « 12,5 » est la façon normale d'écrire douze kilos et demi : Number() y voit NaN, et le
     // colis se refusait avec un message parlant d'un poids nul que l'agent venait pourtant de saisir.
-    if (!((montantSaisi(poids) ?? 0) > 0)) { refus("Le poids doit être supérieur à 0 kg — écrivez par exemple 12,5.", "produits"); return; }
+    if (!(poidsRetenu > 0)) { refus("Le poids doit être supérieur à 0 kg — écrivez par exemple 12,5.", "produits"); return; }
     // Mêmes règles que sur l'encaissement d'un colis : on n'enregistre jamais plus que ce qui est
     // dû (le surplus est de la monnaie à rendre, pas une recette), et une somme retirée de la
     // caisse d'un agent doit être justifiée.
     if (ecartPaye > 0 && payeNum > prix + 0.005) { refus("Le montant encaissé ne peut pas dépasser le total à payer.", "frais"); return; }
     if (ecartPaye < 0 && !correctionMotif.trim()) { refus("Indiquez le motif de la correction du montant encaissé.", "frais"); return; }
     const ajustement = ligneAjustement();
+    /*
+     * Les lignes d'un achat en ligne se rangent comme au comptoir : le nom repris ailleurs dans
+     * l'application suit la boutique ou la référence, et la fiche garde la provenance et la
+     * première référence — ce sont elles qui figurent sur la facture et dans le comptage par
+     * boutique. Sans cela, corriger « Shein » en « Temu » laissait le colis compté chez Shein.
+     */
+    const produitsRetenus = enLigne
+      ? produits.map((p) => ({
+          ...p,
+          nom: String(p.commande || "").trim() || String(p.reference || "").trim() || "Article commandé",
+          reference: String(p.reference || "").trim(),
+          quantite: String(Math.max(Number(p.quantite) || 1, 1)),
+          poids: String(Number(p.poids) || 0),
+          categorie: "", personnalise: false, montant: "", devise: "GNF",
+        }))
+      : produits;
+    const referencesEnLigne = produitsRetenus.map((p) => String(p.reference || "").trim()).filter(Boolean);
+    const boutiqueRetenue = produitsRetenus.length
+      && produitsRetenus.every((p) => p.commande && p.commande === produitsRetenus[0].commande)
+      ? produitsRetenus[0].commande
+      : (produitsRetenus.map((p) => p.commande).find(Boolean) || null);
     onSave({
       expediteur, expediteurTelephone, expediteurEmail, expediteurAdresse,
       destinataire, telephone,
@@ -18178,8 +18271,15 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
       destinataireAdresse, destinataireVille, destinataireCodePostal,
       pays, direction,
       destinatairePays: direction === "import" ? "GN" : pays, mode,
-      poids: montantSaisi(poids) ?? 0, volume: montantSaisi(volume) ?? 0,
-      produits, valeurDeclaree: produits.length ? valeurProduits : (colis.valeurDeclaree || 0),
+      poids: poidsRetenu, volume: montantSaisi(volume) ?? 0,
+      produits: produitsRetenus, valeurDeclaree: produitsRetenus.length ? valeurProduits : (colis.valeurDeclaree || 0),
+      ...(enLigne ? {
+        referenceCommande: referencesEnLigne[0] || null,
+        provenance: boutiqueRetenue,
+        notesInternes: `Achat en ligne · ${produitsRetenus.length} article(s)`
+          + `${referencesEnLigne.length ? ` · réf. ${referencesEnLigne.join(", ")}` : ""}`
+          + ` · ${poidsRetenu.toFixed(2)} kg à ${fmtGNF(tarifAchatEnLigne(poidsRetenu, tarifsReception).tauxParKg)}/kg`,
+      } : {}),
       /*
        * Sur un colis partenaire, les montants de l'entreprise restent tels quels — à zéro — et
        * c'est `prixPartenaire` qu'on recalcule, au tarif du contrat pour cette route. Laisser
@@ -18200,7 +18300,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
       }),
       ...(estPartenaire
         ? {
-            prixPartenaire: detailPrixPartenaire({ produits, poids: montantSaisi(poids) ?? 0, pays }, partenaire).total,
+            prixPartenaire: detailPrixPartenaire({ produits, poids: poidsRetenu, pays }, partenaire).total,
             devisePartenaire: contratPartenaire.devise,
             /*
              * Un repère saisi rend le colis « sous repère », et le vide : un colis dont on vient
@@ -18291,7 +18391,13 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
         </>)}
 
         {etapeCourante === "destinataire" && (<>
-        <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Destinataire</div>
+        <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{enLigne ? "Client" : "Destinataire"}</div>
+        {enLigne && (
+          <div style={{ gridColumn: "1 / -1", fontSize: 11.5, color: "var(--muted)", lineHeight: 1.55, marginTop: -6 }}>
+            Colis commandé en ligne : il n’a pas d’expéditeur, et son prix ne vient que du poids —
+            corriger ces coordonnées ne le change pas.
+          </div>
+        )}
         <Field label="Prénom"><input value={destPrenom} onChange={(e) => setDestPrenom(e.target.value)} style={inputStyle} /></Field>
         <Field label="Nom"><input value={destNom} onChange={(e) => setDestNom(e.target.value)} style={inputStyle} /></Field>
         <Field label="Téléphone (WhatsApp)"><PhoneInput value={telephone} onChange={setTelephone} /></Field>
@@ -18335,10 +18441,82 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
               * valeur déjà enregistrée sur un colis reste prise en compte telle quelle, pour ne
               * pas changer le prix d'un envoi en cours.
               */}
-            <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Poids &amp; contenu</div>
-            <Field label="Poids (kg)"><input value={poids} onChange={(e) => setPoids(e.target.value)} style={inputStyle} inputMode="decimal" /></Field>
+            <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>
+              {enLigne ? "Articles de la commande" : "Poids & contenu"}
+            </div>
+            {!enLigne && <Field label="Poids (kg)"><input value={poids} onChange={(e) => setPoids(e.target.value)} style={inputStyle} inputMode="decimal" /></Field>}
             <div style={{ gridColumn: "1 / -1" }} />
-            {produits.length > 0 && (
+            {/*
+              * LE COMPTOIR, TEL QU'IL A SERVI À SAISIR LE COLIS.
+              *
+              * Référence, boutique, quantité, poids : rien d'autre. Pas de catégorie — le prix ne
+              * vient que du poids — et pas de champ « poids total » : c'est la somme des lignes,
+              * affichée sous elles avec le palier qu'elle atteint, pour que l'agent voie le
+              * montant bouger pendant qu'il corrige.
+              */}
+            {enLigne && (
+              <div style={{ gridColumn: "1 / -1" }}>
+                <div style={{ display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
+                  <span style={{ fontSize: 11.5, color: "var(--muted)" }}>Commande passée sur :</span>
+                  {["Shein", "Temu", "Amazon", "AliExpress"].map((v) => (
+                    <button key={v} type="button" onClick={() => poserBoutiquePartout(v)} style={{
+                      background: boutiqueCommune === v ? "var(--info-fg)" : "var(--surface)",
+                      color: boutiqueCommune === v ? "#fff" : "var(--text)",
+                      border: `1px solid ${boutiqueCommune === v ? "var(--info-fg)" : "var(--border)"}`,
+                      borderRadius: 999, padding: "5px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer",
+                    }}>{v}</button>
+                  ))}
+                </div>
+                {produits.map((p, idx) => (
+                  <div key={p.id} style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 12 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>{idx + 1}. Article</div>
+                      <button type="button" onClick={() => removeProduit(p.id)} disabled={produits.length === 1}
+                        title={`Retirer l’article ${idx + 1}`} aria-label={`Retirer l’article ${idx + 1}`}
+                        style={{ background: "none", border: "none", color: produits.length === 1 ? "var(--border)" : "var(--danger-fg)", cursor: produits.length === 1 ? "not-allowed" : "pointer" }}>
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+                      <Field label="Référence">
+                        <input value={p.reference || ""} onChange={(e) => updateProduit(p.id, { reference: e.target.value })} style={inputStyle} placeholder="SHEIN-XYZ" />
+                      </Field>
+                      <Field label="Commande">
+                        <select value={p.commande || ""} onChange={(e) => updateProduit(p.id, { commande: e.target.value })} style={inputStyle}>
+                          <option value="">Boutique…</option>
+                          {VENDEURS_EN_LIGNE.map((v) => <option key={v} value={v}>{v}</option>)}
+                        </select>
+                      </Field>
+                      <Field label="Quantité">
+                        <input type="number" min="1" step="1" inputMode="numeric" value={p.quantite} onChange={(e) => updateProduit(p.id, { quantite: e.target.value })} style={inputStyle} />
+                      </Field>
+                      <Field label="Poids (kg)">
+                        <input type="number" min="0" step="0.1" inputMode="decimal" value={p.poids} onChange={(e) => updateProduit(p.id, { poids: e.target.value })} style={inputStyle} placeholder="3.5" />
+                      </Field>
+                    </div>
+                  </div>
+                ))}
+                <button type="button" onClick={() => setProduits((liste) => [...liste, { ...emptyProduit(), reference: "", commande: boutiqueCommune }])}
+                  style={{ width: "100%", border: "1.5px dashed var(--border)", borderRadius: 12, padding: "12px 0", background: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>
+                  + Ajouter un article
+                </button>
+                <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: "12px 14px", marginTop: 14 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", fontSize: 12.5, color: "var(--text)" }}>
+                    <span>Poids constaté — somme des lignes pesées</span>
+                    <strong>{poidsRetenu.toFixed(2)} kg</strong>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", fontSize: 12, color: "var(--muted)", marginTop: 6 }}>
+                    <span>Palier appliqué{baremeEnLigne?.degressif ? " — tarif dégressif" : ""}</span>
+                    <span>{fmtGNF(baremeEnLigne?.tauxParKg || 0)}/kg</span>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", fontSize: 14, fontWeight: 800, color: "var(--text)", marginTop: 8 }}>
+                    <span>Total</span>
+                    <span>{fmtGNF(baremeEnLigne?.totalGNF || 0)}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+            {!enLigne && produits.length > 0 && (
             <div style={{ gridColumn: "1 / -1" }}>
               {produits.map((p, idx) => (
                 <div key={p.id} style={{ border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 12 }}>
@@ -18532,7 +18710,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
               <div style={{ display: "flex", borderBottom: "1px solid var(--border)" }}>
                 <div style={{ flex: 1, padding: "14px 18px", textAlign: "center" }}>
                   <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.6 }}>POIDS</div>
-                  <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 20, fontWeight: 700, color: "var(--text)", marginTop: 3 }}>{montantSaisi(poids) ?? 0} kg</div>
+                  <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 20, fontWeight: 700, color: "var(--text)", marginTop: 3 }}>{poidsRetenu} kg</div>
                 </div>
                 {produits.length > 0 && (
                   <div style={{ flex: 1, padding: "14px 18px", textAlign: "center", borderInlineStart: "1px solid var(--border)" }}>
@@ -18544,6 +18722,12 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
                   <div style={{ flex: 1.4, padding: "14px 18px", textAlign: "center", borderInlineStart: "1px solid var(--border)" }}>
                     <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.6 }}>TOTAL</div>
                     <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 20, fontWeight: 700, color: "var(--text)", marginTop: 3 }}>{fmt(prix, "EUR")}</div>
+                    {/* La comptabilité de ces colis se tient en francs : le palier y est libellé. */}
+                    {enLigne && (
+                      <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3 }}>
+                        {fmtGNF(Math.round(prix * (LIVE_RATES.GNF || CURRENCIES.GNF)))} · {fmtGNF(baremeEnLigne?.tauxParKg || 0)}/kg
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -18553,16 +18737,24 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
                 <div style={{ padding: "16px 18px" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 8 }}>
                     <User size={13} color="var(--muted)" />
-                    <span style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.6 }}>EXPÉDITEUR</span>
+                    {/* Sur un achat en ligne, il n'y a pas d'expéditeur : c'est la boutique qui expédie. */}
+                    <span style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.6 }}>{enLigne ? "COMMANDE" : "EXPÉDITEUR"}</span>
                   </div>
+                  {enLigne ? (
+                    <>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>Achat en ligne</div>
+                      {boutiqueCommune && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>{boutiqueCommune}</div>}
+                    </>
+                  ) : (<>
                   <div style={{ fontSize: 14, fontWeight: 700, color: expediteur ? "var(--text)" : "var(--danger-fg)" }}>{expediteur || "à renseigner"}</div>
                   {expediteurTelephone && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>{expediteurTelephone}</div>}
                   {expediteurAdresse && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>{expediteurAdresse}</div>}
+                  </>)}
                 </div>
                 <div style={{ padding: "16px 18px", borderInlineStart: "1px solid var(--border)" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 7, marginBottom: 8 }}>
                     <MapPin size={13} color="var(--muted)" />
-                    <span style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.6 }}>DESTINATAIRE</span>
+                    <span style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.6 }}>{enLigne ? "CLIENT" : "DESTINATAIRE"}</span>
                   </div>
                   <div style={{ fontSize: 14, fontWeight: 700, color: destinataire ? "var(--text)" : "var(--danger-fg)" }}>{destinataire || "à renseigner"}</div>
                   {telephone && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3 }}>{telephone}</div>}

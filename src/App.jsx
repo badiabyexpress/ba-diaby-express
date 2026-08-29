@@ -4838,6 +4838,10 @@ function Shell({ children, rtl, theme }) {
         div:has(> table) { overflow-x: auto; -webkit-overflow-scrolling: touch; }
         table { min-width: 560px; }
         @media (max-width: 768px) {
+          .bde-public-header { padding: 14px 16px !important; align-items: flex-start !important; }
+          .bde-public-nav { gap: 2px !important; }
+          .bde-public-nav a, .bde-public-nav button { font-size: 12px !important; padding: 8px 6px !important; }
+          .bde-public-nav a[href="#services"], .bde-public-nav a[href="#destinations"] { display: none; }
           /* Empêche le zoom automatique sur iOS quand on touche un champ (nécessite 16px minimum) */
           input, select, textarea { font-size: 16px !important; }
           /* Les grilles à 2 colonnes fixes passent à 1 colonne sur petit écran */
@@ -7362,20 +7366,22 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
 
   return (
     <div dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "var(--bg)" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "20px 24px", maxWidth: 1100, margin: "0 auto" }}>
+      <header className="bde-public-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 20, padding: "18px 24px", maxWidth: 1100, margin: "0 auto", position: "sticky", top: 0, zIndex: 10, background: "color-mix(in srgb, var(--bg) 92%, transparent)", backdropFilter: "blur(14px)", borderBottom: "1px solid color-mix(in srgb, var(--border) 55%, transparent)" }}>
         <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 19, color: "var(--text)" }}>
           <img src={data.branding?.logo || DEFAULT_LOGO} alt="logo" style={{ width: 26, height: 26, borderRadius: 6, objectFit: "cover", verticalAlign: "middle", marginInlineEnd: 8 }} />
           {nomPublic.split(" ")[0]} <span style={{ color: "var(--danger-fg)" }}>{nomPublic.split(" ").slice(1).join(" ")}</span>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <nav className="bde-public-nav" aria-label="Navigation principale" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <a href="#services" style={{ color: "var(--muted)", textDecoration: "none", fontSize: 13, fontWeight: 600, padding: "8px 10px" }}>Nos services</a>
+          <a href="#destinations" style={{ color: "var(--muted)", textDecoration: "none", fontSize: 13, fontWeight: 600, padding: "8px 10px" }}>Destinations</a>
           <button onClick={() => {
             const url = new URL(window.location.href);
             url.search = ""; url.searchParams.set("client", "1");
             window.location.href = url.toString();
-          }} style={{ background: "none", border: "none", fontSize: 13, fontWeight: 600, color: "var(--text)", cursor: "pointer" }}>Espace Client</button>
-          <button onClick={onConnexionClick} style={{ background: "var(--surface)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Se connecter</button>
-        </div>
-      </div>
+          }} style={{ background: "none", border: "none", fontSize: 13, fontWeight: 600, color: "var(--text)", cursor: "pointer", padding: "8px 10px" }}>Espace Client</button>
+          <button onClick={onConnexionClick} style={{ background: "var(--brand-solid)", border: "1.5px solid var(--brand-solid)", color: "#fff", borderRadius: 9, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", boxShadow: "0 8px 20px rgba(200,16,46,0.18)" }}>Se connecter</button>
+        </nav>
+      </header>
 
       <div style={{ maxWidth: 720, margin: "40px auto 0", padding: "0 24px", textAlign: "center" }}>
         <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: "clamp(26px, 5vw, 40px)", color: "var(--text)", margin: "0 0 12px", lineHeight: 1.2 }}>{tagline}</h1>
@@ -7411,8 +7417,19 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
         )}
       </div>
 
-      <div style={{ maxWidth: 1000, margin: "0 auto", padding: "0 24px 60px" }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", letterSpacing: 0.5, textAlign: "center", marginBottom: 6 }}>NOS DESTINATIONS</div>
+      <main style={{ maxWidth: 1000, margin: "0 auto", padding: "0 24px 60px" }}>
+        <section id="services" aria-labelledby="services-title" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 14, margin: "12px 0 56px" }}>
+          {[{ icon: Truck, title: "Transport fiable", text: "Des départs organisés entre la Guinée et vos destinations." }, { icon: Search, title: "Suivi en ligne", text: "Consultez l’avancement de votre colis avec votre numéro." }, { icon: Receipt, title: "Tarifs transparents", text: "Une prise en charge claire, avec des informations utiles à chaque étape." }].map(({ icon: Icon, title, text }) => (
+            <article key={title} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16, padding: "20px 18px", textAlign: "start", boxShadow: "0 10px 30px rgba(10,38,71,0.06)" }}>
+              <div style={{ width: 40, height: 40, display: "grid", placeItems: "center", borderRadius: 11, background: "var(--ok-bg-soft)", color: "var(--brand-solid)", marginBottom: 12 }}><Icon size={20} /></div>
+              <h2 id={title === "Transport fiable" ? "services-title" : undefined} style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 16, margin: "0 0 7px", color: "var(--text)" }}>{title}</h2>
+              <p style={{ fontSize: 13, lineHeight: 1.55, color: "var(--muted)", margin: 0 }}>{text}</p>
+            </article>
+          ))}
+        </section>
+
+        <section id="destinations" aria-labelledby="destinations-title">
+        <div id="destinations-title" style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", letterSpacing: 0.5, textAlign: "center", marginBottom: 6 }}>NOS DESTINATIONS</div>
         <div style={{ fontSize: 11.5, color: "var(--muted)", textAlign: "center", marginBottom: 24 }}>Cliquez sur un pays pour voir le prochain départ</div>
 
         {isMobile ? (
@@ -7448,7 +7465,8 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
             })}
           </div>
         )}
-      </div>
+        </section>
+      </main>
 
       {selectedCountry && (
         <Modal onClose={() => setSelectedPays(null)} title={`${FLAGS[selectedCountry.code]} ${selectedCountry.name}`}>

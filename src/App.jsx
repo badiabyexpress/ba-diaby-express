@@ -5373,9 +5373,10 @@ function PublicTrackingPage() {
       </div>
       <div style={{ fontSize: 13.5, color: "rgba(255,255,255,0.78)", marginBottom: 28 }}>{T("Suivi de colis")}</div>
 
-      <form onSubmit={rechercher} style={{ display: "flex", gap: 8, width: "100%", maxWidth: 420, marginBottom: 24 }}>
-        <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="Numéro de suivi (ex : BDE123456)" style={{ ...inputStyle, flex: 1, fontSize: 15, padding: "13px 16px", border: "none" }} />
-        <button type="submit" style={{ background: "#fff", color: "#0A2647", border: "none", borderRadius: 8, padding: "0 22px", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>{T("Suivre")}</button>
+      <form onSubmit={rechercher} aria-label="Suivi de colis" style={{ display: "flex", gap: 8, width: "100%", maxWidth: 420, marginBottom: 24 }}>
+        <label htmlFor="public-tracking-code" style={{ position: "absolute", width: 1, height: 1, padding: 0, margin: -1, overflow: "hidden", clip: "rect(0, 0, 0, 0)", whiteSpace: "nowrap", border: 0 }}>Numéro de suivi</label>
+        <input id="public-tracking-code" value={code} onChange={(e) => setCode(e.target.value)} placeholder="Numéro de suivi (ex : BDE123456)" autoComplete="off" style={{ ...inputStyle, flex: 1, fontSize: 15, padding: "13px 16px", border: "none" }} />
+        <button type="submit" disabled={!code.trim() || loading} style={{ background: "#fff", color: "#0A2647", border: "none", borderRadius: 8, padding: "0 22px", fontWeight: 700, fontSize: 14, cursor: code.trim() && !loading ? "pointer" : "not-allowed", opacity: code.trim() && !loading ? 1 : 0.65 }}>{T("Suivre")}</button>
       </form>
 
       {loading && searched && <div style={{ color: "rgba(255,255,255,0.8)", fontSize: 13 }}>{T("Recherche en cours…")}</div>}

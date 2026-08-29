@@ -7375,6 +7375,7 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
         <nav className="bde-public-nav" aria-label="Navigation principale" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
           <a href="#services" style={{ color: "var(--muted)", textDecoration: "none", fontSize: 13, fontWeight: 600, padding: "8px 10px" }}>Nos services</a>
           <a href="#destinations" style={{ color: "var(--muted)", textDecoration: "none", fontSize: 13, fontWeight: 600, padding: "8px 10px" }}>Destinations</a>
+          <a href="#contact" style={{ color: "var(--muted)", textDecoration: "none", fontSize: 13, fontWeight: 600, padding: "8px 10px" }}>Contact</a>
           <button onClick={() => {
             const url = new URL(window.location.href);
             url.search = ""; url.searchParams.set("client", "1");
@@ -7466,6 +7467,17 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
             })}
           </div>
         )}
+        </section>
+
+        <section id="contact" aria-labelledby="contact-title" style={{ marginTop: 12, background: "linear-gradient(135deg, var(--surface) 0%, var(--surface2) 100%)", border: "1px solid var(--border)", borderRadius: 18, padding: "26px 22px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 18, flexWrap: "wrap" }}>
+          <div>
+            <h2 id="contact-title" style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 19, color: "var(--text)", margin: "0 0 7px" }}>Besoin d’aide pour votre envoi ?</h2>
+            <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.55, color: "var(--muted)", maxWidth: 560 }}>Retrouvez vos colis dans l’espace client ou contactez l’agence avec votre numéro de suivi.</p>
+          </div>
+          <div style={{ display: "flex", gap: 9, flexWrap: "wrap" }}>
+            <button onClick={() => { const url = new URL(window.location.href); url.search = ""; url.searchParams.set("client", "1"); window.location.href = url.toString(); }} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Ouvrir mon espace</button>
+            {data.entreprise?.email && <a href={`mailto:${data.entreprise.email}`} style={{ display: "inline-flex", alignItems: "center", background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 15px", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>Écrire à l’agence</a>}
+          </div>
         </section>
       </main>
 

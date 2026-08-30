@@ -34,7 +34,7 @@ const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 if (!SUPABASE_URL || !SUPABASE_KEY) {
-  console.error("VITE_SUPABASE_URL et VITE_SUPABASE_ANON_KEY doivent être configurées (voir .env.example).");
+  console.warn("VITE_SUPABASE_URL et VITE_SUPABASE_ANON_KEY doivent être configurées (voir .env.example).");
 }
 
 /*
@@ -48,6 +48,10 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 let jetonAcces = null;
 
 function creerClient() {
+  // Le mode vitrine et les tests locaux doivent pouvoir démarrer sans Supabase configuré.
+  // Le client sera créé dès que les deux variables existent ; les appels métier retomberont
+  // alors sur leur gestion d’erreur/cache habituelle au lieu de faire planter le module au chargement.
+  if (!SUPABASE_URL || !SUPABASE_KEY) return null;
   return createClient(SUPABASE_URL, SUPABASE_KEY,
     jetonAcces ? { global: { headers: { Authorization: `Bearer ${jetonAcces}` } } } : undefined);
 }
@@ -66,7 +70,7 @@ export function clientSupabase() {
 export function definirJetonAcces(jeton) {
   if (jeton === jetonAcces) return;
   jetonAcces = jeton || null;
-  try { client.removeAllChannels?.(); } catch (e) { /* aucun canal ouvert */ }
+  try { client?.removeAllChannels?.(); } catch (e) { /* aucun canal ouvert */ }
   client = creerClient();
 }
 
@@ -363,6 +367,9 @@ function suivreParInterrogation(key, callback) {
 }
 
 export function subscribeToChanges(key, callback) {
+  // Aucun abonnement n’est possible en prévisualisation locale sans Supabase ; l’interface publique
+  // reste fonctionnelle et les appels de données afficheront leur état de configuration.
+  if (!client && !jetonSession) return () => {};
   /*
    * Le choix se fait à l'usage, pas sur une configuration : au premier appel on ne sait pas
    * encore si la voie serveur répond. On interroge, et on branche l'un ou l'autre selon la
@@ -382,6 +389,7 @@ export function subscribeToChanges(key, callback) {
 }
 
 function abonnementTempsReel(key, callback) {
+  if (!client) return () => {};
   const channel = client
     .channel(`bde_data_changes_${key}`)
     .on(
@@ -395,7 +403,7 @@ function abonnementTempsReel(key, callback) {
     )
     .subscribe();
 
-  return () => { client.removeChannel(channel); };
+  return () => { client?.removeChannel?.(channel); };
 }
 
 /*

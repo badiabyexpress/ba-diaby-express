@@ -3957,7 +3957,10 @@ function App() {
     if (baseDemandee) return;
     let vivant = true;
     fetch("/api/public?vitrine=1")
-      .then((r) => (r.ok ? r.json() : null))
+      .then(async (r) => {
+        const type = r.headers.get("content-type") || "";
+        return r.ok && type.includes("application/json") ? r.json() : null;
+      })
       .then((d) => { if (vivant && d) setDonneesPubliques(d); })
       // La vitrine reste affichable sans : elle montrera l'identité par défaut plutôt que rien.
       .catch(() => {});
@@ -4927,7 +4930,10 @@ function CguPage() {
   const [data, setData] = useState(null);
   useEffect(() => {
     fetch("/api/public?cgu=1")
-      .then((r) => (r.ok ? r.json() : null))
+      .then(async (r) => {
+        const type = r.headers.get("content-type") || "";
+        return r.ok && type.includes("application/json") ? r.json() : null;
+      })
       .then((d) => d && setData(d))
       // Les mentions restent lisibles avec les coordonnées par défaut : mieux vaut une page
       // complète avec un numéro générique qu'une page vide.
@@ -5309,10 +5315,13 @@ function PublicTrackingPage() {
     setLoading(true); setPanne(false);
     try {
       const reponse = await fetch(`/api/public?suivi=${encodeURIComponent(propre)}`);
-      if (!reponse.ok) throw new Error(`HTTP ${reponse.status}`);
+      const type = reponse.headers.get("content-type") || "";
+      if (!reponse.ok || !type.includes("application/json")) {
+        throw new Error(`Réponse de suivi indisponible (HTTP ${reponse.status})`);
+      }
       setData(await reponse.json());
     } catch (e) {
-      console.error("Suivi indisponible", e);
+      console.warn("Suivi indisponible", e);
       setData(null); setPanne(true);
     } finally {
       setLoading(false);
@@ -5403,6 +5412,13 @@ function PublicTrackingPage() {
         <div style={{ background: "var(--surface)", borderRadius: 14, padding: 20, width: "100%", maxWidth: 420, textAlign: "center", boxShadow: "0 24px 60px rgba(10,38,71,0.35)" }}>
           <div style={{ fontSize: 13.5, color: "var(--text)", fontWeight: 600 }}>{T("Aucun colis trouvé")}</div>
           <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>{T("Vérifiez le numéro de suivi et réessayez.")}</div>
+        </div>
+      )}
+
+      {panne && !loading && (
+        <div role="alert" style={{ background: "rgba(255,255,255,0.96)", border: "1px solid rgba(214,39,63,0.35)", borderRadius: 14, padding: 20, width: "100%", maxWidth: 420, textAlign: "center", boxShadow: "0 24px 60px rgba(10,38,71,0.35)" }}>
+          <div style={{ fontSize: 13.5, color: "#9F1D32", fontWeight: 700 }}>{T("Service de suivi temporairement indisponible")}</div>
+          <div style={{ fontSize: 12, color: "#5B6472", marginTop: 5 }}>{T("Réessayez dans un instant ou contactez l’agence.")}</div>
         </div>
       )}
 

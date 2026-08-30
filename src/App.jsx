@@ -6467,6 +6467,58 @@ function GuideCommandeModal({ compte, agence, onClose }) {
   );
 }
 
+function ReservationAerienneModal({ reservations, onSubmit, onClose }) {
+  const [destination, setDestination] = useState("");
+  const [poids, setPoids] = useState("");
+  const [dateSouhaitee, setDateSouhaitee] = useState("");
+  const [description, setDescription] = useState("");
+  const pays = COUNTRIES.filter((c) => c.code !== "GN");
+
+  function submit(e) {
+    e.preventDefault();
+    const poidsNombre = Number(poids);
+    if (!destination || !Number.isFinite(poidsNombre) || poidsNombre <= 0) return;
+    onSubmit({ destination, poids: poidsNombre, dateSouhaitee: dateSouhaitee || null, description: description.trim() });
+    setDestination(""); setPoids(""); setDateSouhaitee(""); setDescription("");
+  }
+
+  return (
+    <Modal onClose={onClose} title="Réserver un envoi aérien" wide saisieEnCours={!!destination || !!poids || !!description}>
+      <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 16, lineHeight: 1.55 }}>
+        Indiquez votre destination et le poids réel prévu. La réservation est traitée par l’agence, qui vous confirmera le tarif aérien correspondant au poids saisi.
+      </div>
+      <form onSubmit={submit}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 9, marginBottom: 9 }}>
+          <label style={{ fontSize: 12, color: "var(--muted)" }}>Destination
+            <select value={destination} onChange={(e) => setDestination(e.target.value)} required style={{ ...inputStyle, width: "100%", marginTop: 5 }}>
+              <option value="">Choisir un pays</option>
+              {pays.map((p) => <option key={p.code} value={p.code}>{p.name}{p.city ? ` — ${p.city}` : ""}</option>)}
+            </select>
+          </label>
+          <label style={{ fontSize: 12, color: "var(--muted)" }}>Poids réel (kg)
+            <input type="number" min="0.1" step="0.1" value={poids} onChange={(e) => setPoids(e.target.value)} required placeholder="Ex. 5" style={{ ...inputStyle, width: "100%", marginTop: 5 }} />
+          </label>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 9, marginBottom: 9 }}>
+          <label style={{ fontSize: 12, color: "var(--muted)" }}>Date souhaitée (facultatif)
+            <input type="date" value={dateSouhaitee} onChange={(e) => setDateSouhaitee(e.target.value)} style={{ ...inputStyle, width: "100%", marginTop: 5 }} />
+          </label>
+          <label style={{ fontSize: 12, color: "var(--muted)" }}>Description (facultatif)
+            <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Nature du colis" style={{ ...inputStyle, width: "100%", marginTop: 5 }} />
+          </label>
+        </div>
+        <button type="submit" disabled={!destination || !(Number(poids) > 0)} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 18px", fontSize: 13, fontWeight: 700, cursor: destination && Number(poids) > 0 ? "pointer" : "not-allowed", opacity: destination && Number(poids) > 0 ? 1 : 0.65 }}>Envoyer la demande</button>
+      </form>
+      <div style={{ borderTop: "1px solid var(--border)", marginTop: 20, paddingTop: 15, fontSize: 12, fontWeight: 700, color: "var(--text)" }}>Mes demandes ({reservations.length})</div>
+      {reservations.length === 0 ? <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 8 }}>Aucune demande de réservation pour le moment.</div> : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 9 }}>
+          {reservations.map((r) => <div key={r.id} style={{ background: "var(--surface2)", borderRadius: 9, padding: "10px 12px", fontSize: 12.5, color: "var(--text)" }}><strong>{pays.find((p) => p.code === r.destination)?.name || r.destination}</strong> · {r.poids} kg · <span style={{ color: "var(--muted)" }}>{r.statut}</span><div style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>{new Date(r.dateCreation).toLocaleDateString("fr-FR")}{r.dateSouhaitee ? ` · départ souhaité le ${new Date(r.dateSouhaitee).toLocaleDateString("fr-FR")}` : ""}</div></div>)}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 function ClientPreAlerteModal({ preAlertes, onAdd, onRemove, onClose, onVoirGuide }) {
   const [trackingExterne, setTrackingExterne] = useState("");
   const [provenance, setProvenance] = useState("Shein");
@@ -6816,6 +6868,7 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
   const [filtreStatut, setFiltreStatut] = useState("tous");
   const [showProfil, setShowProfil] = useState(false);
   const [showPreAlerte, setShowPreAlerte] = useState(false);
+  const [showReservation, setShowReservation] = useState(false);
   const [showPaiements, setShowPaiements] = useState(false);
   const [notifications, setNotifications] = useState([]);
   const [declarantPour, setDeclarantPour] = useState(null);
@@ -6967,8 +7020,13 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
     const demande = { id: `regr${Date.now()}`, clientAccountId: compte.id, trackings, note, statut: "En attente", dateCreation: new Date().toISOString() };
     persist({ ...data, demandesRegroupement: [demande, ...(data.demandesRegroupement || [])] });
   }
+  function demanderReservationAerienne(champs) {
+    const demande = { id: `resa${Date.now()}`, clientAccountId: compte.id, mode: "aerien", ...champs, statut: "En attente", dateCreation: new Date().toISOString() };
+    persist({ ...data, demandesReservation: [demande, ...(data.demandesReservation || [])] });
+  }
 
   const mesPreAlertesEnAttenteCount = compte ? (data.preAlertes || []).filter((p) => p.clientAccountId === compte.id && p.statut === "En attente").length : 0;
+  const mesReservations = compte ? (data.demandesReservation || []).filter((r) => r.clientAccountId === compte.id) : [];
   const statsClient = {
     total: mesColis.length,
     enAttente: mesPreAlertesEnAttenteCount,
@@ -7041,6 +7099,7 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
           <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 22, color: "var(--text)" }}>{T("Espace Client")}</div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button onClick={() => setShowGuide(true)} style={{ background: "var(--brand-solid)", border: "none", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "#fff", fontWeight: 700, cursor: "pointer" }}>{T("Comment commander")}</button>
+            <button onClick={() => setShowReservation(true)} style={{ background: "var(--brand-solid)", border: "1px solid var(--brand-solid)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "#fff", fontWeight: 700, cursor: "pointer" }}>Réserver un envoi aérien</button>
             <button onClick={() => setShowPreAlerte(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Pré-alerte colis")}</button>
             <button onClick={() => setShowVerif(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Vérifier une référence")}</button>
             <button onClick={() => {
@@ -7101,6 +7160,7 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
         )}
 
         {showProfil && <ClientProfilModal compte={compte} onSave={majProfil} onClose={() => setShowProfil(false)} />}
+        {showReservation && <ReservationAerienneModal reservations={mesReservations} onSubmit={(champs) => { demanderReservationAerienne(champs); setShowReservation(false); }} onClose={() => setShowReservation(false)} />}
         {showPreAlerte && <ClientPreAlerteModal preAlertes={mesPreAlertes} onAdd={ajouterPreAlerte} onRemove={retirerPreAlerte} onClose={() => setShowPreAlerte(false)} onVoirGuide={() => { setShowPreAlerte(false); setShowGuide(true); }} />}
         {showPaiements && <ClientPaiementsModal colisListe={mesColis} onClose={() => setShowPaiements(false)} devise={deviseClient} onDeclarer={(c) => { setShowPaiements(false); setDeclarantPour(c); }} />}
         {declarantPour && <DeclarationPaiementModal colis={declarantPour} onDeclarer={(m, d, mo, r) => { declarerPaiement(declarantPour, m, d, mo, r); setDeclarantPour(null); }} onClose={() => setDeclarantPour(null)} />}

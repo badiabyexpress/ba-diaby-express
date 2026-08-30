@@ -12550,6 +12550,7 @@ function CentreClientsPage({ data, persist, notify, session }) {
     return new Date(derB) - new Date(derA);
   });
   const demandes = (data.demandesRegroupement || []).sort((a, b) => new Date(b.dateCreation) - new Date(a.dateCreation));
+  const reservations = (data.demandesReservation || []).slice().sort((a, b) => new Date(b.dateCreation) - new Date(a.dateCreation));
   const clientsById = Object.fromEntries(clients.map((c) => [c.id, c]));
   const preAlertes = data.preAlertes || [];
   const signalementsOuverts = data.colis.flatMap((c) => (c.signalements || []).filter((s) => s.statut === "Ouvert").map((s) => ({ ...s, colis: c })))
@@ -12604,6 +12605,7 @@ function CentreClientsPage({ data, persist, notify, session }) {
 
   const messagesNonLus = clients.filter((c) => (c.messages || []).some((m) => m.expediteur === "client" && !m.lu)).length;
   const regroupementsEnAttente = demandes.filter((d) => d.statut === "En attente").length;
+  const reservationsEnAttente = reservations.filter((r) => r.statut === "En attente").length;
   const preAlertesEnAttente = preAlertes.filter((p) => p.statut === "En attente").length;
   const expressEnAttente = demandesExpress.length;
 
@@ -12622,6 +12624,11 @@ function CentreClientsPage({ data, persist, notify, session }) {
       persist({ ...data, clientAccounts: clients.map((c) => (c.id === client.id ? updated : c)) });
     }
   }
+  function majReservation(id, statut) {
+    persist({ ...data, demandesReservation: reservations.map((r) => (r.id === id ? { ...r, statut, dateMaj: new Date().toISOString(), traitePar: `${session.prenom} ${session.nom}`.trim() || session.identifiant } : r)), activityLog: pushActivity(data, session, `Réservation aérienne ${statut.toLowerCase()}`, id) });
+    notify?.(statut === "Acceptée" ? "Réservation aérienne acceptée" : "Réservation aérienne refusée");
+  }
+
   function majDemande(id, statut) {
     const demande = demandes.find((d) => d.id === id);
     if (statut === "Acceptée" && demande) {
@@ -12723,6 +12730,7 @@ function CentreClientsPage({ data, persist, notify, session }) {
     ["messages", "Messages", messagesNonLus],
     ["prealertes", "Pré-alertes", preAlertesEnAttente],
     ["regroupements", "Regroupements", regroupementsEnAttente],
+    ["reservations", "Réservations aériennes", reservationsEnAttente],
     ["signalements", "Signalements", signalementsOuverts.length],
     ["express", "Livraison express", expressEnAttente],
     ["comptes", "Comptes inscrits", (data.clientAccounts || []).length],
@@ -12756,6 +12764,19 @@ function CentreClientsPage({ data, persist, notify, session }) {
 
       {ongletActif === "campagnes" && effectivePermission(session, "clients.campagnes") && (
         <CampagnesPage data={data} persist={persist} session={session} notify={notify} />
+      )}
+
+      {ongletActif === "reservations" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {reservations.length === 0 ? <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>Aucune demande de réservation aérienne.</div> : reservations.map((r) => {
+            const client = clientsById[r.clientAccountId];
+            const destination = COUNTRIES.find((p) => p.code === r.destination);
+            return <div key={r.id} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+              <div style={{ minWidth: 220 }}><div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{destination?.name || r.destination} · {r.poids} kg · aérien</div><div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>{client ? `${client.prenom} ${client.nom}` : "Client supprimé"}{client?.telephone ? ` · ${client.telephone}` : ""}{r.dateSouhaitee ? ` · départ souhaité le ${new Date(r.dateSouhaitee).toLocaleDateString("fr-FR")}` : ""}</div><div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3 }}>{r.description || "Aucune description"} · reçue le {new Date(r.dateCreation).toLocaleDateString("fr-FR")}</div></div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>{r.statut !== "En attente" && <span style={{ color: r.statut === "Acceptée" ? "var(--ok-fg)" : "var(--danger-fg)", fontSize: 12.5, fontWeight: 700 }}>{r.statut}</span>}{r.statut === "En attente" && <><button onClick={() => majReservation(r.id, "Acceptée")} style={{ background: "var(--ok-fg)", color: "#fff", border: "none", borderRadius: 8, padding: "8px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Accepter</button><button onClick={() => majReservation(r.id, "Refusée")} style={{ background: "none", color: "var(--danger-fg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "8px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Refuser</button></>}</div>
+            </div>;
+          })}
+        </div>
       )}
 
       {ongletActif === "comptes" && (

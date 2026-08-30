@@ -4838,6 +4838,10 @@ function Shell({ children, rtl, theme }) {
         div:has(> table) { overflow-x: auto; -webkit-overflow-scrolling: touch; }
         table { min-width: 560px; }
         @media (max-width: 768px) {
+          .bde-public-header { padding: 14px 16px !important; align-items: flex-start !important; }
+          .bde-public-nav { gap: 2px !important; }
+          .bde-public-nav a, .bde-public-nav button { font-size: 12px !important; padding: 8px 6px !important; }
+          .bde-public-nav a[href="#services"], .bde-public-nav a[href="#destinations"] { display: none; }
           /* Empêche le zoom automatique sur iOS quand on touche un champ (nécessite 16px minimum) */
           input, select, textarea { font-size: 16px !important; }
           /* Les grilles à 2 colonnes fixes passent à 1 colonne sur petit écran */
@@ -5369,9 +5373,10 @@ function PublicTrackingPage() {
       </div>
       <div style={{ fontSize: 13.5, color: "rgba(255,255,255,0.78)", marginBottom: 28 }}>{T("Suivi de colis")}</div>
 
-      <form onSubmit={rechercher} style={{ display: "flex", gap: 8, width: "100%", maxWidth: 420, marginBottom: 24 }}>
-        <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="Numéro de suivi (ex : BDE123456)" style={{ ...inputStyle, flex: 1, fontSize: 15, padding: "13px 16px", border: "none" }} />
-        <button type="submit" style={{ background: "#fff", color: "#0A2647", border: "none", borderRadius: 8, padding: "0 22px", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>{T("Suivre")}</button>
+      <form onSubmit={rechercher} aria-label="Suivi de colis" style={{ display: "flex", gap: 8, width: "100%", maxWidth: 420, marginBottom: 24 }}>
+        <label htmlFor="public-tracking-code" style={{ position: "absolute", width: 1, height: 1, padding: 0, margin: -1, overflow: "hidden", clip: "rect(0, 0, 0, 0)", whiteSpace: "nowrap", border: 0 }}>Numéro de suivi</label>
+        <input id="public-tracking-code" value={code} onChange={(e) => setCode(e.target.value)} placeholder="Numéro de suivi (ex : BDE123456)" autoComplete="off" style={{ ...inputStyle, flex: 1, fontSize: 15, padding: "13px 16px", border: "none" }} />
+        <button type="submit" disabled={!code.trim() || loading} style={{ background: "#fff", color: "#0A2647", border: "none", borderRadius: 8, padding: "0 22px", fontWeight: 700, fontSize: 14, cursor: code.trim() && !loading ? "pointer" : "not-allowed", opacity: code.trim() && !loading ? 1 : 0.65 }}>{T("Suivre")}</button>
       </form>
 
       {loading && searched && <div style={{ color: "rgba(255,255,255,0.8)", fontSize: 13 }}>{T("Recherche en cours…")}</div>}
@@ -6462,6 +6467,58 @@ function GuideCommandeModal({ compte, agence, onClose }) {
   );
 }
 
+function ReservationAerienneModal({ reservations, onSubmit, onClose }) {
+  const [destination, setDestination] = useState("");
+  const [poids, setPoids] = useState("");
+  const [dateSouhaitee, setDateSouhaitee] = useState("");
+  const [description, setDescription] = useState("");
+  const pays = COUNTRIES.filter((c) => c.code !== "GN");
+
+  function submit(e) {
+    e.preventDefault();
+    const poidsNombre = Number(poids);
+    if (!destination || !Number.isFinite(poidsNombre) || poidsNombre <= 0) return;
+    onSubmit({ destination, poids: poidsNombre, dateSouhaitee: dateSouhaitee || null, description: description.trim() });
+    setDestination(""); setPoids(""); setDateSouhaitee(""); setDescription("");
+  }
+
+  return (
+    <Modal onClose={onClose} title="Réserver un envoi aérien" wide saisieEnCours={!!destination || !!poids || !!description}>
+      <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 16, lineHeight: 1.55 }}>
+        Indiquez votre destination et le poids réel prévu. La réservation est traitée par l’agence, qui vous confirmera le tarif aérien correspondant au poids saisi.
+      </div>
+      <form onSubmit={submit}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 9, marginBottom: 9 }}>
+          <label style={{ fontSize: 12, color: "var(--muted)" }}>Destination
+            <select value={destination} onChange={(e) => setDestination(e.target.value)} required style={{ ...inputStyle, width: "100%", marginTop: 5 }}>
+              <option value="">Choisir un pays</option>
+              {pays.map((p) => <option key={p.code} value={p.code}>{p.name}{p.city ? ` — ${p.city}` : ""}</option>)}
+            </select>
+          </label>
+          <label style={{ fontSize: 12, color: "var(--muted)" }}>Poids réel (kg)
+            <input type="number" min="0.1" step="0.1" value={poids} onChange={(e) => setPoids(e.target.value)} required placeholder="Ex. 5" style={{ ...inputStyle, width: "100%", marginTop: 5 }} />
+          </label>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 9, marginBottom: 9 }}>
+          <label style={{ fontSize: 12, color: "var(--muted)" }}>Date souhaitée (facultatif)
+            <input type="date" value={dateSouhaitee} onChange={(e) => setDateSouhaitee(e.target.value)} style={{ ...inputStyle, width: "100%", marginTop: 5 }} />
+          </label>
+          <label style={{ fontSize: 12, color: "var(--muted)" }}>Description (facultatif)
+            <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Nature du colis" style={{ ...inputStyle, width: "100%", marginTop: 5 }} />
+          </label>
+        </div>
+        <button type="submit" disabled={!destination || !(Number(poids) > 0)} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 18px", fontSize: 13, fontWeight: 700, cursor: destination && Number(poids) > 0 ? "pointer" : "not-allowed", opacity: destination && Number(poids) > 0 ? 1 : 0.65 }}>Envoyer la demande</button>
+      </form>
+      <div style={{ borderTop: "1px solid var(--border)", marginTop: 20, paddingTop: 15, fontSize: 12, fontWeight: 700, color: "var(--text)" }}>Mes demandes ({reservations.length})</div>
+      {reservations.length === 0 ? <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 8 }}>Aucune demande de réservation pour le moment.</div> : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 9 }}>
+          {reservations.map((r) => <div key={r.id} style={{ background: "var(--surface2)", borderRadius: 9, padding: "10px 12px", fontSize: 12.5, color: "var(--text)" }}><strong>{pays.find((p) => p.code === r.destination)?.name || r.destination}</strong> · {r.poids} kg · <span style={{ color: "var(--muted)" }}>{r.statut}</span><div style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>{new Date(r.dateCreation).toLocaleDateString("fr-FR")}{r.dateSouhaitee ? ` · départ souhaité le ${new Date(r.dateSouhaitee).toLocaleDateString("fr-FR")}` : ""}</div></div>)}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 function ClientPreAlerteModal({ preAlertes, onAdd, onRemove, onClose, onVoirGuide }) {
   const [trackingExterne, setTrackingExterne] = useState("");
   const [provenance, setProvenance] = useState("Shein");
@@ -6811,6 +6868,7 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
   const [filtreStatut, setFiltreStatut] = useState("tous");
   const [showProfil, setShowProfil] = useState(false);
   const [showPreAlerte, setShowPreAlerte] = useState(false);
+  const [showReservation, setShowReservation] = useState(false);
   const [showPaiements, setShowPaiements] = useState(false);
   const [notifications, setNotifications] = useState([]);
   const [declarantPour, setDeclarantPour] = useState(null);
@@ -6962,8 +7020,13 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
     const demande = { id: `regr${Date.now()}`, clientAccountId: compte.id, trackings, note, statut: "En attente", dateCreation: new Date().toISOString() };
     persist({ ...data, demandesRegroupement: [demande, ...(data.demandesRegroupement || [])] });
   }
+  function demanderReservationAerienne(champs) {
+    const demande = { id: `resa${Date.now()}`, clientAccountId: compte.id, mode: "aerien", ...champs, statut: "En attente", dateCreation: new Date().toISOString() };
+    persist({ ...data, demandesReservation: [demande, ...(data.demandesReservation || [])] });
+  }
 
   const mesPreAlertesEnAttenteCount = compte ? (data.preAlertes || []).filter((p) => p.clientAccountId === compte.id && p.statut === "En attente").length : 0;
+  const mesReservations = compte ? (data.demandesReservation || []).filter((r) => r.clientAccountId === compte.id) : [];
   const statsClient = {
     total: mesColis.length,
     enAttente: mesPreAlertesEnAttenteCount,
@@ -7036,6 +7099,7 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
           <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 22, color: "var(--text)" }}>{T("Espace Client")}</div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button onClick={() => setShowGuide(true)} style={{ background: "var(--brand-solid)", border: "none", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "#fff", fontWeight: 700, cursor: "pointer" }}>{T("Comment commander")}</button>
+            <button onClick={() => setShowReservation(true)} style={{ background: "var(--brand-solid)", border: "1px solid var(--brand-solid)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "#fff", fontWeight: 700, cursor: "pointer" }}>Réserver un envoi aérien</button>
             <button onClick={() => setShowPreAlerte(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Pré-alerte colis")}</button>
             <button onClick={() => setShowVerif(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Vérifier une référence")}</button>
             <button onClick={() => {
@@ -7096,6 +7160,7 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
         )}
 
         {showProfil && <ClientProfilModal compte={compte} onSave={majProfil} onClose={() => setShowProfil(false)} />}
+        {showReservation && <ReservationAerienneModal reservations={mesReservations} onSubmit={(champs) => { demanderReservationAerienne(champs); setShowReservation(false); }} onClose={() => setShowReservation(false)} />}
         {showPreAlerte && <ClientPreAlerteModal preAlertes={mesPreAlertes} onAdd={ajouterPreAlerte} onRemove={retirerPreAlerte} onClose={() => setShowPreAlerte(false)} onVoirGuide={() => { setShowPreAlerte(false); setShowGuide(true); }} />}
         {showPaiements && <ClientPaiementsModal colisListe={mesColis} onClose={() => setShowPaiements(false)} devise={deviseClient} onDeclarer={(c) => { setShowPaiements(false); setDeclarantPour(c); }} />}
         {declarantPour && <DeclarationPaiementModal colis={declarantPour} onDeclarer={(m, d, mo, r) => { declarerPaiement(declarantPour, m, d, mo, r); setDeclarantPour(null); }} onClose={() => setDeclarantPour(null)} />}
@@ -7362,20 +7427,23 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
 
   return (
     <div dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "var(--bg)" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "20px 24px", maxWidth: 1100, margin: "0 auto" }}>
+      <header className="bde-public-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 20, padding: "18px 24px", maxWidth: 1100, margin: "0 auto", position: "sticky", top: 0, zIndex: 10, background: "color-mix(in srgb, var(--bg) 92%, transparent)", backdropFilter: "blur(14px)", borderBottom: "1px solid color-mix(in srgb, var(--border) 55%, transparent)" }}>
         <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 19, color: "var(--text)" }}>
           <img src={data.branding?.logo || DEFAULT_LOGO} alt="logo" style={{ width: 26, height: 26, borderRadius: 6, objectFit: "cover", verticalAlign: "middle", marginInlineEnd: 8 }} />
           {nomPublic.split(" ")[0]} <span style={{ color: "var(--danger-fg)" }}>{nomPublic.split(" ").slice(1).join(" ")}</span>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <nav className="bde-public-nav" aria-label="Navigation principale" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <a href="#services" style={{ color: "var(--muted)", textDecoration: "none", fontSize: 13, fontWeight: 600, padding: "8px 10px" }}>Nos services</a>
+          <a href="#destinations" style={{ color: "var(--muted)", textDecoration: "none", fontSize: 13, fontWeight: 600, padding: "8px 10px" }}>Destinations</a>
+          <a href="#contact" style={{ color: "var(--muted)", textDecoration: "none", fontSize: 13, fontWeight: 600, padding: "8px 10px" }}>Contact</a>
           <button onClick={() => {
             const url = new URL(window.location.href);
             url.search = ""; url.searchParams.set("client", "1");
             window.location.href = url.toString();
-          }} style={{ background: "none", border: "none", fontSize: 13, fontWeight: 600, color: "var(--text)", cursor: "pointer" }}>Espace Client</button>
-          <button onClick={onConnexionClick} style={{ background: "var(--surface)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Se connecter</button>
-        </div>
-      </div>
+          }} style={{ background: "none", border: "none", fontSize: 13, fontWeight: 600, color: "var(--text)", cursor: "pointer", padding: "8px 10px" }}>Espace Client</button>
+          <button onClick={onConnexionClick} style={{ background: "var(--brand-solid)", border: "1.5px solid var(--brand-solid)", color: "#fff", borderRadius: 9, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", boxShadow: "0 8px 20px rgba(200,16,46,0.18)" }}>Se connecter</button>
+        </nav>
+      </header>
 
       <div style={{ maxWidth: 720, margin: "40px auto 0", padding: "0 24px", textAlign: "center" }}>
         <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: "clamp(26px, 5vw, 40px)", color: "var(--text)", margin: "0 0 12px", lineHeight: 1.2 }}>{tagline}</h1>
@@ -7411,8 +7479,19 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
         )}
       </div>
 
-      <div style={{ maxWidth: 1000, margin: "0 auto", padding: "0 24px 60px" }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", letterSpacing: 0.5, textAlign: "center", marginBottom: 6 }}>NOS DESTINATIONS</div>
+      <main style={{ maxWidth: 1000, margin: "0 auto", padding: "0 24px 60px" }}>
+        <section id="services" aria-labelledby="services-title" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 14, margin: "12px 0 56px" }}>
+          {[{ icon: Truck, title: "Transport fiable", text: "Des départs organisés entre la Guinée et vos destinations." }, { icon: Search, title: "Suivi en ligne", text: "Consultez l’avancement de votre colis avec votre numéro." }, { icon: Receipt, title: "Tarifs transparents", text: "Une prise en charge claire, avec des informations utiles à chaque étape." }].map(({ icon: Icon, title, text }) => (
+            <article key={title} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16, padding: "20px 18px", textAlign: "start", boxShadow: "0 10px 30px rgba(10,38,71,0.06)" }}>
+              <div style={{ width: 40, height: 40, display: "grid", placeItems: "center", borderRadius: 11, background: "var(--ok-bg-soft)", color: "var(--brand-solid)", marginBottom: 12 }}><Icon size={20} /></div>
+              <h2 id={title === "Transport fiable" ? "services-title" : undefined} style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 16, margin: "0 0 7px", color: "var(--text)" }}>{title}</h2>
+              <p style={{ fontSize: 13, lineHeight: 1.55, color: "var(--muted)", margin: 0 }}>{text}</p>
+            </article>
+          ))}
+        </section>
+
+        <section id="destinations" aria-labelledby="destinations-title">
+        <div id="destinations-title" style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", letterSpacing: 0.5, textAlign: "center", marginBottom: 6 }}>NOS DESTINATIONS</div>
         <div style={{ fontSize: 11.5, color: "var(--muted)", textAlign: "center", marginBottom: 24 }}>Cliquez sur un pays pour voir le prochain départ</div>
 
         {isMobile ? (
@@ -7448,7 +7527,19 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
             })}
           </div>
         )}
-      </div>
+        </section>
+
+        <section id="contact" aria-labelledby="contact-title" style={{ marginTop: 12, background: "linear-gradient(135deg, var(--surface) 0%, var(--surface2) 100%)", border: "1px solid var(--border)", borderRadius: 18, padding: "26px 22px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 18, flexWrap: "wrap" }}>
+          <div>
+            <h2 id="contact-title" style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 19, color: "var(--text)", margin: "0 0 7px" }}>Besoin d’aide pour votre envoi ?</h2>
+            <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.55, color: "var(--muted)", maxWidth: 560 }}>Retrouvez vos colis dans l’espace client ou contactez l’agence avec votre numéro de suivi.</p>
+          </div>
+          <div style={{ display: "flex", gap: 9, flexWrap: "wrap" }}>
+            <button onClick={() => { const url = new URL(window.location.href); url.search = ""; url.searchParams.set("client", "1"); window.location.href = url.toString(); }} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Ouvrir mon espace</button>
+            {data.entreprise?.email && <a href={`mailto:${data.entreprise.email}`} style={{ display: "inline-flex", alignItems: "center", background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 15px", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>Écrire à l’agence</a>}
+          </div>
+        </section>
+      </main>
 
       {selectedCountry && (
         <Modal onClose={() => setSelectedPays(null)} title={`${FLAGS[selectedCountry.code]} ${selectedCountry.name}`}>
@@ -12459,6 +12550,7 @@ function CentreClientsPage({ data, persist, notify, session }) {
     return new Date(derB) - new Date(derA);
   });
   const demandes = (data.demandesRegroupement || []).sort((a, b) => new Date(b.dateCreation) - new Date(a.dateCreation));
+  const reservations = (data.demandesReservation || []).slice().sort((a, b) => new Date(b.dateCreation) - new Date(a.dateCreation));
   const clientsById = Object.fromEntries(clients.map((c) => [c.id, c]));
   const preAlertes = data.preAlertes || [];
   const signalementsOuverts = data.colis.flatMap((c) => (c.signalements || []).filter((s) => s.statut === "Ouvert").map((s) => ({ ...s, colis: c })))
@@ -12513,6 +12605,7 @@ function CentreClientsPage({ data, persist, notify, session }) {
 
   const messagesNonLus = clients.filter((c) => (c.messages || []).some((m) => m.expediteur === "client" && !m.lu)).length;
   const regroupementsEnAttente = demandes.filter((d) => d.statut === "En attente").length;
+  const reservationsEnAttente = reservations.filter((r) => r.statut === "En attente").length;
   const preAlertesEnAttente = preAlertes.filter((p) => p.statut === "En attente").length;
   const expressEnAttente = demandesExpress.length;
 
@@ -12531,6 +12624,11 @@ function CentreClientsPage({ data, persist, notify, session }) {
       persist({ ...data, clientAccounts: clients.map((c) => (c.id === client.id ? updated : c)) });
     }
   }
+  function majReservation(id, statut) {
+    persist({ ...data, demandesReservation: reservations.map((r) => (r.id === id ? { ...r, statut, dateMaj: new Date().toISOString(), traitePar: `${session.prenom} ${session.nom}`.trim() || session.identifiant } : r)), activityLog: pushActivity(data, session, `Réservation aérienne ${statut.toLowerCase()}`, id) });
+    notify?.(statut === "Acceptée" ? "Réservation aérienne acceptée" : "Réservation aérienne refusée");
+  }
+
   function majDemande(id, statut) {
     const demande = demandes.find((d) => d.id === id);
     if (statut === "Acceptée" && demande) {
@@ -12632,6 +12730,7 @@ function CentreClientsPage({ data, persist, notify, session }) {
     ["messages", "Messages", messagesNonLus],
     ["prealertes", "Pré-alertes", preAlertesEnAttente],
     ["regroupements", "Regroupements", regroupementsEnAttente],
+    ["reservations", "Réservations aériennes", reservationsEnAttente],
     ["signalements", "Signalements", signalementsOuverts.length],
     ["express", "Livraison express", expressEnAttente],
     ["comptes", "Comptes inscrits", (data.clientAccounts || []).length],
@@ -12665,6 +12764,19 @@ function CentreClientsPage({ data, persist, notify, session }) {
 
       {ongletActif === "campagnes" && effectivePermission(session, "clients.campagnes") && (
         <CampagnesPage data={data} persist={persist} session={session} notify={notify} />
+      )}
+
+      {ongletActif === "reservations" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {reservations.length === 0 ? <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>Aucune demande de réservation aérienne.</div> : reservations.map((r) => {
+            const client = clientsById[r.clientAccountId];
+            const destination = COUNTRIES.find((p) => p.code === r.destination);
+            return <div key={r.id} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+              <div style={{ minWidth: 220 }}><div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{destination?.name || r.destination} · {r.poids} kg · aérien</div><div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>{client ? `${client.prenom} ${client.nom}` : "Client supprimé"}{client?.telephone ? ` · ${client.telephone}` : ""}{r.dateSouhaitee ? ` · départ souhaité le ${new Date(r.dateSouhaitee).toLocaleDateString("fr-FR")}` : ""}</div><div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3 }}>{r.description || "Aucune description"} · reçue le {new Date(r.dateCreation).toLocaleDateString("fr-FR")}</div></div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>{r.statut !== "En attente" && <span style={{ color: r.statut === "Acceptée" ? "var(--ok-fg)" : "var(--danger-fg)", fontSize: 12.5, fontWeight: 700 }}>{r.statut}</span>}{r.statut === "En attente" && <><button onClick={() => majReservation(r.id, "Acceptée")} style={{ background: "var(--ok-fg)", color: "#fff", border: "none", borderRadius: 8, padding: "8px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Accepter</button><button onClick={() => majReservation(r.id, "Refusée")} style={{ background: "none", color: "var(--danger-fg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "8px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Refuser</button></>}</div>
+            </div>;
+          })}
+        </div>
       )}
 
       {ongletActif === "comptes" && (

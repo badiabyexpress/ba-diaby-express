@@ -2950,6 +2950,17 @@ function nettoyerTextePdf(valeur) {
  * ne peut réintroduire le problème, y compris dans du code ajouté plus tard.
  */
 function preparerDocPdf(doc) {
+  // Métadonnées intégrées à chaque export : elles facilitent l’archivage, la recherche et l’identification
+  // du document sans modifier son contenu visible ni les montants métier.
+  if (typeof doc.setProperties === "function") {
+    doc.setProperties({
+      title: "Document Ba-Diaby Express",
+      subject: "Transport de colis et suivi logistique",
+      author: "Ba-Diaby Express",
+      creator: "Ba-Diaby Express",
+      keywords: "Ba-Diaby Express, transport, colis, suivi",
+    });
+  }
   const originale = doc.text.bind(doc);
   doc.text = function (texte, ...reste) {
     const propre = Array.isArray(texte) ? texte.map(nettoyerTextePdf) : nettoyerTextePdf(texte);
@@ -2997,14 +3008,21 @@ async function loadXLSXLib() {
  * environnements en iframe (aucune erreur visible), alors que l’ouverture d’un onglet
  * est généralement autorisée. L’utilisateur peut ensuite l’enregistrer depuis le navigateur.
  */
+function nomFichierPdfSûr(filename) {
+  return String(filename || "document-ba-diaby-express.pdf")
+    .normalize("NFKD").replace(/[\\u0300-\\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/-{2,}/g, "-").replace(/^-|-$/g, "")
+    .slice(0, 150) || "document-ba-diaby-express.pdf";
+}
 function openPdf(doc, filename) {
+  const nomSûr = nomFichierPdfSûr(filename);
   try {
     const blobUrl = doc.output("bloburl");
     const w = window.open(blobUrl, "_blank");
     if (!w) throw new Error("popup bloqué");
   } catch (e) {
     console.error("Ouverture en onglet impossible, tentative de téléchargement direct.", e);
-    doc.save(filename);
+    doc.save(nomSûr);
   }
 }
 /*

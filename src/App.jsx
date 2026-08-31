@@ -4375,11 +4375,11 @@ function App() {
   return (
     <ContexteOuvrirColis.Provider value={peutOuvrirColis ? ouvrirColis : null}>
     <Shell rtl={rtl} theme={theme}>
-      <div style={{ display: "flex", minHeight: "100vh", background: "var(--surface2)" }}>
+      <div className="bde-app-shell" style={{ display: "flex", minHeight: "100vh", background: "var(--surface2)" }}>
         {isMobile && mobileNavOpen && (
           <div onClick={() => setMobileNavOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 40 }} />
         )}
-        <aside style={{
+        <aside className="bde-app-sidebar" style={{
           width: isMobile ? 240 : (collapsed ? 72 : 240),
           transition: isMobile ? "transform 0.2s ease" : "width 0.18s ease",
           background: "#0A2647", color: "#fff", display: "flex", flexDirection: "column", flexShrink: 0,
@@ -4464,9 +4464,9 @@ function App() {
             </button>
           </div>
         </aside>
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+        <div className="bde-app-workspace" style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
           {isMobile && (
-            <div style={{ position: "sticky", top: 0, zIndex: 20, display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", background: "#0A2647", color: "#fff" }}>
+            <div className="bde-mobile-topbar" style={{ position: "sticky", top: 0, zIndex: 20, display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", background: "#0A2647", color: "#fff" }}>
               <button onClick={() => setMobileNavOpen(true)} style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 8, width: 34, height: 34, display: "grid", placeItems: "center", color: "#fff", cursor: "pointer", flexShrink: 0 }}>
                 <Menu size={18} />
               </button>
@@ -4478,7 +4478,7 @@ function App() {
               </button>
             </div>
           )}
-          <main style={{ flex: 1, padding: isMobile ? "16px 14px" : "28px 32px", overflowY: "auto", minWidth: 0 }}>
+          <main className="bde-app-main" style={{ flex: 1, padding: isMobile ? "16px 14px" : "28px 32px", overflowY: "auto", minWidth: 0 }}>
             <BandeauEcrasement data={data} persist={persist} session={session} />
             {view === "dashboard" && (session.role === "Partenaire" ? <PartnerDashboard data={data} session={session} persist={persist} verifier={persisterEtVerifier} notify={notify} onglet={ongletPartenaire} /> : <Dashboard data={data} session={session} onNavigate={setView} onNouveauColis={() => { setView("colis"); setOuvrirFormulaireColis((n) => n + 1); }} />)}
             {view === "colis" && <ColisView data={data} persist={persist} verifier={persisterEtVerifier} session={session} notify={notify} t={t} demandeOuverture={demandeColis} onDemandeTraitee={() => setDemandeColis(null)} ouvrirFormulaire={ouvrirFormulaireColis} />}
@@ -4858,7 +4858,52 @@ function Shell({ children, rtl, theme }) {
            pour que les tableaux ne débordent jamais de l’écran sur mobile. */
         div:has(> table) { overflow-x: auto; -webkit-overflow-scrolling: touch; }
         table { min-width: 560px; }
+        .bde-public-tracking form { padding: 7px; border: 1px solid rgba(255,255,255,0.18); border-radius: 14px; background: rgba(255,255,255,0.08); box-shadow: 0 18px 45px rgba(0,0,0,0.20); }
+        .bde-public-tracking form input { background: rgba(255,255,255,0.96) !important; }
+        .bde-public-tracking form button { transition: transform 160ms ease, box-shadow 180ms ease; }
+        .bde-public-tracking form button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 10px 20px rgba(0,0,0,0.18); }
+        .bde-public-tracking > div[style*="maxWidth: 480"] { border: 1px solid rgba(255,255,255,0.26); }
+        .bde-modal-backdrop { backdrop-filter: blur(5px); }
+        .bde-modal-card { animation: bde-modal-in 180ms cubic-bezier(0.23,1,0.32,1); }
+        @keyframes bde-modal-in { from { opacity: 0; transform: translateY(8px) scale(0.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
+        .bde-app-main table { border-collapse: separate !important; border-spacing: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; }
+        .bde-app-main table thead th { background: color-mix(in srgb, var(--surface2) 86%, transparent); color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: 0.03em; text-transform: uppercase; }
+        .bde-app-main table tbody tr { transition: background 160ms ease; }
+        .bde-app-main table tbody tr:hover { background: color-mix(in srgb, var(--brand-solid) 5%, var(--surface)); }
         .bde-home-page { background-image: radial-gradient(circle at 50% -10%, rgba(200,16,46,0.13), transparent 34%), radial-gradient(circle at 100% 42%, rgba(35,83,150,0.10), transparent 30%); }
+        .bde-client-login, .bde-client-portal { background-image: radial-gradient(circle at 50% -12%, rgba(200,16,46,0.10), transparent 34%), radial-gradient(circle at 100% 22%, rgba(35,83,150,0.08), transparent 32%); }
+        .bde-client-login form { box-shadow: 0 24px 60px rgba(10,38,71,0.12) !important; }
+        .bde-client-content { min-width: 0; }
+        .bde-client-header > div:first-child { letter-spacing: -0.02em; }
+        .bde-client-actions button { transition: transform 160ms ease, border-color 180ms ease, box-shadow 180ms ease, background 180ms ease; }
+        .bde-client-actions button:hover { transform: translateY(-1px); border-color: color-mix(in srgb, var(--brand-solid) 45%, var(--border)) !important; box-shadow: 0 8px 20px rgba(10,38,71,0.08); }
+        .bde-client-portal .bde-client-content > div { min-width: 0; }
+        @media (max-width: 768px) {
+          .bde-client-content { padding: 22px 14px 42px !important; }
+          .bde-client-header { align-items: flex-start !important; }
+          .bde-client-actions { width: 100%; display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px !important; }
+          .bde-client-actions button { min-height: 42px; padding: 9px 10px !important; font-size: 12px !important; }
+          .bde-client-actions button:first-child, .bde-client-actions button:nth-child(2) { grid-column: span 2; }
+        }
+        .bde-app-shell { background-image: radial-gradient(circle at 85% 0%, rgba(200,16,46,0.05), transparent 28%); }
+        .bde-app-sidebar { box-shadow: 12px 0 36px rgba(3, 14, 32, 0.14); }
+        .bde-app-sidebar nav button { transition: background 180ms ease, color 180ms ease, transform 160ms ease; }
+        .bde-app-sidebar nav button:hover { background: rgba(255,255,255,0.10) !important; transform: translateX(2px); }
+        .bde-app-sidebar nav button[style*="var(--brand-solid)"] { box-shadow: 0 8px 20px rgba(200,16,46,0.18); }
+        .bde-app-main { background: linear-gradient(135deg, color-mix(in srgb, var(--surface2) 94%, transparent), color-mix(in srgb, var(--surface) 28%, transparent)); }
+        .bde-app-main input, .bde-app-main select, .bde-app-main textarea { transition: border-color 180ms ease, box-shadow 180ms ease, background 180ms ease; }
+        .bde-app-main input:focus, .bde-app-main select:focus, .bde-app-main textarea:focus { border-color: color-mix(in srgb, var(--brand-solid) 58%, var(--border)) !important; box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-solid) 12%, transparent) !important; outline: none; }
+        .bde-app-main button { transition: transform 160ms ease, box-shadow 180ms ease, border-color 180ms ease; }
+        .bde-app-main button:active { transform: scale(0.98); }
+        .bde-mobile-topbar { box-shadow: 0 8px 24px rgba(3, 14, 32, 0.18); }
+        @media (max-width: 768px) {
+          .bde-app-main { padding-top: 18px !important; }
+          .bde-app-main > div { max-width: 100% !important; }
+          .bde-mobile-topbar { padding-top: max(12px, env(safe-area-inset-top)) !important; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .bde-app-sidebar nav button, .bde-app-main button, .bde-app-main input, .bde-app-main select, .bde-app-main textarea { transition: none !important; }
+        }
         .bde-home-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 0.82fr); gap: clamp(28px, 6vw, 72px); align-items: center; }
         .bde-hero-copy { padding: 8px 0; }
         .bde-hero-actions { min-width: 0; }
@@ -5438,7 +5483,7 @@ function PublicTrackingPage() {
   const autresDevisesReste = [...new Set([expCur, destCur].filter((c) => c && c !== "GNF"))];
 
   return (
-    <div dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "linear-gradient(135deg,#0A2647 0%,#0A2647 55%,#C8102E 250%)", display: "flex", flexDirection: "column", alignItems: "center", padding: "40px 16px" }}>
+      <div className="bde-public-tracking" dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "linear-gradient(135deg,#0A2647 0%,#0A2647 55%,#C8102E 250%)", display: "flex", flexDirection: "column", alignItems: "center", padding: "40px 16px" }}>
       <div style={{ width: "100%", maxWidth: 560, display: "flex", justifyContent: "flex-end", marginBottom: 20 }}>
         <ClientLangSwitch lang={lang} onChange={setLang} />
       </div>
@@ -7146,7 +7191,7 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
 
   if (!compte) {
     return (
-      <div dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", flexDirection: "column", alignItems: "center", padding: "60px 16px" }}>
+      <div className="bde-client-login" dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", flexDirection: "column", alignItems: "center", padding: "60px 16px" }}>
         <div style={{ width: "100%", maxWidth: 420, display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
           <ClientLangSwitch lang={lang} onChange={setLang} />
         </div>
@@ -7183,11 +7228,11 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
   }
 
   return (
-    <div dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "var(--bg)" }}>
-      <div style={{ maxWidth: 900, margin: "0 auto", padding: "32px 20px 60px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexWrap: "wrap", gap: 10 }}>
+      <div className="bde-client-portal" dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "var(--bg)" }}>
+        <div className="bde-client-content" style={{ maxWidth: 900, margin: "0 auto", padding: "32px 20px 60px" }}>
+          <div className="bde-client-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexWrap: "wrap", gap: 10 }}>
           <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 22, color: "var(--text)" }}>{T("Espace Client")}</div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <div className="bde-client-actions" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button onClick={() => setShowGuide(true)} style={{ background: "var(--brand-solid)", border: "none", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "#fff", fontWeight: 700, cursor: "pointer" }}>{T("Comment commander")}</button>
             <button onClick={() => setShowReservation(true)} style={{ background: "var(--brand-solid)", border: "1px solid var(--brand-solid)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "#fff", fontWeight: 700, cursor: "pointer" }}>Réserver un envoi aérien</button>
             <button onClick={() => setShowPreAlerte(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Pré-alerte colis")}</button>
@@ -31046,8 +31091,9 @@ function Modal({ title, children, onClose, wide, niveau = 0, saisieEnCours = fal
   return (
     <div
       onMouseDown={(e) => { if (e.target === e.currentTarget) demanderFermeture(); }}
+      className="bde-modal-backdrop"
       style={{ position: "fixed", inset: 0, background: "rgba(4,7,14,0.65)", display: "grid", placeItems: "center", zIndex: 50 + niveau * 10, padding: 12 }} onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 14, padding: 20, width: wide ? "min(94vw, 620px)" : "min(94vw, 420px)", maxHeight: "90vh", overflowY: "auto", boxShadow: "0 24px 60px rgba(0,0,0,0.5)" }}>
+      <div className="bde-modal-card" onClick={(e) => e.stopPropagation()} style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 14, padding: 20, width: wide ? "min(94vw, 620px)" : "min(94vw, 420px)", maxHeight: "90vh", overflowY: "auto", boxShadow: "0 24px 60px rgba(0,0,0,0.5)" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
           <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 17, color: TEXT }}>{title}</div>
           <button onClick={demanderFermeture} style={{ background: SURFACE2, border: "none", borderRadius: 8, width: 28, height: 28, cursor: "pointer", display: "grid", placeItems: "center", flexShrink: 0 }}><X size={15} color={MUTED} /></button>

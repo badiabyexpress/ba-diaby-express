@@ -4858,7 +4858,33 @@ function Shell({ children, rtl, theme }) {
            pour que les tableaux ne débordent jamais de l’écran sur mobile. */
         div:has(> table) { overflow-x: auto; -webkit-overflow-scrolling: touch; }
         table { min-width: 560px; }
+        .bde-public-tracking form { padding: 7px; border: 1px solid rgba(255,255,255,0.18); border-radius: 14px; background: rgba(255,255,255,0.08); box-shadow: 0 18px 45px rgba(0,0,0,0.20); }
+        .bde-public-tracking form input { background: rgba(255,255,255,0.96) !important; }
+        .bde-public-tracking form button { transition: transform 160ms ease, box-shadow 180ms ease; }
+        .bde-public-tracking form button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 10px 20px rgba(0,0,0,0.18); }
+        .bde-public-tracking > div[style*="maxWidth: 480"] { border: 1px solid rgba(255,255,255,0.26); }
+        .bde-modal-backdrop { backdrop-filter: blur(5px); }
+        .bde-modal-card { animation: bde-modal-in 180ms cubic-bezier(0.23,1,0.32,1); }
+        @keyframes bde-modal-in { from { opacity: 0; transform: translateY(8px) scale(0.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
+        .bde-app-main table { border-collapse: separate !important; border-spacing: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; }
+        .bde-app-main table thead th { background: color-mix(in srgb, var(--surface2) 86%, transparent); color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: 0.03em; text-transform: uppercase; }
+        .bde-app-main table tbody tr { transition: background 160ms ease; }
+        .bde-app-main table tbody tr:hover { background: color-mix(in srgb, var(--brand-solid) 5%, var(--surface)); }
         .bde-home-page { background-image: radial-gradient(circle at 50% -10%, rgba(200,16,46,0.13), transparent 34%), radial-gradient(circle at 100% 42%, rgba(35,83,150,0.10), transparent 30%); }
+        .bde-client-login, .bde-client-portal { background-image: radial-gradient(circle at 50% -12%, rgba(200,16,46,0.10), transparent 34%), radial-gradient(circle at 100% 22%, rgba(35,83,150,0.08), transparent 32%); }
+        .bde-client-login form { box-shadow: 0 24px 60px rgba(10,38,71,0.12) !important; }
+        .bde-client-content { min-width: 0; }
+        .bde-client-header > div:first-child { letter-spacing: -0.02em; }
+        .bde-client-actions button { transition: transform 160ms ease, border-color 180ms ease, box-shadow 180ms ease, background 180ms ease; }
+        .bde-client-actions button:hover { transform: translateY(-1px); border-color: color-mix(in srgb, var(--brand-solid) 45%, var(--border)) !important; box-shadow: 0 8px 20px rgba(10,38,71,0.08); }
+        .bde-client-portal .bde-client-content > div { min-width: 0; }
+        @media (max-width: 768px) {
+          .bde-client-content { padding: 22px 14px 42px !important; }
+          .bde-client-header { align-items: flex-start !important; }
+          .bde-client-actions { width: 100%; display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px !important; }
+          .bde-client-actions button { min-height: 42px; padding: 9px 10px !important; font-size: 12px !important; }
+          .bde-client-actions button:first-child, .bde-client-actions button:nth-child(2) { grid-column: span 2; }
+        }
         .bde-app-shell { background-image: radial-gradient(circle at 85% 0%, rgba(200,16,46,0.05), transparent 28%); }
         .bde-app-sidebar { box-shadow: 12px 0 36px rgba(3, 14, 32, 0.14); }
         .bde-app-sidebar nav button { transition: background 180ms ease, color 180ms ease, transform 160ms ease; }
@@ -5457,7 +5483,7 @@ function PublicTrackingPage() {
   const autresDevisesReste = [...new Set([expCur, destCur].filter((c) => c && c !== "GNF"))];
 
   return (
-    <div dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "linear-gradient(135deg,#0A2647 0%,#0A2647 55%,#C8102E 250%)", display: "flex", flexDirection: "column", alignItems: "center", padding: "40px 16px" }}>
+      <div className="bde-public-tracking" dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "linear-gradient(135deg,#0A2647 0%,#0A2647 55%,#C8102E 250%)", display: "flex", flexDirection: "column", alignItems: "center", padding: "40px 16px" }}>
       <div style={{ width: "100%", maxWidth: 560, display: "flex", justifyContent: "flex-end", marginBottom: 20 }}>
         <ClientLangSwitch lang={lang} onChange={setLang} />
       </div>
@@ -7165,7 +7191,7 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
 
   if (!compte) {
     return (
-      <div dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", flexDirection: "column", alignItems: "center", padding: "60px 16px" }}>
+      <div className="bde-client-login" dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", flexDirection: "column", alignItems: "center", padding: "60px 16px" }}>
         <div style={{ width: "100%", maxWidth: 420, display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
           <ClientLangSwitch lang={lang} onChange={setLang} />
         </div>
@@ -7202,11 +7228,11 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
   }
 
   return (
-    <div dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "var(--bg)" }}>
-      <div style={{ maxWidth: 900, margin: "0 auto", padding: "32px 20px 60px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexWrap: "wrap", gap: 10 }}>
+      <div className="bde-client-portal" dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "var(--bg)" }}>
+        <div className="bde-client-content" style={{ maxWidth: 900, margin: "0 auto", padding: "32px 20px 60px" }}>
+          <div className="bde-client-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexWrap: "wrap", gap: 10 }}>
           <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 22, color: "var(--text)" }}>{T("Espace Client")}</div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <div className="bde-client-actions" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button onClick={() => setShowGuide(true)} style={{ background: "var(--brand-solid)", border: "none", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "#fff", fontWeight: 700, cursor: "pointer" }}>{T("Comment commander")}</button>
             <button onClick={() => setShowReservation(true)} style={{ background: "var(--brand-solid)", border: "1px solid var(--brand-solid)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "#fff", fontWeight: 700, cursor: "pointer" }}>Réserver un envoi aérien</button>
             <button onClick={() => setShowPreAlerte(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Pré-alerte colis")}</button>
@@ -31065,8 +31091,9 @@ function Modal({ title, children, onClose, wide, niveau = 0, saisieEnCours = fal
   return (
     <div
       onMouseDown={(e) => { if (e.target === e.currentTarget) demanderFermeture(); }}
+      className="bde-modal-backdrop"
       style={{ position: "fixed", inset: 0, background: "rgba(4,7,14,0.65)", display: "grid", placeItems: "center", zIndex: 50 + niveau * 10, padding: 12 }} onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 14, padding: 20, width: wide ? "min(94vw, 620px)" : "min(94vw, 420px)", maxHeight: "90vh", overflowY: "auto", boxShadow: "0 24px 60px rgba(0,0,0,0.5)" }}>
+      <div className="bde-modal-card" onClick={(e) => e.stopPropagation()} style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 14, padding: 20, width: wide ? "min(94vw, 620px)" : "min(94vw, 420px)", maxHeight: "90vh", overflowY: "auto", boxShadow: "0 24px 60px rgba(0,0,0,0.5)" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
           <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 17, color: TEXT }}>{title}</div>
           <button onClick={demanderFermeture} style={{ background: SURFACE2, border: "none", borderRadius: 8, width: 28, height: 28, cursor: "pointer", display: "grid", placeItems: "center", flexShrink: 0 }}><X size={15} color={MUTED} /></button>

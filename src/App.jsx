@@ -4859,6 +4859,15 @@ function Shell({ children, rtl, theme }) {
         div:has(> table) { overflow-x: auto; -webkit-overflow-scrolling: touch; }
         table { min-width: 560px; }
         .bde-home-page { background-image: radial-gradient(circle at 50% -10%, rgba(200,16,46,0.13), transparent 34%), radial-gradient(circle at 100% 42%, rgba(35,83,150,0.10), transparent 30%); }
+        .bde-home-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 0.82fr); gap: clamp(28px, 6vw, 72px); align-items: center; }
+        .bde-hero-copy { padding: 8px 0; }
+        .bde-hero-actions { min-width: 0; }
+        .bde-hero-actions .bde-announcement { margin: 0 0 16px; max-width: none; }
+        .bde-hero-actions .bde-tracking-form { margin-bottom: 0; }
+        .bde-home-main { position: relative; }
+        .bde-feature-grid { margin-top: 52px !important; }
+        .bde-feature-card { background: color-mix(in srgb, var(--surface) 92%, transparent) !important; }
+        .bde-destinations-heading { margin-bottom: 22px; }
         .bde-public-header { box-shadow: 0 8px 30px rgba(3, 9, 24, 0.12); }
         .bde-hero-kicker { display: inline-flex; align-items: center; gap: 8px; margin-bottom: 14px; padding: 7px 11px; border: 1px solid color-mix(in srgb, var(--brand-solid) 38%, var(--border)); border-radius: 999px; background: color-mix(in srgb, var(--surface) 82%, transparent); color: var(--brand-solid); font-size: 10px; font-weight: 800; letter-spacing: 1.1px; }
         .bde-hero-kicker::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--brand-solid); box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-solid) 16%, transparent); }
@@ -4881,10 +4890,12 @@ function Shell({ children, rtl, theme }) {
         @media (max-width: 768px) {
           .bde-public-header { padding: 12px 16px !important; align-items: center !important; }
           .bde-public-nav { gap: 2px !important; }
-          .bde-home-hero { margin-top: 24px !important; padding: 0 16px !important; }
+          .bde-home-hero { display: block !important; margin-top: 24px !important; padding: 0 16px !important; text-align: center !important; }
+          .bde-hero-actions { margin-top: 22px; }
+          .bde-hero-copy p { margin-inline: auto !important; }
           .bde-hero-kicker { margin-bottom: 12px; font-size: 9px; letter-spacing: 0.9px; }
           .bde-home-hero h1 { font-size: 29px !important; line-height: 1.14 !important; margin-bottom: 10px !important; }
-          .bde-home-hero > p { font-size: 14px !important; line-height: 1.45 !important; margin-bottom: 20px !important; }
+          .bde-home-hero > p, .bde-hero-copy > p { font-size: 14px !important; line-height: 1.45 !important; margin-bottom: 20px !important; }
           .bde-announcement { margin-bottom: 20px !important; padding: 14px 15px !important; }
           .bde-announcement > div:nth-child(2) { font-size: 15px !important; line-height: 1.4 !important; }
           .bde-tracking-form { margin-bottom: 28px !important; }
@@ -7524,10 +7535,13 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
         </nav>
       </header>
 
-      <div className="bde-home-hero" style={{ maxWidth: 720, margin: "40px auto 0", padding: "0 24px", textAlign: "center" }}>
-        <div className="bde-hero-kicker">EXPÉDITION INTERNATIONALE</div>
-        <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: "clamp(26px, 5vw, 40px)", color: "var(--text)", margin: "0 0 12px", lineHeight: 1.2 }}>{tagline}</h1>
-        <p style={{ fontSize: 15, color: "var(--muted)", marginBottom: 32 }}>Transport de colis rapide et fiable entre la Guinée et {destinations.length} destinations dans le monde.</p>
+      <div className="bde-home-hero" style={{ maxWidth: 1040, margin: "56px auto 0", padding: "0 24px", textAlign: "start" }}>
+        <div className="bde-hero-copy">
+          <div className="bde-hero-kicker">EXPÉDITION INTERNATIONALE</div>
+          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: "clamp(30px, 5vw, 48px)", color: "var(--text)", margin: "0 0 14px", lineHeight: 1.1, letterSpacing: "-0.035em" }}>{tagline}</h1>
+          <p style={{ fontSize: 16, color: "var(--muted)", margin: 0, maxWidth: 510, lineHeight: 1.6 }}>Transport de colis rapide et fiable entre la Guinée et {destinations.length} destinations dans le monde.</p>
+        </div>
+        <div className="bde-hero-actions">
 
         {/*
           * L'ANNONCE EN COURS, EN HAUT ET SANS RIEN CLIQUER.
@@ -7552,11 +7566,12 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
         )}
 
         {trackingActif && (
-          <form className="bde-tracking-form" onSubmit={suivre} style={{ display: "flex", gap: 8, maxWidth: 460, margin: "0 auto 40px", flexWrap: "wrap", justifyContent: "center" }}>
+          <form className="bde-tracking-form" onSubmit={suivre} style={{ display: "flex", gap: 8, maxWidth: 460, margin: "0 0 40px", flexWrap: "wrap", justifyContent: "center" }}>
             <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="Entrez votre numéro de suivi (ex : BDE123456)" style={{ ...inputStyle, flex: 1, minWidth: 220, fontSize: 14.5, padding: "13px 16px" }} />
             <button type="submit" style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "0 22px", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>Suivre mon colis</button>
           </form>
         )}
+        </div>
       </div>
 
       <main className="bde-home-main" style={{ maxWidth: 1000, margin: "0 auto", padding: "0 24px 60px" }}>

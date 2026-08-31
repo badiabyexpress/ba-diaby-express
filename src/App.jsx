@@ -18281,8 +18281,10 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
    * pesées. Deux champs pour une même grandeur, c'est un jour où ils se contredisent, et le prix
    * qui suit celui que le client ne voit pas.
    */
-  const poidsEnLigne = +produits.reduce((somme, p) => somme + (Number(p.poids) || 0), 0).toFixed(2);
-  const poidsRetenu = enLigne ? poidsEnLigne : (montantSaisi(poids) ?? 0);
+  const poidsProduits = +produits.reduce((somme, p) => somme + (Number(p.poids) || 0), 0).toFixed(2);
+  // Dès qu’un colis est détaillé article par article, le poids total doit suivre les lignes.
+  // L’ancien code recalculait le prix depuis les articles mais conservait le champ poids historique.
+  const poidsRetenu = produits.length > 0 ? poidsProduits : (montantSaisi(poids) ?? 0);
   const baremeEnLigne = enLigne ? tarifAchatEnLigne(poidsRetenu, tarifsReception) : null;
   /* La boutique commune, quand toutes les lignes viennent du même site — comme au comptoir. */
   const boutiqueCommune = produits.length > 0 && produits.every((p) => p.commande && p.commande === produits[0].commande)
@@ -18369,7 +18371,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
    * l'appliquer une seconde fois ferait dire à la correction un autre prix que la facture remise
    * au client le jour de l'enregistrement.
    */
-  const discountVolume = enLigne ? 0 : remiseVolumePourcent(poids, remiseVolumeConfig);
+  const discountVolume = enLigne ? 0 : remiseVolumePourcent(poidsRetenu, remiseVolumeConfig);
   const prixApresFidelite = +(prixBrut * (1 - discountLoyalty / 100) * (1 - discountVolume / 100)).toFixed(2);
   const rabaisEUR = +((Number(rabaisMontant) || 0) / (LIVE_RATES[rabaisDevise] || CURRENCIES[rabaisDevise] || 1)).toFixed(2);
   const prix = Math.max(+(prixApresFidelite - rabaisEUR).toFixed(2), 0);
@@ -18698,7 +18700,8 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
             <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>
               {enLigne ? "Articles de la commande" : "Poids & contenu"}
             </div>
-            {!enLigne && <Field label="Poids (kg)"><input value={poids} onChange={(e) => setPoids(e.target.value)} style={inputStyle} inputMode="decimal" /></Field>}
+            {!enLigne && produits.length === 0 && <Field label="Poids (kg)"><input value={poids} onChange={(e) => setPoids(e.target.value)} style={inputStyle} inputMode="decimal" /></Field>}
+            {!enLigne && produits.length > 0 && <div style={{ gridColumn: "1 / -1", background: "var(--info-bg-alt)", border: "1px solid var(--info-border)", borderRadius: 10, padding: "10px 13px", fontSize: 12.5, color: "var(--info-fg)" }}>Poids total calculé automatiquement depuis les articles : <strong>{poidsRetenu.toFixed(2)} kg</strong></div>}
             <div style={{ gridColumn: "1 / -1" }} />
             {/*
               * LE COMPTOIR, TEL QU'IL A SERVI À SAISIR LE COLIS.

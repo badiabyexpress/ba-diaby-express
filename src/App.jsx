@@ -4375,11 +4375,11 @@ function App() {
   return (
     <ContexteOuvrirColis.Provider value={peutOuvrirColis ? ouvrirColis : null}>
     <Shell rtl={rtl} theme={theme}>
-      <div style={{ display: "flex", minHeight: "100vh", background: "var(--surface2)" }}>
+      <div className="bde-app-shell" style={{ display: "flex", minHeight: "100vh", background: "var(--surface2)" }}>
         {isMobile && mobileNavOpen && (
           <div onClick={() => setMobileNavOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 40 }} />
         )}
-        <aside style={{
+        <aside className="bde-app-sidebar" style={{
           width: isMobile ? 240 : (collapsed ? 72 : 240),
           transition: isMobile ? "transform 0.2s ease" : "width 0.18s ease",
           background: "#0A2647", color: "#fff", display: "flex", flexDirection: "column", flexShrink: 0,
@@ -4464,9 +4464,9 @@ function App() {
             </button>
           </div>
         </aside>
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+        <div className="bde-app-workspace" style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
           {isMobile && (
-            <div style={{ position: "sticky", top: 0, zIndex: 20, display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", background: "#0A2647", color: "#fff" }}>
+            <div className="bde-mobile-topbar" style={{ position: "sticky", top: 0, zIndex: 20, display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", background: "#0A2647", color: "#fff" }}>
               <button onClick={() => setMobileNavOpen(true)} style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 8, width: 34, height: 34, display: "grid", placeItems: "center", color: "#fff", cursor: "pointer", flexShrink: 0 }}>
                 <Menu size={18} />
               </button>
@@ -4478,7 +4478,7 @@ function App() {
               </button>
             </div>
           )}
-          <main style={{ flex: 1, padding: isMobile ? "16px 14px" : "28px 32px", overflowY: "auto", minWidth: 0 }}>
+          <main className="bde-app-main" style={{ flex: 1, padding: isMobile ? "16px 14px" : "28px 32px", overflowY: "auto", minWidth: 0 }}>
             <BandeauEcrasement data={data} persist={persist} session={session} />
             {view === "dashboard" && (session.role === "Partenaire" ? <PartnerDashboard data={data} session={session} persist={persist} verifier={persisterEtVerifier} notify={notify} onglet={ongletPartenaire} /> : <Dashboard data={data} session={session} onNavigate={setView} onNouveauColis={() => { setView("colis"); setOuvrirFormulaireColis((n) => n + 1); }} />)}
             {view === "colis" && <ColisView data={data} persist={persist} verifier={persisterEtVerifier} session={session} notify={notify} t={t} demandeOuverture={demandeColis} onDemandeTraitee={() => setDemandeColis(null)} ouvrirFormulaire={ouvrirFormulaireColis} />}
@@ -4859,6 +4859,25 @@ function Shell({ children, rtl, theme }) {
         div:has(> table) { overflow-x: auto; -webkit-overflow-scrolling: touch; }
         table { min-width: 560px; }
         .bde-home-page { background-image: radial-gradient(circle at 50% -10%, rgba(200,16,46,0.13), transparent 34%), radial-gradient(circle at 100% 42%, rgba(35,83,150,0.10), transparent 30%); }
+        .bde-app-shell { background-image: radial-gradient(circle at 85% 0%, rgba(200,16,46,0.05), transparent 28%); }
+        .bde-app-sidebar { box-shadow: 12px 0 36px rgba(3, 14, 32, 0.14); }
+        .bde-app-sidebar nav button { transition: background 180ms ease, color 180ms ease, transform 160ms ease; }
+        .bde-app-sidebar nav button:hover { background: rgba(255,255,255,0.10) !important; transform: translateX(2px); }
+        .bde-app-sidebar nav button[style*="var(--brand-solid)"] { box-shadow: 0 8px 20px rgba(200,16,46,0.18); }
+        .bde-app-main { background: linear-gradient(135deg, color-mix(in srgb, var(--surface2) 94%, transparent), color-mix(in srgb, var(--surface) 28%, transparent)); }
+        .bde-app-main input, .bde-app-main select, .bde-app-main textarea { transition: border-color 180ms ease, box-shadow 180ms ease, background 180ms ease; }
+        .bde-app-main input:focus, .bde-app-main select:focus, .bde-app-main textarea:focus { border-color: color-mix(in srgb, var(--brand-solid) 58%, var(--border)) !important; box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-solid) 12%, transparent) !important; outline: none; }
+        .bde-app-main button { transition: transform 160ms ease, box-shadow 180ms ease, border-color 180ms ease; }
+        .bde-app-main button:active { transform: scale(0.98); }
+        .bde-mobile-topbar { box-shadow: 0 8px 24px rgba(3, 14, 32, 0.18); }
+        @media (max-width: 768px) {
+          .bde-app-main { padding-top: 18px !important; }
+          .bde-app-main > div { max-width: 100% !important; }
+          .bde-mobile-topbar { padding-top: max(12px, env(safe-area-inset-top)) !important; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .bde-app-sidebar nav button, .bde-app-main button, .bde-app-main input, .bde-app-main select, .bde-app-main textarea { transition: none !important; }
+        }
         .bde-home-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 0.82fr); gap: clamp(28px, 6vw, 72px); align-items: center; }
         .bde-hero-copy { padding: 8px 0; }
         .bde-hero-actions { min-width: 0; }

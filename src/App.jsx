@@ -4859,8 +4859,30 @@ function Shell({ children, rtl, theme }) {
         div:has(> table) { overflow-x: auto; -webkit-overflow-scrolling: touch; }
         table { min-width: 560px; }
         @media (max-width: 768px) {
-          .bde-public-header { padding: 14px 16px !important; align-items: flex-start !important; }
+          .bde-public-header { padding: 12px 16px !important; align-items: center !important; }
           .bde-public-nav { gap: 2px !important; }
+          .bde-home-hero { margin-top: 24px !important; padding: 0 16px !important; }
+          .bde-home-hero h1 { font-size: 29px !important; line-height: 1.14 !important; margin-bottom: 10px !important; }
+          .bde-home-hero > p { font-size: 14px !important; line-height: 1.45 !important; margin-bottom: 20px !important; }
+          .bde-announcement { margin-bottom: 20px !important; padding: 14px 15px !important; }
+          .bde-announcement > div:nth-child(2) { font-size: 15px !important; line-height: 1.4 !important; }
+          .bde-tracking-form { margin-bottom: 28px !important; }
+          .bde-home-main { padding: 0 16px 36px !important; }
+          .bde-feature-grid { grid-template-columns: 1fr !important; gap: 9px !important; margin: 0 0 34px !important; }
+          .bde-feature-card { display: grid; grid-template-columns: 34px 1fr; column-gap: 11px; align-items: center; padding: 12px 13px !important; border-radius: 12px !important; }
+          .bde-feature-card > div:first-child { width: 34px !important; height: 34px !important; grid-row: span 2; margin: 0 !important; }
+          .bde-feature-card h2 { font-size: 14px !important; margin: 0 0 2px !important; }
+          .bde-feature-card p { font-size: 12px !important; line-height: 1.35 !important; }
+          .bde-destinations-heading { margin-bottom: 16px !important; }
+          .bde-destinations-grid { gap: 8px !important; }
+          .bde-destinations-grid button { padding: 10px 8px !important; }
+          .bde-destinations-grid button div:first-child { font-size: 22px !important; margin-bottom: 3px !important; }
+          .bde-home-contact { margin-top: 28px !important; padding: 18px 15px !important; }
+          .bde-home-contact h2 { font-size: 16px !important; }
+          .bde-home-contact > div:last-child { width: 100%; }
+          .bde-home-contact > div:last-child button, .bde-home-contact > div:last-child a { flex: 1; justify-content: center; }
+          .bde-public-header > div:first-child { font-size: 16px !important; }
+          .bde-public-nav a[href="#contact"] { display: none; }
           .bde-public-nav a, .bde-public-nav button { font-size: 12px !important; padding: 8px 6px !important; }
           .bde-public-nav a[href="#services"], .bde-public-nav a[href="#destinations"] { display: none; }
           /* Empêche le zoom automatique sur iOS quand on touche un champ (nécessite 16px minimum) */
@@ -7479,7 +7501,7 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
         </nav>
       </header>
 
-      <div style={{ maxWidth: 720, margin: "40px auto 0", padding: "0 24px", textAlign: "center" }}>
+      <div className="bde-home-hero" style={{ maxWidth: 720, margin: "40px auto 0", padding: "0 24px", textAlign: "center" }}>
         <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: "clamp(26px, 5vw, 40px)", color: "var(--text)", margin: "0 0 12px", lineHeight: 1.2 }}>{tagline}</h1>
         <p style={{ fontSize: 15, color: "var(--muted)", marginBottom: 32 }}>Transport de colis rapide et fiable entre la Guinée et {destinations.length} destinations dans le monde.</p>
 
@@ -7492,7 +7514,7 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
           * s'affiche donc avant tout le reste, et disparaît d'elle-même à sa date.
           */}
         {annonceEnCours(data.annoncePublique) && (
-          <div style={{ maxWidth: 560, margin: "0 auto 32px", background: "var(--surface)", border: "1.5px solid var(--brand-solid)", borderRadius: 14, padding: "18px 20px", textAlign: "start" }}>
+          <div className="bde-announcement" style={{ maxWidth: 560, margin: "0 auto 32px", background: "var(--surface)", border: "1.5px solid var(--brand-solid)", borderRadius: 14, padding: "18px 20px", textAlign: "start" }}>
             <div style={{ fontSize: 11.5, fontWeight: 700, letterSpacing: 0.6, textTransform: "uppercase", color: "var(--brand-solid)", marginBottom: 7 }}>
               {data.annoncePublique.titre}
             </div>
@@ -7506,17 +7528,17 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
         )}
 
         {trackingActif && (
-          <form onSubmit={suivre} style={{ display: "flex", gap: 8, maxWidth: 460, margin: "0 auto 40px", flexWrap: "wrap", justifyContent: "center" }}>
+          <form className="bde-tracking-form" onSubmit={suivre} style={{ display: "flex", gap: 8, maxWidth: 460, margin: "0 auto 40px", flexWrap: "wrap", justifyContent: "center" }}>
             <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="Entrez votre numéro de suivi (ex : BDE123456)" style={{ ...inputStyle, flex: 1, minWidth: 220, fontSize: 14.5, padding: "13px 16px" }} />
             <button type="submit" style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "0 22px", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>Suivre mon colis</button>
           </form>
         )}
       </div>
 
-      <main style={{ maxWidth: 1000, margin: "0 auto", padding: "0 24px 60px" }}>
-        <section id="services" aria-labelledby="services-title" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 14, margin: "12px 0 56px" }}>
+      <main className="bde-home-main" style={{ maxWidth: 1000, margin: "0 auto", padding: "0 24px 60px" }}>
+        <section id="services" className="bde-feature-grid" aria-labelledby="services-title" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 14, margin: "12px 0 56px" }}>
           {[{ icon: Truck, title: "Transport fiable", text: "Des départs organisés entre la Guinée et vos destinations." }, { icon: Search, title: "Suivi en ligne", text: "Consultez l’avancement de votre colis avec votre numéro." }, { icon: Receipt, title: "Tarifs transparents", text: "Une prise en charge claire, avec des informations utiles à chaque étape." }].map(({ icon: Icon, title, text }) => (
-            <article key={title} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16, padding: "20px 18px", textAlign: "start", boxShadow: "0 10px 30px rgba(10,38,71,0.06)" }}>
+            <article key={title} className="bde-feature-card" style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16, padding: "20px 18px", textAlign: "start", boxShadow: "0 10px 30px rgba(10,38,71,0.06)" }}>
               <div style={{ width: 40, height: 40, display: "grid", placeItems: "center", borderRadius: 11, background: "var(--ok-bg-soft)", color: "var(--brand-solid)", marginBottom: 12 }}><Icon size={20} /></div>
               <h2 id={title === "Transport fiable" ? "services-title" : undefined} style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 16, margin: "0 0 7px", color: "var(--text)" }}>{title}</h2>
               <p style={{ fontSize: 13, lineHeight: 1.55, color: "var(--muted)", margin: 0 }}>{text}</p>
@@ -7525,11 +7547,13 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
         </section>
 
         <section id="destinations" aria-labelledby="destinations-title">
+        <div className="bde-destinations-heading">
         <div id="destinations-title" style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", letterSpacing: 0.5, textAlign: "center", marginBottom: 6 }}>NOS DESTINATIONS</div>
         <div style={{ fontSize: 11.5, color: "var(--muted)", textAlign: "center", marginBottom: 24 }}>Cliquez sur un pays pour voir le prochain départ</div>
+        </div>
 
         {isMobile ? (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12 }}>
+          <div className="bde-destinations-grid" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12 }}>
             {destinations.map((c) => (
               <button key={c.code} onClick={() => setSelectedPays(c.code)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "16px 14px", textAlign: "center", cursor: "pointer" }}>
                 <div style={{ fontSize: 26, marginBottom: 6 }}>{FLAGS[c.code]}</div>
@@ -7563,7 +7587,7 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
         )}
         </section>
 
-        <section id="contact" aria-labelledby="contact-title" style={{ marginTop: 12, background: "linear-gradient(135deg, var(--surface) 0%, var(--surface2) 100%)", border: "1px solid var(--border)", borderRadius: 18, padding: "26px 22px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 18, flexWrap: "wrap" }}>
+        <section id="contact" className="bde-home-contact" aria-labelledby="contact-title" style={{ marginTop: 12, background: "linear-gradient(135deg, var(--surface) 0%, var(--surface2) 100%)", border: "1px solid var(--border)", borderRadius: 18, padding: "26px 22px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 18, flexWrap: "wrap" }}>
           <div>
             <h2 id="contact-title" style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 19, color: "var(--text)", margin: "0 0 7px" }}>Besoin d’aide pour votre envoi ?</h2>
             <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.55, color: "var(--muted)", maxWidth: 560 }}>Retrouvez vos colis dans l’espace client ou contactez l’agence avec votre numéro de suivi.</p>

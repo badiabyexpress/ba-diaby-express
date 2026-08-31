@@ -4858,10 +4858,31 @@ function Shell({ children, rtl, theme }) {
            pour que les tableaux ne débordent jamais de l’écran sur mobile. */
         div:has(> table) { overflow-x: auto; -webkit-overflow-scrolling: touch; }
         table { min-width: 560px; }
+        .bde-home-page { background-image: radial-gradient(circle at 50% -10%, rgba(200,16,46,0.13), transparent 34%), radial-gradient(circle at 100% 42%, rgba(35,83,150,0.10), transparent 30%); }
+        .bde-public-header { box-shadow: 0 8px 30px rgba(3, 9, 24, 0.12); }
+        .bde-hero-kicker { display: inline-flex; align-items: center; gap: 8px; margin-bottom: 14px; padding: 7px 11px; border: 1px solid color-mix(in srgb, var(--brand-solid) 38%, var(--border)); border-radius: 999px; background: color-mix(in srgb, var(--surface) 82%, transparent); color: var(--brand-solid); font-size: 10px; font-weight: 800; letter-spacing: 1.1px; }
+        .bde-hero-kicker::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--brand-solid); box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-solid) 16%, transparent); }
+        .bde-tracking-form { padding: 7px; border: 1px solid var(--border); border-radius: 14px; background: color-mix(in srgb, var(--surface) 68%, transparent); box-shadow: 0 14px 35px rgba(10,38,71,0.10); }
+        .bde-tracking-form input { border: 0 !important; background: transparent !important; }
+        .bde-tracking-form button { min-height: 44px; box-shadow: 0 8px 18px rgba(200,16,46,0.20); transition: transform 160ms ease, box-shadow 160ms ease; }
+        .bde-tracking-form button:hover { transform: translateY(-1px); box-shadow: 0 11px 24px rgba(200,16,46,0.28); }
+        .bde-public-nav a, .bde-public-nav button { transition: color 180ms ease, background 180ms ease, transform 160ms ease; }
+        .bde-public-nav a:hover, .bde-public-nav button:hover { color: var(--text) !important; }
+        .bde-public-nav button:last-child:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(200,16,46,0.28) !important; }
+        .bde-feature-card { transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease; }
+        .bde-feature-card:hover { transform: translateY(-3px); border-color: color-mix(in srgb, var(--brand-solid) 42%, var(--border)); box-shadow: 0 16px 34px rgba(10,38,71,0.12) !important; }
+        .bde-destinations-grid button, .bde-ring button { transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease; }
+        .bde-destinations-grid button:hover, .bde-ring button:hover { transform: translateY(-3px); border-color: var(--brand-solid) !important; box-shadow: 0 12px 24px rgba(10,38,71,0.16) !important; }
+        .bde-tracking-form input:focus-visible, .bde-announcement:focus-visible, button:focus-visible, a:focus-visible, select:focus-visible { outline: 3px solid color-mix(in srgb, var(--brand-solid) 55%, transparent); outline-offset: 3px; }
+        .bde-home-contact { box-shadow: 0 18px 45px rgba(10,38,71,0.08); }
+        @media (prefers-reduced-motion: reduce) {
+          *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+        }
         @media (max-width: 768px) {
           .bde-public-header { padding: 12px 16px !important; align-items: center !important; }
           .bde-public-nav { gap: 2px !important; }
           .bde-home-hero { margin-top: 24px !important; padding: 0 16px !important; }
+          .bde-hero-kicker { margin-bottom: 12px; font-size: 9px; letter-spacing: 0.9px; }
           .bde-home-hero h1 { font-size: 29px !important; line-height: 1.14 !important; margin-bottom: 10px !important; }
           .bde-home-hero > p { font-size: 14px !important; line-height: 1.45 !important; margin-bottom: 20px !important; }
           .bde-announcement { margin-bottom: 20px !important; padding: 14px 15px !important; }
@@ -4884,6 +4905,8 @@ function Shell({ children, rtl, theme }) {
           .bde-public-header > div:first-child { font-size: 16px !important; }
           .bde-public-nav a[href="#contact"] { display: none; }
           .bde-public-nav a, .bde-public-nav button { font-size: 12px !important; padding: 8px 6px !important; }
+          .bde-feature-card p { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+          .bde-home-main section { scroll-margin-top: 80px; }
           .bde-public-nav a[href="#services"], .bde-public-nav a[href="#destinations"] { display: none; }
           /* Empêche le zoom automatique sur iOS quand on touche un champ (nécessite 16px minimum) */
           input, select, textarea { font-size: 16px !important; }
@@ -7482,7 +7505,7 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
   const prochainDepart = selectedPays ? departsAVenir(data.departs, selectedPays)[0] : null;
 
   return (
-    <div dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "var(--bg)" }}>
+    <div className="bde-home-page" dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "var(--bg)" }}>
       <header className="bde-public-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 20, padding: "18px 24px", maxWidth: 1100, margin: "0 auto", position: "sticky", top: 0, zIndex: 10, background: "color-mix(in srgb, var(--bg) 92%, transparent)", backdropFilter: "blur(14px)", borderBottom: "1px solid color-mix(in srgb, var(--border) 55%, transparent)" }}>
         <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 19, color: "var(--text)" }}>
           <img src={data.branding?.logo || DEFAULT_LOGO} alt="logo" style={{ width: 26, height: 26, borderRadius: 6, objectFit: "cover", verticalAlign: "middle", marginInlineEnd: 8 }} />
@@ -7502,6 +7525,7 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
       </header>
 
       <div className="bde-home-hero" style={{ maxWidth: 720, margin: "40px auto 0", padding: "0 24px", textAlign: "center" }}>
+        <div className="bde-hero-kicker">EXPÉDITION INTERNATIONALE</div>
         <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: "clamp(26px, 5vw, 40px)", color: "var(--text)", margin: "0 0 12px", lineHeight: 1.2 }}>{tagline}</h1>
         <p style={{ fontSize: 15, color: "var(--muted)", marginBottom: 32 }}>Transport de colis rapide et fiable entre la Guinée et {destinations.length} destinations dans le monde.</p>
 

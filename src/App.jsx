@@ -13330,8 +13330,8 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
   const baseList = useMemo(() => {
     return data.colis
       .filter((c) => (isChauffeur ? c.status === "Disponible au retrait" : true))
-      .filter((c) => colisDeLAgence(c, session.agence));
-  }, [data.colis, isChauffeur, session.agence]);
+      .filter((c) => colisDeLAgence(c, session.zoneOperation || session.agence));
+  }, [data.colis, isChauffeur, session.zoneOperation, session.agence]);
   const [statutFiltre, setStatutFiltre] = useState(null);
   const list = useMemo(() => {
     const q = pourRecherche(deferredQuery);
@@ -14340,7 +14340,7 @@ function BordereauCreation({ data, session, onCancel, onCreate }) {
   const country = COUNTRIES.find((c) => c.code === pays);
 
   const dejaInclus = new Set((data.bordereaux || []).filter((b) => normalizeBordereauStatut(b.statut) !== "Livré").flatMap((b) => b.colisTrackings));
-  const eligibles = data.colis.filter((c) => c.pays === pays && (c.direction || "export") === direction && c.status !== "Livré" && c.status !== "Annulé" && !dejaInclus.has(c.tracking) && colisDeLAgence(c, session?.agence));
+  const eligibles = data.colis.filter((c) => c.pays === pays && (c.direction || "export") === direction && c.status !== "Livré" && c.status !== "Annulé" && !dejaInclus.has(c.tracking) && colisDeLAgence(c, session?.zoneOperation || session?.agence));
 
   function toggle(tracking) {
     setSelectedTrackings((list) => (list.includes(tracking) ? list.filter((t) => t !== tracking) : [...list, tracking]));
@@ -15012,7 +15012,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
    * sitesLocaux) — un enregistrement fait depuis un autre pays n'a pas d'agence à choisir, il n'y
    * a que le pays d'opération (déjà déterminé par le pays expéditeur, verrouillé plus haut).
    */
-  const agenceImposee = session?.agence || "";
+  const agenceImposee = session?.zoneOperation || session?.agence || "";
   const siteLocalParDefaut = sitesLocaux(sites)[0];
   const [agence, setAgence] = useState(() => {
     if (agenceImposee) return agenceImposee;
@@ -30668,7 +30668,7 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
   const [telephone, setTelephone] = useState(user.telephone || "");
   const [role, setRole] = useState(user.role);
   const [paysOperation, setPaysOperation] = useState(user.paysOperation || "GN");
-  const [agence, setAgence] = useState(user.agence || "");
+  const [agence, setAgence] = useState(user.zoneOperation || user.agence || "");
   const [paysAutorises, setPaysAutorises] = useState(user.paysAutorises || COUNTRIES.filter((c) => c.code !== "GN").map((c) => c.code));
   const [permissionsOverride, setPermissionsOverride] = useState(user.permissionsOverride || {});
   const isAdmin = role === "Administrateur";
@@ -30729,6 +30729,7 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
       ...(peutChangerIdentifiant && vise ? { identifiant: vise } : {}),
       prenom, nom, email, telephone, role, paysOperation,
       agence: role === "Administrateur" || role === "Comptable" ? "" : agence,
+      zoneOperation: role === "Administrateur" || role === "Comptable" ? "" : agence,
       paysAutorises: isAdmin ? [] : paysAutorises,
       permissionsOverride: isAdmin ? {} : permissionsOverride,
     });
@@ -30816,8 +30817,8 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
               </div>
             </Field>
           )}
-          {(role === "Agent" || role === "Chauffeur") && (
-            <Field label="Agence assignée">
+          {(role === "Agent" || role === "Responsable de zone" || role === "Chauffeur") && (
+            <Field label={role === "Responsable de zone" ? "Zone opérationnelle assignée" : "Agence / zone assignée"}>
               <select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>
                 <option value="">Toutes les agences (aucune restriction)</option>
                 {sitesPourPays(sites, paysOperation).map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}
@@ -30959,7 +30960,7 @@ function UserForm({ onClose, onSave, existing, sites }) {
       prenom: estPartenaire ? "" : prenom,
       nom: estPartenaire ? nomEntreprise.trim() : nom,
       email: email.trim(), telephone, identifiant: identifiant.trim(), ...identifiants, role, paysOperation,
-      agence: role === "Administrateur" || role === "Comptable" ? "" : agence, twoFA,
+      agence: role === "Administrateur" || role === "Comptable" ? "" : agence, zoneOperation: role === "Administrateur" || role === "Comptable" ? "" : agence, twoFA,
       paysAutorises: role === "Administrateur" ? [] : paysAutorises,
       // Le contrat s'ouvre ensuite déjà rempli de ce que l'administrateur vient de saisir.
       ...(estPartenaire ? { partenaire: { nomCommercial: nomEntreprise.trim(), telephone, email: email.trim() } } : {}),
@@ -31014,9 +31015,9 @@ function UserForm({ onClose, onSave, existing, sites }) {
             <div style={{ fontSize: 11, color: "var(--muted)", marginTop: -8, marginBottom: 10 }}>Pays où travaille cette personne — son point expéditeur. Détermine l’agence proposée et les destinations autorisées par défaut.</div>
           </div>
         )}
-        {(role === "Agent" || role === "Chauffeur") && (
+        {(role === "Agent" || role === "Responsable de zone" || role === "Chauffeur") && (
           <div style={{ gridColumn: "1 / -1" }}>
-            <Field label="Agence assignée">
+            <Field label={role === "Responsable de zone" ? "Zone opérationnelle assignée" : "Agence / zone assignée"}>
               <select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>
                 <option value="">Toutes les agences (aucune restriction)</option>
                 {sitesPourPays(sites, paysOperation).map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}

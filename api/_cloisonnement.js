@@ -547,7 +547,7 @@ const CHAMPS_SOI_MEME = [
  * administrateur, qui les a déjà tous et n'a donc rien à y gagner : la règle vaut surtout pour
  * celui qui n'en a pas.
  */
-const CHAMPS_DE_POUVOIR = ["role", "permissionsOverride", "paysAutorises", "agence", "partenaireParent"];
+const CHAMPS_DE_POUVOIR = ["role", "permissionsOverride", "paysAutorises", "agence", "zoneOperation", "partenaireParent"];
 
 /*
  * Les sections de réglages, et la permission qu'il faut pour y toucher — les mêmes que celles qui
@@ -670,7 +670,7 @@ function comptesDeLEquipe(base, envoye, moi, peut) {
       return;
     }
 
-    if (!gere) { sortie.push(u); return; }
+    if (!gere || (zoneDeMoi && !compteDansMaZone(u))) { sortie.push(u); return; }
     if (!envoyeU) { if (peutSupprimer) return; sortie.push(u); return; }
     const retenu = { ...envoyeU };
     if (!droitsDesAutres) {
@@ -716,6 +716,8 @@ function comptesDeLEquipe(base, envoye, moi, peut) {
   const avantParId = new Map();
   liste(base.users).forEach((u) => { if (u && u.id) avantParId.set(u.id, u); });
   const estAdministrateur = moi.role === "Administrateur";
+  const zoneDeMoi = String(moi.zoneOperation || moi.agence || "").trim().toLowerCase();
+  const compteDansMaZone = (u) => !zoneDeMoi || u?.id === moi.id || String(u?.zoneOperation || u?.agence || "").trim().toLowerCase() === zoneDeMoi;
 
   const prisAilleurs = (id, candidat) => liste(base.users)
     .some((u) => u && u.id !== id && String(u.identifiant || "").trim().toLowerCase() === candidat);
@@ -858,6 +860,55 @@ export function reunirAlertesEcrasement(alertesBase, alertesEnvoyees) {
  * lui, l'alerte dirait qu'un enregistrement a été refusé sans dire d'où il venait, et il n'y
  * aurait rien à aller fermer.
  */
+/**
+ * Vue opérationnelle d'une zone pour les comptes internes non administrateurs.
+ * Le filtrage se fait côté serveur : masquer un menu côté navigateur ne suffit pas.
+ * Les colis sans site restent visibles afin de ne pas rendre une donnée orpheline introuvable.
+ */
+export function vueEquipeZone(donnees, compteId) {
+  if (!donnees || typeof donnees !== "object" || Array.isArray(donnees)) return donnees;
+  const moi = liste(donnees.users).find((u) => u && u.id === compteId);
+  if (!moi || moi.role === "Administrateur" || moi.role === "Comptable") return donnees;
+  const zone = String(moi.zoneOperation || moi.agence || "").trim().toLowerCase();
+  const pays = String(moi.paysOperation || "").trim().toUpperCase();
+  if (!zone) return { ...donnees, users: liste(donnees.users).filter((u) => u && u.id === compteId) };
+  const dansZone = (x) => {
+    if (!x) return false;
+    const valeur = String(x.site || x.agence || x.zoneOperation || "").trim();
+    return !valeur || valeur.toLowerCase() === zone;
+  };
+  const colis = liste(donnees.colis).filter((c) => dansZone(c) && (!pays || !c.expediteurPays || c.expediteurPays === pays));
+  const tracks = new Set(colis.map((c) => c.tracking).filter(Boolean));
+  const bordereaux = liste(donnees.bordereaux).filter((b) => liste(b.colisTrackings).some((t) => tracks.has(t)) || String(b.site || "").trim().toLowerCase() === zone);
+  const bordereauIds = new Set(bordereaux.map((b) => b.id).filter(Boolean));
+  const depenses = liste(donnees.depenses).filter((d) =>
+    (d.bordereauId && bordereauIds.has(d.bordereauId)) || String(d.bordereauNumero || "").trim() && bordereaux.some((b) => String(b.numero) === String(d.bordereauNumero))
+    || String(d.agence || d.site || "").trim().toLowerCase() === zone,
+  );
+  const users = liste(donnees.users).filter((u) => u && (u.id === compteId || String(u.zoneOperation || u.agence || "").trim().toLowerCase() === zone));
+  const clients = liste(donnees.clientAccounts).filter((c) =>
+    colis.some((x) => x.clientAccountId === c.id)
+    || String(c.zoneOperation || c.agence || "").trim().toLowerCase() === zone,
+  );
+  const clientIds = new Set(clients.map((c) => c.id).filter(Boolean));
+  const idsEquipe = new Set(users.map((u) => u.id).filter(Boolean));
+  const vue = {};
+  SECTIONS_PARTAGEES.forEach((cle) => { if (donnees[cle] !== undefined) vue[cle] = donnees[cle]; });
+  vue.colis = colis;
+  vue.bordereaux = bordereaux;
+  vue.depenses = depenses;
+  vue.users = users;
+  vue.clientAccounts = clients;
+  vue.preAlertes = liste(donnees.preAlertes).filter((x) => clientIds.has(x?.clientAccountId));
+  vue.demandesRegroupement = liste(donnees.demandesRegroupement).filter((x) => clientIds.has(x?.clientAccountId));
+  vue.remisesCaisse = liste(donnees.remisesCaisse).filter((x) => idsEquipe.has(x?.agentId) || String(x?.agence || "").trim().toLowerCase() === zone);
+  vue.pointages = liste(donnees.pointages).filter((x) => idsEquipe.has(x?.userId) || String(x?.agence || "").trim().toLowerCase() === zone);
+  vue.factures = liste(donnees.factures).filter((f) => liste(f?.trackings).some((t) => tracks.has(t)) || String(f?.agence || "").trim().toLowerCase() === zone);
+  vue.activityLog = liste(donnees.activityLog).filter((e) => idsEquipe.has(e?.userId) || String(e?.agence || "").trim().toLowerCase() === zone);
+  vue.messagesWhatsApp = liste(donnees.messagesWhatsApp).filter((m) => tracks.has(m?.tracking) || clientIds.has(m?.clientAccountId));
+  return vue;
+}
+
 export function fusionnerEcritureEquipe(actuel, propose, compteId, contexte = {}) {
   const base = actuel && typeof actuel === "object" && !Array.isArray(actuel) ? actuel : {};
   const envoye = propose && typeof propose === "object" && !Array.isArray(propose) ? propose : {};
@@ -919,6 +970,28 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId, contexte = {}
   });
 
   sortie.users = preserverIdentifiants(base.users, comptesDeLEquipe(base, envoye, moi, peut));
+  const zoneEcriture = String(moi.zoneOperation || moi.agence || "").trim().toLowerCase();
+  /* Une vue de zone est partielle : une écriture ne doit jamais transformer l’absence des autres
+   * zones en suppression. Les collections opérationnelles hors zone sont donc réintégrées ici. */
+  if (zoneEcriture) {
+    const conserverHorsZone = (cle, identifiant = "id") => {
+      const envoyes = liste(sortie[cle]);
+      const idsEnvoyes = new Set(envoyes.map((x) => x && x[identifiant]).filter(Boolean));
+      const horsZone = liste(base[cle]).filter((x) => x && x[identifiant] && !idsEnvoyes.has(x[identifiant]) && String(x.site || x.agence || x.zoneOperation || "").trim() && String(x.site || x.agence || x.zoneOperation || "").trim().toLowerCase() !== zoneEcriture);
+      sortie[cle] = [...envoyes, ...horsZone];
+    };
+    conserverHorsZone("colis", "tracking");
+    conserverHorsZone("bordereaux");
+    conserverHorsZone("depenses");
+    conserverHorsZone("clientAccounts");
+    conserverHorsZone("factures");
+    conserverHorsZone("remisesCaisse");
+    conserverHorsZone("pointages");
+    conserverHorsZone("preAlertes");
+    conserverHorsZone("demandesRegroupement");
+    conserverHorsZone("messagesWhatsApp");
+    conserverHorsZone("activityLog");
+  }
   /*
    * Les comptes clients ne passent par aucun tamis — l'équipe les gère entièrement. Ils ont donc
    * besoin de la même protection, et ce sont eux qui l'ont payée : deux des trois comptes clients

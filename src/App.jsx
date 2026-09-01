@@ -28501,22 +28501,31 @@ async function construireFacturePartenaireDoc(facture, partenaire, colisFactures
 
   doc.setFont(undefined, "normal"); doc.setFontSize(9);
   colisFactures.forEach((c, i) => {
-    if (y > 262) { doc.addPage(); y = 24; }
-    if (i % 2 === 1) { doc.setFillColor(247, 249, 252); doc.rect(M, y, W - 2 * M, 8, "F"); }
-    doc.setTextColor(...INK);
-    doc.text(String(c.tracking || "—"), colX[0], y + 5.4);
-    doc.text(doc.splitTextToSize(clientDuColisPartenaire(c), 56)[0], colX[1], y + 5.4);
+    // La colonne Contenu s'arrête avant le Poids : l'ancienne largeur de 60 mm empiétait sur
+    // « 8 kg » dès qu'un article avait un libellé un peu long.
+    const largeurClient = colX[2] - colX[1] - 5;
+    const largeurContenu = colX[3] - colX[2] - 5;
+    const clientLignes = doc.splitTextToSize(clientDuColisPartenaire(c), largeurClient);
     // Le timbre refacturé apparaît sur la ligne : le partenaire doit pouvoir vérifier qu'il paie
     // un envoi postal, et non une majoration de transport inexpliquée.
     const contenu = ((c.produits || []).map((p) => `${p.quantite || 1}× ${p.nom || "article"}`).join(", ") || "—")
       + (Number(c.fraisPostePartenaire) > 0 ? ` + poste ${fmt(Number(c.fraisPostePartenaire), facture.devise)}` : "");
+    const contenuLignes = doc.splitTextToSize(contenu, largeurContenu);
+    const hauteurLigne = Math.max(8, Math.max(clientLignes.length, contenuLignes.length) * 4.2 + 3);
+    if (y + hauteurLigne > 262) { doc.addPage(); y = 24; }
+    if (i % 2 === 1) { doc.setFillColor(247, 249, 252); doc.rect(M, y, W - 2 * M, hauteurLigne, "F"); }
+    doc.setFont(undefined, "normal"); doc.setTextColor(...INK);
+    doc.text(String(c.tracking || "—"), colX[0], y + 5.4);
+    doc.text(clientLignes, colX[1], y + 5.2);
     doc.setTextColor(...MUTED);
-    doc.text(doc.splitTextToSize(contenu, 60)[0], colX[2], y + 5.4);
-    doc.text(`${Number(c.poids) || 0} kg`, colX[3], y + 5.4, { align: "right" });
+    doc.text(contenuLignes, colX[2], y + 5.2);
+    const ligneCentre = y + hauteurLigne / 2 + 1.5;
+    doc.setTextColor(...MUTED);
+    doc.text(`${Number(c.poids) || 0} kg`, colX[3], ligneCentre, { align: "right" });
     doc.setTextColor(...INK); doc.setFont(undefined, "bold");
-    doc.text(fmt(Number(c.prixPartenaire) || 0, facture.devise), colX[4], y + 5.4, { align: "right" });
+    doc.text(fmt(Number(c.prixPartenaire) || 0, facture.devise), colX[4], ligneCentre, { align: "right" });
     doc.setFont(undefined, "normal");
-    y += 8;
+    y += hauteurLigne;
   });
 
   if (y > 250) { doc.addPage(); y = 24; }

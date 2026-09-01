@@ -14552,7 +14552,10 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
 
   async function telechargerPdf() {
     setGenPdf(true);
-    try { await downloadRouteManifest(colisInclus, country, bordereau.direction, bordereau, devise); }
+    try {
+      const depensesLiees = (data.depenses || []).filter((d) => d.bordereauId === bordereau.id || d.bordereauNumero === bordereau.numero || String(d.nom || "").endsWith(`(${bordereau.numero})`));
+      await downloadRouteManifest(colisInclus, country, bordereau.direction, bordereau, devise, depensesLiees);
+    }
     catch (e) { console.error(e); notify?.("Échec de génération du PDF"); }
     setGenPdf(false);
   }
@@ -14566,7 +14569,7 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
     // Même règle qu'en comptabilité : un montant illisible arrête la saisie, il ne devient pas zéro.
     const montantDepense = montantSaisi(depenseForm?.montant);
     if (montantDepense === null || montantDepense <= 0) { setDepenseForm({ ...depenseForm, erreur: "Montant illisible. Tapez le nombre, par exemple 500 000." }); return; }
-    const entry = { id: `dep${Date.now()}`, type: "Dépense", nom: `${depenseForm.nom} (${bordereau.numero})`, montant: Math.round(montantDepense), date: new Date().toISOString() };
+    const entry = { id: `dep${Date.now()}`, type: "Dépense", nom: depenseForm.nom.trim(), bordereauId: bordereau.id, bordereauNumero: bordereau.numero, montant: Math.round(montantDepense), devise: "GNF", date: new Date().toISOString() };
     persist({ ...data, depenses: [entry, ...(data.depenses || [])], activityLog: pushActivity(data, session, "Dépense liée à un bordereau", `${bordereau.numero} — ${entry.nom}`) });
     notify?.("Dépense ajoutée");
     setDepenseForm(null);
@@ -15962,7 +15965,7 @@ async function downloadReceptionBordereau(compte, colisSelectionnes, tarifs) {
   openPdf(doc, `bordereau-reception-${compte.nom}-${numero}.pdf`);
 }
 
-async function downloadRouteManifest(colisRoute, country, direction, bordereau, deviseAffichage) {
+async function downloadRouteManifest(colisRoute, country, direction, bordereau, deviseAffichage, depensesLiees = []) {
   const cur = deviseAffichage || country.currency;
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF());
@@ -16134,6 +16137,8 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   const totalFacture = colisRoute.reduce((s, c) => s + c.prix, 0);
   const totalEncaisse = colisRoute.reduce((s, c) => s + c.paye, 0);
   const totalRestant = colisRoute.reduce((s, c) => s + c.reste, 0);
+  const depensesPropres = (depensesLiees || []).filter((d) => Number(d.montant) > 0);
+  const totalDepenses = depensesPropres.reduce((s, d) => s + (Number(d.montant) || 0), 0);
   doc.setFillColor(245, 247, 251); doc.rect(14, finalY + 5, 182, 12, "F");
   doc.setFontSize(9); doc.setFont(undefined, "bold"); doc.setTextColor(10, 38, 71);
   // Le reste à percevoir est calé sur le bord droit du panneau : en francs guinéens, la ligne est
@@ -16144,7 +16149,29 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   doc.setTextColor(226, 63, 82);
   doc.text(`Reste à percevoir : ${fmt(totalRestant, cur)}`, 192, finalY + 12.5, { align: "right" });
 
-  const sigY = finalY + 30;
+  finalY += 24;
+  if (depensesPropres.length > 0) {
+    if (finalY > 252) { doc.addPage(); finalY = 20; }
+    doc.setFillColor(10, 38, 71); doc.roundedRect(14, finalY, 182, 8, 2, 2, "F");
+    doc.setFont(undefined, "bold"); doc.setFontSize(8); doc.setTextColor(255, 255, 255);
+    doc.text("DÉPENSES LIÉES AU BORDEREAU", 18, finalY + 5.3);
+    finalY += 11;
+    doc.setFont(undefined, "normal"); doc.setFontSize(8); doc.setTextColor(30, 40, 55);
+    depensesPropres.forEach((d, i) => {
+      if (finalY > 276) { doc.addPage(); finalY = 20; }
+      if (i % 2 === 0) { doc.setFillColor(245, 247, 251); doc.rect(14, finalY - 3.5, 182, 7, "F"); }
+      doc.text(String(d.nom || "Dépense"), 18, finalY + 1);
+      doc.text(`${fmt(Number(d.montant) || 0, d.devise || "GNF")}`, 192, finalY + 1, { align: "right" });
+      finalY += 7;
+    });
+    doc.setDrawColor(190, 198, 210); doc.line(14, finalY, 196, finalY);
+    doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(214, 39, 63);
+    doc.text("TOTAL DÉPENSES", 18, finalY + 7);
+    doc.text(fmt(totalDepenses, "GNF"), 192, finalY + 7, { align: "right" });
+    finalY += 14;
+  }
+
+  const sigY = finalY + 16;
   doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(90, 100, 120);
   doc.text("Signature de l’agent :", 14, sigY);
   doc.setDrawColor(180); doc.line(14, sigY + 14, 85, sigY + 14);

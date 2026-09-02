@@ -7617,8 +7617,14 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
        */
       let comptes = list;
       if (comptes.length === 0) {
+        /*
+         * `loadData` rend maintenant `{ document, ducache }` : ici on ne veut que les comptes, et
+         * peu importe qu'ils viennent du cache — c'est même tout l'objet de ce repli, ouvrir sa
+         * session sans réseau. Lire `base.users` sur l'enveloppe rendait la liste vide, et
+         * l'agent hors ligne se voyait refuser son propre mot de passe.
+         */
         const base = await loadData().catch(() => null);
-        comptes = base?.users || [];
+        comptes = base?.document?.users || [];
       }
       /*
        * Hors ligne, la recherche suit les mêmes trois clés qu'au serveur : sans cela, un agent
@@ -8428,7 +8434,7 @@ function PartnerDashboard({ data, session, persist, verifier, notify, onglet }) 
     const inclus = (data.colis || []).filter((c) => (facture.trackings || []).includes(c.tracking));
     setPdfEnCours(facture.id);
     try {
-      const doc = await construireFacturePartenaireDoc(facture, moi, inclus);
+      const doc = await construireFacturePartenaireDoc(facture, moi, inclus, data?.entreprise);
       openPdf(doc, `${facture.numero}.pdf`);
     } catch (e) {
       console.error(e);
@@ -10950,6 +10956,25 @@ function AgencesConfigPage({ data, persist, notify, onBack, sansEntete }) {
         <Field label="Deuxième ligne (facultatif)"><input value={entreprise.telephone2 || ""} onChange={(e) => setEntreprise({ ...entreprise, telephone2: e.target.value })} style={inputStyle} placeholder="Laissez vide s’il n’y en a qu’une" /></Field>
         <Field label="E-mail"><input value={entreprise.email} onChange={(e) => setEntreprise({ ...entreprise, email: e.target.value })} style={inputStyle} /></Field>
         <Field label="Site web"><input value={entreprise.siteWeb} onChange={(e) => setEntreprise({ ...entreprise, siteWeb: e.target.value })} style={inputStyle} /></Field>
+        {/*
+          * LE NUMÉRO DU REGISTRE DU COMMERCE, SUR LES FACTURES.
+          *
+          * Une facture sans immatriculation est une facture qu'on peut contester : rien n'y dit
+          * que l'entreprise existe légalement. Le numéro d'entreprise du RCCM le dit en une ligne,
+          * vérifiable au Tribunal de commerce — c'est ce que cherche un client qui doit justifier
+          * une dépense, et ce que demande une administration.
+          *
+          * Il se règle ici plutôt que de vivre dans le code : une immatriculation change (forme
+          * juridique, transfert de siège), et cela ne doit pas demander une mise en ligne.
+          */}
+        <Field label="N° RCCM (registre du commerce)">
+          <input value={entreprise.rccm || ""} onChange={(e) => setEntreprise({ ...entreprise, rccm: e.target.value })} style={inputStyle} placeholder="ex : GN.TCC.2024.A.02328" />
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -8, lineHeight: 1.5 }}>
+            Le <strong>numéro d’entreprise</strong> de votre attestation, pas le numéro de formalité.
+            Il s’imprimera sur toutes vos factures — c’est lui qui montre que l’entreprise est
+            régulièrement constituée.
+          </div>
+        </Field>
       </div>
 
       <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, maxWidth: 620, border: "1px solid var(--border)", marginBottom: 20 }}>
@@ -17093,7 +17118,9 @@ async function downloadFactureEnLigne(colis, data, options = {}) {
     ? `Suivez ce colis et tous les suivants depuis votre espace : ouvrez votre compte sur ${lienEspaceClient()}`
     : "Conservez cette facture jusqu’à la remise du colis. Vous serez prévenu par WhatsApp à chaque étape.", M, PIED - 3);
   const entreprise = data?.entreprise || {};
-  const societe = ["BA-DIABY EXPRESS", entreprise.telephone || telephonePourPays(data, "GN"), entreprise.email || "badiabyexpress.bde@gmail.com"]
+  /* L'immatriculation en pied de facture : elle dit que l'entreprise est régulièrement constituée. */
+  const societe = ["BA-DIABY EXPRESS", entreprise.telephone || telephonePourPays(data, "GN"), entreprise.email || "badiabyexpress.bde@gmail.com",
+    entreprise.rccm ? `RCCM ${entreprise.rccm}` : null]
     .filter(Boolean).join(" · ");
   doc.text(couper(societe, W - 2 * M - 24), M, PIED + 1.5);
 
@@ -17401,7 +17428,9 @@ async function downloadInvoice(colis, data, options = {}) {
     ? `Suivez ce colis et tous les suivants depuis votre espace : ouvrez votre compte sur ${lienEspaceClient()}`
     : "Conservez ce ticket jusqu'à la remise du colis. Vous serez prévenu par WhatsApp à chaque étape.", M, Z.pied - 3);
   const entreprise = data?.entreprise || {};
-  const ligneSociete = ["BA-DIABY EXPRESS", entreprise.telephone || telephonePourPays(data, "GN"), entreprise.email || "badiabyexpress.bde@gmail.com"]
+  /* L'immatriculation en pied de facture : elle dit que l'entreprise est régulièrement constituée. */
+  const ligneSociete = ["BA-DIABY EXPRESS", entreprise.telephone || telephonePourPays(data, "GN"), entreprise.email || "badiabyexpress.bde@gmail.com",
+    entreprise.rccm ? `RCCM ${entreprise.rccm}` : null]
     .filter(Boolean).join(" · ");
   doc.text(couper(ligneSociete, W - 2 * M - 24), M, Z.pied + 1.5);
   doc.text("Page 1 / 1", W - M, Z.pied + 1.5, { align: "right" });
@@ -28369,7 +28398,7 @@ function clientDuColisPartenaire(colis) {
   return String(nom || colis?.destinataire || "—");
 }
 
-async function construireFacturePartenaireDoc(facture, partenaire, colisFactures) {
+async function construireFacturePartenaireDoc(facture, partenaire, colisFactures, entreprise = {}) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF());
   const W = 210, M = 16;
@@ -28537,6 +28566,22 @@ async function construireFacturePartenaireDoc(facture, partenaire, colisFactures
   doc.text(doc.splitTextToSize(
     "Montants calculés au tarif convenu avec le partenaire, sur des colis vérifiés et pesés par nos agents. "
     + "Les prix que le partenaire applique à ses propres clients ne figurent pas sur cette facture.", W - 2 * M), M, y);
+
+  /*
+   * L'IMMATRICULATION, EN PIED DE FACTURE.
+   *
+   * C'est la facture la plus formelle que l'entreprise émette : elle part à une autre entreprise,
+   * qui la porte dans sa comptabilité. Sans numéro de registre du commerce, rien n'y dit que
+   * l'émetteur existe légalement — et c'est la première chose que regarde un comptable, ou une
+   * administration à qui l'on présente la dépense.
+   */
+  const rccm = String(entreprise?.rccm || "").trim();
+  if (rccm) {
+    y += 10;
+    if (y > 280) { doc.addPage(); y = 24; }
+    doc.setFontSize(8); doc.setTextColor(...MUTED);
+    doc.text(`BA-DIABY EXPRESS — RCCM ${rccm}`, M, y);
+  }
 
   return doc;
 }
@@ -29078,7 +29123,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
   async function imprimerFacture(facture) {
     const inclus = (data.colis || []).filter((c) => (facture.trackings || []).includes(c.tracking));
     try {
-      const doc = await construireFacturePartenaireDoc(facture, partenaire, inclus);
+      const doc = await construireFacturePartenaireDoc(facture, partenaire, inclus, data?.entreprise);
       openPdf(doc, `${facture.numero}.pdf`);
     } catch (e) {
       console.error(e);

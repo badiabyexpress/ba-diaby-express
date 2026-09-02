@@ -1769,6 +1769,12 @@ function sitesOperationEtranger(data) {
 }
 function peutCreerColisEnLigne(session, data) {
   if (!session) return false;
+  /*
+   * Un partenaire est une entreprise tierce : il dépose des colis, il n'en enregistre pas pour le
+   * compte de l'entreprise. Le rôle passe avant l'agence — sans quoi un partenaire à qui l'on
+   * aurait mis « PARIS » dans sa fiche ouvrirait le comptoir de l'entreprise.
+   */
+  if (session.role === "Partenaire") return false;
   if (session.role === "Administrateur") return true;
   const sienne = String(session.agence || "").trim().toLowerCase();
   if (!sienne) return false;
@@ -1801,6 +1807,25 @@ export function autorisationModifierColisEnLigne(session, data) {
   if (peutCreerColisEnLigne(session, data)) return { autorise: true, motif: null };
   if (effectivePermission(session, "colis.enligne_modifier")) return { autorise: true, motif: "derogation" };
   return { autorise: false, motif: "site" };
+}
+
+/**
+ * QUI OUVRE LE COMPTOIR DE RÉCEPTION CLIENT.
+ *
+ * L'écran demandait une permission, et une seule — accordée compte par compte. C'est juste pour
+ * Conakry, où l'on remet les colis : tout le monde n'a pas à générer des bordereaux. Mais à
+ * PARIS, ce comptoir n'est pas une commodité, c'est le poste de travail : les commandes y
+ * arrivent, on les y pèse, et c'est le seul endroit d'où un colis d'achat en ligne peut naître.
+ * Un agent affecté au site de départ s'y voyait pourtant refuser l'entrée tant que
+ * l'administrateur ne l'avait pas nommé — et il n'avait aucun autre moyen d'enregistrer les colis
+ * qu'il avait sous la main.
+ *
+ * Le droit lui vient donc de son site, comme la correction d'un colis en ligne. Ailleurs, il
+ * reste une permission à accorder.
+ */
+export function peutOuvrirComptoirReception(session, data) {
+  if (effectivePermission(session, "colis.bordereau_reception")) return true;
+  return peutCreerColisEnLigne(session, data);
 }
 
 /** Le nom des sites d’où partent les commandes — pour dire à qui revient la correction. */
@@ -13743,7 +13768,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
         */}
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", minWidth: 0 }}>
           {effectivePermission(session, "colis.importer_excel") && <button onClick={() => setShowImport(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><Download size={17} color="var(--info-fg)" style={{ transform: "rotate(180deg)" }} /> Importer Excel</button>}
-          {effectivePermission(session, "colis.bordereau_reception") && <button onClick={() => setShowReception(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={17} color="var(--ok-fg)" /> Bordereau de réception</button>}
+          {peutOuvrirComptoirReception(session, data) && <button onClick={() => setShowReception(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={17} color="var(--ok-fg)" /> Bordereau de réception</button>}
           {effectivePermission(session, "colis.reglement_groupe") && <button onClick={() => setShowEncaisseGroupe(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><DollarSign size={17} color="var(--ok-fg)" /> Règlement groupé</button>}
           {peutCreer && <button onClick={() => setShowAi(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><Sparkles size={17} color="#8B5CF6" /> Créer par IA</button>}
           {/* Colis déposé par un partenaire : formulaire court, sans catégorie ni tarif — le partenaire

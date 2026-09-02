@@ -930,14 +930,37 @@ export function reunirAlertesEcrasement(alertesBase, alertesEnvoyees) {
  * aurait rien à aller fermer.
  */
 /**
+ * CE COMPTE REÇOIT-IL UNE VUE RÉDUITE À SA ZONE ?
+ *
+ * Une seule fonction répond, et la lecture comme l'écriture s'y réfèrent : deux réponses
+ * différentes ici, et le serveur rendrait moins que ce qu'il accepte de réécrire — c'est-à-dire
+ * qu'il effacerait la différence à chaque enregistrement.
+ *
+ * TROIS FAÇONS DE TOUT VOIR, et « Voir tous les colis » en est une.
+ *
+ * Cette permission existe, elle s'affiche dans l'écran des droits, et l'administrateur l'accorde.
+ * Elle n'était pourtant lue nulle part ici : l'agent à qui on venait de la donner continuait de
+ * ne voir que son agence, sans que rien n'explique pourquoi. Une permission accordée qui ne
+ * change rien est pire que pas de permission du tout — personne ne cherche l'erreur là où le
+ * réglage dit que c'est bon.
+ */
+export function estFiltreParZone(document, compteId) {
+  const moi = liste(document?.users).find((u) => u && u.id === compteId);
+  if (!moi) return false;
+  if (moi.role === "Administrateur" || moi.role === "Comptable") return false;
+  if (effectivePermission(moi, "colis.voir_tous")) return false;
+  return true;
+}
+
+/**
  * Vue opérationnelle d'une zone pour les comptes internes non administrateurs.
  * Le filtrage se fait côté serveur : masquer un menu côté navigateur ne suffit pas.
  * Les colis sans site restent visibles afin de ne pas rendre une donnée orpheline introuvable.
  */
 export function vueEquipeZone(donnees, compteId) {
   if (!donnees || typeof donnees !== "object" || Array.isArray(donnees)) return donnees;
+  if (!estFiltreParZone(donnees, compteId)) return donnees;
   const moi = liste(donnees.users).find((u) => u && u.id === compteId);
-  if (!moi || moi.role === "Administrateur" || moi.role === "Comptable") return donnees;
   const zone = String(moi.zoneOperation || moi.agence || "").trim().toLowerCase();
   const pays = String(moi.paysOperation || "").trim().toUpperCase();
   if (!zone) return { ...donnees, users: liste(donnees.users).filter((u) => u && u.id === compteId) };
@@ -976,21 +999,6 @@ export function vueEquipeZone(donnees, compteId) {
   vue.activityLog = liste(donnees.activityLog).filter((e) => idsEquipe.has(e?.userId) || String(e?.agence || "").trim().toLowerCase() === zone);
   vue.messagesWhatsApp = liste(donnees.messagesWhatsApp).filter((m) => tracks.has(m?.tracking) || clientIds.has(m?.clientAccountId));
   return vue;
-}
-
-/**
- * CE COMPTE REÇOIT-IL UNE VUE RÉDUITE À SA ZONE ?
- *
- * `vueEquipeZone` ne rend à un responsable de zone que ce qui la concerne. C'est juste en lecture —
- * et redoutable en écriture, parce que TOUTES les données de l'application tiennent dans un seul
- * document : la page renvoie ce qu'elle a reçu, c'est-à-dire une version où tout ce qui est hors
- * de sa zone a disparu. Sans le rattrapage ci-dessous, chaque enregistrement d'un agent de zone
- * effacerait le travail des autres zones.
- */
-export function estFiltreParZone(document, compteId) {
-  const moi = liste(document?.users).find((u) => u && u.id === compteId);
-  if (!moi || moi.role === "Administrateur" || moi.role === "Comptable") return false;
-  return !!String(moi.zoneOperation || moi.agence || "").trim();
 }
 
 /**
@@ -1148,28 +1156,13 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId, contexte = {}
   });
 
   sortie.users = preserverIdentifiants(base.users, comptesDeLEquipe(base, envoye, moi, peut));
-  const zoneEcriture = String(moi.zoneOperation || moi.agence || "").trim().toLowerCase();
-  /* Une vue de zone est partielle : une écriture ne doit jamais transformer l’absence des autres
-   * zones en suppression. Les collections opérationnelles hors zone sont donc réintégrées ici. */
-  if (zoneEcriture) {
-    const conserverHorsZone = (cle, identifiant = "id") => {
-      const envoyes = liste(sortie[cle]);
-      const idsEnvoyes = new Set(envoyes.map((x) => x && x[identifiant]).filter(Boolean));
-      const horsZone = liste(base[cle]).filter((x) => x && x[identifiant] && !idsEnvoyes.has(x[identifiant]) && String(x.site || x.agence || x.zoneOperation || "").trim() && String(x.site || x.agence || x.zoneOperation || "").trim().toLowerCase() !== zoneEcriture);
-      sortie[cle] = [...envoyes, ...horsZone];
-    };
-    conserverHorsZone("colis", "tracking");
-    conserverHorsZone("bordereaux");
-    conserverHorsZone("depenses");
-    conserverHorsZone("clientAccounts");
-    conserverHorsZone("factures");
-    conserverHorsZone("remisesCaisse");
-    conserverHorsZone("pointages");
-    conserverHorsZone("preAlertes");
-    conserverHorsZone("demandesRegroupement");
-    conserverHorsZone("messagesWhatsApp");
-    conserverHorsZone("activityLog");
-  }
+  /*
+   * Le rattrapage des lignes hors zone se fait tout en haut, par `reconstituerHorsZone` : il part
+   * de ce que la LECTURE avait réellement montré à ce compte, et non d'une devinette sur le nom de
+   * son agence. Un premier essai le faisait ici, à partir du champ `site` de chaque ligne, et pour
+   * toute personne ayant une agence — même celles qui reçoivent le document entier. Elles ne
+   * pouvaient alors plus rien supprimer hors de leur agence, sans un mot d'explication.
+   */
   /*
    * Les comptes clients ne passent par aucun tamis — l'équipe les gère entièrement. Ils ont donc
    * besoin de la même protection, et ce sont eux qui l'ont payée : deux des trois comptes clients

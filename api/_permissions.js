@@ -130,7 +130,19 @@ export const PERMISSIONS_SCHEMA = [
 
 export const ROLE_DEFAULT_PERMISSIONS = {
   "Administrateur": PERMISSIONS_SCHEMA.flatMap((g) => g.permissions.map((p) => p.key)),
-  "Responsable de zone": ["colis.voir_propres", "colis.voir_tous", "colis.creer", "colis.modifier", "colis.changer_statut", "colis.enregistrer_paiement", "colis.importer_excel", "colis.bordereau_reception", "colis.reglement_groupe", "bordereaux.consulter", "bordereaux.creer", "bordereaux.modifier", "bordereaux.valider", "factures.consulter", "factures.creer", "factures.modifier", "paiements.voir_propres", "clients.consulter", "espaceclient.gerer", "stats.personnelles", "equipe.pointage", "users.gerer", "ia.utiliser"],
+  /*
+   * LE RESPONSABLE DE ZONE VOIT SA ZONE — c'est le sens même du rôle.
+   *
+   * Il portait « Voir tous les colis » par défaut. Or c'est cette permission qui commande le
+   * cloisonnement : la lui donner d'office revenait à créer un rôle « responsable de zone » qui
+   * n'était responsable d'aucune zone en particulier, et le filtrage ne s'appliquait à personne.
+   * L'administrateur peut toujours la lui accorder nommément s'il veut qu'il voie tout.
+   *
+   * « Consulter les utilisateurs » lui manquait, alors qu'il a le droit d'en créer et d'en
+   * modifier : l'écran qui sert à cela ne s'ouvrait donc pas pour lui. Un droit accordé qu'aucune
+   * porte n'honore est un droit qui n'existe pas.
+   */
+  "Responsable de zone": ["colis.voir_propres", "colis.creer", "colis.modifier", "colis.changer_statut", "colis.enregistrer_paiement", "colis.importer_excel", "colis.bordereau_reception", "colis.reglement_groupe", "bordereaux.consulter", "bordereaux.creer", "bordereaux.modifier", "bordereaux.valider", "factures.consulter", "factures.creer", "factures.modifier", "paiements.voir_propres", "clients.consulter", "espaceclient.gerer", "stats.personnelles", "equipe.pointage", "users.consulter", "users.gerer", "ia.utiliser"],
   "Agent": ["colis.voir_propres", "colis.voir_tous", "colis.creer", "colis.modifier", "colis.changer_statut", "colis.enregistrer_paiement", "bordereaux.consulter", "bordereaux.creer", "bordereaux.modifier", "bordereaux.valider", "factures.consulter", "factures.creer", "factures.modifier", "paiements.voir_propres", "clients.consulter", "stats.personnelles", "ia.utiliser"],
   "Comptable": ["colis.voir_tous", "factures.consulter", "factures.creer", "factures.modifier", "clients.consulter", "bordereaux.consulter", "compta.consulter", "compta.gerer_depenses", "compta.charges_fixes", "compta.marges", "stats.globales", "stats.exporter"],
   "Chauffeur": ["colis.voir_propres", "colis.changer_statut", "stats.personnelles"],

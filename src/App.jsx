@@ -819,6 +819,22 @@ function fmtGNF(n) {
  * virgule décimale et le sigle de la devise. On rend null — et non zéro — quand il n'y a rien de
  * lisible : c'est à l'appelant de refuser la saisie plutôt que d'inventer un montant.
  */
+/**
+ * CE QUE L'AGENT TAPE, TEL QUE LE RESTE DU CODE SAIT LE LIRE.
+ *
+ * En français, trois kilos trois se tapent « 3,30 ». Un champ `type="number"` REFUSE la virgule :
+ * le navigateur affiche bien ce qui est saisi, le cadre passe au rouge, et `value` reste VIDE.
+ * L'agent voyait donc son poids à l'écran, appuyait sur « Confirmer », et rien ne se passait —
+ * sans qu'aucun message n'explique pourquoi. Sur un téléphone guinéen, le clavier propose la
+ * virgule ; c'est donc le cas ordinaire, pas le cas rare.
+ *
+ * Les champs de poids sont désormais des champs de texte à clavier décimal, et la virgule devient
+ * un point à la frappe : tout ce qui lit ces valeurs avec `Number()` continue de fonctionner.
+ */
+function nombreTape(valeur) {
+  return String(valeur ?? "").replace(",", ".");
+}
+
 function montantSaisi(valeur) {
   if (typeof valeur === "number") return Number.isFinite(valeur) ? valeur : null;
   if (typeof valeur !== "string") return null;
@@ -1779,6 +1795,26 @@ function peutCreerColisEnLigne(session, data) {
   const sienne = String(session.agence || "").trim().toLowerCase();
   if (!sienne) return false;
   return sitesOperationEtranger(data).some((s) => String(s.nom || "").trim().toLowerCase() === sienne);
+}
+
+/**
+ * LES DROITS QUI OUVRENT LA CONFIGURATION — un seul suffit.
+ *
+ * L'entrée du menu ne lisait que « Accéder à la configuration ». Or la Configuration n'est pas un
+ * écran : c'est une salle de dix-sept portes, et chacune a sa propre clé. Un responsable à qui
+ * l'on avait donné le droit de gérer les utilisateurs — la seule porte qui l'intéressait — ne
+ * voyait tout simplement pas la salle. Son droit était accordé, affiché dans le tableau, et sans
+ * effet : il n'y avait aucun chemin pour s'en servir.
+ *
+ * La liste ci-dessous doit rester celle des permissions employées par ces écrans. Un banc le
+ * vérifie : ajouter une porte sans sa clé ici la rendrait invisible à qui la possède.
+ */
+export const PERMISSIONS_CONFIGURATION = [
+  "config.acceder", "config.tarifs", "config.categories",
+  "users.consulter", "stats.globales", "stats.exporter",
+];
+export function peutOuvrirConfiguration(session) {
+  return PERMISSIONS_CONFIGURATION.some((cle) => effectivePermission(session, cle));
 }
 
 /** Un colis d’achat en ligne — reconnu partout de la même façon. */
@@ -4473,7 +4509,7 @@ function App() {
      * dans le menu, à côté de son travail.
      */
     { key: "mapointage", label: "Ma fiche", icon: Clock, show: !perm("equipe.pointage") },
-    { key: "admin", label: t.admin, icon: Settings, show: perm("config.acceder") },
+    { key: "admin", label: t.admin, icon: Settings, show: peutOuvrirConfiguration(session) },
   ].filter((n) => n.show);
 
   return (
@@ -6735,7 +6771,7 @@ function ReservationAerienneModal({ reservations, onSubmit, onClose }) {
             </select>
           </label>
           <label style={{ fontSize: 12, color: "var(--muted)" }}>Poids réel (kg)
-            <input type="number" min="0.1" step="0.1" value={poids} onChange={(e) => setPoids(e.target.value)} required placeholder="Ex. 5" style={{ ...inputStyle, width: "100%", marginTop: 5 }} />
+            <input type="text" inputMode="decimal" value={poids} onChange={(e) => setPoids(nombreTape(e.target.value))} required placeholder="Ex. 5" style={{ ...inputStyle, width: "100%", marginTop: 5 }} />
           </label>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 9, marginBottom: 9 }}>
@@ -10811,7 +10847,7 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
                       </Field>
                     )}
                     <Field label="Quantité"><input type="number" min="1" value={a.quantite} onChange={(e) => majArticle(a.id, { quantite: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
-                    <Field label="Poids (kg) *"><input type="number" step="0.01" min="0" value={a.poids} onChange={(e) => majArticle(a.id, { poids: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="0" /></Field>
+                    <Field label="Poids (kg) *"><input type="text" inputMode="decimal" value={a.poids} onChange={(e) => majArticle(a.id, { poids: nombreTape(e.target.value) })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="0" /></Field>
                   </div>
                   {tarifDefini && (
                     <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8 }}>
@@ -12291,7 +12327,7 @@ function TraiterPreAlerteModal({ preAlerte, client, tarifs, onValider, onClose }
 
       <div style={{ fontSize: 11.5, color: "var(--muted)", fontWeight: 700, margin: "18px 0 8px" }}>PESÉE ET TARIFICATION</div>
       <div style={{ display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
-        <input type="number" step="0.1" min="0" value={poids} onChange={(e) => { setPoids(e.target.value); setErreur(""); }} placeholder="Poids réel (kg)" autoFocus style={{ ...inputStyle, width: 150, marginBottom: 0 }} />
+        <input type="text" inputMode="decimal" value={poids} onChange={(e) => { setPoids(nombreTape(e.target.value)); setErreur(""); }} placeholder="Poids réel (kg)" autoFocus style={{ ...inputStyle, width: 150, marginBottom: 0 }} />
         <div style={{ flex: 1, minWidth: 220, background: calcul ? "var(--ok-bg)" : "var(--surface2)", border: "1px solid " + (calcul ? "var(--ok-border)" : "var(--border)"), borderRadius: 12, padding: "10px 14px" }}>
           {calcul ? (
             <>
@@ -15641,7 +15677,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
                 <Field label="Nom du produit *"><input value={p.nom} onChange={(e) => updateProduit(p.id, { nom: e.target.value })} style={inputStyle} placeholder="Rechercher ou saisir un produit..." /></Field>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 10 }}>
                   <Field label="Quantité *"><input type="number" min="1" step="1" inputMode="numeric" value={p.quantite} onChange={(e) => updateProduit(p.id, { quantite: e.target.value })} style={inputStyle} /></Field>
-                  <Field label="Poids du colis (kg) *"><input type="number" min="0" step="0.1" inputMode="decimal" value={p.poids} onChange={(e) => updateProduit(p.id, { poids: e.target.value })} style={inputStyle} /></Field>
+                  <Field label="Poids du colis (kg) *"><input type="text" inputMode="decimal" value={p.poids} onChange={(e) => updateProduit(p.id, { poids: nombreTape(e.target.value) })} style={inputStyle} /></Field>
                 </div>
                 <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: -8, marginBottom: 12 }}>Le poids est indépendant de la quantité — il représente le poids réel du colis, jamais multiplié.</div>
 
@@ -18421,7 +18457,33 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   // ont déjà servi à générer le bordereau et l'étiquette — les modifier après coup créerait un
   // écart avec les documents déjà imprimés/remis. Seules les coordonnées expéditeur/destinataire
   // restent corrigibles à ce stade (numéro erroné, adresse à préciser...).
-  const modifiableComplet = colis.status === "Enregistré";
+  /*
+   * ET L'ADMINISTRATEUR, LUI, CORRIGE À TOUT MOMENT.
+   *
+   * La règle vaut pour l'équipe : après le départ, le poids et le tarif ont servi à faire le
+   * bordereau et l'étiquette, et les rouvrir créerait un écart avec des papiers déjà imprimés.
+   *
+   * Mais les erreurs qu'on découvre sont justement celles de la RÉCEPTION — un poids mal relevé,
+   * un article oublié, un prix faux — et on ne les découvre qu'une fois le colis arrivé, quand le
+   * client est au comptoir. L'administrateur se retrouvait alors devant une fiche verrouillée, sans
+   * autre solution que d'annuler le colis et de le ressaisir : le numéro de suivi changeait, le
+   * client recevait deux messages, et l'historique perdait le fil. Il corrige donc directement, et
+   * l'écran lui rappelle ce que sa correction laisse en arrière.
+   */
+  const modifiableComplet = colis.status === "Enregistré" || estAdmin
+    /*
+     * ET L'ÉQUIPE QUI A PESÉ LE COLIS EN LIGNE, À TOUT MOMENT.
+     *
+     * Un carton de plus arrive pour le même client trois jours après le premier, ou l'agent
+     * s'aperçoit au comptoir qu'un article manque à la liste. Ces erreurs-là ne se découvrent
+     * qu'après coup, et l'écran ne montrait alors plus l'étape « Articles » : il ne restait qu'à
+     * annuler le colis et le ressaisir — nouveau numéro de suivi, deux messages au client,
+     * historique perdu.
+     *
+     * C'est le site de départ qui pèse ces colis et qui répond de leur prix ; c'est donc à lui que
+     * la correction revient, à toute heure. `modificationAutorisee` porte déjà cette règle.
+     */
+    || (estColisEnLigne(colis) && modificationAutorisee);
   const auxPaliers = colis.tarification === "reception";
   /*
    * UN COLIS COMMANDÉ EN LIGNE SE CORRIGE COMME IL A ÉTÉ SAISI.
@@ -18814,9 +18876,22 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
 
         <StepIndicator step={step} etapes={etapesEdition} onStepClick={(i) => { setErr(""); setStep(i); }} />
 
+        {/*
+          * L'administrateur corrige un colis déjà parti : on ne l'en empêche pas, on lui dit ce que
+          * sa correction laisse en arrière. Le bordereau et l'étiquette sont imprimés, la facture
+          * peut être déjà partie — changer le poids ici ne les change pas.
+          */}
+        {modifiableComplet && colis.status !== "Enregistré" && (
+          <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "var(--warn-fg)", marginBottom: 16, lineHeight: 1.5 }}>
+            Ce colis est déjà <strong>{colis.status}</strong>. Vous pouvez tout corriger — c’est
+            fait pour les erreurs constatées à la réception. Retenez que le bordereau et l’étiquette
+            sont déjà imprimés{Number(colis.paye) > 0 ? ", et qu’un paiement a déjà été encaissé" : ""} :
+            renvoyez la facture au client si le montant change.
+          </div>
+        )}
         {!modifiableComplet && (
           <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "var(--warn-fg)", marginBottom: 16, lineHeight: 1.5 }}>
-            Colis déjà expédié ({colis.status}) — le poids, le contenu, la route et le tarif ne sont plus modifiables ici, pour rester cohérents avec le bordereau et l’étiquette déjà émis. Seules les coordonnées expéditeur et destinataire restent corrigibles.
+            Colis déjà expédié ({colis.status}) — le poids, le contenu, la route et le tarif ne sont plus modifiables ici, pour rester cohérents avec le bordereau et l’étiquette déjà émis. Seules les coordonnées expéditeur et destinataire restent corrigibles. Un administrateur peut, lui, tout corriger.
           </div>
         )}
 
@@ -18933,7 +19008,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
                         <input type="number" min="1" step="1" inputMode="numeric" value={p.quantite} onChange={(e) => updateProduit(p.id, { quantite: e.target.value })} style={inputStyle} />
                       </Field>
                       <Field label="Poids (kg)">
-                        <input type="number" min="0" step="0.1" inputMode="decimal" value={p.poids} onChange={(e) => updateProduit(p.id, { poids: e.target.value })} style={inputStyle} placeholder="3.5" />
+                        <input type="text" inputMode="decimal" value={p.poids} onChange={(e) => updateProduit(p.id, { poids: nombreTape(e.target.value) })} style={inputStyle} placeholder="3.5" />
                       </Field>
                     </div>
                   </div>
@@ -18985,7 +19060,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
                   <Field label="Nom de l’article"><input value={p.nom} onChange={(e) => updateProduit(p.id, { nom: e.target.value })} style={inputStyle} /></Field>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10 }}>
                     <Field label="Quantité"><input type="number" min="1" step="1" inputMode="numeric" value={p.quantite} onChange={(e) => updateProduit(p.id, { quantite: e.target.value })} style={inputStyle} /></Field>
-                    <Field label="Poids (kg)"><input type="number" min="0" step="0.1" inputMode="decimal" value={p.poids} onChange={(e) => updateProduit(p.id, { poids: e.target.value })} style={inputStyle} /></Field>
+                    <Field label="Poids (kg)"><input type="text" inputMode="decimal" value={p.poids} onChange={(e) => updateProduit(p.id, { poids: nombreTape(e.target.value) })} style={inputStyle} /></Field>
                   </div>
                   {estPartenaire ? (
                     <>
@@ -24325,7 +24400,7 @@ function ScanArticleEnLigne({ referencesExistantes = [], boutiqueParDefaut = "",
                 <input type="number" min="1" value={verif.quantite} onChange={(e) => setVerif({ ...verif, quantite: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} />
               </Field>
               <Field label="Poids pesé (kg) *">
-                <input type="number" min="0" step="0.001" value={verif.poids} onChange={(e) => setVerif({ ...verif, poids: e.target.value, erreur: "" })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="ex : 3.758" />
+                <input type="text" inputMode="decimal" value={verif.poids} onChange={(e) => setVerif({ ...verif, poids: nombreTape(e.target.value), erreur: "" })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="ex : 3.758" />
               </Field>
             </div>
 
@@ -24846,7 +24921,7 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
                         </select>
                       </Field>
                       <Field label={etroit || i === 0 ? "Qté" : ""}><input type="number" min="1" value={a.quantite} onChange={(e) => majArticle(a.id, { quantite: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
-                      <Field label={etroit || i === 0 ? "Poids (kg)" : ""}><input type="number" min="0" step="0.1" value={a.poids} onChange={(e) => majArticle(a.id, { poids: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="3.5" /></Field>
+                      <Field label={etroit || i === 0 ? "Poids (kg)" : ""}><input type="text" inputMode="decimal" value={a.poids} onChange={(e) => majArticle(a.id, { poids: nombreTape(e.target.value) })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="3.5" /></Field>
                       <button
                         onClick={() => setArticles((l) => (l.length > 1 ? l.filter((x) => x.id !== a.id) : l))}
                         disabled={articles.length === 1}

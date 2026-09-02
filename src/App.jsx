@@ -12155,7 +12155,7 @@ function GestionDevisesPage({ data, persist, session, notify, onBack }) {
     setRapatriement(true);
     setTauxMsg(null);
     try {
-      const reponse = await appelServeurQuiDepense("/api/taux");
+      const reponse = await appelServeurQuiDepense("/api/services?service=taux");
       const corps = await reponse.json().catch(() => ({}));
       if (reponse.status === 501) {
         setTauxMsg({ ok: false, texte: "Les taux automatiques ne sont pas encore configurés sur le serveur. Vos taux saisis à la main restent en place." });
@@ -25104,7 +25104,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
 }
 
 async function callClaude(prompt) {
-  const response = await appelServeurQuiDepense("/api/claude", {
+  const response = await appelServeurQuiDepense("/api/services?service=claude", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1000, messages: [{ role: "user", content: prompt }] }),
   });

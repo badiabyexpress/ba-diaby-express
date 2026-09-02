@@ -236,6 +236,231 @@ export default async function handler(req, res) {
       }
 
       /*
+       * Une sauvegarde (bde-backup-…) est écrite d'un bloc par la rotation automatique : elle ne
+       * passe par aucun tamis et n'a pas de version à confronter. Tout le reste — le document
+       * vivant, d'où qu'il vienne — passe par la boucle ci-dessous.
+       */
+      /*
+       * LECTURE → FUSION → ÉCRITURE CONDITIONNELLE, ET ON REJOUE SI ÇA A BOUGÉ.
+       *
+       * La séquence lisait la base, fusionnait, puis écrivait sans condition. Entre la lecture et
+       * l'écriture il s'écoule quelques dizaines de millisecondes — et deux agents qui enregistrent
+       * dans le même instant lisaient donc la même version : le second reposait la sienne
+       * par-dessus, et tout ce que le premier venait d'écrire disparaissait sans un mot. Aucun
+       * garde-fou ne pouvait le voir, puisque les deux documents étaient légitimes.
+       *
+       * L'écriture porte désormais sa condition : « n'écris que si la ligne est encore dans l'état
+       * où je l'ai lue ». Si elle a bougé, rien n'est écrit, et l'on recommence depuis la relecture
+       * — la fusion se refait alors sur le travail du collègue, qui n'est jamais perdu.
+       */
+      const ESSAIS_ECRITURE = 4;
+      /*
+       * LA VERSION SUR LAQUELLE LA PAGE A TRAVAILLÉ.
+       *
+       * Toutes les données tiennent dans un seul document : une écriture est donc toujours un
+       * « remplace tout par ce que je crois savoir ». Tant qu'on ignore DEPUIS QUAND la page le
+       * croit, on ne peut pas distinguer une modification d'un écrasement. Elle envoie donc
+       * l'horodatage de la version qu'elle a lue ; s'il ne correspond plus, quelqu'un a enregistré
+       * entre-temps et l'on cesse d'accepter la moindre disparition de ligne.
+       *
+       * Une page qui ne l'envoie pas — version plus ancienne de l'application — est traitée comme
+       * avant : le garde-fou de fonte reste sa protection.
+       */
+      const versionLue = typeof corps.baseVersion === "string" ? corps.baseVersion : null;
+
+      let aEcrire = valeur;
+      let alerteAEnvoyer = null;
+      let ecrit = false;
+      let conflitVu = false;
+
+      for (let essai = 0; essai < ESSAIS_ECRITURE && !ecrit; essai++) {
+        aEcrire = valeur;
+        alerteAEnvoyer = null;
+        let versionActuelle = null;
+
+        if (clef === "bde-data" || cloisonne) {
+          const lecture = await fetch(
+            `${url}/rest/v1/${TABLE}?key=eq.${encodeURIComponent(clef)}&select=value,updated_at`,
+            { headers: entetes },
+          );
+          if (!lecture.ok) return res.status(502).json({ error: "Base de données injoignable" });
+          const lignesActuelles = await lecture.json();
+          const ligneActuelle = Array.isArray(lignesActuelles) ? lignesActuelles[0] : null;
+          const actuel = ligneActuelle?.value || null;
+          versionActuelle = ligneActuelle?.updated_at || null;
+
+          if (cloisonne) {
+            /*
+             * Un compte cloisonné n'écrit jamais le document : il propose des modifications, et le
+             * serveur ne retient que celles qui portent sur ce qui est à lui.
+             *
+             * Pas de document en base : il n'y a rien sur quoi reposer une modification, et écrire
+             * une vue réduite à la place du document de l'entreprise serait le pire des accidents.
+             * On refuse plutôt que de deviner.
+             */
+            if (!actuel) return res.status(409).json({ error: "Données introuvables — écriture refusée." });
+            const perime = jetonPerime(actuel, session);
+            if (perime) return res.status(401).json({ error: perime, sessionRevoquee: true });
+            aEcrire = estClient
+              ? fusionnerEcritureClient(actuel, valeur, compteId)
+              : fusionnerEcriturePartenaire(actuel, valeur, partenaireDuCompte(actuel, compteId), compteId);
+          } else if (actuel) {
+            /*
+             * L'équipe, elle, reçoit et réécrit le document entier — c'est son travail. On part de
+             * ce qu'elle envoie, et l'on remet en place ce que son rôle ne l'autorisait pas à
+             * changer : les droits des comptes, les réglages, et le journal, qui ne se réécrit pas.
+             *
+             * Le jeton est confronté au compte AVANT la fusion : un jeton révoqué ne doit pas
+             * pouvoir écrire, et c'est l'écriture qui fait le plus de dégâts.
+             */
+            const perime = jetonPerime(actuel, session);
+            if (perime) return res.status(401).json({ error: perime, sessionRevoquee: true });
+            /*
+             * Deux agents en même temps : la page écrit sur une version qui a déjà bougé. Dès le
+             * second essai, c'est prouvé — la première écriture a été refusée pour cette raison.
+             */
+            const conflit = essai > 0 || !!(versionLue && versionActuelle && versionLue !== versionActuelle);
+            conflitVu = conflitVu || conflit;
+            aEcrire = fusionnerEcritureEquipe(actuel, valeur, compteId, {
+              appareil: req.headers["user-agent"] || "",
+              adresse: String(req.headers["x-forwarded-for"] || "").split(",")[0].trim(),
+              conflit,
+            });
+            /*
+             * Une alerte est nouvelle si son identifiant n'était pas déjà en base. On la reconnaît
+             * ainsi plutôt qu'en comparant les longueurs : la page renvoie sa propre copie de la
+             * liste, et compter ne dirait rien de fiable.
+             */
+            const connues = new Set(
+              (Array.isArray(actuel.alertesEcrasement) ? actuel.alertesEcrasement : [])
+                .map((a) => a && a.id),
+            );
+            alerteAEnvoyer = (Array.isArray(aEcrire.alertesEcrasement) ? aEcrire.alertesEcrasement : [])
+              .find((a) => a && !connues.has(a.id)) || null;
+          }
+        }
+
+        const corpsEcriture = JSON.stringify({ value: aEcrire, updated_at: new Date().toISOString() });
+        if (versionActuelle) {
+          /*
+           * L'écriture conditionnelle : elle ne s'applique QUE si la ligne porte encore
+           * l'horodatage qu'on vient de lire. `return=representation` fait répondre les lignes
+           * touchées — zéro ligne veut dire que quelqu'un est passé avant nous.
+           */
+          const reponse = await fetch(
+            `${url}/rest/v1/${TABLE}?key=eq.${encodeURIComponent(clef)}`
+              + `&updated_at=eq.${encodeURIComponent(versionActuelle)}`,
+            {
+              method: "PATCH",
+              headers: { ...entetes, Prefer: "return=representation" },
+              body: corpsEcriture,
+            },
+          );
+          if (!reponse.ok) {
+            const detail = await reponse.text().catch(() => "");
+            console.error("Écriture impossible", reponse.status, detail);
+            return res.status(502).json({ error: "Enregistrement impossible" });
+          }
+          const touchees = await reponse.json().catch(() => []);
+          ecrit = Array.isArray(touchees) && touchees.length > 0;
+          /* Rien n'a été touché : la ligne a bougé entre la lecture et l'écriture. On rejoue. */
+        } else {
+          /*
+           * Pas de ligne en base — première écriture. `on_conflict` protège de la course : si deux
+           * appareils créent le document en même temps, le second met à jour au lieu de doubler.
+           */
+          const reponse = await fetch(
+            `${url}/rest/v1/${TABLE}?on_conflict=key`,
+            {
+              method: "POST",
+              headers: { ...entetes, Prefer: "resolution=merge-duplicates,return=minimal" },
+              body: JSON.stringify({ key: clef, value: aEcrire, updated_at: new Date().toISOString() }),
+            },
+          );
+          if (!reponse.ok) {
+            const detail = await reponse.text().catch(() => "");
+            console.error("Écriture impossible", reponse.status, detail);
+            return res.status(502).json({ error: "Enregistrement impossible" });
+          }
+          ecrit = true;
+        }
+      }
+
+      if (!ecrit) {
+        /*
+         * Quatre essais, quatre fois doublé : ce n'est plus une course, c'est que quelque chose
+         * écrit en boucle. On refuse franchement plutôt que d'écraser — l'application remettra
+         * l'enregistrement dans sa file et le rejouera.
+         */
+        return res.status(409).json({
+          error: "Une autre écriture est passée avant celle-ci. Réessayez.",
+          conflit: true,
+        });
+      }
+      /*
+       * Les données sont en place : on peut maintenant prévenir. L'envoi est attendu — quelques
+       * centaines de millisecondes — parce qu'une fonction serverless qui rend la main est
+       * arrêtée : un envoi lancé sans être attendu ne partirait pas une fois sur deux. Un échec
+       * du courriel ne change rien à la réponse : l'enregistrement, lui, a bien eu lieu.
+       */
+      if (alerteAEnvoyer) {
+        const envoi = await envoyerAlerteEcrasement(aEcrire, alerteAEnvoyer);
+        if (!envoi.envoye) console.error("Alerte d'écrasement non envoyée :", envoi.raison, envoi.detail || "");
+      }
+      return res.status(200).json({ ok: true, conflit: conflitVu });
+    }
+
+    if (req.method === "GET") {
+      /*
+       * `tete` ne rapporte que la date de dernière modification. C'est ce qui remplace l'abonnement
+       * temps réel : une base fermée ne diffuse plus ses changements à la clé publique, et faire
+       * redescendre le document entier toutes les vingt secondes pour constater qu'il n'a pas
+       * bougé coûterait cher à tout le monde — au forfait comme aux téléphones des agents.
+       */
+      const tete = req.query?.tete !== undefined;
+      const champs = tete ? "updated_at" : "value,updated_at";
+      const reponse = await fetch(
+        `${url}/rest/v1/${TABLE}?key=eq.${encodeURIComponent(clef)}&select=${champs}`,
+        { headers: entetes },
+      );
+      if (!reponse.ok) {
+        console.error("Lecture impossible", reponse.status);
+        return res.status(502).json({ error: "Base de données injoignable" });
+      }
+      const lignes = await reponse.json();
+      const ligne = Array.isArray(lignes) ? lignes[0] : null;
+      if (!ligne) return res.status(404).json({ error: "Donnée absente", cleAbsente: true });
+      /*
+       * La lecture d'entête est laissée passer sans contrôle, et c'est délibéré : elle ne rend
+       * qu'une date de dernière modification — rien qui appartienne à quiconque — et elle est
+       * demandée toutes les vingt secondes par chaque appareil connecté. La faire précéder d'une
+       * lecture du document entier coûterait bien plus qu'elle ne protège. Le premier vrai
+       * chargement, lui, est contrôlé, et c'est celui qui porte les données.
+       */
+      if (tete) return res.status(200).json({ updated_at: ligne.updated_at || null });
+      if (clef === "bde-data") {
+        const perime = jetonPerime(ligne.value, session);
+        if (perime) return res.status(401).json({ error: perime, sessionRevoquee: true });
+      }
+      const valeurLue = estClient ? vueClient(ligne.value, compteId)
+        : estPartenaire ? vuePartenaire(ligne.value, partenaireDuCompte(ligne.value, compteId))
+          : ligne.value;
+      return res.status(200).json({ value: valeurLue, updated_at: ligne.updated_at || null });
+    }
+
+    if (req.method === "PUT" || req.method === "POST") {
+      const corps = req.body || {};
+      const valeur = typeof corps.value === "string" ? JSON.parse(corps.value) : corps.value;
+      /*
+       * Une écriture sans contenu effacerait tout. Le cas n'a aucun usage légitime, et c'est
+       * exactement la forme que prend l'accident : un état vide envoyé au démarrage par une
+       * application qui n'a pas réussi à lire.
+       */
+      if (valeur === undefined || valeur === null) {
+        return res.status(400).json({ error: "Contenu absent — écriture refusée." });
+      }
+
+      /*
        * Un compte cloisonné n'écrit jamais le document : il propose des modifications, et le
        * serveur ne retient que celles qui portent sur ce qui est à lui.
        *
@@ -255,19 +480,43 @@ export default async function handler(req, res) {
        */
       let aEcrire = valeur;
       /*
+       * COMBIEN DE FOIS ON REJOUE LA LECTURE-FUSION-ÉCRITURE.
+       *
+       * L'écriture est conditionnée à la version lue : si un collègue a enregistré dans
+       * l'intervalle — quelques dizaines de millisecondes — la condition ne s'applique plus et
+       * rien n'est écrit. On recommence alors depuis la relecture, sur la version fraîche. Trois
+       * essais suffisent très largement : au-delà, ce n'est plus une course, c'est une panne.
+       */
+      /*
        * L'alerte à envoyer, s'il y en a une. Elle est repérée ici mais expédiée APRÈS l'écriture :
        * prévenir d'un refus avant d'avoir remis les données en place laisserait une fenêtre où le
        * message dit « vos données sont intactes » alors que rien n'est encore enregistré.
        */
       let alerteAEnvoyer = null;
+      /*
+       * LA VERSION SUR LAQUELLE LA PAGE A TRAVAILLÉ.
+       *
+       * Toutes les données tiennent dans un seul document : une écriture est donc toujours un
+       * « remplacer tout par ce que je crois savoir ». Tant qu'on ne sait pas DEPUIS QUAND la page
+       * croit le savoir, on ne peut pas distinguer une modification d'un écrasement. Elle envoie
+       * donc l'horodatage de la version qu'elle a lue ; s'il ne correspond plus, quelqu'un a
+       * enregistré entre-temps et l'on cesse d'accepter la moindre disparition de ligne.
+       *
+       * Une page qui ne l'envoie pas (version plus ancienne de l'application) est traitée comme
+       * avant : le garde-fou de fonte reste sa protection.
+       */
+      const versionLue = typeof corps.baseVersion === "string" ? corps.baseVersion : null;
+      /* L'horodatage réel de la ligne au moment de la relecture — il sert aussi à l'écriture conditionnelle. */
+      let versionActuelle = null;
       if (!cloisonne && clef === "bde-data") {
         const lecture = await fetch(
-          `${url}/rest/v1/${TABLE}?key=eq.${encodeURIComponent(clef)}&select=value`,
+          `${url}/rest/v1/${TABLE}?key=eq.${encodeURIComponent(clef)}&select=value,updated_at`,
           { headers: entetes },
         );
         if (!lecture.ok) return res.status(502).json({ error: "Base de données injoignable" });
         const lignesActuelles = await lecture.json();
         const actuel = Array.isArray(lignesActuelles) ? lignesActuelles[0]?.value : null;
+        versionActuelle = Array.isArray(lignesActuelles) ? (lignesActuelles[0]?.updated_at || null) : null;
         // Première écriture d'une base neuve : il n'y a pas encore de règles à faire respecter.
         if (actuel) {
           /*
@@ -279,6 +528,8 @@ export default async function handler(req, res) {
           aEcrire = fusionnerEcritureEquipe(actuel, valeur, compteId, {
             appareil: req.headers["user-agent"] || "",
             adresse: String(req.headers["x-forwarded-for"] || "").split(",")[0].trim(),
+            /* Deux agents en même temps : la page écrit sur une version qui a déjà bougé. */
+            conflit: !!(versionLue && versionActuelle && versionLue !== versionActuelle),
           });
           /*
            * Une alerte est nouvelle si son identifiant n'était pas déjà en base. On la reconnaît

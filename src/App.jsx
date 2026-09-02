@@ -3383,13 +3383,21 @@ function defaultSeed() {
 async function loadData() {
   try {
     const r = await storage.get("bde-data", true);
-    return JSON.parse(r.value);
+    /*
+     * `ducache` : le serveur n'a pas répondu et c'est la dernière copie locale qui revient.
+     *
+     * Elle était rendue comme une lecture ordinaire. L'application refermait alors son mode
+     * hors-ligne, affichait ce document comme la vérité du jour — et le réenregistrait au premier
+     * geste, par-dessus le vrai. Un document qu'on n'a pas relu au serveur ne fait donc plus
+     * autorité : on travaille avec, on ne l'impose pas.
+     */
+    return { document: JSON.parse(r.value), ducache: !!r.ducache };
   } catch (e) {
     if (e && e.serveurInjoignable) throw e;
     const seed = defaultSeed();
     try { await storage.set("bde-data", JSON.stringify(seed), true); }
     catch (e2) { console.error("Stockage indisponible, poursuite en mode local sans sauvegarde.", e2); }
-    return seed;
+    return { document: seed, ducache: false };
   }
 }
 /**
@@ -3913,18 +3921,42 @@ function App() {
     let essais = 0;
     let minuteur = null;
 
-    function reussite(d) {
+    function reussite({ document: d, ducache }) {
+      /*
+       * On a bien un document — le délai de secours n'a plus lieu de se déclencher. Il servait à
+       * ne pas laisser l'agent devant un écran vide ; ce n'est plus le cas.
+       */
       abouti = true;
       if (!vivant) return;
       setData(d);
       setLang(d.lang || "fr");
       setTheme(d.theme || "dark");
       if (d.exchangeRates) LIVE_RATES = { ...CURRENCIES, ...d.exchangeRates };
+      setLoading(false);
+      setPendingSync(pendingSyncCount());
+      /*
+       * UN DOCUMENT VENU DU CACHE N'EST PAS UN CHARGEMENT RÉUSSI.
+       *
+       * L'agent peut travailler avec — c'est tout l'intérêt du mode hors-ligne — mais l'écran doit
+       * le dire, et l'on continue de retenter le serveur. Sans cela, une page ouverte pendant une
+       * coupure passagère s'installait pour la journée sur une copie ancienne et la réécrivait à
+       * chaque geste : c'est le mécanisme exact qui a fait proposer un répertoire vide onze fois
+       * de suite le 1er septembre.
+       */
+      if (ducache) {
+        /*
+         * On travaille, on n'impose pas : les enregistrements partent par la file d'attente, qui
+         * les fusionne au retour avec ce que les collègues ont écrit pendant la coupure. Ce qu'on
+         * ne fait plus, c'est prétendre que cette copie est la version du jour.
+         */
+        setOffline(true);
+        essais += 1;
+        minuteur = setTimeout(tenter, Math.min(30000, 4000 * essais));
+        return;
+      }
       setOffline(false);
       setModeSecours(false);
-      setLoading(false);
       autoBackupIfNeeded(d);
-      setPendingSync(pendingSyncCount());
     }
 
     function echec(e) {

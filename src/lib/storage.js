@@ -110,6 +110,40 @@ function tiroirDuJeton(jeton) {
   } catch (e) { return ""; }
 }
 function cleCache(key) { return `${CACHE_PREFIX}${tiroir}${key}`; }
+
+/*
+ * ÉCRIRE LE CACHE, OU L'EFFACER — JAMAIS LE LAISSER PÉRIMÉ.
+ *
+ * Le stockage d'un navigateur est petit, et il se remplit. Quand `setItem` échoue — quota
+ * dépassé, mode privé, stockage refusé — l'échec était avalé : « pas grave ». Il l'était.
+ * L'ancienne version restait en place, et c'est elle que la lecture suivante servait si le réseau
+ * hésitait une seconde. L'application repartait alors sur un document d'il y a des semaines en le
+ * croyant frais — puis le réenregistrait par-dessus le vrai. C'est ainsi qu'une page se retrouve
+ * à proposer un répertoire vide à chaque geste.
+ *
+ * Un cache qu'on ne peut pas tenir à jour est donc effacé. Perdre le mode hors-ligne vaut mieux
+ * que travailler sur une base périmée sans le savoir.
+ */
+function ecrireCache(key, valeur) {
+  const cle = cleCache(key);
+  try {
+    localStorage.setItem(cle, JSON.stringify(valeur));
+    return true;
+  } catch (e) {
+    try { localStorage.removeItem(cle); } catch (e2) { /* rien à faire de plus */ }
+    console.error("Cache local non écrit — il est effacé plutôt que laissé périmé.", e);
+    return false;
+  }
+}
+
+/*
+ * LA VERSION QUE LA PAGE A LUE — celle qu'elle renverra en enregistrant.
+ *
+ * Le serveur s'en sert pour savoir si quelqu'un a écrit entre-temps. Sans elle, il ne peut pas
+ * distinguer « je modifie ce que je viens de lire » de « je repose ce que je crois savoir ».
+ */
+const versionsLues = new Map();
+export function versionLue(key) { return versionsLues.get(key) || null; }
 function cleFile() { return `${QUEUE_KEY}${tiroir ? `:${tiroir.replace(/:$/, "")}` : ""}`; }
 
 /* ------------------------------------------------------------------------------------------
@@ -225,7 +259,8 @@ export const storage = {
         if (!parServeur.ok) throw new Error(parServeur.corps?.error || "Lecture impossible");
         serveurARepondu = true;
         const valeur = parServeur.corps?.value;
-        try { localStorage.setItem(cleCache(key), JSON.stringify(valeur)); } catch (e) { /* pas grave */ }
+        versionsLues.set(key, parServeur.corps?.updated_at || null);
+        ecrireCache(key, valeur);
         return { key, value: JSON.stringify(valeur), shared: !!shared };
       }
 
@@ -237,12 +272,19 @@ export const storage = {
         absente.cleAbsente = true;
         throw absente;
       }
-      try { localStorage.setItem(cleCache(key), JSON.stringify(data.value)); } catch (e) { /* pas grave */ }
+      ecrireCache(key, data.value);
       return { key, value: JSON.stringify(data.value), shared: !!shared };
     } catch (e) {
-      // Supabase injoignable (hors ligne) : on se rabat sur la dernière version connue localement.
+      /*
+       * Supabase injoignable (hors ligne) : on se rabat sur la dernière version connue localement.
+       *
+       * ET ON LE DIT. Ce repli revenait comme une lecture ordinaire : l'application refermait son
+       * mode hors-ligne, affichait ce vieux document comme la vérité du jour, et le réenregistrait
+       * au premier geste. `ducache` permet à l'appelant de continuer à travailler tout en sachant
+       * qu'il ne tient pas la version du serveur.
+       */
       const cached = localStorage.getItem(cleCache(key));
-      if (cached !== null) return { key, value: cached, shared: !!shared };
+      if (cached !== null) return { key, value: cached, shared: !!shared, ducache: true };
       if (!serveurARepondu) e.serveurInjoignable = true;
       throw e;
     }
@@ -250,13 +292,24 @@ export const storage = {
 
   async set(key, value, shared) {
     const parsed = typeof value === "string" ? JSON.parse(value) : value;
-    try { localStorage.setItem(cleCache(key), JSON.stringify(parsed)); } catch (e) { /* pas grave */ }
+    ecrireCache(key, parsed);
     try {
       const parServeur = await appelServeur(`?cle=${encodeURIComponent(key)}`, {
-        method: "PUT", body: JSON.stringify({ value: parsed }),
+        /*
+         * `baseVersion` : l'horodatage de la version sur laquelle cette page a travaillé. Le
+         * serveur écrit sous condition — si la ligne a bougé depuis, il refait sa fusion sur la
+         * version fraîche plutôt que de laisser cette page reposer la sienne par-dessus.
+         */
+        method: "PUT", body: JSON.stringify({ value: parsed, baseVersion: versionsLues.get(key) || null }),
       });
       if (!parServeur.indisponible) {
         if (!parServeur.ok) throw new Error(parServeur.corps?.error || "Enregistrement impossible");
+        /*
+         * Le document vient de changer : la version que nous avions n'est plus la bonne. On
+         * l'oublie plutôt que d'annoncer au prochain enregistrement une version dépassée — le
+         * serveur la relira de toute façon, et une version fausse ferait crier au conflit à tort.
+         */
+        versionsLues.delete(key);
         return { key, value, shared: !!shared };
       }
       const { error } = await client.from(TABLE).upsert({ key, value: parsed, updated_at: new Date().toISOString() });
@@ -346,7 +399,9 @@ function suivreParInterrogation(key, callback) {
       const complet = await appelServeur(`?cle=${encodeURIComponent(key)}`);
       if (arrete) return;
       if (!complet.indisponible && complet.ok && complet.corps?.value !== undefined) {
-        try { localStorage.setItem(cleCache(key), JSON.stringify(complet.corps.value)); } catch (e) { /* pas grave */ }
+        /* Le document redescendu devient la version de référence de cette page. */
+        versionsLues.set(key, complet.corps?.updated_at || marque);
+        ecrireCache(key, complet.corps.value);
         callback(JSON.stringify(complet.corps.value));
       }
     }
@@ -428,6 +483,19 @@ export function fusionnerDocuments(serveur, local) {
   Object.keys(sortie).forEach((cle) => {
     const cotéServeur = serveur[cle];
     const cotéLocal = local[cle];
+    /*
+     * UNE LISTE VIDE NE REMPLACE JAMAIS UNE LISTE PLEINE.
+     *
+     * `{ ...serveur, ...local }` donnait raison au local sur toute la ligne — y compris quand le
+     * local était un tableau vide. Une écriture mise en file par une page qui n'avait pas encore
+     * chargé les comptes clients rejouait donc « zéro compte » par-dessus les huit du serveur, et
+     * la fusion ne s'y opposait pas : elle ne regarde que les listes identifiables, et une liste
+     * vide n'en est pas une.
+     */
+    if (Array.isArray(cotéLocal) && cotéLocal.length === 0 && Array.isArray(cotéServeur) && cotéServeur.length > 0) {
+      sortie[cle] = cotéServeur;
+      return;
+    }
     if (!listeIdentifiable(cotéServeur) || !listeIdentifiable(cotéLocal)) return;
     const parIdentite = new Map();
     cotéServeur.forEach((x) => parIdentite.set(identiteDe(x), x));
@@ -485,7 +553,7 @@ export async function flushOutbox() {
         const { error } = await client.from(TABLE).upsert({ key: item.key, value: valeur, updated_at: new Date().toISOString() });
         if (error) throw error;
       }
-      try { localStorage.setItem(cleCache(item.key), JSON.stringify(valeur)); } catch (e2) { /* pas grave */ }
+      ecrireCache(item.key, valeur);
       flushed++;
     } catch (e) {
       stillFailed.push(item); // toujours hors ligne ou erreur ponctuelle : on retente au prochain retour de connexion
@@ -521,5 +589,6 @@ export async function relireDuServeur(key = "bde-data") {
   if (parServeur.indisponible) return { injoignable: true };
   if (parServeur.corps?.cleAbsente) return { valeur: null };
   if (!parServeur.ok) return { injoignable: true };
+  versionsLues.set(key, parServeur.corps?.updated_at || null);
   return { valeur: parServeur.corps?.value ?? null };
 }

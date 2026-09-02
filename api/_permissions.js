@@ -169,11 +169,24 @@ export const ROLE_DEFAULT_PERMISSIONS = {
    */
   "Responsable de zone": ["colis.voir_propres", "colis.creer", "colis.modifier", "colis.changer_statut", "colis.enregistrer_paiement", "colis.importer_excel", "colis.bordereau_reception", "colis.reglement_groupe", "bordereaux.consulter", "bordereaux.creer", "bordereaux.modifier", "bordereaux.valider", "factures.consulter", "factures.creer", "factures.modifier", "paiements.voir_propres", "clients.consulter", "espaceclient.gerer", "stats.personnelles", "equipe.pointage", "users.consulter", "users.gerer", "ia.utiliser",
     /*
-     * Le responsable de zone opère les transferts de sa zone : c'est son métier, et il est le
-     * recours quand un agent n'est pas là. Il ne règle ni les frais ni les taux — cela reste à
-     * l'administrateur, sinon la marge de l'entreprise se décide en agence.
      */
-    "transfert.creer", "transfert.payer", "transfert.voir_propres", "transfert.voir_zone", "transfert.caisse"],
+    /*
+     * LE TRANSFERT D'ARGENT NE SUIT AUCUN RÔLE — il se donne nom par nom.
+     *
+     * Le responsable de zone le portait par défaut, au motif qu'il opère sa zone. C'était une
+     * erreur de raisonnement : envoyer et payer de l'argent n'est pas une extension du travail
+     * sur les colis, c'est un autre métier, et le décider par le rôle revient à l'accorder à
+     * quelqu'un parce qu'on l'a nommé responsable — pas parce qu'on a voulu qu'il touche à
+     * l'argent. Un rôle créé demain le recevrait en silence.
+     *
+     * Personne ne l'a donc par défaut, quel que soit le rôle. L'administrateur désigne, compte
+     * par compte, qui envoie et qui paie — et retire aussi facilement.
+     *
+     * Restent les droits de LECTURE : voir sa zone, et voir ce qu'on a soi-même fait. Lire n'est
+     * pas faire — et sans « voir ses propres transferts », un responsable dont l'agence n'est pas
+     * encore renseignée n'aurait plus aucune portée du tout, donc un écran vide sans explication.
+     */
+    "transfert.voir_propres", "transfert.voir_zone"],
   "Agent": ["colis.voir_propres", "colis.voir_tous", "colis.creer", "colis.modifier", "colis.changer_statut", "colis.enregistrer_paiement", "bordereaux.consulter", "bordereaux.creer", "bordereaux.modifier", "bordereaux.valider", "factures.consulter", "factures.creer", "factures.modifier", "paiements.voir_propres", "clients.consulter", "stats.personnelles", "ia.utiliser"],
   /*
    * Le comptable LIT les transferts — il en a besoin pour arrêter les comptes — et n'en opère

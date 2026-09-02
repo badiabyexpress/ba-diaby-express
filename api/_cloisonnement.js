@@ -1116,9 +1116,35 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId, contexte = {}
   else sortie.journalAcces = base.journalAcces;
 
   SECTIONS_REGLAGES.forEach(([cle, permission]) => {
-    if (peut(permission)) return;
-    if (base[cle] === undefined) delete sortie[cle];
-    else sortie[cle] = base[cle];
+    if (!peut(permission)) {
+      if (base[cle] === undefined) delete sortie[cle];
+      else sortie[cle] = base[cle];
+      return;
+    }
+    /*
+     * UN CHAMP DE RÉGLAGE QUE LA PAGE NE CONNAÎT PAS N'EST PAS UN CHAMP EFFACÉ.
+     *
+     * C'est la règle des sections absentes, appliquée un cran plus bas. Le numéro RCCM avait été
+     * réglé un matin ; une page ouverte AVANT, qui ne l'avait donc jamais reçu, a renvoyé son
+     * bloc « entreprise » sans lui — et le numéro a disparu de la base sans que personne ne
+     * l'efface. Le même sort attendait n'importe quel réglage ajouté pendant qu'un onglet reste
+     * ouvert quelque part.
+     *
+     * Ce que la page envoie fait foi sur ce dont elle parle ; ce dont elle ne parle pas revient de
+     * la base. Vider un champ à la main reste possible : il est alors présent, et vide.
+     */
+    const avant = base[cle];
+    const apres = sortie[cle];
+    if (!avant || typeof avant !== "object" || Array.isArray(avant)) return;
+    if (!apres || typeof apres !== "object" || Array.isArray(apres)) return;
+    const complete = { ...apres };
+    let manquant = false;
+    Object.keys(avant).forEach((champ) => {
+      if (Object.prototype.hasOwnProperty.call(apres, champ)) return;
+      complete[champ] = avant[champ];
+      manquant = true;
+    });
+    if (manquant) sortie[cle] = complete;
   });
 
   sortie.users = preserverIdentifiants(base.users, comptesDeLEquipe(base, envoye, moi, peut));

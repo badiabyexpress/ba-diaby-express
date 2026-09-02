@@ -13807,7 +13807,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
     for (const c of colisSelectionnes) {
       try {
         if (type === "etiquette") await downloadLabel(c, data);
-        else if (type === "ticket") await downloadTicketThermal(c);
+        else if (type === "ticket") await downloadTicketThermal(c, data?.entreprise);
         else await downloadInvoice(c, data);
       } catch (e) { console.error(`Échec impression pour ${c.tracking}`, e); }
       await new Promise((r) => setTimeout(r, 400)); // laisse le navigateur traiter chaque téléchargement avant le suivant
@@ -16332,6 +16332,22 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   const doc = preparerDocPdf(new jspdf.jsPDF());
   const label = direction === "import" ? `${country.city} → Conakry` : `Conakry → ${country.city}`;
   const poidsTotal = colisRoute.reduce((s, c) => s + c.poids, 0);
+  /*
+   * UN COLIS PARTENAIRE NE COMPTE PAS DANS L'ARGENT DU BORDEREAU.
+   *
+   * La fiche de voyage le dit depuis toujours : là où il y aurait un prix, elle écrit « — », et
+   * dans la colonne du reste, « Partenaire ». Le bordereau, lui, imprimait « 0 GNF » et
+   * « Non payé » — les deux mentions qui, sur un document remis au transporteur puis rangé dans
+   * un classeur, se lisent exactement comme un client qui doit de l'argent. Pire : ces zéros
+   * entraient dans « MONTANT TOTAL » et dans « Reste à percevoir », si bien qu'un bordereau
+   * chargé de colis partenaire annonçait une créance que personne ne devait.
+   *
+   * Ces colis appartiennent au partenaire, qui les facture à ses propres clients selon un tarif
+   * dont nous n'avons pas connaissance et que nous n'avons pas à faire figurer. Ils sont donc
+   * comptés en colis et en kilos — c'est ce qu'on charge dans l'avion — mais jamais en francs.
+   */
+  const colisFactures = colisRoute.filter((c) => !estColisPartenaire(c));
+  const nbPartenaires = colisRoute.length - colisFactures.length;
 
   // Bandeau d’en-tête — filet rouge au pied de la bande navy, comme sur l'étiquette et le ticket
   // d'envoi : même identité de marque bicolore sur tous les documents imprimés.
@@ -16379,7 +16395,7 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   };
   stat(14, "COLIS", colisRoute.length);
   stat(76, "POIDS TOTAL", `${poidsTotal.toFixed(1)} kg`);
-  stat(138, "MONTANT TOTAL", fmt(colisRoute.reduce((s, c) => s + c.prix, 0), cur), true);
+  stat(138, "MONTANT TOTAL", fmt(colisFactures.reduce((s, c) => s + c.prix, 0), cur), true);
   y += 26;
 
   /*
@@ -16390,6 +16406,8 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
    * partiellement payé, ou pas payé du tout. C'est la question posée à chaque remise.
    */
   const reglementDuColis = (c) => {
+    // Même mention que sur la fiche de voyage : ni « payé », ni « dû », le colis n'est pas à nous.
+    if (estColisPartenaire(c)) return { libelle: "Partenaire", teinte: [91, 141, 239] };
     const paye = Number(c.paye) || 0;
     if (paye <= 0.005) return { libelle: "Non payé", teinte: [200, 45, 60] };
     if ((Number(c.reste) || 0) <= 0.005) return { libelle: "Payé", teinte: [40, 140, 90] };
@@ -16398,7 +16416,7 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   const head = ["N° de suivi", "Destinataire", "Téléphone", "Articles", "Poids", "Statut", `Montant (${cur})`, "Règlement"];
   const body = colisRoute.map((c) => [
     c.tracking, c.destinataire, c.telephone, String(nombreArticles(c)),
-    `${c.poids} kg`, c.status, fmt(c.prix, cur), reglementDuColis(c).libelle,
+    `${c.poids} kg`, c.status, estColisPartenaire(c) ? "—" : fmt(c.prix, cur), reglementDuColis(c).libelle,
   ]);
 
   const hasAutoTable = await ensureAutoTable();
@@ -16495,9 +16513,9 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
    */
   if (finalY > 234) { doc.addPage(); finalY = 20; }
 
-  const totalFacture = colisRoute.reduce((s, c) => s + c.prix, 0);
-  const totalEncaisse = colisRoute.reduce((s, c) => s + c.paye, 0);
-  const totalRestant = colisRoute.reduce((s, c) => s + c.reste, 0);
+  const totalFacture = colisFactures.reduce((s, c) => s + c.prix, 0);
+  const totalEncaisse = colisFactures.reduce((s, c) => s + c.paye, 0);
+  const totalRestant = colisFactures.reduce((s, c) => s + c.reste, 0);
   const depensesPropres = (depensesLiees || []).filter((d) => Number(d.montant) > 0);
   const totalDepenses = depensesPropres.reduce((s, d) => s + (Number(d.montant) || 0), 0);
   doc.setFillColor(245, 247, 251); doc.rect(14, finalY + 5, 182, 12, "F");
@@ -16511,6 +16529,21 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   doc.text(`Reste à percevoir : ${fmt(totalRestant, cur)}`, 192, finalY + 12.5, { align: "right" });
 
   finalY += 24;
+  /*
+   * Sans cette ligne, un bordereau de vingt colis dont douze sont partenaires afficherait un
+   * total calculé sur huit, et le lecteur croirait à une erreur de saisie. Elle dit d'où vient
+   * l'écart entre le nombre de colis affiché en haut et le nombre de lignes qui portent un prix.
+   */
+  if (nbPartenaires > 0) {
+    if (finalY > 262) { doc.addPage(); finalY = 20; }
+    doc.setFont(undefined, "normal"); doc.setFontSize(8); doc.setTextColor(120, 130, 150);
+    const mention = doc.splitTextToSize(
+      `Dont ${nbPartenaires} colis partenaire${nbPartenaires > 1 ? "s" : ""} — transporté${nbPartenaires > 1 ? "s" : ""} pour un partenaire et non facturé${nbPartenaires > 1 ? "s" : ""} par Ba-Diaby Express : ils comptent dans les colis et les kilos, jamais dans les montants ci-dessus.`,
+      182,
+    );
+    doc.text(mention, 14, finalY);
+    finalY += mention.length * 3.6 + 4;
+  }
   if (depensesPropres.length > 0) {
     if (finalY > 252) { doc.addPage(); finalY = 20; }
     doc.setFillColor(10, 38, 71); doc.roundedRect(14, finalY, 182, 8, 2, 2, "F");
@@ -17251,7 +17284,7 @@ async function testerReseauEpson(ip) {
 }
 
 /** Reçu d’encaissement PDF pour un paiement précis — utile pour la comptabilité et le client. */
-async function downloadRecu(colis, paiement) {
+async function downloadRecu(colis, paiement, entreprise = {}) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a5" }));
   const W = 148, H = 210, M = 10;
@@ -17335,6 +17368,13 @@ async function downloadRecu(colis, paiement) {
   doc.setFontSize(7.3); doc.setTextColor(140, 140, 140);
   doc.text("Ce reçu fait foi d’encaissement pour la comptabilité de Ba-Diaby Express.", M, Z.pied);
   doc.text("badiabyexpress.bde@gmail.com · www.ba-diaby-express.com", M, Z.pied + 4);
+  /*
+   * Un reçu d'encaissement est une pièce comptable : il justifie une sortie d'argent chez celui
+   * qui l'a payé. Sans immatriculation, rien n'y atteste que l'encaisseur est une entreprise
+   * constituée — la mention y a donc autant sa place que sur la facture.
+   */
+  const rccmRecu = String(entreprise?.rccm || "").trim();
+  if (rccmRecu) doc.text(`RCCM ${rccmRecu}`, M, Z.pied + 8);
 
   openPdf(doc, `recu-${colis.tracking}-${paiement.id}.pdf`);
 }
@@ -18000,7 +18040,7 @@ async function downloadInvoice(colis, data, options = {}) {
  * tickets de caisse). Le QR permet au personnel connecté d’ouvrir le dossier complet du
  * colis dans l’application (suivi, paiements, historique).
  */
-async function downloadTicketThermal(colis) {
+async function downloadTicketThermal(colis, entreprise = {}) {
   const jspdf = await loadJsPDF();
   // colis.pays est le pays de route (l'origine pour un import) ; la devise affichée doit suivre
   // le destinataire réel, toujours la Guinée pour un import.
@@ -18122,7 +18162,13 @@ async function downloadTicketThermal(colis) {
     const merci = doc.splitTextToSize("Merci de votre confiance. Conservez ce ticket jusqu’à la livraison de votre colis.", W - 2 * M);
     doc.text(merci, W / 2, y, { align: "center" }); y += merci.length * 3.6 + 3;
     doc.setFont(undefined, "normal"); doc.setFontSize(6.2); doc.setTextColor(...MUTED);
-    const legal = doc.splitTextToSize("Ba-Diaby Express — Conakry, Guinée · badiabyexpress.bde@gmail.com · Transport soumis aux CGV.", W - 2 * M);
+    // Le ticket est le seul papier que repart avec le client au comptoir : l'immatriculation y
+    // figure au même titre que sur la facture, pour dire de quelle entreprise il vient.
+    const rccmTicket = String(entreprise?.rccm || "").trim();
+    const legal = doc.splitTextToSize(
+      `Ba-Diaby Express — Conakry, Guinée · badiabyexpress.bde@gmail.com${rccmTicket ? ` · RCCM ${rccmTicket}` : ""} · Transport soumis aux CGV.`,
+      W - 2 * M,
+    );
     doc.text(legal, W / 2, y, { align: "center" }); y += legal.length * 3;
 
     return y;
@@ -19888,12 +19934,12 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
 
   async function handleDownloadTicketThermal() {
     setTicketThermalState("loading");
-    try { await downloadTicketThermal(colis); setTicketThermalState("idle"); }
+    try { await downloadTicketThermal(colis, data?.entreprise); setTicketThermalState("idle"); }
     catch (e) { console.error(e); setTicketThermalState("error"); }
   }
   async function handleDownloadRecu(paiement) {
     setRecuState(paiement.id);
-    try { await downloadRecu(colis, paiement); setRecuState("idle"); }
+    try { await downloadRecu(colis, paiement, data?.entreprise); setRecuState("idle"); }
     catch (e) { console.error(e); setRecuState("error"); }
   }
   function validerEncaissement() {
@@ -29210,7 +29256,7 @@ async function construireFacturePartenaireDoc(facture, partenaire, colisFactures
  * Aucun montant n'y figure : ce que le partenaire nous doit ne regarde pas son correspondant, et
  * ce qu'il facture à ses clients ne nous regarde pas.
  */
-async function construireBordereauRemiseDoc(partenaire, lot, agent) {
+async function construireBordereauRemiseDoc(partenaire, lot, agent, entreprise = {}) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF());
   const W = 210, M = 16;
@@ -29295,10 +29341,18 @@ async function construireBordereauRemiseDoc(partenaire, lot, agent) {
   doc.text("Signature du correspondant", M, y + 23);
   doc.text(`Notre agent — ${agent || "—"}`, W / 2 + 4, y + 23);
 
+  // Ce bordereau est signé par une autre entreprise : il dit qui il engage.
+  const rccmRemise = String(entreprise?.rccm || "").trim();
+  if (rccmRemise) {
+    const yPied = Math.min(y + 34, 288);
+    doc.setFontSize(8); doc.setTextColor(...MUTED);
+    doc.text(`BA-DIABY EXPRESS — RCCM ${rccmRemise}`, M, yPied);
+  }
+
   return doc;
 }
 
-async function construireRelevePartenaireDoc(partenaire, mois, factures, colis) {
+async function construireRelevePartenaireDoc(partenaire, mois, factures, colis, entreprise = {}) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF());
   const W = 210, M = 16;
@@ -29418,6 +29472,18 @@ async function construireRelevePartenaireDoc(partenaire, mois, factures, colis) 
   doc.text(doc.splitTextToSize(
     "Relevé établi au tarif convenu avec le partenaire, sur des colis vérifiés et pesés par nos agents. "
     + "Les prix que le partenaire applique à ses propres clients n'y figurent pas.", W - 2 * M), M, y);
+
+  /*
+   * Le relevé est la pièce que le partenaire remet à son comptable quand un solde est contesté :
+   * il porte donc la même immatriculation que la facture qu'il récapitule.
+   */
+  const rccmReleve = String(entreprise?.rccm || "").trim();
+  if (rccmReleve) {
+    y += 10;
+    if (y > 280) { doc.addPage(); y = 24; }
+    doc.setFontSize(8); doc.setTextColor(...MUTED);
+    doc.text(`BA-DIABY EXPRESS — RCCM ${rccmReleve}`, M, y);
+  }
 
   return doc;
 }
@@ -29714,7 +29780,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
   async function imprimerReleve(mois) {
     const sesColis = (data.colis || []).filter((c) => c.partenaireId === partenaire.id);
     try {
-      const doc = await construireRelevePartenaireDoc(partenaire, mois, sesFactures, sesColis);
+      const doc = await construireRelevePartenaireDoc(partenaire, mois, sesFactures, sesColis, data?.entreprise);
       const etiquette = `${String(mois.mois + 1).padStart(2, "0")}-${mois.annee}`;
       openPdf(doc, `releve-${(reglagesPartenaire(partenaire).nomCommercial || partenaire.nom || "partenaire").replace(/\s+/g, "-").toLowerCase()}-${etiquette}.pdf`);
     } catch (e) {
@@ -29760,7 +29826,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
     const trackings = new Set(lot.colis.map((c) => c.tracking));
     const marque = { le: new Date().toISOString(), par: monNom, correspondant: lot.correspondant?.nom || "" };
     try {
-      const doc = await construireBordereauRemiseDoc(partenaire, lot, monNom);
+      const doc = await construireBordereauRemiseDoc(partenaire, lot, monNom, data?.entreprise);
       openPdf(doc, `remise-${(reglagesPartenaire(partenaire).nomCommercial || partenaire.nom || "partenaire").replace(/\s+/g, "-").toLowerCase()}-${lot.pays}.pdf`);
     } catch (e) {
       console.error(e);

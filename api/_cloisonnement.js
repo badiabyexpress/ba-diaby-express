@@ -602,6 +602,12 @@ const SECTIONS_REGLAGES = [
   ["departs", "config.acceder"],
   ["notificationSettings", "config.acceder"],
   ["notifWhatsApp", "config.acceder"],
+  /*
+   * Le barème du transfert d'argent — frais, taux, limites, commissions. Il décide de la marge de
+   * l'entreprise sur chaque envoi : il se garde comme un tarif, derrière sa propre permission, et
+   * pas derrière l'accès général à la configuration.
+   */
+  ["transfertConfig", "transfert.config"],
   ["miraKnowledge", "config.acceder"],
   ["exchangeRates", "config.tarifs"],
   ["tauxMisAJourLe", "config.tarifs"],

@@ -24,8 +24,37 @@
  */
 
 import { passage, adresseDe, refuser } from "./_verrou.js";
+import { normaliserCode, empreinteCode, vuePubliqueTransfert, secretDisponible } from "./_transferts.js";
 
 const CLE_DONNEES = "bde-data";
+
+/**
+ * Retrouve un transfert pour le suivi public — par son code de retrait, ou par sa référence.
+ *
+ * Le code n'existe dans la base que sous forme d'empreinte : seule l'égalité exacte le retrouve,
+ * ce qui interdit toute recherche approchante et donc tout balayage par proximité.
+ */
+async function chercherTransfertPublic(saisie, parCode) {
+  const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+  const cle = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !cle) return null;
+  let filtre = null;
+  if (parCode) {
+    const code = normaliserCode(saisie);
+    const empreinte = code ? empreinteCode(code) : null;
+    if (!empreinte) return null;
+    filtre = `code_hash=eq.${empreinte}`;
+  } else {
+    filtre = `reference=eq.${encodeURIComponent(saisie.toUpperCase())}`;
+  }
+  const reponse = await fetch(`${url}/rest/v1/transferts?${filtre}&select=*&limit=1`, {
+    headers: { apikey: cle, Authorization: `Bearer ${cle}` },
+  }).catch(() => null);
+  if (!reponse || !reponse.ok) return null;
+  const lignes = await reponse.json().catch(() => null);
+  const t = Array.isArray(lignes) ? lignes[0] : null;
+  return t ? vuePubliqueTransfert(t) : null;
+}
 
 /** Les étapes visibles d'un colis, sans les commentaires internes des agents. */
 function historiquePublic(historique) {
@@ -173,6 +202,36 @@ export default async function handler(req, res) {
       const code = String(suivi || "").trim().toUpperCase();
       // Une recherche vide ne renvoie pas « tous les colis » : elle ne renvoie rien.
       if (!code) return res.status(200).json({ colis: [], users: [] });
+
+      /*
+       * UN TRANSFERT D'ARGENT SE SUIT AU MÊME ENDROIT QU'UN COLIS.
+       *
+       * Le client ne sait pas qu'il y a deux systèmes derrière : il tape ce qu'on lui a donné.
+       * On reconnaît donc un code de retrait (huit chiffres, avec ou sans le préfixe) et une
+       * référence (TX-…), et on répond avec ce qu'un inconnu peut voir sans nuire à personne :
+       * l'état, la destination, le montant à recevoir, et des initiales. Ni téléphone, ni pièce
+       * d'identité, ni nom complet de l'autre partie — un code tapé au hasard ne doit jamais
+       * renseigner sur des gens qu'on ne connaît pas.
+       */
+      const estCodeTransfert = /^(TRF[\s-]*)?\d{8}$/i.test(code.replace(/\s/g, " ").trim());
+      const estReferenceTransfert = /^TX-\d{8}-\d{6}$/i.test(code);
+      if ((estCodeTransfert || estReferenceTransfert) && secretDisponible()) {
+        const trouve = await chercherTransfertPublic(code, estCodeTransfert);
+        if (trouve) return res.status(200).json({ transfert: trouve, branding: donnees.branding || {} });
+        if (estReferenceTransfert) {
+          const balayage = passage({
+            nature: "suivi-introuvable", cle: adresseDe(req),
+            max: INTROUVABLES_PAR_FENETRE, fenetreMs: FENETRE_SUIVI_MS,
+          });
+          if (balayage.bloque) {
+            return refuser(res, balayage.dansSecondes,
+              "Trop de références inconnues depuis cette connexion. Réessayez dans quelques minutes.");
+          }
+          return res.status(200).json({ colis: [], users: [] });
+        }
+        // Un code à huit chiffres qui ne correspond à rien peut aussi être un numéro de colis :
+        // on continue la recherche plus bas plutôt que de refuser tout de suite.
+      }
       const trouve = (donnees.colis || []).find((c) => String(c.tracking || "").toUpperCase() === code);
       if (!trouve) {
         /*

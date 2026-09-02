@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue, memo, createContext, useContext } from "react";
-import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, ChevronDown, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell, SlidersHorizontal, Copy, MoreHorizontal, Wallet } from "lucide-react";
+import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, ChevronDown, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell, SlidersHorizontal, Copy, MoreHorizontal, Wallet, Banknote, Send, ArrowRightLeft, HandCoins, Coins, ArrowUpRight, ArrowDownLeft, ScrollText, Ban } from "lucide-react";
 import { ROLES, PERMISSIONS_SCHEMA, ROLE_DEFAULT_PERMISSIONS, effectivePermission } from "../api/_permissions.js";
 import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree, relireDuServeur } from "./lib/storage.js";
 
@@ -4549,6 +4549,16 @@ function App() {
     { key: "bordereaux", label: t.bordereaux, icon: FileStack, show: perm("bordereaux.consulter") },
     { key: "paiements", label: t.paiements, icon: Receipt, show: perm("factures.consulter"), badge: declarationsEnAttente },
     { key: "caisse", label: "Caisse", icon: Wallet, show: perm("paiements.voir_propres") || perm("factures.consulter") || perm("compta.consulter") },
+    /*
+     * Le transfert d'argent est un métier à part : il a sa caisse, ses agents, son journal. Il
+     * n'apparaît que pour qui a au moins un droit dessus — sinon l'entrée mènerait à une page
+     * qui explique qu'on n'y a pas accès, ce qui est une façon compliquée de ne rien dire.
+     */
+    {
+      key: "transferts", label: "Transfert d’argent", icon: Banknote,
+      show: perm("transfert.creer") || perm("transfert.payer") || perm("transfert.voir_propres")
+        || perm("transfert.voir_zone") || perm("transfert.voir_tous"),
+    },
     { key: "voyages", label: "Voyages", icon: Plane, show: perm("compta.consulter") },
     { key: "comptabilite", label: "Comptabilité", icon: DollarSign, show: perm("compta.consulter") },
     { key: "ia", label: t.ia, icon: Sparkles, show: perm("ia.utiliser") },
@@ -4691,6 +4701,7 @@ function App() {
             {view === "bordereaux" && <BordereauxPage data={data} persist={persist} session={session} notify={notify} />}
             {view === "paiements" && <PaiementsPage data={data} notify={notify} />}
             {view === "caisse" && <CaissePage data={data} persist={persist} session={session} notify={notify} />}
+            {view === "transferts" && <TransfertsPage data={data} session={session} notify={notify} persist={persist} />}
             {view === "voyages" && perm("compta.consulter") && <VoyagesPage data={data} persist={persist} session={session} notify={notify} />}
             {view === "comptabilite" && <ComptabilitePage data={data} persist={persist} session={session} notify={notify} />}
             {view === "ia" && <AiAssistant data={data} />}
@@ -5815,7 +5826,13 @@ function PublicTrackingPage() {
   }, []);
 
   const colis = data && searched ? (data.colis || [])[0] : null;
-  const notFound = searched && !loading && !panne && data && !colis;
+  /*
+   * Le même champ sert pour un colis et pour un transfert d'argent : le client ne sait pas qu'il
+   * y a deux systèmes derrière, il tape ce qu'on lui a donné. Le serveur reconnaît la forme et
+   * répond avec l'un ou l'autre.
+   */
+  const transfert = data && searched ? data.transfert || null : null;
+  const notFound = searched && !loading && !panne && data && !colis && !transfert;
   /*
    * Un colis partenaire se suit sous la marque du partenaire, jamais sous la nôtre.
    *
@@ -5900,6 +5917,45 @@ function PublicTrackingPage() {
         <div role="alert" style={{ background: "rgba(255,255,255,0.96)", border: "1px solid rgba(214,39,63,0.35)", borderRadius: 14, padding: 20, width: "100%", maxWidth: 420, textAlign: "center", boxShadow: "0 24px 60px rgba(10,38,71,0.35)" }}>
           <div style={{ fontSize: 13.5, color: "#9F1D32", fontWeight: 700 }}>{T("Service de suivi temporairement indisponible")}</div>
           <div style={{ fontSize: 12, color: "#5B6472", marginTop: 5 }}>{T("Réessayez dans un instant ou contactez l’agence.")}</div>
+        </div>
+      )}
+
+      {transfert && (
+        <div style={{ background: "var(--surface)", borderRadius: 16, overflow: "hidden", width: "100%", maxWidth: 460, boxShadow: "0 28px 70px rgba(10,38,71,0.4)" }}>
+          <div style={{ height: 4, background: "var(--brand-solid)" }} />
+          <div style={{ padding: "20px 22px 22px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+              <span style={{ fontSize: 12, color: "var(--muted)", fontWeight: 600 }}>{transfert.reference}</span>
+              <BadgeStatutTransfert statut={transfert.statut} />
+            </div>
+            <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 4 }}>
+              Montant à recevoir
+            </div>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 30, fontWeight: 700, color: "var(--text)", letterSpacing: "-0.02em", marginBottom: 16 }}>
+              {montantTransfert(transfert.montantARecevoir, transfert.deviseReception)}
+            </div>
+            <div style={{ display: "grid", gap: 8 }}>
+              {[["Expéditeur", transfert.expediteur],
+                ["Bénéficiaire", transfert.beneficiaire],
+                ["Destination", transfert.destination || "—"],
+                ["Envoyé le", new Date(transfert.creeLe).toLocaleDateString("fr-FR")],
+                transfert.statut === "Payé"
+                  ? ["Retiré le", `${new Date(transfert.payeLe).toLocaleDateString("fr-FR")}${transfert.agencePaiement ? ` — ${transfert.agencePaiement}` : ""}`]
+                  : ["Valable jusqu’au", new Date(transfert.expireLe).toLocaleDateString("fr-FR")],
+              ].map(([k, v]) => (
+                <div key={k} style={{ display: "flex", justifyContent: "space-between", gap: 12, borderTop: "1px solid var(--surface2)", paddingTop: 8 }}>
+                  <span style={{ fontSize: 12.5, color: "var(--muted)" }}>{k}</span>
+                  <span style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600, textAlign: "end" }}>{v}</span>
+                </div>
+              ))}
+            </div>
+            {transfert.statut === "Disponible au retrait" && (
+              <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 10, padding: "11px 13px", marginTop: 16, fontSize: 12, color: "var(--text)", lineHeight: 1.55 }}>
+                Le bénéficiaire doit se présenter dans une agence avec le <strong>code de retrait</strong> et
+                une pièce d’identité au nom indiqué. Le code ne figure pas sur cette page.
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -15235,7 +15291,20 @@ function BordereauCreation({ data, session, onCancel, onCreate }) {
   const [selectedTrackings, setSelectedTrackings] = useState([]);
   const country = COUNTRIES.find((c) => c.code === pays);
 
-  const dejaInclus = new Set((data.bordereaux || []).filter((b) => normalizeBordereauStatut(b.statut) !== "Livré").flatMap((b) => b.colisTrackings));
+  /*
+   * UN COLIS N'EST SUR QU'UN SEUL BORDEREAU, ET POUR TOUJOURS.
+   *
+   * On écartait les bordereaux « Livré » de ce décompte, si bien qu'un colis posé sur un bordereau
+   * déjà remis redevenait sélectionnable pour un autre. Et cela arrive : un bordereau est marqué
+   * livré quand le gros du lot est parti, alors que tel colis attend encore son client. Il
+   * réapparaissait alors dans la liste, on le rechargeait de bonne foi, et le même colis se
+   * retrouvait compté sur deux bordereaux — donc deux fois dans les poids, deux fois dans les
+   * montants, et introuvable au moment de savoir lequel des deux fait foi.
+   *
+   * Le rattachement à un bordereau ne s'annule pas par le temps qui passe : il se défait en
+   * retirant le colis du bordereau, ce que l'écran de modification permet déjà.
+   */
+  const dejaInclus = new Set((data.bordereaux || []).flatMap((b) => b.colisTrackings || []));
   const eligibles = data.colis.filter((c) => c.pays === pays && (c.direction || "export") === direction && c.status !== "Livré" && c.status !== "Annulé" && !dejaInclus.has(c.tracking) && colisVisiblePour(session, c));
 
   function toggle(tracking) {
@@ -15271,7 +15340,7 @@ function BordereauCreation({ data, session, onCancel, onCreate }) {
 
       <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", marginBottom: 18 }}>
         {eligibles.length === 0 ? (
-          <div style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucun colis en attente sur cette route (ou déjà inclus dans un autre bordereau en cours).</div>
+          <div style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucun colis en attente sur cette route. Ceux qui figurent déjà sur un autre bordereau n’apparaissent pas ici : retirez-les de ce bordereau pour pouvoir les replacer.</div>
         ) : eligibles.map((c) => (
           <label key={c.tracking} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", borderTop: "1px solid var(--border)", cursor: "pointer" }}>
             <input type="checkbox" checked={selectedTrackings.includes(c.tracking)} onChange={() => toggle(c.tracking)} />
@@ -15320,7 +15389,9 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
   const stIdx = BORDEREAU_STATUSES.indexOf(statutActuel);
   const estFinal = stIdx === BORDEREAU_STATUSES.length - 1;
 
-  const dejaInclusAilleurs = new Set((data.bordereaux || []).filter((b) => b.id !== bordereau.id && normalizeBordereauStatut(b.statut) !== "Livré").flatMap((b) => b.colisTrackings));
+  // Même règle qu'à la création : un colis rattaché ailleurs ne s'ajoute pas ici, quel que soit
+  // l'état de l'autre bordereau. Il faut d'abord l'en retirer.
+  const dejaInclusAilleurs = new Set((data.bordereaux || []).filter((b) => b.id !== bordereau.id).flatMap((b) => b.colisTrackings || []));
   const ajoutables = data.colis.filter((c) => c.pays === bordereau.pays && (c.direction || "export") === bordereau.direction && c.status !== "Livré" && c.status !== "Annulé" && !bordereau.colisTrackings.includes(c.tracking) && !dejaInclusAilleurs.has(c.tracking));
 
   /*
@@ -32381,6 +32452,1396 @@ class ErrorBoundary extends React.Component {
     }
     return this.props.children;
   }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * TRANSFERT D'ARGENT — l'écran.
+ *
+ * Cinq pages sous un même toit : envoyer, payer, la liste, la caisse, le journal. Elles ne
+ * partagent aucun état avec le reste de l'application, et pour cause : les transferts ne vivent
+ * pas dans le document JSON mais dans leurs propres tables, derrière api/transferts.js. Ce module
+ * ne fait donc jamais persist() — il appelle le serveur et relit.
+ *
+ * LE CALCUL EST AFFICHÉ, PAS DÉCIDÉ, ICI.
+ * Le devis vient du serveur, à chaque changement de montant. La page ne sait pas calculer des
+ * frais, et c'est voulu : si elle savait, elle aurait deux vérités possibles avec le serveur, et
+ * c'est toujours celle du client qui finit par être crue par le client.
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+/*
+ * Le barème, vu du navigateur, tant que le serveur n'a pas répondu.
+ *
+ * Ce n'est PAS une seconde source de vérité : le serveur recalcule tout, et c'est lui qui décide.
+ * Ces valeurs servent uniquement à dessiner l'écran avant la première réponse — sans quoi les
+ * listes déroulantes de devises seraient vides pendant une seconde.
+ */
+const CONFIG_TRANSFERT_VIDE = {
+  actif: true,
+  validiteJours: 30,
+  devisesEnvoi: ["EUR", "GNF", "USD", "XOF"],
+  devisesReception: ["GNF", "EUR", "USD", "XOF"],
+  taux: {},
+  bareme: {},
+  limites: {},
+  commissions: { agentEnvoi: 0, agentPaiement: 0, agence: 0 },
+};
+
+const STATUTS_TRANSFERT = ["Créé", "En attente de paiement", "Disponible au retrait", "Payé", "Annulé", "Expiré"];
+
+const STYLE_STATUT_TRANSFERT = {
+  "Créé": { bg: "var(--surface2)", fg: "var(--neutral-fg)", icone: Clock },
+  "En attente de paiement": { bg: "var(--warn-bg)", fg: "var(--warn-fg)", icone: Clock },
+  "Disponible au retrait": { bg: "var(--info-bg)", fg: "var(--info-fg)", icone: HandCoins },
+  "Payé": { bg: "var(--ok-bg)", fg: "var(--ok-fg)", icone: CheckCircle2 },
+  "Annulé": { bg: "var(--danger-bg)", fg: "var(--danger-fg)", icone: Ban },
+  "Expiré": { bg: "var(--warn-bg)", fg: "var(--warn-fg-soft)", icone: AlertTriangle },
+};
+
+function BadgeStatutTransfert({ statut }) {
+  const s = STYLE_STATUT_TRANSFERT[statut] || STYLE_STATUT_TRANSFERT["Créé"];
+  const Icone = s.icone;
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, background: s.bg, color: s.fg, padding: "4px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>
+      <Icone size={12} /> {statut}
+    </span>
+  );
+}
+
+/** Un appel au module de transfert, jeton de session compris. */
+async function appelTransferts(chemin, options = {}) {
+  const jeton = jetonSessionCourant();
+  const reponse = await fetch(`/api/transferts${chemin}`, {
+    ...options,
+    headers: {
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...(options.headers || {}),
+      ...(jeton ? { Authorization: `Bearer ${jeton}` } : {}),
+    },
+  });
+  const corps = await reponse.json().catch(() => ({}));
+  if (!reponse.ok) {
+    const erreur = new Error(corps?.error || "L’opération n’a pas abouti.");
+    erreur.corps = corps;
+    erreur.statut = reponse.status;
+    throw erreur;
+  }
+  return corps;
+}
+
+/** Un montant de transfert, dans sa devise, en chiffres à chasse fixe. */
+function montantTransfert(valeur, devise) {
+  const n = Number(valeur) || 0;
+  const sansDecimale = ["GNF", "XOF", "XAF"].includes(String(devise).toUpperCase());
+  return `${n.toLocaleString("fr-FR", { minimumFractionDigits: sansDecimale ? 0 : 2, maximumFractionDigits: sansDecimale ? 0 : 2 })} ${devise}`;
+}
+
+/*
+ * LE CODE, TEL QU'ON LE LIT AU TÉLÉPHONE.
+ *
+ * « TRF-48273195 » se dicte mal ; « TRF 4827 3195 » se dicte. C'est un détail d'affichage et il
+ * décide du nombre d'appels au comptoir pour un code mal recopié.
+ */
+/*
+ * « GN » devient « Guinée » : au comptoir, on lit un pays, pas un code ISO.
+ *
+ * Deux versions, et la distinction n'est pas cosmétique : jsPDF ne sait pas dessiner un drapeau
+ * emoji — il l'imprime en carrés vides ou en signes illisibles. Le drapeau reste donc à l'écran,
+ * et les documents imprimés n'ont que le nom.
+ */
+function nomPaysImprime(code) {
+  return COUNTRIES.find((c) => c.code === code)?.name || code || "—";
+}
+
+function paysLisible(code) {
+  const pays = COUNTRIES.find((c) => c.code === code);
+  return pays ? `${FLAGS[pays.code] || ""} ${pays.name}`.trim() : (code || "—");
+}
+
+function codeLisible(code) {
+  const chiffres = String(code || "").replace(/\D/g, "");
+  if (chiffres.length !== 8) return code || "";
+  return `TRF ${chiffres.slice(0, 4)} ${chiffres.slice(4)}`;
+}
+
+/* ── LE REÇU D'ENVOI ───────────────────────────────────────────────────────────
+ * C'est la pièce que l'expéditeur emporte, et sur laquelle il lira le code à sa famille. Le code
+ * y est donc le plus gros élément de la page — plus gros que le montant, plus gros que le nom de
+ * l'entreprise. Tout le reste sert à trancher une contestation ; lui sert à retirer l'argent.
+ */
+async function downloadRecuTransfert(transfert, code, entreprise = {}) {
+  const jspdf = await loadJsPDF();
+  const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a5" }));
+  const W = 148, M = 10;
+  const INK = [20, 22, 26], MUTED = [122, 130, 142], NAVY = [10, 38, 71], RED = [214, 39, 63];
+
+  doc.setDrawColor(20, 20, 20); doc.setLineWidth(0.5); doc.rect(3, 3, W - 6, 210 - 6);
+  doc.setFillColor(...NAVY); doc.rect(3, 3, W - 6, 26, "F");
+  doc.setFillColor(255, 255, 255); doc.roundedRect(8, 6, 20, 20, 2.5, 2.5, "F");
+  doc.addImage(DEFAULT_LOGO, "PNG", 9, 7, 18, 18);
+  doc.setTextColor(255, 255, 255); doc.setFontSize(13); doc.setFont(undefined, "bold");
+  doc.text("BA-DIABY EXPRESS", 31, 13);
+  doc.setFontSize(8.5); doc.setFont(undefined, "normal"); doc.setTextColor(180, 195, 220);
+  doc.text("Reçu de transfert d’argent", 31, 19);
+  doc.setFontSize(7.5); doc.text(transfert.reference, W - M, 19, { align: "right" });
+
+  // ── Le code, en grand, encadré ────────────────────────────────────────────
+  let y = 38;
+  doc.setDrawColor(...RED); doc.setLineWidth(0.8);
+  doc.roundedRect(M, y, W - 2 * M, 26, 2, 2, "S");
+  doc.setFontSize(8); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
+  doc.text("CODE DE RETRAIT — à communiquer au bénéficiaire", W / 2, y + 7, { align: "center" });
+  doc.setFontSize(21); doc.setTextColor(...RED); doc.setFont(undefined, "bold");
+  doc.text(codeLisible(code), W / 2, y + 19, { align: "center" });
+  y += 34;
+
+  const ligne = (libelle, valeur, gras) => {
+    doc.setFontSize(8); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
+    doc.text(libelle, M, y);
+    doc.setFontSize(gras ? 11 : 9.5); doc.setTextColor(...INK); doc.setFont(undefined, gras ? "bold" : "normal");
+    doc.text(String(valeur ?? "—"), W - M, y, { align: "right" });
+    y += gras ? 8 : 6.5;
+  };
+
+  ligne("Expéditeur", transfert.expediteur);
+  ligne("Bénéficiaire", transfert.beneficiaire);
+  ligne("Destination", [transfert.beneficiaireVille, nomPaysImprime(transfert.beneficiairePays)].filter(Boolean).join(", "));
+  doc.setDrawColor(220); doc.line(M, y, W - M, y); y += 7;
+  ligne("Montant envoyé", montantTransfert(transfert.montantEnvoye, transfert.deviseEnvoi));
+  ligne("Frais de transfert", montantTransfert(transfert.frais, transfert.deviseEnvoi));
+  ligne("TOTAL PAYÉ", montantTransfert(Number(transfert.montantEnvoye) + Number(transfert.frais), transfert.deviseEnvoi), true);
+  doc.setDrawColor(220); doc.line(M, y, W - M, y); y += 7;
+  ligne("Taux appliqué", `1 ${transfert.deviseEnvoi} = ${Number(transfert.taux).toLocaleString("fr-FR", { maximumFractionDigits: 4 })} ${transfert.deviseReception}`);
+  ligne("LE BÉNÉFICIAIRE REÇOIT", montantTransfert(transfert.montantARecevoir, transfert.deviseReception), true);
+  doc.setDrawColor(220); doc.line(M, y, W - M, y); y += 7;
+  ligne("Date", new Date(transfert.creeLe).toLocaleString("fr-FR"));
+  ligne("Agent / agence", `${transfert.creePar} — ${transfert.agenceEnvoi}`);
+  ligne("Valable jusqu’au", new Date(transfert.expireLe).toLocaleDateString("fr-FR"));
+
+  y = 178;
+  doc.setDrawColor(200); doc.line(M, y, W - M, y);
+  doc.setFontSize(7.6); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
+  const avis = doc.splitTextToSize(
+    "Ce code vaut paiement : ne le communiquez qu’au bénéficiaire. Toute personne le présentant avec une pièce d’identité au nom indiqué peut retirer les fonds.",
+    W - 2 * M);
+  doc.text(avis, M, y + 6);
+  const rccm = String(entreprise?.rccm || "").trim();
+  doc.setFontSize(7.2);
+  doc.text(`badiabyexpress.bde@gmail.com${rccm ? ` · RCCM ${rccm}` : ""}`, M, 200);
+
+  openPdf(doc, `transfert-${transfert.reference}.pdf`);
+}
+
+/* ── LE REÇU DE PAIEMENT ───────────────────────────────────────────────────────
+ * Ce que le bénéficiaire signe et emporte. Il ne porte PAS le code : celui-ci ne sert plus, et
+ * l'imprimer une seconde fois le ferait circuler après usage.
+ */
+async function downloadRecuPaiementTransfert(transfert, entreprise = {}) {
+  const jspdf = await loadJsPDF();
+  const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a5" }));
+  const W = 148, M = 10;
+  const INK = [20, 22, 26], MUTED = [122, 130, 142], NAVY = [10, 38, 71], VERT = [22, 120, 70];
+
+  doc.setDrawColor(20, 20, 20); doc.setLineWidth(0.5); doc.rect(3, 3, W - 6, 210 - 6);
+  doc.setFillColor(...NAVY); doc.rect(3, 3, W - 6, 26, "F");
+  doc.setFillColor(255, 255, 255); doc.roundedRect(8, 6, 20, 20, 2.5, 2.5, "F");
+  doc.addImage(DEFAULT_LOGO, "PNG", 9, 7, 18, 18);
+  doc.setTextColor(255, 255, 255); doc.setFontSize(13); doc.setFont(undefined, "bold");
+  doc.text("BA-DIABY EXPRESS", 31, 13);
+  doc.setFontSize(8.5); doc.setFont(undefined, "normal"); doc.setTextColor(180, 195, 220);
+  doc.text("Reçu de paiement — transfert d’argent", 31, 19);
+  doc.setFontSize(7.5); doc.text(transfert.reference, W - M, 19, { align: "right" });
+
+  let y = 42;
+  doc.setFontSize(8.5); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
+  doc.text("MONTANT REMIS", M, y);
+  doc.setTextColor(...VERT); doc.setFont(undefined, "bold"); doc.setFontSize(20);
+  doc.text(montantTransfert(transfert.montantRemis ?? transfert.montantARecevoir, transfert.deviseReception), M, y + 10);
+  y += 22;
+  doc.setDrawColor(220); doc.line(M, y, W - M, y); y += 8;
+
+  const ligne = (libelle, valeur) => {
+    doc.setFontSize(8); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
+    doc.text(libelle, M, y);
+    doc.setFontSize(10); doc.setTextColor(...INK); doc.setFont(undefined, "bold");
+    doc.text(String(valeur ?? "—"), M, y + 5);
+    y += 12;
+  };
+  ligne("Bénéficiaire", transfert.beneficiaireNomVerifie || transfert.beneficiaire);
+  ligne("Pièce présentée", [transfert.beneficiairePiece, transfert.beneficiairePieceNumero].filter(Boolean).join(" — "));
+  ligne("Envoyé par", transfert.expediteur);
+  ligne("Payé le", new Date(transfert.payeLe).toLocaleString("fr-FR"));
+  ligne("Agent / agence", `${transfert.payePar} — ${transfert.agencePaiement}`);
+
+  y = 172;
+  doc.setDrawColor(200); doc.line(M, y, W - M, y);
+  doc.setFontSize(8.5); doc.setTextColor(90, 90, 90); doc.setFont(undefined, "normal");
+  doc.text("Signature du bénéficiaire :", M, y + 8);
+  doc.setDrawColor(150); doc.line(M, y + 20, 70, y + 20);
+  const rccm = String(entreprise?.rccm || "").trim();
+  doc.setFontSize(7.2); doc.setTextColor(140, 140, 140);
+  doc.text("Ce reçu atteste de la remise des fonds au bénéficiaire désigné.", M, 198);
+  doc.text(`badiabyexpress.bde@gmail.com${rccm ? ` · RCCM ${rccm}` : ""}`, M, 202);
+
+  openPdf(doc, `paiement-${transfert.reference}.pdf`);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * ENVOYER — le formulaire de départ
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+const PIECES_IDENTITE = ["Carte d’identité", "Passeport", "Permis de conduire", "Carte consulaire", "Carte de séjour", "Autre"];
+
+function NouveauTransfert({ data, session, config, onFait, onFermer, notify }) {
+  const [etape, setEtape] = useState(0);
+  const [envoi, setEnvoi] = useState(false);
+  const [erreur, setErreur] = useState("");
+  const [resultat, setResultat] = useState(null);
+
+  const [exp, setExp] = useState({ nom: "", prenom: "", telephone: "", pieceType: PIECES_IDENTITE[0], pieceNumero: "", adresse: "", pays: session?.paysAutorises?.[0] || "GN" });
+  const [ben, setBen] = useState({ nom: "", prenom: "", telephone: "", pays: "GN", ville: "", agence: "" });
+  const [argent, setArgent] = useState({
+    deviseEnvoi: (config.devisesEnvoi || ["EUR"])[0],
+    deviseReception: (config.devisesReception || ["GNF"])[0],
+    montant: "",
+  });
+  const [devis, setDevis] = useState(null);
+  const [devisEnCours, setDevisEnCours] = useState(false);
+
+  /*
+   * Le devis vient du serveur, jamais d'un calcul local. On attend un court instant après la
+   * dernière frappe : sans cela, taper « 100 000 » lance six appels dont cinq portent sur un
+   * montant que personne n'a voulu.
+   */
+  useEffect(() => {
+    const montant = montantSaisi(argent.montant);
+    if (!(montant > 0)) { setDevis(null); return undefined; }
+    let vivant = true;
+    setDevisEnCours(true);
+    const minuteur = setTimeout(() => {
+      appelTransferts("", {
+        method: "POST",
+        body: JSON.stringify({ action: "devis", deviseEnvoi: argent.deviseEnvoi, deviseReception: argent.deviseReception, montantEnvoye: montant }),
+      })
+        .then((r) => { if (vivant) { setDevis(r.devis); setErreur(""); } })
+        .catch((e) => { if (vivant) { setDevis(null); setErreur(e.message); } })
+        .finally(() => { if (vivant) setDevisEnCours(false); });
+    }, 420);
+    return () => { vivant = false; clearTimeout(minuteur); };
+  }, [argent.montant, argent.deviseEnvoi, argent.deviseReception]);
+
+  const etapes = ["Expéditeur", "Bénéficiaire", "Montant", "Résumé"];
+  const peutAvancer =
+    (etape === 0 && exp.nom.trim() && exp.telephone.trim())
+    || (etape === 1 && ben.nom.trim() && ben.pays)
+    || (etape === 2 && devis && !devisEnCours)
+    || etape === 3;
+
+  async function valider() {
+    if (envoi) return;
+    setEnvoi(true); setErreur("");
+    try {
+      const r = await appelTransferts("", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "creer",
+          expNom: exp.nom, expPrenom: exp.prenom, expTelephone: exp.telephone,
+          expPieceType: exp.pieceType, expPieceNumero: exp.pieceNumero, expAdresse: exp.adresse, expPays: exp.pays,
+          benNom: ben.nom, benPrenom: ben.prenom, benTelephone: ben.telephone,
+          benPays: ben.pays, benVille: ben.ville, benAgence: ben.agence,
+          deviseEnvoi: argent.deviseEnvoi, deviseReception: argent.deviseReception,
+          montantEnvoye: montantSaisi(argent.montant),
+          paysEnvoi: exp.pays,
+        }),
+      });
+      setResultat(r);
+      onFait?.();
+    } catch (e) {
+      setErreur(e.message);
+    } finally {
+      setEnvoi(false);
+    }
+  }
+
+  /* ── L'écran de succès : le code, et rien qui puisse le faire manquer ── */
+  if (resultat) {
+    const t = resultat.transfert;
+    const vue = {
+      reference: t.reference,
+      expediteur: `${t.exp_nom} ${t.exp_prenom}`.trim(),
+      beneficiaire: `${t.ben_nom} ${t.ben_prenom}`.trim(),
+      beneficiaireVille: t.ben_ville, beneficiairePays: t.ben_pays,
+      montantEnvoye: t.montant_envoye, deviseEnvoi: t.devise_envoi,
+      frais: t.frais, taux: t.taux,
+      montantARecevoir: t.montant_a_recevoir, deviseReception: t.devise_reception,
+      creeLe: t.cree_le, creePar: t.cree_par_nom, agenceEnvoi: t.agence_envoi, expireLe: t.expire_le,
+    };
+    return (
+      <Modal title="Transfert enregistré" onClose={onFermer} wide>
+        <div style={{ textAlign: "center", marginBottom: 18 }}>
+          <div style={{ width: 52, height: 52, margin: "0 auto 12px", borderRadius: 16, display: "grid", placeItems: "center", background: "color-mix(in srgb, var(--ok-fg) 14%, transparent)", border: "1px solid color-mix(in srgb, var(--ok-fg) 26%, transparent)" }}>
+            <CheckCircle2 size={24} color="var(--ok-fg)" />
+          </div>
+          <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Référence {vue.reference}</div>
+        </div>
+
+        <div style={{ border: "1.5px solid var(--brand-solid)", borderRadius: 14, padding: "18px 16px", textAlign: "center", marginBottom: 16, background: "color-mix(in srgb, var(--brand-solid) 7%, transparent)" }}>
+          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 8 }}>
+            Code de retrait
+          </div>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 32, fontWeight: 700, color: "var(--brand-solid)", letterSpacing: "0.04em", fontVariantNumeric: "tabular-nums" }}>
+            {codeLisible(resultat.code)}
+          </div>
+          <button onClick={() => { navigator.clipboard?.writeText(resultat.code); notify?.("Code copié"); }}
+            style={{ marginTop: 10, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 14px", fontSize: 12, fontWeight: 600, color: "var(--text)", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <Copy size={13} /> Copier le code
+          </button>
+        </div>
+
+        <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 10, padding: "11px 13px", fontSize: 12, color: "var(--text)", lineHeight: 1.55, marginBottom: 16 }}>
+          <strong style={{ color: "var(--warn-fg)" }}>Ce code vaut paiement.</strong> Il n’apparaîtra plus dans
+          les listes : notez-le ou imprimez le reçu maintenant. Le redemander plus tard est possible,
+          mais c’est un geste enregistré au journal.
+        </div>
+
+        <div style={{ display: "grid", gap: 6, fontSize: 12.5, color: "var(--muted)", marginBottom: 18 }}>
+          <div style={{ display: "flex", justifyContent: "space-between" }}><span>Bénéficiaire</span><strong style={{ color: "var(--text)" }}>{vue.beneficiaire}</strong></div>
+          <div style={{ display: "flex", justifyContent: "space-between" }}><span>Il recevra</span><strong style={{ color: "var(--ok-fg)" }}>{montantTransfert(vue.montantARecevoir, vue.deviseReception)}</strong></div>
+          <div style={{ display: "flex", justifyContent: "space-between" }}><span>Total encaissé</span><strong style={{ color: "var(--text)" }}>{montantTransfert(Number(vue.montantEnvoye) + Number(vue.frais), vue.deviseEnvoi)}</strong></div>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={() => downloadRecuTransfert(vue, resultat.code, data?.entreprise)}
+            style={{ flex: 1, minWidth: 160, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 10, padding: "12px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
+            <Printer size={16} /> Imprimer le reçu
+          </button>
+          <button onClick={onFermer}
+            style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 10, padding: "12px 20px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+            Terminer
+          </button>
+        </div>
+      </Modal>
+    );
+  }
+
+  const champ = (label, valeur, onChange, options = {}) => (
+    <Field label={label}>
+      {options.select
+        ? <select aria-label={String(label).replace(" *", "")} value={valeur} onChange={(e) => onChange(e.target.value)} style={inputStyle}>{options.select}</select>
+        : <input aria-label={String(label).replace(" *", "")} value={valeur} onChange={(e) => onChange(e.target.value)} placeholder={options.placeholder || ""}
+            inputMode={options.inputMode} style={inputStyle} />}
+    </Field>
+  );
+
+  return (
+    <Modal title="Nouveau transfert d’argent" onClose={onFermer} wide saisieEnCours={!!(exp.nom || ben.nom || argent.montant)}>
+      <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 18, flexWrap: "wrap" }}>
+        {etapes.map((nom, i) => (
+          <React.Fragment key={nom}>
+            <button onClick={() => i < etape && setEtape(i)}
+              style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, background: "none", border: "none", cursor: i < etape ? "pointer" : "default", padding: 0 }}>
+              <div style={{ width: 28, height: 28, borderRadius: "50%", display: "grid", placeItems: "center",
+                            background: i <= etape ? "var(--brand-solid)" : "var(--surface2)",
+                            color: i <= etape ? "#fff" : "var(--muted)", fontSize: 12, fontWeight: 700 }}>
+                {i < etape ? <Check size={14} /> : i + 1}
+              </div>
+              <span style={{ fontSize: 10.5, fontWeight: 600, color: i <= etape ? "var(--text)" : "var(--muted)" }}>{nom}</span>
+            </button>
+            {i < etapes.length - 1 && <div style={{ flex: 1, height: 1.5, background: i < etape ? "var(--brand-solid)" : "var(--border)", minWidth: 12 }} />}
+          </React.Fragment>
+        ))}
+      </div>
+
+      {etape === 0 && (
+        <>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.55 }}>
+            La pièce d’identité de l’expéditeur n’est pas une formalité : c’est elle qui permet de
+            lui rendre son argent si le transfert est annulé, et de répondre à un contrôle.
+          </div>
+          <div className="responsive-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            {champ("Nom *", exp.nom, (v) => setExp({ ...exp, nom: v }))}
+            {champ("Prénom", exp.prenom, (v) => setExp({ ...exp, prenom: v }))}
+          </div>
+          <Field label="Téléphone *"><PhoneInput value={exp.telephone} onChange={(v) => setExp({ ...exp, telephone: v })} /></Field>
+          <div className="responsive-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            {champ("Pièce d’identité", exp.pieceType, (v) => setExp({ ...exp, pieceType: v }), { select: PIECES_IDENTITE.map((p) => <option key={p} value={p}>{p}</option>) })}
+            {champ("Numéro de pièce", exp.pieceNumero, (v) => setExp({ ...exp, pieceNumero: v }))}
+          </div>
+          <div className="responsive-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            {champ("Adresse", exp.adresse, (v) => setExp({ ...exp, adresse: v }))}
+            {champ("Pays", exp.pays, (v) => setExp({ ...exp, pays: v }), { select: COUNTRIES.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code]} {c.name}</option>) })}
+          </div>
+        </>
+      )}
+
+      {etape === 1 && (
+        <>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.55 }}>
+            Le nom saisi ici est celui qui devra figurer sur la pièce présentée au retrait. Une
+            faute d’orthographe se paie d’un aller-retour du bénéficiaire.
+          </div>
+          <div className="responsive-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            {champ("Nom *", ben.nom, (v) => setBen({ ...ben, nom: v }))}
+            {champ("Prénom", ben.prenom, (v) => setBen({ ...ben, prenom: v }))}
+          </div>
+          <Field label="Téléphone"><PhoneInput value={ben.telephone} onChange={(v) => setBen({ ...ben, telephone: v })} defaultDial={indicatifDuPays(ben.pays)} /></Field>
+          <div className="responsive-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            {champ("Pays de retrait *", ben.pays, (v) => setBen({ ...ben, pays: v }), { select: COUNTRIES.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code]} {c.name}</option>) })}
+            {champ("Ville", ben.ville, (v) => setBen({ ...ben, ville: v }))}
+          </div>
+          <Field label="Agence de paiement souhaitée">
+            <select value={ben.agence} onChange={(e) => setBen({ ...ben, agence: e.target.value })} style={inputStyle}>
+              <option value="">N’importe quelle agence du réseau</option>
+              {(data?.sites || []).filter((s) => !ben.pays || s.pays === ben.pays).map((s) => <option key={s.id} value={s.nom}>{s.nom}</option>)}
+            </select>
+          </Field>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -6 }}>
+            Indicative : le bénéficiaire pourra retirer dans n’importe quelle agence autorisée à payer.
+          </div>
+        </>
+      )}
+
+      {etape === 2 && (
+        <>
+          <div className="responsive-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            {champ("Devise d’envoi", argent.deviseEnvoi, (v) => setArgent({ ...argent, deviseEnvoi: v }), { select: (config.devisesEnvoi || []).map((d) => <option key={d} value={d}>{d}</option>) })}
+            {champ("Devise de réception", argent.deviseReception, (v) => setArgent({ ...argent, deviseReception: v }), { select: (config.devisesReception || []).map((d) => <option key={d} value={d}>{d}</option>) })}
+          </div>
+          {champ(`Montant envoyé (${argent.deviseEnvoi}) *`, argent.montant, (v) => setArgent({ ...argent, montant: v }), { inputMode: "decimal", placeholder: "0" })}
+
+          <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px", marginTop: 4 }}>
+            {devisEnCours && !devis && <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Calcul en cours…</div>}
+            {!devis && !devisEnCours && <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Saisissez un montant pour voir les frais et le montant à recevoir.</div>}
+            {devis && (
+              <div style={{ display: "grid", gap: 8, fontSize: 13, fontVariantNumeric: "tabular-nums" }}>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span style={{ color: "var(--muted)" }}>Montant envoyé</span>
+                  <strong style={{ color: "var(--text)" }}>{montantTransfert(devis.montantEnvoye, devis.deviseEnvoi)}</strong>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span style={{ color: "var(--muted)" }}>Frais de transfert</span>
+                  <strong style={{ color: "var(--text)" }}>{montantTransfert(devis.frais, devis.deviseEnvoi)}</strong>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+                  <span style={{ color: "var(--text)", fontWeight: 700 }}>Total à encaisser</span>
+                  <strong style={{ color: "var(--text)", fontSize: 15 }}>{montantTransfert(devis.totalPaye, devis.deviseEnvoi)}</strong>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: "var(--muted)" }}>
+                  <span>Taux appliqué</span>
+                  <span>1 {devis.deviseEnvoi} = {Number(devis.taux).toLocaleString("fr-FR", { maximumFractionDigits: 4 })} {devis.deviseReception}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+                  <span style={{ color: "var(--ok-fg)", fontWeight: 700 }}>Le bénéficiaire reçoit</span>
+                  <strong style={{ color: "var(--ok-fg)", fontSize: 16 }}>{montantTransfert(devis.montantARecevoir, devis.deviseReception)}</strong>
+                </div>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {etape === 3 && devis && (
+        <div style={{ display: "grid", gap: 12 }}>
+          {[["Expéditeur", `${exp.nom} ${exp.prenom}`.trim(), exp.telephone, [exp.pieceType, exp.pieceNumero].filter(Boolean).join(" — ")],
+            ["Bénéficiaire", `${ben.nom} ${ben.prenom}`.trim(), ben.telephone, [ben.ville, COUNTRIES.find((c) => c.code === ben.pays)?.name].filter(Boolean).join(", ")]]
+            .map(([titre, nom, tel, detail]) => (
+            <div key={titre} style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: "12px 14px" }}>
+              <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 5 }}>{titre}</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{nom || "—"}</div>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>{[tel, detail].filter(Boolean).join(" · ") || "—"}</div>
+            </div>
+          ))}
+          <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "14px 16px", display: "grid", gap: 7, fontVariantNumeric: "tabular-nums" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+              <span style={{ color: "var(--muted)" }}>À encaisser maintenant</span>
+              <strong style={{ color: "var(--text)", fontSize: 16 }}>{montantTransfert(devis.totalPaye, devis.deviseEnvoi)}</strong>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+              <span style={{ color: "var(--muted)" }}>Le bénéficiaire recevra</span>
+              <strong style={{ color: "var(--ok-fg)", fontSize: 16 }}>{montantTransfert(devis.montantARecevoir, devis.deviseReception)}</strong>
+            </div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", borderTop: "1px solid var(--info-border)", paddingTop: 7 }}>
+              Frais {montantTransfert(devis.frais, devis.deviseEnvoi)} · taux 1 {devis.deviseEnvoi} = {Number(devis.taux).toLocaleString("fr-FR", { maximumFractionDigits: 4 })} {devis.deviseReception}.
+              Le taux est figé à la création : il ne changera plus, quoi qu’il arrive d’ici au retrait.
+            </div>
+          </div>
+        </div>
+      )}
+
+      {erreur && (
+        <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 10, padding: "11px 13px", marginTop: 14, fontSize: 12.5, color: "var(--danger-fg)" }}>
+          {erreur}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, marginTop: 18 }}>
+        {etape > 0 && (
+          <button onClick={() => setEtape(etape - 1)} style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 10, padding: "11px 18px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+            Retour
+          </button>
+        )}
+        <div style={{ flex: 1 }} />
+        {etape < 3 ? (
+          <button onClick={() => peutAvancer && setEtape(etape + 1)} disabled={!peutAvancer}
+            style={{ background: peutAvancer ? "var(--brand-solid)" : "var(--surface2)", color: peutAvancer ? "#fff" : "var(--muted)", border: "none", borderRadius: 10, padding: "11px 22px", fontSize: 13.5, fontWeight: 700, cursor: peutAvancer ? "pointer" : "not-allowed", display: "flex", alignItems: "center", gap: 6 }}>
+            Suivant <ChevronRight size={15} />
+          </button>
+        ) : (
+          <button onClick={valider} disabled={envoi || !devis}
+            style={{ background: envoi || !devis ? "var(--surface2)" : "var(--brand-solid)", color: envoi || !devis ? "var(--muted)" : "#fff", border: "none", borderRadius: 10, padding: "11px 22px", fontSize: 13.5, fontWeight: 700, cursor: envoi || !devis ? "not-allowed" : "pointer", display: "flex", alignItems: "center", gap: 7 }}>
+            <Send size={15} /> {envoi ? "Enregistrement…" : "Encaisser et générer le code"}
+          </button>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * PAYER — le comptoir d'arrivée
+ *
+ * Trois temps, et l'ordre compte : on trouve le transfert, on vérifie l'identité, on paie. Les
+ * regrouper sur un seul écran ferait payer avant d'avoir regardé la pièce — c'est exactement ce
+ * qu'on veut rendre impossible.
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+function PayerTransfert({ data, onFait, onFermer, notify }) {
+  const [code, setCode] = useState("");
+  const [recherche, setRecherche] = useState(false);
+  const [trouve, setTrouve] = useState(null);
+  const [erreur, setErreur] = useState("");
+  const [detailRefus, setDetailRefus] = useState(null);
+  const [verif, setVerif] = useState({ nom: "", telephone: "", pieceType: PIECES_IDENTITE[0], pieceNumero: "", montantRemis: "" });
+  const [confirmation, setConfirmation] = useState(false);
+  const [paiement, setPaiement] = useState(false);
+  const [paye, setPaye] = useState(null);
+
+  async function chercher() {
+    const chiffres = code.replace(/\D/g, "");
+    if (chiffres.length !== 8) { setErreur("Un code de transfert compte huit chiffres."); return; }
+    setRecherche(true); setErreur(""); setDetailRefus(null); setTrouve(null);
+    try {
+      const r = await appelTransferts(`?code=${encodeURIComponent(chiffres)}`);
+      setTrouve(r.transfert);
+      // Le nom annoncé au départ pré-remplit la vérification : l'agent CORRIGE ce qu'il lit sur
+      // la pièce, il ne le recopie pas — un champ vide se remplit sans regarder.
+      setVerif((v) => ({ ...v, nom: r.transfert.beneficiaire || "", telephone: r.transfert.beneficiaireTelephone || "", montantRemis: String(r.transfert.montantARecevoir ?? "") }));
+    } catch (e) {
+      setErreur(e.message);
+      setDetailRefus(e.corps?.detail || null);
+    } finally {
+      setRecherche(false);
+    }
+  }
+
+  async function payer() {
+    setConfirmation(false);
+    setPaiement(true); setErreur("");
+    try {
+      const r = await appelTransferts("", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "payer",
+          code: code.replace(/\D/g, ""),
+          benNomVerifie: verif.nom, benTelephoneVerifie: verif.telephone,
+          benPieceType: verif.pieceType, benPieceNumero: verif.pieceNumero,
+          montantRemis: montantSaisi(verif.montantRemis),
+        }),
+      });
+      const t = r.transfert;
+      setPaye({
+        reference: t.reference,
+        expediteur: `${t.exp_nom} ${t.exp_prenom}`.trim(),
+        beneficiaire: `${t.ben_nom} ${t.ben_prenom}`.trim(),
+        beneficiaireNomVerifie: t.ben_nom_verifie,
+        beneficiairePiece: t.ben_piece_type, beneficiairePieceNumero: t.ben_piece_numero,
+        montantRemis: t.montant_remis, montantARecevoir: t.montant_a_recevoir, deviseReception: t.devise_reception,
+        payeLe: t.paye_le, payePar: t.paye_par_nom, agencePaiement: t.agence_paiement,
+      });
+      onFait?.();
+    } catch (e) {
+      setErreur(e.message);
+      setDetailRefus(e.corps?.detail || null);
+      // Un refus « déjà payé » doit effacer la fiche : sinon le bouton reste là, et on réessaie.
+      if (e.corps?.raison === "deja_paye" || e.corps?.raison === "annule" || e.corps?.raison === "expire") setTrouve(null);
+    } finally {
+      setPaiement(false);
+    }
+  }
+
+  if (paye) {
+    return (
+      <Modal title="Transfert payé" onClose={onFermer} wide>
+        <div style={{ textAlign: "center", marginBottom: 20 }}>
+          <div style={{ width: 56, height: 56, margin: "0 auto 12px", borderRadius: 18, display: "grid", placeItems: "center", background: "color-mix(in srgb, var(--ok-fg) 14%, transparent)", border: "1px solid color-mix(in srgb, var(--ok-fg) 28%, transparent)" }}>
+            <CheckCircle2 size={26} color="var(--ok-fg)" />
+          </div>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 26, fontWeight: 700, color: "var(--ok-fg)" }}>
+            {montantTransfert(paye.montantRemis ?? paye.montantARecevoir, paye.deviseReception)}
+          </div>
+          <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 4 }}>
+            remis à {paye.beneficiaireNomVerifie || paye.beneficiaire} · {paye.reference}
+          </div>
+        </div>
+        <div style={{ background: "var(--ok-bg-soft)", border: "1px solid var(--ok-border)", borderRadius: 10, padding: "11px 13px", fontSize: 12.5, color: "var(--text)", marginBottom: 18, lineHeight: 1.55 }}>
+          Le code est désormais inutilisable : toute nouvelle présentation sera refusée.
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={() => downloadRecuPaiementTransfert(paye, data?.entreprise)}
+            style={{ flex: 1, minWidth: 160, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 10, padding: "12px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
+            <Printer size={16} /> Reçu de paiement
+          </button>
+          <button onClick={onFermer} style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 10, padding: "12px 20px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+            Terminer
+          </button>
+        </div>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal title="Payer un transfert" onClose={onFermer} wide saisieEnCours={!!trouve}>
+      <Field label="Code de transfert présenté par le bénéficiaire">
+        <div style={{ display: "flex", gap: 8 }}>
+          <input aria-label="Code de transfert" value={code} onChange={(e) => setCode(e.target.value)} onKeyDown={(e) => e.key === "Enter" && chercher()}
+            placeholder="TRF 4827 3195" inputMode="numeric" autoFocus
+            style={{ ...inputStyle, marginBottom: 0, fontSize: 18, fontWeight: 700, letterSpacing: "0.06em", fontVariantNumeric: "tabular-nums" }} />
+          <button onClick={chercher} disabled={recherche}
+            style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 10, padding: "0 20px", fontSize: 13.5, fontWeight: 700, cursor: recherche ? "wait" : "pointer", whiteSpace: "nowrap" }}>
+            {recherche ? "…" : "Rechercher"}
+          </button>
+        </div>
+      </Field>
+
+      {erreur && (
+        <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 10, padding: "12px 14px", marginBottom: 14 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "var(--danger-fg)" }}>{erreur}</div>
+          {detailRefus?.payeLe && (
+            <div style={{ fontSize: 12, color: "var(--text)", marginTop: 5, lineHeight: 1.5 }}>
+              Payé le {new Date(detailRefus.payeLe).toLocaleString("fr-FR")}
+              {detailRefus.payePar ? ` par ${detailRefus.payePar}` : ""}
+              {detailRefus.agencePaiement ? ` — agence ${detailRefus.agencePaiement}` : ""}.
+            </div>
+          )}
+          {detailRefus?.expireLe && !detailRefus?.payeLe && (
+            <div style={{ fontSize: 12, color: "var(--text)", marginTop: 5 }}>
+              Expiré le {new Date(detailRefus.expireLe).toLocaleDateString("fr-FR")}.
+            </div>
+          )}
+          {detailRefus?.motif && (
+            <div style={{ fontSize: 12, color: "var(--text)", marginTop: 5 }}>Motif : {detailRefus.motif}</div>
+          )}
+        </div>
+      )}
+
+      {trouve && (
+        <>
+          <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px", marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 12.5, color: "var(--muted)" }}>{trouve.reference}</span>
+              <BadgeStatutTransfert statut={trouve.statut} />
+            </div>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 28, fontWeight: 700, color: "var(--text)", letterSpacing: "-0.02em", marginBottom: 12 }}>
+              {montantTransfert(trouve.montantARecevoir, trouve.deviseReception)}
+            </div>
+            <div style={{ display: "grid", gap: 7, fontSize: 12.5 }}>
+              {[["Bénéficiaire annoncé", trouve.beneficiaire],
+                ["Téléphone annoncé", trouve.beneficiaireTelephone || "—"],
+                ["Envoyé par", `${trouve.expediteur} · ${trouve.expediteurTelephone || "—"}`],
+                ["Destination", [trouve.beneficiaireVille, paysLisible(trouve.beneficiairePays)].filter(Boolean).join(", ")],
+                ["Créé le", `${new Date(trouve.creeLe).toLocaleString("fr-FR")} — ${trouve.creePar} (${trouve.agenceEnvoi})`],
+                ["Valable jusqu’au", new Date(trouve.expireLe).toLocaleDateString("fr-FR")]].map(([k, v]) => (
+                <div key={k} style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                  <span style={{ color: "var(--muted)" }}>{k}</span>
+                  <span style={{ color: "var(--text)", fontWeight: 600, textAlign: "end" }}>{v}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 10, padding: "11px 13px", fontSize: 12.5, color: "var(--text)", lineHeight: 1.55, marginBottom: 14 }}>
+            <strong style={{ color: "var(--warn-fg)" }}>Vérifiez la pièce d’identité avant de payer.</strong> Le nom
+            ci-dessous est celui annoncé au départ : corrigez-le d’après la pièce présentée, il sera
+            porté sur le reçu et c’est lui qui fera foi.
+          </div>
+
+          <div className="responsive-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <Field label="Nom relevé sur la pièce *">
+              <input aria-label="Nom relevé sur la pièce" value={verif.nom} onChange={(e) => setVerif({ ...verif, nom: e.target.value })} style={inputStyle} />
+            </Field>
+            <Field label="Téléphone du bénéficiaire">
+              <input aria-label="Téléphone du bénéficiaire" value={verif.telephone} onChange={(e) => setVerif({ ...verif, telephone: e.target.value })} style={inputStyle} />
+            </Field>
+          </div>
+          <div className="responsive-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <Field label="Type de pièce *">
+              <select aria-label="Type de pièce" value={verif.pieceType} onChange={(e) => setVerif({ ...verif, pieceType: e.target.value })} style={inputStyle}>
+                {PIECES_IDENTITE.map((p) => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </Field>
+            <Field label="Numéro de la pièce *">
+              <input aria-label="Numéro de la pièce" value={verif.pieceNumero} onChange={(e) => setVerif({ ...verif, pieceNumero: e.target.value })} style={inputStyle} />
+            </Field>
+          </div>
+          <Field label={`Montant remis (${trouve.deviseReception})`}>
+            <input aria-label="Montant remis" value={verif.montantRemis} onChange={(e) => setVerif({ ...verif, montantRemis: e.target.value })}
+              inputMode="decimal" style={inputStyle} />
+          </Field>
+
+          <button onClick={() => setConfirmation(true)}
+            disabled={paiement || !verif.nom.trim() || !verif.pieceNumero.trim()}
+            style={{
+              width: "100%", marginTop: 6, borderRadius: 10, padding: "14px 0", fontSize: 14.5, fontWeight: 700,
+              border: "none", cursor: paiement || !verif.nom.trim() || !verif.pieceNumero.trim() ? "not-allowed" : "pointer",
+              background: paiement || !verif.nom.trim() || !verif.pieceNumero.trim() ? "var(--surface2)" : "var(--brand-solid)",
+              color: paiement || !verif.nom.trim() || !verif.pieceNumero.trim() ? "var(--muted)" : "#fff",
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+            }}>
+            <HandCoins size={18} /> {paiement ? "Paiement en cours…" : "PAYER LE TRANSFERT"}
+          </button>
+
+          {confirmation && (
+            <ConfirmerAction
+              titre="Confirmer le paiement ?"
+              message={`Voulez-vous confirmer le paiement de ${montantTransfert(montantSaisi(verif.montantRemis) || trouve.montantARecevoir, trouve.deviseReception)} à ${verif.nom} ?`}
+              consequence="Le code deviendra immédiatement inutilisable et l’opération sera inscrite au journal, avec votre nom et votre agence. Elle ne pourra plus être annulée."
+              libelleAction="Confirmer le paiement"
+              onConfirmer={payer}
+              onAnnuler={() => setConfirmation(false)}
+            />
+          )}
+        </>
+      )}
+    </Modal>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * LA PAGE — liste, chiffres, caisse, journal, réglages
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+function TransfertsPage({ data, session, notify, persist }) {
+  const perm = useCallback((k) => effectivePermission(session, k), [session]);
+  const [onglet, setOnglet] = useState("liste");
+  const [config, setConfig] = useState(CONFIG_TRANSFERT_VIDE);
+  const [liste, setListe] = useState([]);
+  const [stats, setStats] = useState(null);
+  const [portee, setPortee] = useState("");
+  const [chargement, setChargement] = useState(true);
+  const [erreur, setErreur] = useState("");
+  const [recherche, setRecherche] = useState("");
+  const [filtres, setFiltres] = useState({ statut: "", pays: "", agence: "", depuis: "", jusqua: "" });
+  const [nouveau, setNouveau] = useState(false);
+  const [payer, setPayer] = useState(false);
+  const [detail, setDetail] = useState(null);
+  const [caisse, setCaisse] = useState(null);
+  const [journal, setJournal] = useState(null);
+
+  const chargerConfig = useCallback(() => {
+    appelTransferts("?config=1").then((r) => setConfig(r.config)).catch(() => {});
+  }, []);
+
+  const charger = useCallback(() => {
+    setChargement(true); setErreur("");
+    const params = new URLSearchParams();
+    if (recherche.trim()) params.set("recherche", recherche.trim());
+    Object.entries(filtres).forEach(([k, v]) => { if (v) params.set(k, v); });
+    appelTransferts(`?${params.toString()}`)
+      .then((r) => { setListe(r.transferts || []); setStats(r.stats || null); setPortee(r.portee || ""); })
+      .catch((e) => setErreur(e.message))
+      .finally(() => setChargement(false));
+  }, [recherche, filtres]);
+
+  useEffect(() => { chargerConfig(); }, [chargerConfig]);
+  useEffect(() => {
+    // Un léger délai après la frappe : sinon chaque lettre part au serveur.
+    const m = setTimeout(charger, recherche ? 400 : 0);
+    return () => clearTimeout(m);
+  }, [charger, recherche]);
+
+  const ouvrirCaisse = () => {
+    setOnglet("caisse");
+    appelTransferts("?caisse=1").then(setCaisse).catch((e) => setErreur(e.message));
+  };
+  const ouvrirJournal = () => {
+    setOnglet("journal");
+    appelTransferts("?journal=1").then((r) => setJournal(r.journal || [])).catch((e) => setErreur(e.message));
+  };
+
+  const carte = { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14 };
+  const onglets = [
+    { cle: "liste", label: "Transferts", icone: ArrowRightLeft, montrer: true },
+    { cle: "caisse", label: "Caisse", icone: Wallet, montrer: perm("transfert.caisse") || perm("transfert.voir_propres"), action: ouvrirCaisse },
+    { cle: "journal", label: "Journal", icone: ScrollText, montrer: perm("transfert.journal") || perm("transfert.voir_tous"), action: ouvrirJournal },
+    { cle: "reglages", label: "Réglages", icone: Settings, montrer: perm("transfert.config") },
+  ].filter((o) => o.montrer);
+
+  /* Le module ne s'ouvre pas à quelqu'un qui n'a aucun droit dessus : mieux vaut une phrase
+     claire qu'une page vide qu'on prend pour une panne. */
+  const aucunDroit = !perm("transfert.creer") && !perm("transfert.payer")
+    && !perm("transfert.voir_propres") && !perm("transfert.voir_zone") && !perm("transfert.voir_tous");
+  if (aucunDroit) {
+    return (
+      <div style={{ ...carte, padding: "40px 24px", textAlign: "center", maxWidth: 520, margin: "40px auto" }}>
+        <Banknote size={30} color="var(--muted)" style={{ marginBottom: 12 }} />
+        <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>Transfert d’argent</div>
+        <div style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.6 }}>
+          Aucun droit ne vous est ouvert sur ce module. Envoyer et payer de l’argent ne s’accordent
+          pas automatiquement : c’est l’administrateur qui désigne, compte par compte, qui envoie et
+          qui paie.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 14, flexWrap: "wrap", marginBottom: 18 }}>
+        <div>
+          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 26, fontWeight: 700, color: "var(--text)", margin: 0 }}>Transfert d’argent</h1>
+          <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 3 }}>
+            Envoi au comptoir, retrait sur code dans n’importe quelle agence du réseau.
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {perm("transfert.payer") && (
+            <button onClick={() => setPayer(true)}
+              style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 10, padding: "11px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+              <HandCoins size={16} /> Payer un transfert
+            </button>
+          )}
+          {perm("transfert.creer") && (
+            <button onClick={() => setNouveau(true)}
+              style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 10, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+              <Plus size={16} /> Nouveau transfert
+            </button>
+          )}
+        </div>
+      </div>
+
+      {onglets.length > 1 && (
+        <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
+          {onglets.map((o) => (
+            <button key={o.cle} onClick={() => (o.action ? o.action() : setOnglet(o.cle))}
+              style={{ display: "flex", alignItems: "center", gap: 6, background: onglet === o.cle ? "var(--brand-solid)" : "var(--surface)", color: onglet === o.cle ? "#fff" : "var(--text)", border: onglet === o.cle ? "none" : "1px solid var(--border)", borderRadius: 999, padding: "8px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+              <o.icone size={14} /> {o.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {erreur && (
+        <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 10, padding: "11px 14px", marginBottom: 14, fontSize: 12.5, color: "var(--danger-fg)" }}>{erreur}</div>
+      )}
+
+      {onglet === "liste" && (
+        <>
+          {stats && (
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
+              <StatCard label="Transferts" value={stats.total} icon={ArrowRightLeft} tint="var(--info-fg)"
+                trend={`${(stats.parStatut?.["Payé"]?.nombre || 0)} payés`} trendColor="var(--ok-fg)" />
+              <StatCard label="Envoyé" value={resumeDevises(stats.envoye)} icon={Send} tint="var(--brand-solid)"
+                trend="Montants confiés par les expéditeurs" trendColor="var(--muted)" />
+              <StatCard label="Frais encaissés" value={resumeDevises(stats.frais)} icon={Coins} tint="var(--warn-fg)"
+                trend="La recette du module" trendColor="var(--muted)" />
+              <StatCard label="En attente de retrait" value={stats.parStatut?.["Disponible au retrait"]?.nombre || 0} icon={Clock} tint="var(--ok-fg)"
+                trend="Argent encaissé, pas encore remis" trendColor="var(--muted)" />
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+            <div style={{ flex: 1, minWidth: 240, display: "flex", alignItems: "center", gap: 8, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: "0 12px" }}>
+              <Search size={15} color="var(--muted)" />
+              <input value={recherche} onChange={(e) => setRecherche(e.target.value)}
+                placeholder="Référence, téléphone, nom, numéro de pièce…"
+                style={{ flex: 1, border: "none", outline: "none", background: "none", color: "var(--text)", fontSize: 13, padding: "11px 0" }} />
+            </div>
+            <select value={filtres.statut} onChange={(e) => setFiltres({ ...filtres, statut: e.target.value })}
+              style={{ ...inputStyle, marginBottom: 0, width: "auto", minWidth: 170 }}>
+              <option value="">Tous les statuts</option>
+              {STATUTS_TRANSFERT.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <input type="date" value={filtres.depuis} onChange={(e) => setFiltres({ ...filtres, depuis: e.target.value })}
+              title="Depuis" style={{ ...inputStyle, marginBottom: 0, width: "auto" }} />
+            <input type="date" value={filtres.jusqua} onChange={(e) => setFiltres({ ...filtres, jusqua: e.target.value })}
+              title="Jusqu’au" style={{ ...inputStyle, marginBottom: 0, width: "auto" }} />
+          </div>
+
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 10 }}>
+            {chargement ? "Chargement…" : `${liste.length} transfert${liste.length > 1 ? "s" : ""}`}
+            {portee === "propres" && " — vous ne voyez que les vôtres."}
+            {portee === "zone" && " — les transferts de votre agence."}
+          </div>
+
+          <div style={{ ...carte, overflow: "hidden" }}>
+            {liste.length === 0 && !chargement ? (
+              <div style={{ padding: "42px 24px", textAlign: "center" }}>
+                <div style={{ width: 50, height: 50, borderRadius: 16, display: "grid", placeItems: "center", margin: "0 auto 10px", background: "color-mix(in srgb, var(--info-fg) 12%, transparent)", border: "1px solid color-mix(in srgb, var(--info-fg) 22%, transparent)" }}>
+                  <Banknote size={22} color="var(--info-fg)" />
+                </div>
+                <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)" }}>Aucun transfert à afficher</div>
+                <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 4, maxWidth: 340, marginInline: "auto", lineHeight: 1.55 }}>
+                  {recherche || Object.values(filtres).some(Boolean)
+                    ? "Rien ne correspond à cette recherche. Un code de retrait ne se cherche pas ici : utilisez « Payer un transfert »."
+                    : "Les transferts créés apparaîtront ici, du plus récent au plus ancien."}
+                </div>
+              </div>
+            ) : (
+              <div>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr style={{ textAlign: "left" }}>
+                      {["Référence", "Expéditeur", "Bénéficiaire", "Destination", "Montant reçu", "Statut", "Date"].map((h) => (
+                        <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, fontWeight: 800, color: "var(--muted)", whiteSpace: "nowrap" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {liste.map((t) => (
+                      <tr key={t.id} onClick={() => setDetail(t)} style={{ cursor: "pointer" }}>
+                        <td style={{ padding: "10px 14px", fontWeight: 700, color: "var(--info-fg)", fontSize: 12.5, whiteSpace: "nowrap" }}>{t.reference}</td>
+                        <td style={{ padding: "10px 14px", color: "var(--text)", fontSize: 12.5 }}>{t.expediteur}</td>
+                        <td style={{ padding: "10px 14px", color: "var(--text)", fontSize: 12.5 }}>{t.beneficiaire}</td>
+                        <td style={{ padding: "10px 14px", color: "var(--muted)", fontSize: 12, whiteSpace: "nowrap" }}>{[t.beneficiaireVille, paysLisible(t.beneficiairePays)].filter(Boolean).join(", ")}</td>
+                        <td style={{ padding: "10px 14px", color: "var(--text)", fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap" }}>{montantTransfert(t.montantARecevoir, t.deviseReception)}</td>
+                        <td style={{ padding: "10px 14px" }}><BadgeStatutTransfert statut={t.statut} /></td>
+                        <td style={{ padding: "10px 14px", color: "var(--muted)", fontSize: 12, whiteSpace: "nowrap" }}>{new Date(t.creeLe).toLocaleDateString("fr-FR")}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {onglet === "caisse" && <CaisseTransferts caisse={caisse} carte={carte} />}
+      {onglet === "journal" && <JournalTransferts journal={journal} carte={carte} />}
+      {onglet === "reglages" && <ReglagesTransferts data={data} persist={persist} config={config} onEnregistre={setConfig} notify={notify} carte={carte} />}
+
+      {nouveau && <NouveauTransfert data={data} session={session} config={config} notify={notify}
+        onFait={charger} onFermer={() => setNouveau(false)} />}
+      {payer && <PayerTransfert data={data} notify={notify} onFait={charger} onFermer={() => setPayer(false)} />}
+      {detail && <DetailTransfert transfert={detail} data={data} session={session} notify={notify}
+        onFerme={() => setDetail(null)} onChange={charger} />}
+    </div>
+  );
+}
+
+/** Un cumul multi-devises tient rarement sur une ligne : on montre la plus grosse, et le compte des autres. */
+function resumeDevises(montants) {
+  const entrees = Object.entries(montants || {}).filter(([, v]) => Number(v) > 0);
+  if (entrees.length === 0) return "—";
+  const [devise, valeur] = entrees.sort((a, b) => b[1] - a[1])[0];
+  const reste = entrees.length - 1;
+  return `${montantTransfert(valeur, devise)}${reste > 0 ? ` +${reste}` : ""}`;
+}
+
+/* ── La fiche d'un transfert ─────────────────────────────────────────────────── */
+
+function DetailTransfert({ transfert, data, session, notify, onFerme, onChange }) {
+  const perm = (k) => effectivePermission(session, k);
+  const [code, setCode] = useState(null);
+  const [motif, setMotif] = useState("");
+  const [annulation, setAnnulation] = useState(false);
+  const [travail, setTravail] = useState("");
+  const [erreur, setErreur] = useState("");
+  const annulable = !["Payé", "Annulé"].includes(transfert.statut);
+
+  async function revoirCode() {
+    setTravail("code"); setErreur("");
+    try {
+      const r = await appelTransferts(`?revoir=${encodeURIComponent(transfert.id)}&motif=${encodeURIComponent("Reçu perdu par le client")}`);
+      setCode(r.code);
+    } catch (e) { setErreur(e.message); } finally { setTravail(""); }
+  }
+
+  async function annuler() {
+    setAnnulation(false); setTravail("annuler"); setErreur("");
+    try {
+      await appelTransferts("", { method: "POST", body: JSON.stringify({ action: "annuler", id: transfert.id, motif }) });
+      notify?.("Transfert annulé — l’expéditeur doit être remboursé.");
+      onChange?.(); onFerme();
+    } catch (e) { setErreur(e.message); } finally { setTravail(""); }
+  }
+
+  const ligne = (k, v) => (
+    <div key={k} style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "7px 0", borderTop: "1px solid var(--surface2)" }}>
+      <span style={{ fontSize: 12.5, color: "var(--muted)" }}>{k}</span>
+      <span style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600, textAlign: "end" }}>{v ?? "—"}</span>
+    </div>
+  );
+
+  return (
+    <Modal title={transfert.reference} onClose={onFerme} wide>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 26, fontWeight: 700, color: "var(--text)", letterSpacing: "-0.02em" }}>
+          {montantTransfert(transfert.montantARecevoir, transfert.deviseReception)}
+        </div>
+        <BadgeStatutTransfert statut={transfert.statut} />
+      </div>
+
+      <div style={{ marginBottom: 16 }}>
+        {ligne("Expéditeur", `${transfert.expediteur} · ${transfert.expediteurTelephone || "—"}`)}
+        {ligne("Bénéficiaire", `${transfert.beneficiaire} · ${transfert.beneficiaireTelephone || "—"}`)}
+        {ligne("Destination", [transfert.beneficiaireVille, paysLisible(transfert.beneficiairePays)].filter(Boolean).join(", "))}
+        {ligne("Montant envoyé", montantTransfert(transfert.montantEnvoye, transfert.deviseEnvoi))}
+        {ligne("Frais", montantTransfert(transfert.frais, transfert.deviseEnvoi))}
+        {ligne("Taux figé à la création", `1 ${transfert.deviseEnvoi} = ${Number(transfert.taux).toLocaleString("fr-FR", { maximumFractionDigits: 4 })} ${transfert.deviseReception}`)}
+        {ligne("Créé le", `${new Date(transfert.creeLe).toLocaleString("fr-FR")} — ${transfert.creePar} (${transfert.agenceEnvoi})`)}
+        {ligne("Valable jusqu’au", new Date(transfert.expireLe).toLocaleDateString("fr-FR"))}
+        {transfert.payeLe && ligne("Payé le", `${new Date(transfert.payeLe).toLocaleString("fr-FR")} — ${transfert.payePar} (${transfert.agencePaiement})`)}
+        {transfert.annuleLe && ligne("Annulé le", `${new Date(transfert.annuleLe).toLocaleString("fr-FR")} — ${transfert.motifAnnulation || "sans motif"}`)}
+      </div>
+
+      {code && (
+        <div style={{ border: "1.5px solid var(--brand-solid)", borderRadius: 12, padding: "14px", textAlign: "center", marginBottom: 14, background: "color-mix(in srgb, var(--brand-solid) 7%, transparent)" }}>
+          <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 6 }}>Code de retrait</div>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 26, fontWeight: 700, color: "var(--brand-solid)", letterSpacing: "0.04em", fontVariantNumeric: "tabular-nums" }}>{codeLisible(code)}</div>
+          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6 }}>Cette relecture est inscrite au journal, à votre nom.</div>
+        </div>
+      )}
+
+      {erreur && <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 10, padding: "10px 12px", marginBottom: 12, fontSize: 12.5, color: "var(--danger-fg)" }}>{erreur}</div>}
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {perm("transfert.revoir_code") && annulable && !code && (
+          <button onClick={revoirCode} disabled={travail === "code"}
+            style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 10, padding: "10px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+            <Eye size={14} /> {travail === "code" ? "…" : "Revoir le code"}
+          </button>
+        )}
+        {perm("transfert.annuler") && annulable && (
+          <button onClick={() => setAnnulation(true)}
+            style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "1px solid var(--danger-border)", color: "var(--danger-fg)", borderRadius: 10, padding: "10px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+            <Ban size={14} /> Annuler le transfert
+          </button>
+        )}
+      </div>
+
+      {annulation && (
+        <Modal title="Annuler ce transfert ?" onClose={() => setAnnulation(false)} niveau={1}>
+          <div style={{ fontSize: 13, color: "var(--text)", marginBottom: 12, lineHeight: 1.6 }}>
+            Le code cessera de fonctionner et un remboursement de {montantTransfert(Number(transfert.montantEnvoye) + Number(transfert.frais), transfert.deviseEnvoi)} sera
+            inscrit en sortie de caisse : l’expéditeur doit être remboursé pour de bon, pas seulement dans le logiciel.
+          </div>
+          <Field label="Motif de l’annulation *">
+            <textarea value={motif} onChange={(e) => setMotif(e.target.value)} rows={3}
+              placeholder="Erreur de saisie, demande de l’expéditeur, bénéficiaire introuvable…"
+              style={{ ...inputStyle, resize: "vertical" }} />
+          </Field>
+          <button onClick={annuler} disabled={motif.trim().length < 3 || travail === "annuler"}
+            style={{ width: "100%", background: motif.trim().length < 3 ? "var(--surface2)" : "var(--danger-fg)", color: motif.trim().length < 3 ? "var(--muted)" : "#fff", border: "none", borderRadius: 10, padding: "12px 0", fontSize: 13.5, fontWeight: 700, cursor: motif.trim().length < 3 ? "not-allowed" : "pointer" }}>
+            {travail === "annuler" ? "Annulation…" : "Annuler et enregistrer le remboursement"}
+          </button>
+        </Modal>
+      )}
+    </Modal>
+  );
+}
+
+/* ── La caisse ────────────────────────────────────────────────────────────────── */
+
+function CaisseTransferts({ caisse, carte }) {
+  if (!caisse) return <div style={{ ...carte, padding: 20, fontSize: 13, color: "var(--muted)" }}>Chargement…</div>;
+  const bloc = (titre, groupes) => (
+    <div style={{ ...carte, padding: 18, marginBottom: 16 }}>
+      <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)", marginBottom: 12 }}>{titre}</div>
+      {groupes.length === 0 ? (
+        <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Aucun mouvement enregistré.</div>
+      ) : groupes.map((g) => (
+        <div key={g.cle} style={{ borderTop: "1px solid var(--surface2)", padding: "11px 0" }}>
+          <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>{g.cle}</div>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+            {Object.entries(g.devises).map(([devise, d]) => (
+              <div key={devise} style={{ fontSize: 12, fontVariantNumeric: "tabular-nums" }}>
+                <div style={{ color: "var(--muted)" }}>
+                  <ArrowDownLeft size={11} style={{ verticalAlign: "-1px" }} /> {montantTransfert(d.entrees, devise)}
+                  {"  "}
+                  <ArrowUpRight size={11} style={{ verticalAlign: "-1px" }} /> {montantTransfert(d.sorties, devise)}
+                </div>
+                <div style={{ fontWeight: 700, color: d.solde >= 0 ? "var(--ok-fg)" : "var(--danger-fg)", fontSize: 14, marginTop: 2 }}>
+                  {montantTransfert(d.solde, devise)}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+
+  return (
+    <>
+      <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 15px", fontSize: 12.5, color: "var(--text)", lineHeight: 1.6, marginBottom: 16 }}>
+        Le solde est ce qui devrait se trouver dans le tiroir : l’argent encaissé sur les envois,
+        moins celui remis aux bénéficiaires et les remboursements d’annulation. Les devises ne
+        s’additionnent pas entre elles.
+      </div>
+      {bloc("Par agence", caisse.soldes?.parAgence || [])}
+      {bloc("Par agent", caisse.soldes?.parAgent || [])}
+      <div style={{ ...carte, overflow: "hidden" }}>
+        <div style={{ padding: "14px 18px", fontSize: 14, fontWeight: 700, color: "var(--text)" }}>Derniers mouvements</div>
+        <div>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr style={{ textAlign: "left" }}>{["Date", "Sens", "Motif", "Montant", "Agent", "Agence"].map((h) => (
+              <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, fontWeight: 800, color: "var(--muted)", whiteSpace: "nowrap" }}>{h}</th>))}</tr></thead>
+            <tbody>
+              {(caisse.mouvements || []).slice(0, 100).map((m) => (
+                <tr key={m.id}>
+                  <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>{new Date(m.le).toLocaleString("fr-FR")}</td>
+                  <td style={{ padding: "9px 14px" }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, borderRadius: 999, padding: "3px 9px",
+                                   background: m.sens === "entree" ? "var(--ok-bg)" : "var(--danger-bg)", color: m.sens === "entree" ? "var(--ok-fg)" : "var(--danger-fg)" }}>
+                      {m.sens === "entree" ? <ArrowDownLeft size={11} /> : <ArrowUpRight size={11} />}
+                      {m.sens === "entree" ? "Entrée" : "Sortie"}
+                    </span>
+                  </td>
+                  <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)" }}>{m.motif}</td>
+                  <td style={{ padding: "9px 14px", fontSize: 12.5, fontWeight: 700, color: "var(--text)", whiteSpace: "nowrap" }}>{montantTransfert(m.montant, m.devise)}</td>
+                  <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--muted)" }}>{m.agent_nom}</td>
+                  <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--muted)" }}>{m.agence}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {(caisse.mouvements || []).length === 0 && <div style={{ padding: 20, fontSize: 13, color: "var(--muted)" }}>Aucun mouvement.</div>}
+      </div>
+    </>
+  );
+}
+
+/* ── Le journal ───────────────────────────────────────────────────────────────── */
+
+const LIBELLE_ACTION_TRANSFERT = {
+  creation: "Création",
+  paiement: "Paiement",
+  paiement_refuse_deja_paye: "Paiement refusé — déjà payé",
+  paiement_refuse_expire: "Paiement refusé — expiré",
+  annulation: "Annulation",
+  expiration: "Expiration automatique",
+  code_reaffiche: "Code réaffiché",
+};
+
+function JournalTransferts({ journal, carte }) {
+  if (!journal) return <div style={{ ...carte, padding: 20, fontSize: 13, color: "var(--muted)" }}>Chargement…</div>;
+  return (
+    <>
+      <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 15px", fontSize: 12.5, color: "var(--text)", lineHeight: 1.6, marginBottom: 16 }}>
+        Ce journal ne se modifie pas et ne s’efface pas — la base refuse l’un et l’autre, y compris
+        au serveur. Les tentatives de paiement REFUSÉES y figurent aussi : c’est là qu’on voit
+        qu’un code a été présenté deux fois.
+      </div>
+      <div style={{ ...carte, overflow: "hidden" }}>
+        <div>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr style={{ textAlign: "left" }}>{["Date", "Action", "Référence", "Par", "Agence", "Détail"].map((h) => (
+              <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, fontWeight: 800, color: "var(--muted)", whiteSpace: "nowrap" }}>{h}</th>))}</tr></thead>
+            <tbody>
+              {journal.map((l) => (
+                <tr key={l.id}>
+                  <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>{new Date(l.le).toLocaleString("fr-FR")}</td>
+                  <td style={{ padding: "9px 14px", fontSize: 12.5, fontWeight: 600, color: String(l.action).includes("refuse") ? "var(--danger-fg)" : "var(--text)" }}>
+                    {LIBELLE_ACTION_TRANSFERT[l.action] || l.action}
+                  </td>
+                  <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--info-fg)", fontWeight: 600, whiteSpace: "nowrap" }}>{l.reference || "—"}</td>
+                  <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--text)" }}>{l.acteur_nom || "—"}</td>
+                  <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--muted)" }}>{l.agence || "—"}</td>
+                  <td style={{ padding: "9px 14px", fontSize: 11.5, color: "var(--muted)", maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {l.apres ? Object.entries(l.apres).map(([k, v]) => `${k} ${v}`).join(" · ") : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {journal.length === 0 && <div style={{ padding: 20, fontSize: 13, color: "var(--muted)" }}>Le journal est vide.</div>}
+      </div>
+    </>
+  );
+}
+
+/* ── Les réglages ─────────────────────────────────────────────────────────────
+ * Frais, taux, limites, commissions. Ils vivent dans le document JSON comme les autres réglages
+ * de l'entreprise — ils se lisent souvent, se changent rarement, et l'administrateur les gère au
+ * même endroit que le reste. Ce qu'un transfert emporte, lui, est figé dans sa propre ligne : ce
+ * qu'on modifie ici ne change AUCUN transfert déjà créé.
+ */
+
+const DEVISES_TRANSFERT = ["EUR", "GNF", "USD", "XOF", "CAD", "MAD", "GBP"];
+
+function ReglagesTransferts({ data, persist, config, onEnregistre, notify, carte }) {
+  const [brouillon, setBrouillon] = useState(config);
+  useEffect(() => { setBrouillon(config); }, [config]);
+  const modifie = JSON.stringify(brouillon) !== JSON.stringify(config);
+
+  const maj = (patch) => setBrouillon((b) => ({ ...b, ...patch }));
+  const majBareme = (devise, tranches) => maj({ bareme: { ...brouillon.bareme, [devise]: tranches } });
+
+  function enregistrer() {
+    persist({ ...data, transfertConfig: brouillon });
+    onEnregistre?.(brouillon);
+    notify?.("Réglages du transfert enregistrés");
+  }
+
+  const titre = (t, d) => (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)" }}>{t}</div>
+      {d && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3, lineHeight: 1.55 }}>{d}</div>}
+    </div>
+  );
+
+  return (
+    <>
+      <div style={{ ...carte, padding: 18, marginBottom: 16 }}>
+        {titre("Le module", "Coupé, plus aucun transfert ne peut être créé — les paiements de ceux déjà en cours restent possibles.")}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 13, color: "var(--text)" }}>Transfert d’argent actif</span>
+          <button onClick={() => maj({ actif: brouillon.actif === false })}
+            aria-pressed={brouillon.actif !== false}
+            style={{ width: 44, height: 24, borderRadius: 20, border: "none", padding: 2, cursor: "pointer",
+                     background: brouillon.actif !== false ? "var(--ok-fg)" : "var(--surface2)", display: "flex",
+                     justifyContent: brouillon.actif !== false ? "flex-end" : "flex-start" }}>
+            <span style={{ width: 20, height: 20, borderRadius: 20, background: "#fff", display: "block" }} />
+          </button>
+        </div>
+        <Field label="Validité d’un code, en jours" style={{ marginTop: 14, marginBottom: 0 }}>
+          <input value={brouillon.validiteJours ?? 30} onChange={(e) => maj({ validiteJours: Number(e.target.value.replace(/\D/g, "")) || 0 })}
+            inputMode="numeric" style={{ ...inputStyle, marginBottom: 0, maxWidth: 140 }} />
+        </Field>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6 }}>
+          Passé ce délai, le code est refusé au retrait. Le transfert n’est pas perdu : il redevient
+          l’affaire de l’agence de départ, qui rembourse ou le recrée.
+        </div>
+      </div>
+
+      <div style={{ ...carte, padding: 18, marginBottom: 16 }}>
+        {titre("Taux de change appliqués", "Votre taux l’emporte sur celui du marché — c’est là qu’est la marge d’un opérateur de transfert. Un couple non réglé retombe sur les taux de l’application ; s’il n’y en a pas, l’envoi est refusé plutôt que calculé au hasard.")}
+        {Object.entries(brouillon.taux || {}).map(([couple, valeur]) => (
+          <div key={couple} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", minWidth: 110 }}>{couple.replace(">", " → ")}</span>
+            <input value={valeur} onChange={(e) => maj({ taux: { ...brouillon.taux, [couple]: montantSaisi(e.target.value) } })}
+              inputMode="decimal" style={{ ...inputStyle, marginBottom: 0, maxWidth: 180 }} />
+            <button onClick={() => { const t = { ...brouillon.taux }; delete t[couple]; maj({ taux: t }); }}
+              style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer", padding: 4 }}><Trash2 size={14} /></button>
+          </div>
+        ))}
+        <AjoutTaux onAjouter={(de, vers, v) => maj({ taux: { ...brouillon.taux, [`${de}>${vers}`]: v } })} />
+      </div>
+
+      <div style={{ ...carte, padding: 18, marginBottom: 16 }}>
+        {titre("Barème des frais", "Par devise d’envoi, en tranches sur le montant envoyé. Un montant au-delà de la dernière tranche prend celle-ci.")}
+        {DEVISES_TRANSFERT.filter((d) => (brouillon.devisesEnvoi || []).includes(d)).map((devise) => (
+          <BaremeDevise key={devise} devise={devise} tranches={brouillon.bareme?.[devise] || []}
+            onChange={(t) => majBareme(devise, t)} />
+        ))}
+      </div>
+
+      <div style={{ ...carte, padding: 18, marginBottom: 16 }}>
+        {titre("Limites par envoi", "Un plancher évite les envois qui coûtent plus cher à traiter qu’ils ne rapportent ; un plafond limite ce qu’une seule erreur peut faire partir.")}
+        {(brouillon.devisesEnvoi || []).map((devise) => (
+          <div key={devise} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", minWidth: 60 }}>{devise}</span>
+            <input placeholder="minimum" value={brouillon.limites?.[devise]?.min ?? ""}
+              onChange={(e) => maj({ limites: { ...brouillon.limites, [devise]: { ...(brouillon.limites?.[devise] || {}), min: montantSaisi(e.target.value) } } })}
+              inputMode="decimal" style={{ ...inputStyle, marginBottom: 0, maxWidth: 150 }} />
+            <input placeholder="maximum" value={brouillon.limites?.[devise]?.max ?? ""}
+              onChange={(e) => maj({ limites: { ...brouillon.limites, [devise]: { ...(brouillon.limites?.[devise] || {}), max: montantSaisi(e.target.value) } } })}
+              inputMode="decimal" style={{ ...inputStyle, marginBottom: 0, maxWidth: 150 }} />
+          </div>
+        ))}
+      </div>
+
+      <div style={{ ...carte, padding: 18, marginBottom: 16 }}>
+        {titre("Commissions", "En pourcentage des FRAIS, jamais du principal : le principal appartient au bénéficiaire. Ce qui reste après ces trois parts revient au réseau — l’entreprise.")}
+        {[["agentEnvoi", "Agent expéditeur"], ["agentPaiement", "Agent payeur"], ["agence", "Agence"]].map(([cle, label]) => (
+          <div key={cle} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+            <span style={{ fontSize: 13, color: "var(--text)", flex: 1 }}>{label}</span>
+            <input value={brouillon.commissions?.[cle] ?? 0}
+              onChange={(e) => maj({ commissions: { ...brouillon.commissions, [cle]: montantSaisi(e.target.value) } })}
+              inputMode="decimal" style={{ ...inputStyle, marginBottom: 0, maxWidth: 90, textAlign: "right" }} />
+            <span style={{ fontSize: 13, color: "var(--muted)" }}>%</span>
+          </div>
+        ))}
+        {(() => {
+          const c = brouillon.commissions || {};
+          const somme = (Number(c.agentEnvoi) || 0) + (Number(c.agentPaiement) || 0) + (Number(c.agence) || 0);
+          const trop = somme > 100;
+          return (
+            <div style={{ marginTop: 10, fontSize: 12.5, fontWeight: 600, color: trop ? "var(--danger-fg)" : "var(--muted)" }}>
+              {trop
+                ? `Ces parts font ${somme} % des frais : au-delà de 100 %, la part du réseau serait négative.`
+                : `Part du réseau : ${(100 - somme).toFixed(2).replace(/\.00$/, "")} % des frais.`}
+            </div>
+          );
+        })()}
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <button onClick={enregistrer} disabled={!modifie}
+          style={{ background: modifie ? "var(--brand-solid)" : "var(--surface2)", color: modifie ? "#fff" : "var(--muted)",
+                   border: "none", borderRadius: 10, padding: "12px 24px", fontSize: 13.5, fontWeight: 700, cursor: modifie ? "pointer" : "not-allowed" }}>
+          Enregistrer les réglages
+        </button>
+      </div>
+    </>
+  );
+}
+
+function AjoutTaux({ onAjouter }) {
+  const [de, setDe] = useState("EUR");
+  const [vers, setVers] = useState("GNF");
+  const [valeur, setValeur] = useState("");
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+      <select value={de} onChange={(e) => setDe(e.target.value)} style={{ ...inputStyle, marginBottom: 0, width: "auto" }}>
+        {DEVISES_TRANSFERT.map((d) => <option key={d} value={d}>{d}</option>)}
+      </select>
+      <ChevronRight size={14} color="var(--muted)" />
+      <select value={vers} onChange={(e) => setVers(e.target.value)} style={{ ...inputStyle, marginBottom: 0, width: "auto" }}>
+        {DEVISES_TRANSFERT.map((d) => <option key={d} value={d}>{d}</option>)}
+      </select>
+      <input value={valeur} onChange={(e) => setValeur(e.target.value)} placeholder="ex : 10800" inputMode="decimal"
+        style={{ ...inputStyle, marginBottom: 0, maxWidth: 160 }} />
+      <button onClick={() => { const v = montantSaisi(valeur); if (de !== vers && v > 0) { onAjouter(de, vers, v); setValeur(""); } }}
+        style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "9px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+        Ajouter
+      </button>
+    </div>
+  );
+}
+
+function BaremeDevise({ devise, tranches, onChange }) {
+  const majTranche = (i, patch) => onChange(tranches.map((t, j) => (j === i ? { ...t, ...patch } : t)));
+  return (
+    <div style={{ borderTop: "1px solid var(--surface2)", paddingTop: 12, marginTop: 12 }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>Envois en {devise}</div>
+      {tranches.map((t, i) => (
+        <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 7, flexWrap: "wrap" }}>
+          <input value={t.min ?? 0} onChange={(e) => majTranche(i, { min: montantSaisi(e.target.value) })}
+            placeholder="de" inputMode="decimal" style={{ ...inputStyle, marginBottom: 0, maxWidth: 120 }} />
+          <span style={{ fontSize: 12, color: "var(--muted)" }}>à</span>
+          <input value={t.max ?? ""} onChange={(e) => majTranche(i, { max: e.target.value === "" ? "" : montantSaisi(e.target.value) })}
+            placeholder="illimité" inputMode="decimal" style={{ ...inputStyle, marginBottom: 0, maxWidth: 120 }} />
+          <span style={{ fontSize: 12, color: "var(--muted)" }}>→</span>
+          <input value={t.valeur ?? 0} onChange={(e) => majTranche(i, { valeur: montantSaisi(e.target.value) })}
+            inputMode="decimal" style={{ ...inputStyle, marginBottom: 0, maxWidth: 110 }} />
+          <select value={t.type || "fixe"} onChange={(e) => majTranche(i, { type: e.target.value })}
+            style={{ ...inputStyle, marginBottom: 0, width: "auto" }}>
+            <option value="fixe">{devise} fixes</option>
+            <option value="pourcent">% du montant</option>
+          </select>
+          <button onClick={() => onChange(tranches.filter((_, j) => j !== i))}
+            style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer", padding: 4 }}><Trash2 size={14} /></button>
+        </div>
+      ))}
+      <button onClick={() => onChange([...tranches, { min: 0, max: "", valeur: 0, type: "fixe" }])}
+        style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: "var(--info-fg)", fontSize: 12.5, fontWeight: 700, cursor: "pointer", padding: 0 }}>
+        <Plus size={13} /> Ajouter une tranche
+      </button>
+    </div>
+  );
 }
 
 export default function AppWithBoundary() {

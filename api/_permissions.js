@@ -123,6 +123,31 @@ export const PERMISSIONS_SCHEMA = [
     { key: "users.gerer", label: "Créer / modifier / supprimer un utilisateur" },
     { key: "users.permissions", label: "Gérer les permissions des autres comptes" },
   ]},
+  /*
+   * LE TRANSFERT D'ARGENT — le module où une permission de trop coûte de l'argent liquide.
+   *
+   * Aucune de ces clés n'est accordée à l'Agent par défaut, et c'est délibéré. Créer un transfert,
+   * c'est encaisser ; en payer un, c'est sortir des billets d'un tiroir sur présentation d'un
+   * code. Ce sont les deux gestes les plus sensibles de toute l'application, et ils ne doivent pas
+   * arriver à quelqu'un parce qu'on lui a créé un compte : c'est à l'administrateur de désigner
+   * nommément qui envoie et qui paie — les deux ne sont d'ailleurs pas forcément la même personne,
+   * ni la même agence.
+   *
+   * « Revoir le code » existe parce qu'un client perd son reçu. Le code n'est pas conservé en clair
+   * dans la base ; le redonner est possible, mais c'est un geste tracé, séparé du reste.
+   */
+  { group: "TRANSFERT D’ARGENT", permissions: [
+    { key: "transfert.creer", label: "Créer un transfert et encaisser l’expéditeur" },
+    { key: "transfert.payer", label: "Payer un transfert au bénéficiaire" },
+    { key: "transfert.voir_propres", label: "Voir ses propres transferts" },
+    { key: "transfert.voir_zone", label: "Voir les transferts de son agence / sa zone" },
+    { key: "transfert.voir_tous", label: "Voir tous les transferts (toutes agences)" },
+    { key: "transfert.annuler", label: "Annuler un transfert non payé" },
+    { key: "transfert.revoir_code", label: "Réafficher le code d’un transfert (geste tracé)" },
+    { key: "transfert.caisse", label: "Consulter la caisse des transferts" },
+    { key: "transfert.journal", label: "Consulter le journal des transferts" },
+    { key: "transfert.config", label: "Régler les frais, les taux, les limites et les commissions" },
+  ]},
   { group: "ASSISTANT IA", permissions: [
     { key: "ia.utiliser", label: "Utiliser l’assistant IA" },
   ]},
@@ -142,9 +167,19 @@ export const ROLE_DEFAULT_PERMISSIONS = {
    * modifier : l'écran qui sert à cela ne s'ouvrait donc pas pour lui. Un droit accordé qu'aucune
    * porte n'honore est un droit qui n'existe pas.
    */
-  "Responsable de zone": ["colis.voir_propres", "colis.creer", "colis.modifier", "colis.changer_statut", "colis.enregistrer_paiement", "colis.importer_excel", "colis.bordereau_reception", "colis.reglement_groupe", "bordereaux.consulter", "bordereaux.creer", "bordereaux.modifier", "bordereaux.valider", "factures.consulter", "factures.creer", "factures.modifier", "paiements.voir_propres", "clients.consulter", "espaceclient.gerer", "stats.personnelles", "equipe.pointage", "users.consulter", "users.gerer", "ia.utiliser"],
+  "Responsable de zone": ["colis.voir_propres", "colis.creer", "colis.modifier", "colis.changer_statut", "colis.enregistrer_paiement", "colis.importer_excel", "colis.bordereau_reception", "colis.reglement_groupe", "bordereaux.consulter", "bordereaux.creer", "bordereaux.modifier", "bordereaux.valider", "factures.consulter", "factures.creer", "factures.modifier", "paiements.voir_propres", "clients.consulter", "espaceclient.gerer", "stats.personnelles", "equipe.pointage", "users.consulter", "users.gerer", "ia.utiliser",
+    /*
+     * Le responsable de zone opère les transferts de sa zone : c'est son métier, et il est le
+     * recours quand un agent n'est pas là. Il ne règle ni les frais ni les taux — cela reste à
+     * l'administrateur, sinon la marge de l'entreprise se décide en agence.
+     */
+    "transfert.creer", "transfert.payer", "transfert.voir_propres", "transfert.voir_zone", "transfert.caisse"],
   "Agent": ["colis.voir_propres", "colis.voir_tous", "colis.creer", "colis.modifier", "colis.changer_statut", "colis.enregistrer_paiement", "bordereaux.consulter", "bordereaux.creer", "bordereaux.modifier", "bordereaux.valider", "factures.consulter", "factures.creer", "factures.modifier", "paiements.voir_propres", "clients.consulter", "stats.personnelles", "ia.utiliser"],
-  "Comptable": ["colis.voir_tous", "factures.consulter", "factures.creer", "factures.modifier", "clients.consulter", "bordereaux.consulter", "compta.consulter", "compta.gerer_depenses", "compta.charges_fixes", "compta.marges", "stats.globales", "stats.exporter"],
+  /*
+   * Le comptable LIT les transferts — il en a besoin pour arrêter les comptes — et n'en opère
+   * aucun. Voir tout et ne rien pouvoir déplacer, c'est exactement son rôle.
+   */
+  "Comptable": ["colis.voir_tous", "factures.consulter", "factures.creer", "factures.modifier", "clients.consulter", "bordereaux.consulter", "compta.consulter", "compta.gerer_depenses", "compta.charges_fixes", "compta.marges", "stats.globales", "stats.exporter", "transfert.voir_tous", "transfert.caisse", "transfert.journal"],
   "Chauffeur": ["colis.voir_propres", "colis.changer_statut", "stats.personnelles"],
   "Partenaire": ["stats.personnelles"],
 };

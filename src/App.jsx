@@ -32146,6 +32146,63 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
               « Gérer les permissions des autres comptes ».
             </div>
           )}
+          {/*
+            * LE TRANSFERT D'ARGENT, EN TÊTE ET EN CLAIR.
+            *
+            * Ces deux droits sont bien dans la liste plus bas, avec les quarante-six autres. Mais
+            * la question « est-ce que celle-ci fait des transferts ? » ne se pose pas comme les
+            * autres : on ne la cherche pas, on l'a en tête en ouvrant la fiche, et la réponse doit
+            * être là. Enterrée au onzième groupe, elle obligeait à faire défiler tout l'écran pour
+            * savoir si quelqu'un peut sortir des billets d'un tiroir — et à recommencer pour
+            * chaque personne.
+            *
+            * Le bloc dit l'état en une phrase, avec le nom de la personne. Les deux interrupteurs
+            * sont les mêmes que ceux d'en bas : ils basculent la même clé, il n'y a pas deux
+            * réglages à tenir d'accord.
+            */}
+          {!isAdmin && role !== "Partenaire" && (() => {
+            const peutCreer = effectivePermission({ role, permissionsOverride }, "transfert.creer");
+            const peutPayer = effectivePermission({ role, permissionsOverride }, "transfert.payer");
+            const nomComplet = `${prenom} ${nom}`.trim() || "Ce compte";
+            const resume = peutCreer && peutPayer
+              ? `${nomComplet} peut envoyer ET payer de l’argent.`
+              : peutCreer ? `${nomComplet} peut envoyer de l’argent, mais pas en payer.`
+              : peutPayer ? `${nomComplet} peut payer de l’argent, mais pas en envoyer.`
+              : `${nomComplet} ne fait aucun transfert d’argent.`;
+            const actif = peutCreer || peutPayer;
+            return (
+              <div style={{
+                border: `1px solid ${actif ? "var(--warn-border)" : "var(--border)"}`, borderRadius: 12, marginBottom: 16, overflow: "hidden",
+                background: actif ? "var(--warn-bg)" : "var(--surface)",
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "12px 16px" }}>
+                  <Banknote size={16} color={actif ? "var(--warn-fg)" : "var(--muted)"} />
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: actif ? "var(--warn-fg)" : "var(--muted)" }}>
+                      Transfert d’argent
+                    </div>
+                    <div style={{ fontSize: 13, color: "var(--text)", fontWeight: 600, marginTop: 3 }}>{resume}</div>
+                  </div>
+                </div>
+                {[["transfert.creer", "Créer un transfert et encaisser l’expéditeur", peutCreer],
+                  ["transfert.payer", "Payer un transfert au bénéficiaire", peutPayer]].map(([cle, libelle, on]) => (
+                  <div key={cle} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "10px 16px", borderTop: "1px solid var(--border)" }}>
+                    <span style={{ fontSize: 13, color: "var(--text)" }}>{libelle}</span>
+                    <button onClick={() => peutReglerLesDroits && togglePermission(cle)} disabled={!peutReglerLesDroits}
+                      aria-pressed={on} aria-label={libelle}
+                      style={{ width: 38, height: 22, borderRadius: 20, border: "none", background: on ? "#3ECB84" : "var(--surface2)", position: "relative", cursor: peutReglerLesDroits ? "pointer" : "default", flexShrink: 0, opacity: peutReglerLesDroits ? 1 : 0.6 }}>
+                      <div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: on ? 19 : 3, transition: "left 0.15s" }} />
+                    </button>
+                  </div>
+                ))}
+                <div style={{ padding: "9px 16px", borderTop: "1px solid var(--border)", fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 }}>
+                  Aucun rôle ne donne ces droits : ils se donnent nom par nom, et n’oublient pas de
+                  se retirer. Ce que la personne a déjà fait reste au journal.
+                </div>
+              </div>
+            );
+          })()}
+
           {PERMISSIONS_SCHEMA.map((g) => {
             const enabledCount = g.permissions.filter((p) => effectivePermission({ role, permissionsOverride }, p.key)).length;
             return (
@@ -33272,6 +33329,7 @@ function TransfertsPage({ data, session, notify, persist }) {
     { cle: "liste", label: "Transferts", icone: ArrowRightLeft, montrer: true },
     { cle: "caisse", label: "Caisse", icone: Wallet, montrer: perm("transfert.caisse") || perm("transfert.voir_propres"), action: ouvrirCaisse },
     { cle: "journal", label: "Journal", icone: ScrollText, montrer: perm("transfert.journal") || perm("transfert.voir_tous"), action: ouvrirJournal },
+    { cle: "agents", label: "Qui est autorisé", icone: Users, montrer: perm("users.consulter") || perm("transfert.config") },
     { cle: "reglages", label: "Réglages", icone: Settings, montrer: perm("transfert.config") },
   ].filter((o) => o.montrer);
 
@@ -33415,6 +33473,7 @@ function TransfertsPage({ data, session, notify, persist }) {
         </>
       )}
 
+      {onglet === "agents" && <AgentsAutorises data={data} carte={carte} />}
       {onglet === "caisse" && <CaisseTransferts caisse={caisse} carte={carte} />}
       {onglet === "journal" && <JournalTransferts journal={journal} carte={carte} />}
       {onglet === "reglages" && <ReglagesTransferts data={data} persist={persist} config={config} onEnregistre={setConfig} notify={notify} carte={carte} />}
@@ -33537,6 +33596,81 @@ function DetailTransfert({ transfert, data, session, notify, onFerme, onChange }
         </Modal>
       )}
     </Modal>
+  );
+}
+
+/* ── Qui est autorisé ─────────────────────────────────────────────────────────
+ * La question se pose dans ce sens-là : « qui, chez moi, peut faire des transferts ? ». Elle
+ * n'avait aucune réponse — il fallait ouvrir les comptes un par un et faire défiler leurs
+ * permissions. Cette page la donne d'un coup d'œil, et dit où aller pour la changer.
+ */
+
+function AgentsAutorises({ data, carte }) {
+  const comptes = (data?.users || []).filter((u) => u && u.role !== "Partenaire" && !u.partenaireParent);
+  const droit = (u, cle) => effectivePermission(u, cle);
+  const autorises = comptes.filter((u) => droit(u, "transfert.creer") || droit(u, "transfert.payer"));
+  const autres = comptes.filter((u) => !droit(u, "transfert.creer") && !droit(u, "transfert.payer"));
+
+  const pastille = (actif, texte) => (
+    <span style={{
+      display: "inline-flex", alignItems: "center", gap: 4, borderRadius: 999, padding: "3px 10px",
+      fontSize: 11, fontWeight: 700, whiteSpace: "nowrap",
+      background: actif ? "var(--ok-bg)" : "var(--surface2)",
+      color: actif ? "var(--ok-fg)" : "var(--muted)",
+    }}>
+      {actif ? <Check size={11} /> : <X size={11} />} {texte}
+    </span>
+  );
+
+  const ligne = (u) => (
+    <div key={u.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "12px 0", borderTop: "1px solid var(--surface2)", flexWrap: "wrap" }}>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)", display: "flex", alignItems: "center", gap: 7 }}>
+          {u.role === "Administrateur" && <Shield size={13} color="var(--brand-solid)" />}
+          {`${u.prenom || ""} ${u.nom || ""}`.trim() || u.identifiant}
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+          {u.role}{(u.zoneOperation || u.agence) ? ` · ${u.zoneOperation || u.agence}` : ""}
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {pastille(droit(u, "transfert.creer"), "Envoie")}
+        {pastille(droit(u, "transfert.payer"), "Paie")}
+      </div>
+    </div>
+  );
+
+  return (
+    <>
+      <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 15px", fontSize: 12.5, color: "var(--text)", lineHeight: 1.6, marginBottom: 16 }}>
+        Aucun rôle ne donne le droit de faire des transferts : il se donne <strong>nom par nom</strong>.
+        Pour l’accorder ou le retirer, ouvrez <strong>Configuration → Utilisateurs</strong>, choisissez
+        la personne, onglet <strong>Permissions</strong> — le bloc « Transfert d’argent » est tout en haut.
+      </div>
+
+      <div style={{ ...carte, padding: 18, marginBottom: 16 }}>
+        <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)" }}>
+          Autorisés <span style={{ color: "var(--muted)", fontWeight: 600 }}>· {autorises.length}</span>
+        </div>
+        {autorises.length === 0 ? (
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 10, lineHeight: 1.55 }}>
+            Personne n’est autorisé pour l’instant. Tant que c’est le cas, seul un administrateur
+            peut envoyer ou payer un transfert.
+          </div>
+        ) : autorises.map(ligne)}
+      </div>
+
+      <div style={{ ...carte, padding: 18 }}>
+        <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)" }}>
+          Non autorisés <span style={{ color: "var(--muted)", fontWeight: 600 }}>· {autres.length}</span>
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 4 }}>
+          Ces comptes ne peuvent ni envoyer ni payer d’argent. Ils continuent d’utiliser le reste
+          de l’application normalement.
+        </div>
+        {autres.map(ligne)}
+      </div>
+    </>
   );
 }
 

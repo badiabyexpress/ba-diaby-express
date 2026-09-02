@@ -361,7 +361,24 @@ export default async function handler(req, res) {
              * Deux agents en même temps : la page écrit sur une version qui a déjà bougé. Dès le
              * second essai, c'est prouvé — la première écriture a été refusée pour cette raison.
              */
-            const conflit = essai > 0 || !!(versionLue && versionActuelle && versionLue !== versionActuelle);
+            /*
+             * UNE ÉCRITURE QUI NE SAIT PAS SUR QUOI ELLE SE FONDE NE SUPPRIME RIEN.
+             *
+             * `baseVersion` est la version que la page a réellement LUE. Elle manque dans un cas
+             * précis, et c'est le pire : l'appareil a démarré sur son cache local sans avoir pu
+             * joindre le serveur. Sa copie peut dater de la veille, et il ne le sait pas.
+             *
+             * Jusqu'ici, ce cas passait pour « pas de conflit » — donc pour une écriture à jour,
+             * autorisée à supprimer. C'était exactement l'inverse de la vérité : elle est la seule
+             * dont on ne puisse RIEN affirmer. Un téléphone rallumé le matin dans une agence, et
+             * le travail de la veille disparaissait sans bruit.
+             *
+             * Faute de preuve, on prend le parti sûr : ce que cette page apporte est gardé, ce
+             * qu'elle ignore revient à sa place. Elle ne peut rien effacer.
+             */
+            const conflit = essai > 0
+              || !versionLue
+              || !!(versionActuelle && versionLue !== versionActuelle);
             conflitVu = conflitVu || conflit;
             aEcrire = fusionnerEcritureEquipe(actuel, valeur, compteId, {
               appareil: req.headers["user-agent"] || "",
@@ -570,8 +587,12 @@ export default async function handler(req, res) {
           aEcrire = fusionnerEcritureEquipe(actuel, valeur, compteId, {
             appareil: req.headers["user-agent"] || "",
             adresse: String(req.headers["x-forwarded-for"] || "").split(",")[0].trim(),
-            /* Deux agents en même temps : la page écrit sur une version qui a déjà bougé. */
-            conflit: !!(versionLue && versionActuelle && versionLue !== versionActuelle),
+            /*
+             * Même règle que sur l'autre chemin d'écriture : deux agents en même temps, OU une
+             * page qui ne sait pas dire sur quelle version elle se fonde. Dans les deux cas, elle
+             * n'a pas prouvé qu'elle connaissait ce qu'elle s'apprête à ne pas renvoyer.
+             */
+            conflit: !versionLue || !!(versionActuelle && versionLue !== versionActuelle),
           });
           /*
            * Une alerte est nouvelle si son identifiant n'était pas déjà en base. On la reconnaît

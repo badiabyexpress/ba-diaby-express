@@ -33473,7 +33473,7 @@ function TransfertsPage({ data, session, notify, persist }) {
         </>
       )}
 
-      {onglet === "agents" && <AgentsAutorises data={data} carte={carte} />}
+      {onglet === "agents" && <AgentsAutorises data={data} persist={persist} session={session} notify={notify} carte={carte} />}
       {onglet === "caisse" && <CaisseTransferts caisse={caisse} carte={carte} />}
       {onglet === "journal" && <JournalTransferts journal={journal} carte={carte} />}
       {onglet === "reglages" && <ReglagesTransferts data={data} persist={persist} config={config} onEnregistre={setConfig} notify={notify} carte={carte} />}
@@ -33605,22 +33605,72 @@ function DetailTransfert({ transfert, data, session, notify, onFerme, onChange }
  * permissions. Cette page la donne d'un coup d'œil, et dit où aller pour la changer.
  */
 
-function AgentsAutorises({ data, carte }) {
+function AgentsAutorises({ data, persist, session, notify, carte }) {
   const comptes = (data?.users || []).filter((u) => u && u.role !== "Partenaire" && !u.partenaireParent);
   const droit = (u, cle) => effectivePermission(u, cle);
   const autorises = comptes.filter((u) => droit(u, "transfert.creer") || droit(u, "transfert.payer"));
   const autres = comptes.filter((u) => !droit(u, "transfert.creer") && !droit(u, "transfert.payer"));
+  const peutRegler = effectivePermission(session, "users.permissions");
 
-  const pastille = (actif, texte) => (
-    <span style={{
-      display: "inline-flex", alignItems: "center", gap: 4, borderRadius: 999, padding: "3px 10px",
-      fontSize: 11, fontWeight: 700, whiteSpace: "nowrap",
-      background: actif ? "var(--ok-bg)" : "var(--surface2)",
-      color: actif ? "var(--ok-fg)" : "var(--muted)",
-    }}>
-      {actif ? <Check size={11} /> : <X size={11} />} {texte}
-    </span>
-  );
+  /*
+   * LA PAGE QUI RÉPOND À LA QUESTION DOIT RÉPONDRE AU GESTE QUI SUIT.
+   *
+   * Elle disait « pour changer, allez dans Configuration → Utilisateurs → la personne → onglet
+   * Permissions ». Quatre écrans pour basculer une case, en regardant justement la liste des
+   * personnes concernées — et la première chose qu'on fait devant ces pastilles, c'est appuyer
+   * dessus. Elles basculent donc le droit sur-le-champ, pour qui a celui de régler les droits.
+   *
+   * On écrit exactement ce que l'écran des permissions écrirait : la même clé, au même endroit du
+   * compte. Il n'y a pas deux chemins qui produisent deux formes différentes — sans quoi l'un des
+   * deux finirait par ne plus refléter l'autre.
+   */
+  function basculer(compte, cle) {
+    if (!peutRegler) return;
+    if (compte.role === "Administrateur") return;
+    const actuel = droit(compte, cle);
+    const nom = `${compte.prenom || ""} ${compte.nom || ""}`.trim() || compte.identifiant;
+    persist({
+      ...data,
+      users: (data.users || []).map((u) => (u.id === compte.id
+        ? { ...u, permissionsOverride: { ...(u.permissionsOverride || {}), [cle]: !actuel } }
+        : u)),
+      activityLog: pushActivity(data, session,
+        actuel ? "Droit de transfert retiré" : "Droit de transfert accordé",
+        `${nom} — ${cle === "transfert.creer" ? "envoyer de l’argent" : "payer un transfert"}`),
+    });
+    notify?.(actuel
+      ? `${nom} ne peut plus ${cle === "transfert.creer" ? "envoyer" : "payer"} d’argent.`
+      : `${nom} peut désormais ${cle === "transfert.creer" ? "envoyer" : "payer"} de l’argent.`);
+  }
+
+  const pastille = (u, cle, texte) => {
+    const actif = droit(u, cle);
+    const fige = !peutRegler || u.role === "Administrateur";
+    const libelle = cle === "transfert.creer" ? "Envoyer de l’argent" : "Payer un transfert";
+    const nom = `${u.prenom || ""} ${u.nom || ""}`.trim() || u.identifiant;
+    return (
+      <button
+        onClick={() => basculer(u, cle)}
+        disabled={fige}
+        aria-pressed={actif}
+        aria-label={`${libelle} — ${nom}`}
+        title={fige
+          ? (u.role === "Administrateur"
+            ? "Un administrateur a tous les droits : ils ne se retirent pas ici."
+            : "Changer les droits demande la permission « Gérer les permissions des autres comptes ».")
+          : `${actif ? "Retirer" : "Accorder"} : ${libelle.toLowerCase()} — ${nom}`}
+        style={{
+          display: "inline-flex", alignItems: "center", gap: 4, borderRadius: 999, padding: "5px 11px",
+          fontSize: 11, fontWeight: 700, whiteSpace: "nowrap",
+          background: actif ? "var(--ok-bg)" : "var(--surface2)",
+          color: actif ? "var(--ok-fg)" : "var(--muted)",
+          border: `1px solid ${actif ? "var(--ok-border)" : "var(--border)"}`,
+          cursor: fige ? "default" : "pointer", opacity: fige ? 0.65 : 1,
+        }}>
+        {actif ? <Check size={11} /> : <X size={11} />} {texte}
+      </button>
+    );
+  };
 
   const ligne = (u) => (
     <div key={u.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "12px 0", borderTop: "1px solid var(--surface2)", flexWrap: "wrap" }}>
@@ -33634,8 +33684,8 @@ function AgentsAutorises({ data, carte }) {
         </div>
       </div>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-        {pastille(droit(u, "transfert.creer"), "Envoie")}
-        {pastille(droit(u, "transfert.payer"), "Paie")}
+        {pastille(u, "transfert.creer", "Envoie")}
+        {pastille(u, "transfert.payer", "Paie")}
       </div>
     </div>
   );
@@ -33644,8 +33694,10 @@ function AgentsAutorises({ data, carte }) {
     <>
       <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 15px", fontSize: 12.5, color: "var(--text)", lineHeight: 1.6, marginBottom: 16 }}>
         Aucun rôle ne donne le droit de faire des transferts : il se donne <strong>nom par nom</strong>.
-        Pour l’accorder ou le retirer, ouvrez <strong>Configuration → Utilisateurs</strong>, choisissez
-        la personne, onglet <strong>Permissions</strong> — le bloc « Transfert d’argent » est tout en haut.
+        {peutRegler
+          ? <> <strong>Appuyez sur « Envoie » ou « Paie »</strong> en face de quelqu’un pour lui accorder
+            ou lui retirer le droit — c’est immédiat, et c’est inscrit au journal d’activité.</>
+          : <> Les accorder demande la permission « Gérer les permissions des autres comptes ».</>}
       </div>
 
       <div style={{ ...carte, padding: 18, marginBottom: 16 }}>

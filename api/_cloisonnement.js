@@ -824,9 +824,27 @@ function comptesDeLEquipe(base, envoye, moi, peut) {
  * vieille, ce qui revient au même.
  * ─────────────────────────────────────────────────────────────────────────────
  */
+/*
+ * LA LISTE S'ÉTAIT ARRÊTÉE AUX NEUF PREMIÈRES VICTIMES.
+ *
+ * Elle avait été écrite après une perte, et ne contenait donc que ce qui avait déjà disparu. Les
+ * catégories de produits sont passées de 58 à 42 sans que rien ne bouge — elles n'étaient pas
+ * dedans. Les fiches de pointage, les sites, les prochains départs non plus. Une liste de
+ * protection qui se construit par l'expérience protège toujours avec un incident de retard.
+ *
+ * Elle couvre maintenant tout ce qui est un REGISTRE : des lignes qu'on ajoute, qu'on corrige, et
+ * qu'on ne retire qu'une par une. Deux absentes volontaires :
+ *
+ * — `users`, traité juste en dessous par comptesDeLEquipe et preserverIdentifiants, qui vont plus
+ *   loin que cette union : ils protègent aussi les mots de passe et les droits ligne par ligne ;
+ * — `messagesWhatsApp`, qui est un journal PLAFONNÉ à trois cents entrées. L'ajout d'un message
+ *   en fait légitimement sortir un ancien ; le protéger ici ferait grossir la liste sans fin.
+ */
 const COLLECTIONS_PROTEGEES = [
   "colis", "clientAccounts", "repertoire", "depenses",
   "bordereaux", "facturesPartenaire", "preAlertes", "remisesCaisse", "voyages",
+  "pointages", "factures", "demandesRegroupement",
+  "categories", "sites", "departs", "desabonnesMarketing",
 ];
 /*
  * Le seuil ne porte pas sur la TAILLE de la liste, mais sur ce qu'une seule écriture emporte.
@@ -837,7 +855,6 @@ const COLLECTIONS_PROTEGEES = [
  * est un enregistrement. Deux disparitions d'un coup, ce sont déjà deux gestes en un.
  */
 const PERTE_TOLEREE = 1;
-const PART_CONSERVEE = 0.5;
 /* L'intention vaut pour le geste qui vient d'être fait, pas pour un onglet ouvert ce matin. */
 const FENETRE_INTENTION_MS = 10 * 60 * 1000;
 
@@ -897,14 +914,24 @@ export function collectionsQuiFondent(base, envoye) {
      * une suppression à la fois est un geste, et c'est la seule façon dont l'application supprime.
      * Un vrai vidage en masse passe, lui, par l'intention datée.
      */
-    if (compte === 0 && perdus > PERTE_TOLEREE) { perdues.push({ cle, avant: avant.length, apres: 0 }); continue; }
     /*
-     * Deux conditions, et les deux ensemble : on perd plus d'une entrée d'un coup, ET il en reste
-     * moins de la moitié. Retirer un colis sur seize passe ; en perdre neuf, non.
+     * LA RÈGLE DE LA MOITIÉ LAISSAIT PASSER LA MOITIÉ DES PERTES — au sens propre.
+     *
+     * Il fallait AUSSI qu'il reste moins de la moitié de la liste pour qu'une écriture soit
+     * retenue. Autrement dit : perdre 48 % d'une collection d'un seul coup passait sans un mot.
+     * Les catégories de produits sont ainsi tombées de 58 à 42 — seize disparues, mais 42 font
+     * plus que la moitié de 58, donc rien ne s'est déclenché, ni ici ni dans la base.
+     *
+     * Le nombre restant ne dit rien de l'intention ; seul le nombre PERDU en dit quelque chose.
+     * Dans cette application, une suppression est un geste, et un geste retire une ligne : c'est
+     * vrai du colis, de la dépense, du compte client, de la catégorie. Deux lignes qui partent
+     * ensemble, ce sont donc deux gestes en un — ou, bien plus probablement, une page qui ne les
+     * avait jamais vues.
+     *
+     * Une vraie suppression en masse — réinitialiser, restaurer, importer — passe par l'intention
+     * datée, et n'arrive jamais ici.
      */
-    if (perdus > PERTE_TOLEREE && compte < Math.ceil(avant.length * PART_CONSERVEE)) {
-      perdues.push({ cle, avant: avant.length, apres: compte });
-    }
+    if (perdus > PERTE_TOLEREE) perdues.push({ cle, avant: avant.length, apres: compte });
   }
   return perdues;
 }

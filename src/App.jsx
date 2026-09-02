@@ -632,6 +632,28 @@ export function autorisationModifierBordereau(session, bordereau) {
   return { autorise: true, motif: null };
 }
 
+/**
+ * UNE FICHE DE VOYAGE VALIDÉE NE SE ROUVRE QUE PAR L'ADMINISTRATEUR.
+ *
+ * La validation d'un voyage n'est pas un enregistrement de plus : elle arrête les comptes d'une
+ * rotation. Elle fige les recettes, les dépenses et le bilan, elle sort ses colis de tous les
+ * voyages suivants, et la fiche part signée. Rouvrir cette fiche, c'est défaire une pièce
+ * comptable déjà imprimée et remise — et supprimer le voyage, c'est la faire disparaître avec
+ * ses dépenses.
+ *
+ * Ces deux gestes étaient ouverts à quiconque pouvait consulter la comptabilité. Ils rejoignent
+ * la règle qui vaut déjà pour un bordereau parti : tant que c'est un brouillon, celui qui le tient
+ * en dispose ; une fois validé, il faut l'administrateur.
+ *
+ * Comme pour le bordereau, on rend le motif plutôt qu'un simple refus : un bouton qui disparaît
+ * sans explication se lit comme une panne, un bouton éteint avec sa raison se comprend.
+ */
+export function autorisationModifierVoyage(session, voyage) {
+  if (voyage?.statut !== "Validé") return { autorise: true, motif: null };
+  if (session?.role === "Administrateur") return { autorise: true, motif: null };
+  return { autorise: false, motif: "valide" };
+}
+
 const T = {
   fr: { dashboard: "Tableau de bord", colis: "Colis", tarif: "Tarification", clients: "Clients", admin: "Configuration", ia: "Assistant IA", logout: "Déconnexion", newColis: "Nouveau colis", search: "Rechercher", createAccount: "Créer un compte", bordereaux: "Bordereaux", paiements: "Paiements & Factures" },
   en: { dashboard: "Dashboard", colis: "Parcels", tarif: "Pricing", clients: "Clients", admin: "Settings", ia: "AI Assistant", logout: "Log out", newColis: "New parcel", search: "Search", createAccount: "Create account", bordereaux: "Waybills", paiements: "Payments & Invoices" },
@@ -4491,6 +4513,17 @@ function App() {
     { key: "compte", label: "Compte", icon: User },
   ].map((n) => ({ ...n, show: true, actif: ongletPartenaire === n.key, onSelect: () => setOngletPartenaire(n.key) }));
 
+  /*
+   * Où mène une ligne de la cloche. Un partenaire navigue entre ses onglets, l'équipe entre les
+   * vues du menu : la cloche donne une destination, c'est ici qu'on sait comment s'y rendre.
+   */
+  const allerDepuisLaCloche = (cible) => {
+    setMobileNavOpen(false);
+    if (session.role === "Partenaire") { setOngletPartenaire(cible); return; }
+    setView(cible);
+    if (cible === "admin") setAdminResetKey((k) => k + 1);
+  };
+
   const nav = session.role === "Partenaire" ? navPartenaire : [
     { key: "dashboard", label: t.dashboard, icon: LayoutDashboard, show: true },
     { key: "colis", label: t.colis, icon: Package, show: perm("colis.voir_propres") || perm("colis.voir_tous") },
@@ -4573,10 +4606,16 @@ function App() {
               </>
             )}
           </div>
-          <div style={{ padding: "0 12px 8px" }}>
-            <button onClick={() => setShowGlobalSearch(true)} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", background: "rgba(255,255,255,0.06)", border: "none", borderRadius: 8, padding: (collapsed && !isMobile) ? "9px 0" : "9px 12px", color: "rgba(255,255,255,0.7)", fontSize: 13, cursor: "pointer" }}>
+          <div style={{ padding: "0 12px 8px", display: "flex", flexDirection: (collapsed && !isMobile) ? "column" : "row", alignItems: "center", gap: 8 }}>
+            <button onClick={() => setShowGlobalSearch(true)} style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0, width: (collapsed && !isMobile) ? "100%" : undefined, justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", background: "rgba(255,255,255,0.06)", border: "none", borderRadius: 8, padding: (collapsed && !isMobile) ? "9px 0" : "9px 12px", color: "rgba(255,255,255,0.7)", fontSize: 13, cursor: "pointer" }}>
               <Search size={15} /> {!(collapsed && !isMobile) && "Recherche globale"}
             </button>
+            {/*
+              * La cloche vit ici, sur la première ligne du menu : c'est le seul endroit visible
+              * sans faire défiler et sans replier quoi que ce soit. Sur téléphone, elle est
+              * doublée dans la barre du haut — là, le menu est fermé la plupart du temps.
+              */}
+            <ClocheNotifications data={data} session={session} onAller={allerDepuisLaCloche} surFondSombre />
           </div>
           <nav style={{ padding: 12, display: "flex", flexDirection: "column", gap: 3, flex: 1, overflowY: "auto" }}>
             {nav.map((n) => (
@@ -4632,6 +4671,7 @@ function App() {
               <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 15, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1 }}>
                 {nav.find((n) => n.actif ?? (n.key === view))?.label || identite.nom || "BA-DIABY EXPRESS"}
               </div>
+              <ClocheNotifications data={data} session={session} onAller={allerDepuisLaCloche} surFondSombre />
               <button onClick={() => setShowGlobalSearch(true)} style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 8, width: 34, height: 34, display: "grid", placeItems: "center", color: "#fff", cursor: "pointer", flexShrink: 0 }}>
                 <Search size={16} />
               </button>
@@ -8327,6 +8367,249 @@ function BarreRepartition({ libelle, valeur, total, teinte }) {
  * identifie sans crier. Le libellé passe en petites capitales espacées — un rôle d'étiquette,
  * pas de titre. Et la précision devient une puce discrète, posée sous le chiffre.
  */
+/*
+ * TOUT CE QUI ATTEND UN GESTE, EN UN SEUL ENDROIT.
+ *
+ * Les pastilles existaient déjà, mais éparpillées sur sept entrées de menu : pour savoir s'il y
+ * avait quelque chose à faire, il fallait parcourir le menu du regard, entrée par entrée — et sur
+ * téléphone, ouvrir le menu d'abord. Un message client passait donc inaperçu jusqu'au moment où
+ * quelqu'un pensait à aller voir.
+ *
+ * Cette fonction rassemble les mêmes comptes, et RIEN DE PLUS : elle ne va chercher aucune donnée
+ * qu'un compte ne verrait pas ailleurs. Chaque source est conditionnée par la permission qui ouvre
+ * l'écran correspondant — sans quoi la cloche deviendrait une fuite : « 3 factures partenaires en
+ * retard » en apprend déjà beaucoup à qui n'a pas accès aux partenaires.
+ *
+ * Elle est exportée et pure : elle se vérifie sans ouvrir de navigateur.
+ */
+export function alertesDuCompte(data, session, maintenant = Date.now()) {
+  if (!data || !session) return [];
+  const perm = (cle) => effectivePermission(session, cle);
+  const alertes = [];
+  const ajouter = (a) => { if (a.compte > 0) alertes.push(a); };
+
+  // Un partenaire n'a que ses propres flux ; le reste ne le concerne pas et ne doit pas l'atteindre.
+  if (session.role === "Partenaire") {
+    const id = partenaireDeLaSession(session);
+    const moi = (data.users || []).find((u) => u.id === id);
+    ajouter({
+      cle: "partenaire-messages", gravite: "info", vue: "messages", icone: MessageCircle,
+      compte: messagesNonLusPour(moi, "partenaire"),
+      titre: (n) => `${n} message${n > 1 ? "s" : ""} de Ba-Diaby Express`,
+      detail: "Réponses à vos demandes.",
+    });
+    if (voitLesMontants(session)) {
+      ajouter({
+        cle: "partenaire-factures", gravite: "alerte", vue: "factures", icone: Receipt,
+        compte: (data.facturesPartenaire || []).filter((f) => f.partenaireId === id && statutFacturePartenaire(f) !== "Réglée").length,
+        titre: (n) => `${n} facture${n > 1 ? "s" : ""} à régler`,
+        detail: "Montants encore dus à Ba-Diaby Express.",
+      });
+    }
+    ajouter({
+      cle: "partenaire-prets", gravite: "info", vue: "accueil", icone: Package,
+      compte: (data.colis || []).filter((c) => c.partenaireId === id && estColisExpediable(c)).length,
+      titre: (n) => `${n} colis prêt${n > 1 ? "s" : ""} à partir`,
+      detail: "Vérifiés et en attente d’embarquement.",
+    });
+    return alertes;
+  }
+
+  /*
+   * Le refus d'un enregistrement passe devant tout le reste : il signale un appareil qui essaie
+   * d'effacer des données à chaque geste, et tant qu'il n'est pas fermé il recommencera.
+   */
+  ajouter({
+    cle: "ecrasement", gravite: "grave", vue: "dashboard", icone: AlertTriangle,
+    compte: (data.alertesEcrasement || []).filter((a) => a && !a.vue).length,
+    titre: (n) => `${n} enregistrement${n > 1 ? "s" : ""} refusé${n > 1 ? "s" : ""} — page périmée`,
+    detail: "Vos données sont intactes. Il reste un onglet à fermer quelque part.",
+  });
+
+  if (perm("espaceclient.gerer")) {
+    const messages = (data.clientAccounts || []).filter((c) => (c.messages || []).some((m) => m.expediteur === "client" && !m.lu)).length;
+    const preAlertes = (data.preAlertes || []).filter((p) => p.statut === "En attente").length;
+    const regroupements = (data.demandesRegroupement || []).filter((r) => r.statut === "En attente").length;
+    const signalements = (data.colis || []).reduce((s, c) => s + (c.signalements || []).filter((sig) => sig.statut === "Ouvert").length, 0);
+    const express = (data.colis || []).filter((c) => c.demandeExpress && c.demandeExpress.statut === "En attente").length;
+    ajouter({ cle: "messages-clients", gravite: "info", vue: "centreclients", icone: MessageCircle, compte: messages,
+      titre: (n) => `${n} message${n > 1 ? "s" : ""} client non lu${n > 1 ? "s" : ""}`, detail: "Depuis l’Espace Client." });
+    ajouter({ cle: "prealertes", gravite: "info", vue: "centreclients", icone: Package, compte: preAlertes,
+      titre: (n) => `${n} pré-alerte${n > 1 ? "s" : ""} à rapprocher`, detail: "Commandes annoncées, colis pas encore reçu." });
+    ajouter({ cle: "regroupements", gravite: "info", vue: "centreclients", icone: FileStack, compte: regroupements,
+      titre: (n) => `${n} demande${n > 1 ? "s" : ""} de regroupement`, detail: "Un client veut réunir plusieurs colis." });
+    ajouter({ cle: "signalements", gravite: "alerte", vue: "centreclients", icone: AlertTriangle, compte: signalements,
+      titre: (n) => `${n} problème${n > 1 ? "s" : ""} signalé${n > 1 ? "s" : ""}`, detail: "Un client déclare un souci sur son colis." });
+    ajouter({ cle: "express", gravite: "alerte", vue: "centreclients", icone: Plane, compte: express,
+      titre: (n) => `${n} demande${n > 1 ? "s" : ""} express`, detail: "Un client demande un acheminement accéléré." });
+  }
+
+  if (perm("factures.consulter")) {
+    ajouter({
+      cle: "declarations", gravite: "alerte", vue: "paiements", icone: Receipt,
+      compte: (data.colis || []).reduce((s, c) => s + (c.declarationsPaiement || []).filter((d) => d.statut === "En attente").length, 0),
+      titre: (n) => `${n} paiement${n > 1 ? "s" : ""} déclaré${n > 1 ? "s" : ""} à vérifier`,
+      detail: "Un client dit avoir payé — à confirmer avant d’encaisser.",
+    });
+  }
+
+  if (perm("config.acceder")) {
+    ajouter({
+      cle: "partenaires-verif", gravite: "alerte", vue: "partenaires", icone: Truck,
+      compte: (data.colis || []).filter((c) => estColisPartenaire(c) && statutValidationPartenaire(c) === "En attente" && c.status !== "Annulé").length,
+      titre: (n) => `${n} colis partenaire à vérifier`,
+      detail: "À contrôler avant de les embarquer.",
+    });
+    ajouter({ cle: "partenaires-messages", gravite: "info", vue: "partenaires", icone: MessageCircle,
+      compte: partenairesEnAttenteDeReponse(data.users).length,
+      titre: (n) => `${n} partenaire${n > 1 ? "s" : ""} attend${n > 1 ? "ent" : ""} une réponse`, detail: "Messages sans réponse de notre côté." });
+    ajouter({ cle: "partenaires-factures", gravite: "alerte", vue: "partenaires", icone: Receipt,
+      compte: toutesFacturesEnRetard(data).length,
+      titre: (n) => `${n} facture${n > 1 ? "s" : ""} partenaire en retard`, detail: "Au-delà du délai de règlement convenu." });
+    ajouter({ cle: "partenaires-depots", gravite: "info", vue: "partenaires", icone: Package,
+      compte: depotsAnnonces(data).length,
+      titre: (n) => `${n} dépôt${n > 1 ? "s" : ""} annoncé${n > 1 ? "s" : ""}`, detail: "Annoncés par un partenaire, pas encore reçus." });
+  }
+
+  /*
+   * Les colis oubliés et les espèces non versées ne portent aucune pastille dans le menu : on ne
+   * les découvrait qu'en descendant le tableau de bord. Ce sont pourtant les deux choses qui
+   * coûtent vraiment de l'argent quand on les oublie.
+   */
+  if (perm("colis.voir_propres") || perm("colis.voir_tous")) {
+    ajouter({
+      cle: "oublies", gravite: "alerte", vue: "colis", icone: Clock,
+      compte: (data.colis || []).filter((c) => colisVisiblePour(session, c) && c.status === "Enregistré"
+        && (maintenant - new Date(c.createdAt).getTime()) / 86400000 > 3).length,
+      titre: (n) => `${n} colis oublié${n > 1 ? "s" : ""}`,
+      detail: "Toujours « Enregistré » depuis plus de trois jours.",
+    });
+  }
+
+  if (perm("paiements.voir_propres") || perm("compta.consulter")) {
+    const monNom = `${session.prenom || ""} ${session.nom || ""}`.trim();
+    const toutesLesCaisses = perm("compta.consulter");
+    ajouter({
+      cle: "caisse", gravite: "alerte", vue: "caisse", icone: Wallet,
+      compte: soldesCaisseParAgent(data).filter((g) => (toutesLesCaisses || g.agent === monNom) && g.jours >= 3).length,
+      titre: (n) => (toutesLesCaisses ? `${n} caisse${n > 1 ? "s" : ""} en retard de versement` : "Espèces à remettre en caisse"),
+      detail: "Encaissé en espèces depuis plus de trois jours, pas encore versé.",
+    });
+  }
+
+  return alertes;
+}
+
+const GRAVITE_ALERTE = {
+  grave:  { fond: "var(--danger-bg)", bord: "var(--danger-border)", teinte: "var(--danger-fg)" },
+  alerte: { fond: "var(--warn-bg)",   bord: "var(--warn-border)",   teinte: "var(--warn-fg)" },
+  info:   { fond: "var(--info-bg)",   bord: "var(--info-border)",   teinte: "var(--info-fg)" },
+};
+
+/**
+ * La cloche — un seul endroit où regarder.
+ *
+ * Elle ne remplace pas les pastilles du menu : elle évite d'avoir à les chercher. Le compte
+ * qu'elle porte est la somme de ce qui attend un geste, et chaque ligne mène à l'écran qui permet
+ * de le faire.
+ */
+function ClocheNotifications({ data, session, onAller, surFondSombre = false }) {
+  const [ouvert, setOuvert] = useState(false);
+  const alertes = useMemo(() => alertesDuCompte(data, session), [data, session]);
+  const total = alertes.reduce((n, a) => n + a.compte, 0);
+  const plusGrave = alertes.some((a) => a.gravite === "grave") ? "grave"
+    : alertes.some((a) => a.gravite === "alerte") ? "alerte" : "info";
+
+  useEffect(() => {
+    if (!ouvert) return undefined;
+    const surTouche = (e) => { if (e.key === "Escape") setOuvert(false); };
+    window.addEventListener("keydown", surTouche);
+    return () => window.removeEventListener("keydown", surTouche);
+  }, [ouvert]);
+
+  const couleurPastille = plusGrave === "grave" ? "var(--danger-fg)" : plusGrave === "alerte" ? "#E0A63A" : "var(--info-fg)";
+
+  return (
+    <>
+      <button
+        onClick={() => setOuvert((o) => !o)}
+        aria-label={total > 0 ? `Notifications — ${total} en attente` : "Notifications — rien en attente"}
+        title={total > 0 ? `${total} chose${total > 1 ? "s" : ""} en attente` : "Rien en attente"}
+        style={{
+          position: "relative", width: 34, height: 34, borderRadius: 10, flexShrink: 0, cursor: "pointer",
+          display: "grid", placeItems: "center",
+          background: surFondSombre ? "rgba(255,255,255,0.10)" : "var(--surface2)",
+          border: surFondSombre ? "none" : "1px solid var(--border)",
+          color: surFondSombre ? "#fff" : "var(--text)",
+        }}>
+        <Bell size={16} />
+        {total > 0 && (
+          <span style={{
+            position: "absolute", top: -4, insetInlineEnd: -4, minWidth: 17, height: 17, padding: "0 4px",
+            borderRadius: 999, background: couleurPastille, color: plusGrave === "alerte" ? "#0A2647" : "#fff",
+            fontSize: 10, fontWeight: 800, display: "grid", placeItems: "center", lineHeight: 1,
+            border: "2px solid " + (surFondSombre ? "#0A2647" : "var(--surface)"),
+          }}>{total > 99 ? "99+" : total}</span>
+        )}
+      </button>
+
+      {ouvert && (
+        <>
+          <div onClick={() => setOuvert(false)} style={{ position: "fixed", inset: 0, zIndex: 90 }} />
+          <div className="bde-cloche-panneau" role="dialog" aria-label="Notifications" style={{
+            position: "fixed", top: 62, insetInlineEnd: 16, zIndex: 91,
+            width: "min(380px, calc(100vw - 24px))", maxHeight: "min(70vh, 560px)", overflowY: "auto",
+            background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16,
+            boxShadow: "var(--shadow-modal)", padding: 12,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "2px 4px 10px" }}>
+              <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 14.5, color: "var(--text)" }}>Notifications</div>
+              <button onClick={() => setOuvert(false)} aria-label="Fermer" style={{ background: "var(--surface2)", border: "none", borderRadius: 8, width: 26, height: 26, cursor: "pointer", display: "grid", placeItems: "center" }}>
+                <X size={13} color="var(--muted)" />
+              </button>
+            </div>
+
+            {alertes.length === 0 ? (
+              <div style={{ padding: "26px 16px", textAlign: "center" }}>
+                <div style={{ width: 44, height: 44, margin: "0 auto 10px", borderRadius: 14, display: "grid", placeItems: "center", background: "color-mix(in srgb, var(--ok-fg) 13%, transparent)", border: "1px solid color-mix(in srgb, var(--ok-fg) 24%, transparent)" }}>
+                  <CheckCircle2 size={20} color="var(--ok-fg)" />
+                </div>
+                <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>Rien n’attend</div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 }}>
+                  Tout ce qui demande un geste apparaîtra ici.
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                {alertes.map((a) => {
+                  const style = GRAVITE_ALERTE[a.gravite] || GRAVITE_ALERTE.info;
+                  const Icone = a.icone;
+                  return (
+                    <button key={a.cle} onClick={() => { setOuvert(false); onAller?.(a.vue); }}
+                      style={{
+                        display: "flex", alignItems: "flex-start", gap: 11, width: "100%", textAlign: "start", cursor: "pointer",
+                        background: style.fond, border: `1px solid ${style.bord}`, borderRadius: 12, padding: "11px 12px",
+                      }}>
+                      <div style={{ width: 30, height: 30, borderRadius: 9, flexShrink: 0, display: "grid", placeItems: "center", background: `color-mix(in srgb, ${style.teinte} 18%, transparent)` }}>
+                        <Icone size={15} color={style.teinte} />
+                      </div>
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: style.teinte, lineHeight: 1.35 }}>{a.titre(a.compte)}</div>
+                        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2, lineHeight: 1.45 }}>{a.detail}</div>
+                      </div>
+                      <ChevronRight size={15} color="var(--muted)" style={{ flexShrink: 0, marginTop: 6 }} />
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
 const StatCard = memo(function StatCard({ label, value, icon: Icon, tint, trend, trendColor, outline }) {
   const teinte = tint || "var(--info-fg)";
   const couleurTendance = trendColor || "var(--ok-fg)";
@@ -23507,6 +23790,12 @@ function VoyagesPage({ data, persist, session, notify }) {
 
   const voyageCourant = ouvert && ouvert !== "nouveau" ? voyages.find((v) => v.id === ouvert) : null;
   const enLecture = !!voyageCourant && voyageCourant.statut === "Validé";
+  /*
+   * Une fiche validée arrête les comptes d'une rotation : la rouvrir ou la supprimer défait une
+   * pièce comptable déjà imprimée. Ces deux gestes reviennent donc à l'administrateur seul, comme
+   * pour un bordereau déjà parti.
+   */
+  const droitRouvrir = autorisationModifierVoyage(session, voyageCourant);
   const monNom = `${session?.prenom || ""} ${session?.nom || ""}`.trim() || session?.identifiant || "";
 
   /** Colis déjà rattachés à un autre voyage — brouillon compris, sinon on les compterait deux fois. */
@@ -23631,6 +23920,10 @@ function VoyagesPage({ data, persist, session, notify }) {
   }
 
   function rouvrir(v) {
+    if (!autorisationModifierVoyage(session, v).autorise) {
+      notify?.("Fiche validée — seul un administrateur peut la rouvrir.");
+      return;
+    }
     persist({
       ...data,
       voyages: voyages.map((x) => (x.id === v.id ? { ...x, statut: "Brouillon", valideeLe: null, valideePar: null } : x)),
@@ -23640,6 +23933,16 @@ function VoyagesPage({ data, persist, session, notify }) {
   }
 
   function supprimer(v) {
+    /*
+     * Supprimer une fiche validée efface une pièce comptable ET ses dépenses, et rend ses colis à
+     * la liste des voyages suivants. Un brouillon, lui, n'engage rien : celui qui le tient peut
+     * le jeter.
+     */
+    if (!autorisationModifierVoyage(session, v).autorise) {
+      notify?.("Fiche validée — seul un administrateur peut la supprimer.");
+      setVoyageASupprimer(null);
+      return;
+    }
     persist({
       ...data,
       voyages: voyages.filter((x) => x.id !== v.id),
@@ -23714,9 +24017,17 @@ function VoyagesPage({ data, persist, session, notify }) {
                   <button onClick={() => imprimerFiche(v)} style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 11px", color: "var(--text)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
                     <Printer size={13} /> Fiche
                   </button>
-                  <button onClick={() => setVoyageASupprimer(v)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer", padding: 4 }} title="Supprimer ce voyage">
-                    <Trash2 size={14} />
-                  </button>
+                  {(() => {
+                    // La liste dit la même chose que la fiche : le bouton reste, éteint, et dit pourquoi.
+                    const droit = autorisationModifierVoyage(session, v);
+                    return (
+                      <button onClick={() => droit.autorise && setVoyageASupprimer(v)} disabled={!droit.autorise}
+                        style={{ background: "none", border: "none", color: droit.autorise ? "var(--danger-fg)" : "var(--muted)", cursor: droit.autorise ? "pointer" : "not-allowed", padding: 4, opacity: droit.autorise ? 1 : 0.5 }}
+                        title={droit.autorise ? "Supprimer ce voyage" : "Fiche validée — seul un administrateur peut la supprimer."}>
+                        <Trash2 size={14} />
+                      </button>
+                    );
+                  })()}
                 </div>
               </div>
             </div>
@@ -24098,9 +24409,17 @@ function VoyagesPage({ data, persist, session, notify }) {
             <button onClick={() => imprimerFiche(voyageCourant)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
               <Printer size={16} /> Rééditer la fiche (PDF)
             </button>
-            <button onClick={() => rouvrir(voyageCourant)} style={{ background: "var(--surface)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+            <button onClick={() => rouvrir(voyageCourant)} disabled={!droitRouvrir.autorise}
+              title={droitRouvrir.autorise ? undefined : "Une fiche validée arrête les comptes du voyage : seul un administrateur peut la rouvrir."}
+              style={{ background: "var(--surface)", border: "1px solid var(--border)", color: droitRouvrir.autorise ? "var(--text)" : "var(--muted)", borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: droitRouvrir.autorise ? "pointer" : "not-allowed" }}>
               Rouvrir pour modifier
             </button>
+            {!droitRouvrir.autorise && (
+              <div style={{ alignSelf: "center", fontSize: 12, color: "var(--muted)", maxWidth: 340, lineHeight: 1.5 }}>
+                Cette fiche est validée : elle arrête les comptes du voyage et ses colis sont sortis
+                des voyages suivants. Seul un administrateur peut la rouvrir.
+              </div>
+            )}
           </>
         )}
       </div>

@@ -47,7 +47,13 @@ async function chercherTransfertPublic(saisie, parCode) {
   } else {
     filtre = `reference=eq.${encodeURIComponent(saisie.toUpperCase())}`;
   }
-  const reponse = await fetch(`${url}/rest/v1/transferts?${filtre}&select=*&limit=1`, {
+  /*
+   * Un transfert retiré par l'administration ne se vérifie plus en ligne. Le QR d'un reçu déjà
+   * imprimé continue d'exister — on ne rappelle pas un papier — mais il ne doit pas confirmer
+   * une opération que l'entreprise a sortie de ses livres : ce serait donner du crédit à un reçu
+   * qui n'en a plus. La page répond alors comme pour une référence inconnue.
+   */
+  const reponse = await fetch(`${url}/rest/v1/transferts?${filtre}&supprime_le=is.null&select=*&limit=1`, {
     headers: { apikey: cle, Authorization: `Bearer ${cle}` },
   }).catch(() => null);
   if (!reponse || !reponse.ok) return null;

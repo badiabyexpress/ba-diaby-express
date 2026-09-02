@@ -2923,6 +2923,27 @@ function trackingUrlFor(tracking) {
 }
 
 /*
+ * L'ADRESSE DE VÉRIFICATION D'UN TRANSFERT — ET POURQUOI ELLE NE PORTE PAS LE CODE.
+ *
+ * Un reçu se photographie et se transfère sur WhatsApp ; c'est même ce qu'on demande à l'agent de
+ * faire. Le code de retrait, lui, VAUT PAIEMENT : quiconque le présente avec une pièce au nom du
+ * bénéficiaire repart avec l'argent. Le mettre dans le QR — donc dans une image qui circule, et
+ * dans une adresse qui s'enregistre dans l'historique du navigateur, dans les journaux du serveur
+ * et dans les aperçus de lien — reviendrait à joindre les billets au reçu.
+ *
+ * Le QR porte donc la RÉFÉRENCE (TX-…), qui ne débloque rien. Elle ouvre une page publique qui
+ * montre l'état du transfert, la destination, le montant à recevoir et des initiales : de quoi
+ * s'assurer que l'opération existe et qu'elle est bien celle qu'on croit, sans rien apprendre sur
+ * des inconnus à qui taperait une référence au hasard.
+ *
+ * Le code reste imprimé en toutes lettres sur le reçu de l'expéditeur — c'est à lui qu'il est
+ * remis, en main propre, avec l'avertissement qui va avec.
+ */
+function lienVerificationTransfert(reference) {
+  return `${adressePublique()}/verify-transfer/${encodeURIComponent(reference)}`;
+}
+
+/*
  * LES ADRESSES COURTES.
  *
  * Chaque page publique de ce site se demandait par un paramètre : « …/?client », « …/?suivi=1&
@@ -2941,9 +2962,15 @@ function trackingUrlFor(tracking) {
  * Cela ne tient que parce que vercel.json réécrit tout ce qui n'est pas /api/ vers index.html :
  * sans cette règle, « /client » serait un fichier introuvable et répondrait 404.
  */
+/*
+ * « verify-transfer » et « verifier-transfert » mènent au suivi, et c'est voulu : le client ne
+ * sait pas qu'il y a deux systèmes derrière, il scanne ce qu'on lui a imprimé. La page de suivi
+ * reconnaît déjà une référence de transfert (TX-…) aussi bien qu'un numéro de colis — il n'y a
+ * donc pas de seconde page à écrire, ni de seconde fonction serverless à déployer.
+ */
 const CHEMINS_COURTS = {
   client: ["client", "espace-client", "espaceclient", "mon-compte"],
-  suivi: ["suivi", "colis"],
+  suivi: ["suivi", "colis", "verify-transfer", "verifier-transfert"],
   cgu: ["cgu", "conditions"],
   connexion: ["connexion"],
 };
@@ -4675,14 +4702,17 @@ function App() {
         <div className="bde-app-workspace" style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
           {isMobile && (
             <div className="bde-mobile-topbar" style={{ position: "sticky", top: 0, zIndex: 20, display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", background: "#0A2647", color: "#fff" }}>
-              <button onClick={() => setMobileNavOpen(true)} style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 8, width: 34, height: 34, display: "grid", placeItems: "center", color: "#fff", cursor: "pointer", flexShrink: 0 }}>
+              {/* Sans nom accessible, un lecteur d’écran annonce « bouton » pour ce qui ouvre toute la navigation. */}
+              <button onClick={() => setMobileNavOpen(true)} aria-label="Ouvrir le menu"
+                style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 8, width: 34, height: 34, display: "grid", placeItems: "center", color: "#fff", cursor: "pointer", flexShrink: 0 }}>
                 <Menu size={18} />
               </button>
               <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 15, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1 }}>
                 {nav.find((n) => n.actif ?? (n.key === view))?.label || identite.nom || "BA-DIABY EXPRESS"}
               </div>
               <ClocheNotifications data={data} session={session} onAller={allerDepuisLaCloche} surFondSombre />
-              <button onClick={() => setShowGlobalSearch(true)} style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 8, width: 34, height: 34, display: "grid", placeItems: "center", color: "#fff", cursor: "pointer", flexShrink: 0 }}>
+              <button onClick={() => setShowGlobalSearch(true)} aria-label="Rechercher"
+                style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 8, width: 34, height: 34, display: "grid", placeItems: "center", color: "#fff", cursor: "pointer", flexShrink: 0 }}>
                 <Search size={16} />
               </button>
             </div>
@@ -5141,6 +5171,40 @@ function Shell({ children, rtl, theme }) {
         @media (prefers-reduced-motion: reduce) {
           .bde-app-sidebar nav button, .bde-app-main button, .bde-app-main input, .bde-app-main select, .bde-app-main textarea { transition: none !important; }
         }
+
+        /* ==========================================================================
+           IMPRIMER UN REÇU DEPUIS L'ÉCRAN
+           --------------------------------------------------------------------------
+           Le bouton « Télécharger PDF » produit un A4 mis en page au millimètre : c'est
+           lui la pièce d'archive. Mais un agent pressé fait Ctrl+P sur ce qu'il a sous
+           les yeux, et sans ces règles il imprimait la barre latérale, le menu et un
+           reçu coupé en deux.
+
+           On masque donc tout SAUF le reçu, on le repose en haut de la page, et on rend
+           ses couleurs obligatoires : sans print-color-adjust, les navigateurs suppriment
+           les aplats pour économiser l'encre — le bandeau et le cadre de sécurité
+           disparaîtraient, et c'est justement ce qui distingue un reçu d'une photocopie.
+
+           Les sections ne se coupent pas : break-inside sur chaque bloc, et le pied de
+           page reste solidaire de ce qu'il conclut.
+           ========================================================================== */
+        @media print {
+          body * { visibility: hidden !important; }
+          .bde-recu, .bde-recu * { visibility: visible !important; }
+          .bde-recu {
+            position: absolute !important; inset: 0 auto auto 0;
+            width: 100% !important; max-width: none !important;
+            margin: 0 !important; border-radius: 0 !important;
+            box-shadow: none !important; border: none !important;
+          }
+          .bde-recu-actions { display: none !important; }
+          .bde-recu-bloc { break-inside: avoid; page-break-inside: avoid; }
+          .bde-recu, .bde-recu * {
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+          }
+        }
+        @page { size: A4; margin: 12mm; }
 
         /* ==========================================================================
            SYSTÈME VISUEL DE L'ESPACE DE TRAVAIL
@@ -32614,78 +32678,319 @@ function paysLisible(code) {
   return pays ? `${FLAGS[pays.code] || ""} ${pays.name}`.trim() : (code || "—");
 }
 
+/*
+ * UN TAUX S'ÉCRIT AVEC ASSEZ DE CHIFFRES POUR REFAIRE LE CALCUL.
+ *
+ * Le module affichait « 1 GNF = 0,0001 EUR ». Arrondi à quatre décimales, un taux GNF→EUR réel
+ * (0,0000926) devient faux de huit pour cent, et le montant reçu ne se retrouve plus à partir du
+ * montant envoyé. Sur un devis c'est gênant ; sur un reçu — dont c'est justement le rôle de
+ * trancher une contestation six mois plus tard — c'est le document de l'entreprise qui lui donne
+ * tort.
+ *
+ * On compte donc en chiffres SIGNIFICATIFS et non en décimales : « 0,0000926 » quelle que soit
+ * l'échelle de la devise. Et sous un centième, on ajoute la lecture inverse, parce que c'est
+ * ainsi qu'un taux se dit et se vérifie au comptoir : personne n'annonce « zéro virgule zéro zéro
+ * zéro zéro neuf », on annonce « dix mille huit cents francs pour un euro ».
+ */
+function tauxLisible(taux, deviseEnvoi, deviseReception) {
+  const valeur = Number(taux);
+  if (!Number.isFinite(valeur) || valeur <= 0) return "—";
+  const direct = `1 ${deviseEnvoi} = ${valeur.toLocaleString("fr-FR", { maximumSignificantDigits: 6 })} ${deviseReception}`;
+  if (valeur >= 0.01) return direct;
+  return `${direct}  (1 ${deviseReception} = ${(1 / valeur).toLocaleString("fr-FR", { maximumFractionDigits: 2 })} ${deviseEnvoi})`;
+}
+
 function codeLisible(code) {
   const chiffres = String(code || "").replace(/\D/g, "");
   if (chiffres.length !== 8) return code || "";
   return `TRF ${chiffres.slice(0, 4)} ${chiffres.slice(4)}`;
 }
 
-/* ── LE REÇU D'ENVOI ───────────────────────────────────────────────────────────
- * C'est la pièce que l'expéditeur emporte, et sur laquelle il lira le code à sa famille. Le code
- * y est donc le plus gros élément de la page — plus gros que le montant, plus gros que le nom de
- * l'entreprise. Tout le reste sert à trancher une contestation ; lui sert à retirer l'argent.
+/* ── LE REÇU DE TRANSFERT D'ARGENT ─────────────────────────────────────────────
+ *
+ * Une pièce A4, imprimable et archivable, qui doit tenir trois rôles à la fois :
+ *
+ *   — Pour l'EXPÉDITEUR, c'est la preuve de ce qu'il a payé et le support du code qu'il dictera
+ *     à sa famille. Le code est donc le plus gros élément de la page.
+ *   — Pour le BÉNÉFICIAIRE, c'est ce qu'on lui transfère par WhatsApp pour qu'il sache quoi
+ *     venir chercher, où, et jusqu'à quand.
+ *   — Pour l'ENTREPRISE, c'est la pièce qu'on ressort six mois plus tard pour trancher une
+ *     contestation. D'où le détail des montants, le taux figé, l'agent, l'agence et l'heure.
+ *
+ * DEUX CHOIX QUI NE SONT PAS DÉCORATIFS
+ *
+ * 1. Le QR porte la RÉFÉRENCE, jamais le code de retrait (voir lienVerificationTransfert). Un
+ *    reçu circule ; le code vaut paiement. Les deux ne voyagent pas ensemble.
+ *
+ * 2. Le filigrane et le cadre ne sont pas là pour faire joli : un reçu d'argent se photocopie et
+ *    se retouche. Ils rendent la falsification visible à l'œil, et le QR la rend vérifiable —
+ *    c'est la page publique qui fait foi, pas le papier.
  */
+
+/** Les couleurs du document. Écrites en dur : jsPDF ne sait pas lire une variable CSS. */
+const RECU_ENCRE = [17, 20, 26], RECU_GRIS = [118, 126, 140], RECU_NAVY = [10, 38, 71];
+const RECU_ROUGE = [214, 39, 63], RECU_VERT = [21, 122, 71], RECU_TRAIT = [222, 226, 233];
+
+/** La teinte du statut, pour que l'état saute aux yeux avant la lecture. */
+function couleurStatutRecu(statut) {
+  if (statut === "Payé") return RECU_VERT;
+  if (statut === "Annulé" || statut === "Expiré") return RECU_ROUGE;
+  return [180, 116, 12];
+}
+
+/*
+ * Le filigrane, posé AVANT tout le reste pour passer dessous.
+ *
+ * En gris très clair plutôt qu'en transparence : les GState de jsPDF ne survivent pas à toutes
+ * les visionneuses PDF, et un filigrane qui redevient opaque à l'impression rendrait le reçu
+ * illisible — exactement le contraire du but.
+ */
+function filigraneRecu(doc, texte) {
+  doc.setTextColor(244, 245, 247);
+  doc.setFont(undefined, "bold");
+  doc.setFontSize(46);
+  [
+    [16, 250], [22, 178], [28, 106],
+  ].forEach(([x, y]) => doc.text(texte, x, y, { angle: 32 }));
+  doc.setTextColor(...RECU_ENCRE);
+}
+
+/** L'en-tête commun aux deux reçus : cadre de sécurité, bandeau, logo, numéro de pièce. */
+function enteteRecu(doc, { titre, reference, statut, W }) {
+  const M = 14;
+  doc.setDrawColor(...RECU_ENCRE); doc.setLineWidth(0.6);
+  doc.rect(6, 6, W - 12, 297 - 12);
+  doc.setDrawColor(...RECU_TRAIT); doc.setLineWidth(0.3);
+  doc.rect(8, 8, W - 16, 297 - 16);
+
+  doc.setFillColor(...RECU_NAVY); doc.rect(8, 8, W - 16, 30, "F");
+  doc.setFillColor(255, 255, 255); doc.roundedRect(13, 12, 22, 22, 2.5, 2.5, "F");
+  doc.addImage(DEFAULT_LOGO, "PNG", 14, 13, 20, 20);
+
+  doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold"); doc.setFontSize(15);
+  doc.text("BA-DIABY EXPRESS", 39, 20);
+  doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(176, 194, 220);
+  doc.text(titre, 39, 26.5);
+  doc.setFontSize(7.5);
+  doc.text("Transfert d’argent international", 39, 31.5);
+
+  // Le numéro de pièce, à droite : c'est par lui qu'on retrouve le dossier.
+  doc.setFontSize(7.2); doc.setTextColor(150, 172, 205);
+  doc.text("N° DE REÇU", W - M, 18, { align: "right" });
+  doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(255, 255, 255);
+  doc.text(reference, W - M, 24, { align: "right" });
+
+  const teinte = couleurStatutRecu(statut);
+  const largeur = doc.getTextWidth(statut.toUpperCase()) + 9;
+  doc.setFillColor(...teinte);
+  doc.roundedRect(W - M - largeur, 27.5, largeur, 6.5, 1.6, 1.6, "F");
+  doc.setFontSize(7.6); doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold");
+  doc.text(statut.toUpperCase(), W - M - largeur / 2, 32, { align: "center" });
+  return M;
+}
+
+/** Un titre de section — le trait sous le libellé sépare sans alourdir. */
+function sectionRecu(doc, titre, x, y, largeur) {
+  doc.setFont(undefined, "bold"); doc.setFontSize(7.8); doc.setTextColor(...RECU_GRIS);
+  doc.text(titre.toUpperCase(), x, y);
+  doc.setDrawColor(...RECU_TRAIT); doc.setLineWidth(0.4);
+  doc.line(x, y + 2, x + largeur, y + 2);
+  return y + 8;
+}
+
+/*
+ * Le pied de page : à qui s'adresser, et comment vérifier.
+ *
+ * Les coordonnées viennent des réglages de l'entreprise — jamais écrites en dur ici, sinon
+ * changer de numéro de téléphone demanderait un déploiement.
+ */
+function piedRecu(doc, { entreprise, reference, W, qr }) {
+  const M = 14;
+  let y = 232;
+
+  doc.setFillColor(249, 250, 251);
+  doc.roundedRect(M, y, W - 2 * M, 30, 2.5, 2.5, "F");
+  doc.setDrawColor(...RECU_TRAIT); doc.setLineWidth(0.3);
+  doc.roundedRect(M, y, W - 2 * M, 30, 2.5, 2.5, "S");
+
+  doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...RECU_ENCRE);
+  doc.text("Besoin d’aide ? Contactez notre service client", M + 6, y + 8);
+  doc.setFont(undefined, "normal"); doc.setFontSize(8.2); doc.setTextColor(...RECU_GRIS);
+  const tels = [entreprise?.telephone, entreprise?.telephone2].filter(Boolean).join("  ·  ");
+  if (tels) doc.text(tels, M + 6, y + 14.5);
+  const contact = [entreprise?.email, entreprise?.siteWeb].filter(Boolean).join("  ·  ");
+  if (contact) doc.text(contact, M + 6, y + 20);
+  if (entreprise?.adresseSiege) doc.text(entreprise.adresseSiege, M + 6, y + 25.5);
+
+  /* ── Détails de vérification ── */
+  y = 268;
+  doc.setDrawColor(...RECU_TRAIT); doc.setLineWidth(0.4);
+  doc.line(M, y - 4, W - M, y - 4);
+  if (qr) doc.addImage(qr, "PNG", M, y - 1, 17, 17);
+
+  doc.setFont(undefined, "bold"); doc.setFontSize(7.4); doc.setTextColor(...RECU_ENCRE);
+  doc.text("DÉTAILS DE VÉRIFICATION", M + 21, y + 1.5);
+  doc.setFont(undefined, "normal"); doc.setFontSize(6.9); doc.setTextColor(...RECU_GRIS);
+  doc.text(`Référence ${reference}  ·  Reçu généré le ${new Date().toLocaleString("fr-FR")}`, M + 21, y + 6);
+  doc.text(`Vérifiez en ligne : ${lienVerificationTransfert(reference)}`, M + 21, y + 10.5);
+  doc.text("Reçu généré électroniquement — valable sans signature ni cachet.", M + 21, y + 15);
+
+  const rccm = String(entreprise?.rccm || "").trim();
+  doc.setFontSize(6.6); doc.setTextColor(160, 166, 178);
+  doc.text(`Ba-Diaby Express${rccm ? ` · RCCM ${rccm}` : ""}`, W - M, y + 15, { align: "right" });
+}
+
 async function downloadRecuTransfert(transfert, code, entreprise = {}) {
   const jspdf = await loadJsPDF();
-  const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a5" }));
-  const W = 148, M = 10;
-  const INK = [20, 22, 26], MUTED = [122, 130, 142], NAVY = [10, 38, 71], RED = [214, 39, 63];
+  const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a4" }));
+  const W = 210, M = 14, COL = (W - 2 * M - 8) / 2;
 
-  doc.setDrawColor(20, 20, 20); doc.setLineWidth(0.5); doc.rect(3, 3, W - 6, 210 - 6);
-  doc.setFillColor(...NAVY); doc.rect(3, 3, W - 6, 26, "F");
-  doc.setFillColor(255, 255, 255); doc.roundedRect(8, 6, 20, 20, 2.5, 2.5, "F");
-  doc.addImage(DEFAULT_LOGO, "PNG", 9, 7, 18, 18);
-  doc.setTextColor(255, 255, 255); doc.setFontSize(13); doc.setFont(undefined, "bold");
-  doc.text("BA-DIABY EXPRESS", 31, 13);
-  doc.setFontSize(8.5); doc.setFont(undefined, "normal"); doc.setTextColor(180, 195, 220);
-  doc.text("Reçu de transfert d’argent", 31, 19);
-  doc.setFontSize(7.5); doc.text(transfert.reference, W - M, 19, { align: "right" });
+  /*
+   * Le QR est fabriqué dans le navigateur, sans appel réseau. S'il échoue — bibliothèque bloquée
+   * par un filtrage d'entreprise, réseau coupé — le reçu s'imprime quand même : une pièce de
+   * caisse ne doit jamais dépendre d'Internet. Seul le carré manque, et l'adresse écrite en
+   * toutes lettres juste à côté fait le même travail.
+   */
+  let qr = null;
+  try { qr = await generateQRDataUrl(lienVerificationTransfert(transfert.reference), 240); }
+  catch (e) { console.error("QR indisponible — le reçu est imprimé sans.", e); }
 
-  // ── Le code, en grand, encadré ────────────────────────────────────────────
-  let y = 38;
-  doc.setDrawColor(...RED); doc.setLineWidth(0.8);
-  doc.roundedRect(M, y, W - 2 * M, 26, 2, 2, "S");
-  doc.setFontSize(8); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
-  doc.text("CODE DE RETRAIT — à communiquer au bénéficiaire", W / 2, y + 7, { align: "center" });
-  doc.setFontSize(21); doc.setTextColor(...RED); doc.setFont(undefined, "bold");
-  doc.text(codeLisible(code), W / 2, y + 19, { align: "center" });
-  y += 34;
+  filigraneRecu(doc, "TRANSFERT D’ARGENT");
+  enteteRecu(doc, { titre: "Reçu de transfert d’argent", reference: transfert.reference,
+                    statut: transfert.statut || "Disponible au retrait", W });
 
-  const ligne = (libelle, valeur, gras) => {
-    doc.setFontSize(8); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
-    doc.text(libelle, M, y);
-    doc.setFontSize(gras ? 11 : 9.5); doc.setTextColor(...INK); doc.setFont(undefined, gras ? "bold" : "normal");
-    doc.text(String(valeur ?? "—"), W - M, y, { align: "right" });
-    y += gras ? 8 : 6.5;
+  /* ── LE CODE DE RETRAIT — le plus gros élément de la page ── */
+  let y = 48;
+  /*
+   * SANS CODE, PAS DE CADRE VIDE.
+   *
+   * Le reçu se rouvre depuis la fiche d'un transfert, où le code n'est PAS affiché — le
+   * redemander est un geste séparé et tracé. Imprimer alors un grand cadre rouge vide sous le
+   * titre « code de transaction » donnait une pièce qui a l'air cassée, et laissait croire à un
+   * client qu'on lui avait remis un reçu incomplet. On imprime donc un duplicata assumé : il
+   * porte tout le dossier, il dit ce qu'il est, et il renvoie vers le bon geste.
+   */
+  if (code) {
+    doc.setDrawColor(...RECU_ROUGE); doc.setLineWidth(0.9);
+    doc.roundedRect(M, y, W - 2 * M - 34, 28, 2.5, 2.5, "S");
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.6); doc.setTextColor(...RECU_GRIS);
+    doc.text("CODE DE TRANSACTION — à communiquer au bénéficiaire uniquement", M + 7, y + 8);
+    doc.setFont(undefined, "bold"); doc.setFontSize(26); doc.setTextColor(...RECU_ROUGE);
+    doc.text(codeLisible(code), M + 7, y + 21);
+  } else {
+    doc.setFillColor(247, 249, 252);
+    doc.roundedRect(M, y, W - 2 * M - 34, 28, 2.5, 2.5, "F");
+    doc.setDrawColor(...RECU_TRAIT); doc.setLineWidth(0.5);
+    doc.roundedRect(M, y, W - 2 * M - 34, 28, 2.5, 2.5, "S");
+    doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(...RECU_ENCRE);
+    doc.text("DUPLICATA — sans code de retrait", M + 7, y + 11);
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.6); doc.setTextColor(...RECU_GRIS);
+    doc.text("Le code n’est pas réimprimé. Pour le redonner à l’expéditeur, utilisez", M + 7, y + 18);
+    doc.text("« Revoir le code » sur la fiche du transfert — ce geste est enregistré.", M + 7, y + 22.5);
+  }
+
+  if (qr) {
+    doc.addImage(qr, "PNG", W - M - 30, y, 30, 30);
+    doc.setFont(undefined, "normal"); doc.setFontSize(6.2); doc.setTextColor(...RECU_GRIS);
+    doc.text("Vérifier ce reçu", W - M - 15, y + 33, { align: "center" });
+  }
+  y += 40;
+
+  /* ── L'OPÉRATION ── */
+  y = sectionRecu(doc, "L’opération", M, y, W - 2 * M);
+  const paire = (libelle, valeur, x, largeur) => {
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.4); doc.setTextColor(...RECU_GRIS);
+    doc.text(libelle, x, y);
+    doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...RECU_ENCRE);
+    doc.text(doc.splitTextToSize(String(valeur ?? "—"), largeur)[0] || "—", x, y + 5);
   };
+  paire("Date et heure", new Date(transfert.creeLe).toLocaleString("fr-FR"), M, COL);
+  paire("Valable jusqu’au", new Date(transfert.expireLe).toLocaleDateString("fr-FR"), M + COL / 2, COL);
+  paire("Agence émettrice", transfert.agenceEnvoi, M + COL, COL);
+  paire("Agent", transfert.creePar, M + COL + COL / 2, COL);
+  y += 14;
 
-  ligne("Expéditeur", transfert.expediteur);
-  ligne("Bénéficiaire", transfert.beneficiaire);
-  ligne("Destination", [transfert.beneficiaireVille, nomPaysImprime(transfert.beneficiairePays)].filter(Boolean).join(", "));
-  doc.setDrawColor(220); doc.line(M, y, W - M, y); y += 7;
+  /* ── LES DEUX PARTIES, CÔTE À CÔTE ── */
+  const hautColonnes = y;
+  let yG = sectionRecu(doc, "Expéditeur", M, y, COL);
+  const champ = (libelle, valeur, x, yy, largeur) => {
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.2); doc.setTextColor(...RECU_GRIS);
+    doc.text(libelle, x, yy);
+    doc.setFont(undefined, "bold"); doc.setFontSize(8.8); doc.setTextColor(...RECU_ENCRE);
+    const lignes = doc.splitTextToSize(String(valeur || "—"), largeur);
+    doc.text(lignes[0], x, yy + 4.6);
+    return yy + 10.5;
+  };
+  yG = champ("Nom complet", transfert.expediteur, M, yG, COL);
+  yG = champ("Téléphone", transfert.expediteurTelephone, M, yG, COL);
+  yG = champ("Pays", nomPaysImprime(transfert.expediteurPays), M, yG, COL);
+
+  const xD = M + COL + 8;
+  let yD = sectionRecu(doc, "Bénéficiaire", xD, hautColonnes, COL);
+  yD = champ("Nom complet", transfert.beneficiaire, xD, yD, COL);
+  yD = champ("Téléphone", transfert.beneficiaireTelephone, xD, yD, COL);
+  yD = champ("Pays et ville", [transfert.beneficiaireVille, nomPaysImprime(transfert.beneficiairePays)]
+        .filter(Boolean).join(", "), xD, yD, COL);
+
+  y = Math.max(yG, yD) + 4;
+
+  /* ── LES MONTANTS — la partie qu'on relit en cas de contestation ── */
+  y = sectionRecu(doc, "Montants", M, y, W - 2 * M);
+  const total = Number(transfert.montantEnvoye) + Number(transfert.frais);
+  const ligne = (libelle, valeur, options = {}) => {
+    doc.setFont(undefined, options.fort ? "bold" : "normal");
+    doc.setFontSize(options.fort ? 9.5 : 8.6);
+    doc.setTextColor(...(options.fort ? RECU_ENCRE : RECU_GRIS));
+    doc.text(libelle, M + 4, y);
+    doc.setFont(undefined, "bold");
+    doc.setFontSize(options.grand ? 12 : options.fort ? 10 : 9);
+    doc.setTextColor(...(options.teinte || RECU_ENCRE));
+    doc.text(String(valeur), W - M - 4, y, { align: "right" });
+    y += options.grand ? 10 : 7;
+  };
   ligne("Montant envoyé", montantTransfert(transfert.montantEnvoye, transfert.deviseEnvoi));
   ligne("Frais de transfert", montantTransfert(transfert.frais, transfert.deviseEnvoi));
-  ligne("TOTAL PAYÉ", montantTransfert(Number(transfert.montantEnvoye) + Number(transfert.frais), transfert.deviseEnvoi), true);
-  doc.setDrawColor(220); doc.line(M, y, W - M, y); y += 7;
-  ligne("Taux appliqué", `1 ${transfert.deviseEnvoi} = ${Number(transfert.taux).toLocaleString("fr-FR", { maximumFractionDigits: 4 })} ${transfert.deviseReception}`);
-  ligne("LE BÉNÉFICIAIRE REÇOIT", montantTransfert(transfert.montantARecevoir, transfert.deviseReception), true);
-  doc.setDrawColor(220); doc.line(M, y, W - M, y); y += 7;
-  ligne("Date", new Date(transfert.creeLe).toLocaleString("fr-FR"));
-  ligne("Agent / agence", `${transfert.creePar} — ${transfert.agenceEnvoi}`);
-  ligne("Valable jusqu’au", new Date(transfert.expireLe).toLocaleDateString("fr-FR"));
+  doc.setDrawColor(...RECU_TRAIT); doc.line(M + 4, y - 3, W - M - 4, y - 3); y += 2;
+  ligne("TOTAL PAYÉ PAR L’EXPÉDITEUR", montantTransfert(total, transfert.deviseEnvoi), { fort: true });
+  y += 3;
 
-  y = 178;
-  doc.setDrawColor(200); doc.line(M, y, W - M, y);
-  doc.setFontSize(7.6); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
-  const avis = doc.splitTextToSize(
-    "Ce code vaut paiement : ne le communiquez qu’au bénéficiaire. Toute personne le présentant avec une pièce d’identité au nom indiqué peut retirer les fonds.",
-    W - 2 * M);
-  doc.text(avis, M, y + 6);
-  const rccm = String(entreprise?.rccm || "").trim();
-  doc.setFontSize(7.2);
-  doc.text(`badiabyexpress.bde@gmail.com${rccm ? ` · RCCM ${rccm}` : ""}`, M, 200);
+  /*
+   * La conversion n'est montrée que s'il y en a une. Afficher « 1 EUR = 1 EUR » sur un transfert
+   * en même devise ferait douter d'un document dont tout l'objet est d'inspirer confiance.
+   */
+  if (transfert.deviseEnvoi !== transfert.deviseReception) {
+    doc.setFillColor(247, 249, 252);
+    doc.roundedRect(M, y, W - 2 * M, 15, 2, 2, "F");
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.4); doc.setTextColor(...RECU_GRIS);
+    doc.text("TAUX DE CHANGE APPLIQUÉ, FIGÉ À LA CRÉATION", M + 4, y + 5.5);
+    doc.setFont(undefined, "bold"); doc.setFontSize(9.5); doc.setTextColor(...RECU_ENCRE);
+    doc.text(tauxLisible(transfert.taux, transfert.deviseEnvoi, transfert.deviseReception),
+             M + 4, y + 11.5);
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.4); doc.setTextColor(...RECU_GRIS);
+    doc.text(`${transfert.deviseEnvoi} → ${transfert.deviseReception}`, W - M - 4, y + 11.5, { align: "right" });
+    y += 20;
+  }
 
-  openPdf(doc, `transfert-${transfert.reference}.pdf`);
+  doc.setFillColor(240, 249, 243);
+  doc.roundedRect(M, y, W - 2 * M, 18, 2.5, 2.5, "F");
+  doc.setDrawColor(...RECU_VERT); doc.setLineWidth(0.5);
+  doc.roundedRect(M, y, W - 2 * M, 18, 2.5, 2.5, "S");
+  doc.setFont(undefined, "bold"); doc.setFontSize(8); doc.setTextColor(...RECU_GRIS);
+  doc.text("LE BÉNÉFICIAIRE REÇOIT", M + 5, y + 7);
+  doc.setFontSize(15); doc.setTextColor(...RECU_VERT);
+  doc.text(montantTransfert(transfert.montantARecevoir, transfert.deviseReception), W - M - 5, y + 12, { align: "right" });
+  y += 25;
+
+  // L'avertissement n'a de sens que si le code est là : sur un duplicata il inquiéterait pour rien.
+  if (code) {
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.4); doc.setTextColor(...RECU_GRIS);
+    doc.text(doc.splitTextToSize(
+      "Ce code vaut paiement : ne le communiquez qu’au bénéficiaire. Toute personne le présentant avec une pièce d’identité au nom indiqué peut retirer les fonds.",
+      W - 2 * M), M, y);
+  }
+
+  piedRecu(doc, { entreprise, reference: transfert.reference, W, qr });
+  openPdf(doc, `recu-transfert-${transfert.reference}.pdf`);
 }
 
 /* ── LE REÇU DE PAIEMENT ───────────────────────────────────────────────────────
@@ -32694,52 +32999,464 @@ async function downloadRecuTransfert(transfert, code, entreprise = {}) {
  */
 async function downloadRecuPaiementTransfert(transfert, entreprise = {}) {
   const jspdf = await loadJsPDF();
-  const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a5" }));
-  const W = 148, M = 10;
-  const INK = [20, 22, 26], MUTED = [122, 130, 142], NAVY = [10, 38, 71], VERT = [22, 120, 70];
+  const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a4" }));
+  const W = 210, M = 14, COL = (W - 2 * M - 8) / 2;
 
-  doc.setDrawColor(20, 20, 20); doc.setLineWidth(0.5); doc.rect(3, 3, W - 6, 210 - 6);
-  doc.setFillColor(...NAVY); doc.rect(3, 3, W - 6, 26, "F");
-  doc.setFillColor(255, 255, 255); doc.roundedRect(8, 6, 20, 20, 2.5, 2.5, "F");
-  doc.addImage(DEFAULT_LOGO, "PNG", 9, 7, 18, 18);
-  doc.setTextColor(255, 255, 255); doc.setFontSize(13); doc.setFont(undefined, "bold");
-  doc.text("BA-DIABY EXPRESS", 31, 13);
-  doc.setFontSize(8.5); doc.setFont(undefined, "normal"); doc.setTextColor(180, 195, 220);
-  doc.text("Reçu de paiement — transfert d’argent", 31, 19);
-  doc.setFontSize(7.5); doc.text(transfert.reference, W - M, 19, { align: "right" });
+  let qr = null;
+  try { qr = await generateQRDataUrl(lienVerificationTransfert(transfert.reference), 240); }
+  catch (e) { console.error("QR indisponible — le reçu est imprimé sans.", e); }
 
-  let y = 42;
-  doc.setFontSize(8.5); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
-  doc.text("MONTANT REMIS", M, y);
-  doc.setTextColor(...VERT); doc.setFont(undefined, "bold"); doc.setFontSize(20);
-  doc.text(montantTransfert(transfert.montantRemis ?? transfert.montantARecevoir, transfert.deviseReception), M, y + 10);
-  y += 22;
-  doc.setDrawColor(220); doc.line(M, y, W - M, y); y += 8;
+  filigraneRecu(doc, "FONDS REMIS");
+  enteteRecu(doc, { titre: "Reçu de paiement — transfert d’argent",
+                    reference: transfert.reference, statut: "Payé", W });
 
-  const ligne = (libelle, valeur) => {
-    doc.setFontSize(8); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
-    doc.text(libelle, M, y);
-    doc.setFontSize(10); doc.setTextColor(...INK); doc.setFont(undefined, "bold");
-    doc.text(String(valeur ?? "—"), M, y + 5);
-    y += 12;
+  let y = 50;
+  doc.setFillColor(240, 249, 243);
+  doc.roundedRect(M, y, W - 2 * M - 34, 26, 2.5, 2.5, "F");
+  doc.setDrawColor(...RECU_VERT); doc.setLineWidth(0.6);
+  doc.roundedRect(M, y, W - 2 * M - 34, 26, 2.5, 2.5, "S");
+  doc.setFont(undefined, "normal"); doc.setFontSize(7.6); doc.setTextColor(...RECU_GRIS);
+  doc.text("MONTANT REMIS AU BÉNÉFICIAIRE", M + 7, y + 8);
+  doc.setFont(undefined, "bold"); doc.setFontSize(22); doc.setTextColor(...RECU_VERT);
+  doc.text(montantTransfert(transfert.montantRemis ?? transfert.montantARecevoir, transfert.deviseReception),
+           M + 7, y + 20);
+  if (qr) {
+    doc.addImage(qr, "PNG", W - M - 30, y - 2, 30, 30);
+    doc.setFont(undefined, "normal"); doc.setFontSize(6.2); doc.setTextColor(...RECU_GRIS);
+    doc.text("Vérifier ce reçu", W - M - 15, y + 31, { align: "center" });
+  }
+  y += 38;
+
+  const hautColonnes = y;
+  const champ = (libelle, valeur, x, yy, largeur) => {
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.2); doc.setTextColor(...RECU_GRIS);
+    doc.text(libelle, x, yy);
+    doc.setFont(undefined, "bold"); doc.setFontSize(8.8); doc.setTextColor(...RECU_ENCRE);
+    doc.text(doc.splitTextToSize(String(valeur || "—"), largeur)[0] || "—", x, yy + 4.6);
+    return yy + 10.5;
   };
-  ligne("Bénéficiaire", transfert.beneficiaireNomVerifie || transfert.beneficiaire);
-  ligne("Pièce présentée", [transfert.beneficiairePiece, transfert.beneficiairePieceNumero].filter(Boolean).join(" — "));
-  ligne("Envoyé par", transfert.expediteur);
-  ligne("Payé le", new Date(transfert.payeLe).toLocaleString("fr-FR"));
-  ligne("Agent / agence", `${transfert.payePar} — ${transfert.agencePaiement}`);
 
-  y = 172;
-  doc.setDrawColor(200); doc.line(M, y, W - M, y);
-  doc.setFontSize(8.5); doc.setTextColor(90, 90, 90); doc.setFont(undefined, "normal");
-  doc.text("Signature du bénéficiaire :", M, y + 8);
-  doc.setDrawColor(150); doc.line(M, y + 20, 70, y + 20);
-  const rccm = String(entreprise?.rccm || "").trim();
-  doc.setFontSize(7.2); doc.setTextColor(140, 140, 140);
-  doc.text("Ce reçu atteste de la remise des fonds au bénéficiaire désigné.", M, 198);
-  doc.text(`badiabyexpress.bde@gmail.com${rccm ? ` · RCCM ${rccm}` : ""}`, M, 202);
+  let yG = sectionRecu(doc, "Bénéficiaire", M, y, COL);
+  yG = champ("Nom relevé sur la pièce", transfert.beneficiaireNomVerifie || transfert.beneficiaire, M, yG, COL);
+  yG = champ("Pièce présentée", [transfert.beneficiairePiece, transfert.beneficiairePieceNumero]
+        .filter(Boolean).join(" — "), M, yG, COL);
+  yG = champ("Téléphone", transfert.beneficiaireTelephoneVerifie || transfert.beneficiaireTelephone, M, yG, COL);
 
-  openPdf(doc, `paiement-${transfert.reference}.pdf`);
+  const xD = M + COL + 8;
+  let yD = sectionRecu(doc, "L’opération", xD, hautColonnes, COL);
+  yD = champ("Envoyé par", transfert.expediteur, xD, yD, COL);
+  yD = champ("Payé le", new Date(transfert.payeLe).toLocaleString("fr-FR"), xD, yD, COL);
+  yD = champ("Agent et agence payeuse", `${transfert.payePar} — ${transfert.agencePaiement}`, xD, yD, COL);
+
+  y = Math.max(yG, yD) + 6;
+
+  y = sectionRecu(doc, "Rappel de l’envoi", M, y, W - 2 * M);
+  const rappel = (libelle, valeur) => {
+    doc.setFont(undefined, "normal"); doc.setFontSize(8.4); doc.setTextColor(...RECU_GRIS);
+    doc.text(libelle, M + 4, y);
+    doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...RECU_ENCRE);
+    doc.text(String(valeur), W - M - 4, y, { align: "right" });
+    y += 7;
+  };
+  rappel("Montant envoyé", montantTransfert(transfert.montantEnvoye, transfert.deviseEnvoi));
+  rappel("Frais de transfert", montantTransfert(transfert.frais, transfert.deviseEnvoi));
+  if (transfert.deviseEnvoi !== transfert.deviseReception) {
+    rappel("Taux appliqué", tauxLisible(transfert.taux, transfert.deviseEnvoi, transfert.deviseReception));
+  }
+  rappel("Envoyé le", new Date(transfert.creeLe).toLocaleString("fr-FR"));
+  y += 6;
+
+  /*
+   * La signature reste. Le reçu est « généré électroniquement », mais c'est bien un billet qui
+   * passe de main en main : la seule preuve que le bénéficiaire l'a effectivement pris, c'est ce
+   * qu'il écrit là, sur le papier que l'agence garde.
+   */
+  doc.setFont(undefined, "normal"); doc.setFontSize(8.4); doc.setTextColor(...RECU_GRIS);
+  doc.text("Signature du bénéficiaire", M, y + 6);
+  doc.setDrawColor(170, 176, 186); doc.setLineWidth(0.4);
+  doc.line(M, y + 20, M + 70, y + 20);
+  doc.text("Cachet et signature de l’agence", W - M - 70, y + 6);
+  doc.line(W - M - 70, y + 20, W - M, y + 20);
+  doc.setFontSize(7.4);
+  doc.text("Ce reçu atteste de la remise des fonds au bénéficiaire désigné ci-dessus.", M, y + 28);
+
+  piedRecu(doc, { entreprise, reference: transfert.reference, W, qr });
+  openPdf(doc, `recu-paiement-${transfert.reference}.pdf`);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * LE REÇU À L'ÉCRAN
+ *
+ * Le PDF reste la pièce d'archive : mis en page au millimètre, il ne se coupe pas et s'imprime
+ * partout pareil. Cet écran-ci sert à autre chose — c'est ce que l'agent montre au comptoir et ce
+ * qu'il envoie au bénéficiaire, souvent depuis un téléphone, souvent sans imprimante à portée.
+ *
+ * CE QUI NE PART PAS DANS UN MESSAGE
+ *
+ * Le partage — WhatsApp, SMS, feuille de partage du téléphone — n'emporte JAMAIS le code de
+ * retrait. Un message se transfère, s'affiche sur un écran verrouillé, se lit par-dessus une
+ * épaule ; le code, lui, vaut paiement. Ce qui part, c'est de quoi savoir qu'un transfert existe,
+ * combien il porte et où le retirer, plus le lien de vérification. Le code est remis à
+ * l'expéditeur en main propre, sur le papier.
+ *
+ * C'est aussi ce que demande le principe « ne jamais afficher de données sensibles inutiles » :
+ * le destinataire d'un SMS n'a pas besoin du code pour savoir qu'on lui a envoyé de l'argent.
+ */
+function RecuTransfert({ transfert, code, data, notify, onFermer, onNouveau, niveau = 1 }) {
+  const [qr, setQr] = useState(null);
+  const [travail, setTravail] = useState("");
+  const entreprise = data?.entreprise || {};
+  const lien = lienVerificationTransfert(transfert.reference);
+  const total = Number(transfert.montantEnvoye) + Number(transfert.frais);
+  const converti = transfert.deviseEnvoi !== transfert.deviseReception;
+  const paye = transfert.statut === "Payé";
+
+  useEffect(() => {
+    let vivant = true;
+    generateQRDataUrl(lien, 320)
+      .then((url) => { if (vivant) setQr(url); })
+      .catch((e) => console.error("QR indisponible à l’écran.", e));
+    return () => { vivant = false; };
+  }, [lien]);
+
+  /*
+   * Le message de partage. Il tient en quelques lignes parce qu'il est lu sur un téléphone, et il
+   * porte le lien de vérification plutôt qu'une promesse : le bénéficiaire peut contrôler
+   * lui-même que l'opération existe, sans appeler personne.
+   */
+  const message = [
+    `Ba-Diaby Express — transfert d’argent`,
+    ``,
+    `Bonjour ${transfert.beneficiaire}, un transfert vous attend.`,
+    `Montant à retirer : ${montantTransfert(transfert.montantARecevoir, transfert.deviseReception)}`,
+    `Retrait : ${[transfert.beneficiaireVille, paysLisible(transfert.beneficiairePays)].filter(Boolean).join(", ")}`,
+    `Référence : ${transfert.reference}`,
+    ``,
+    `Vérifier ce transfert : ${lien}`,
+    ``,
+    `Présentez-vous avec une pièce d’identité à votre nom et le code que l’expéditeur vous a communiqué.`,
+  ].join("\n");
+
+  function numeroPourLien(tel) {
+    return String(tel || "").replace(/[^\d]/g, "");
+  }
+
+  async function partager() {
+    const charge = { title: `Transfert ${transfert.reference}`, text: message, url: lien };
+    if (navigator.share) {
+      try { await navigator.share(charge); return; }
+      catch (e) { if (e?.name === "AbortError") return; }   // l’agent a refermé la feuille
+    }
+    try {
+      await navigator.clipboard.writeText(`${message}`);
+      notify?.("Partage indisponible sur cet appareil — le message a été copié.");
+    } catch (e) {
+      notify?.("Le partage n’est pas disponible sur cet appareil.");
+    }
+  }
+
+  function versWhatsApp() {
+    const numero = numeroPourLien(transfert.beneficiaireTelephone);
+    /*
+     * wa.me ouvre WhatsApp sur l'appareil de l'agent avec le message prérempli ; c'est lui qui
+     * appuie sur envoyer. Ce n'est pas l'envoi automatique par l'API de Meta : celui-là exige un
+     * modèle validé, et le module de transfert n'en a pas encore.
+     */
+    window.open(numero ? `https://wa.me/${numero}?text=${encodeURIComponent(message)}`
+                       : `https://wa.me/?text=${encodeURIComponent(message)}`, "_blank");
+  }
+
+  function versSMS() {
+    const numero = numeroPourLien(transfert.beneficiaireTelephone);
+    window.location.href = `sms:${numero ? `+${numero}` : ""}?&body=${encodeURIComponent(message)}`;
+  }
+
+  async function telecharger() {
+    setTravail("pdf");
+    try {
+      if (paye) await downloadRecuPaiementTransfert(transfert, entreprise);
+      else await downloadRecuTransfert(transfert, code, entreprise);
+    } catch (e) {
+      notify?.("Le PDF n’a pas pu être produit. Réessayez dans un instant.");
+    } finally { setTravail(""); }
+  }
+
+  const encre = "#11141a", gris = "#767e8c", trait = "#dee2e9";
+  const bloc = { background: "#fff", borderRadius: 0, breakInside: "avoid" };
+  const etiquette = { fontSize: 10, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: gris };
+  const valeur = { fontSize: 13.5, fontWeight: 700, color: encre, marginTop: 2, wordBreak: "break-word" };
+
+  const champ = (libelle, contenu) => (
+    <div style={{ marginBottom: 11 }}>
+      <div style={etiquette}>{libelle}</div>
+      <div style={valeur}>{contenu || "—"}</div>
+    </div>
+  );
+
+  const section = (titre) => (
+    <div style={{ ...etiquette, paddingBottom: 5, borderBottom: `1px solid ${trait}`, marginBottom: 11 }}>{titre}</div>
+  );
+
+  const bouton = (icone, libelle, action, principal) => {
+    const Icone = icone;
+    return (
+      <button onClick={action} disabled={travail === "pdf" && principal}
+        style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 7,
+                 background: principal ? "var(--brand-solid)" : "var(--surface)",
+                 color: principal ? "#fff" : "var(--text)",
+                 border: principal ? "none" : "1px solid var(--border)",
+                 borderRadius: 10, padding: "11px 15px", fontSize: 13, fontWeight: 700,
+                 cursor: "pointer", flex: "1 1 148px", minWidth: 0 }}>
+        <Icone size={15} /> {libelle}
+      </button>
+    );
+  };
+
+  return (
+    <Modal title={paye ? "Reçu de paiement" : "Reçu de transfert"} onClose={onFermer} wide niveau={niveau}>
+      {/*
+        * La feuille. Fond blanc et encre sombre quel que soit le thème de l'application : c'est
+        * un document, pas un écran. En thème sombre, un reçu sombre imprimé sortirait noir.
+        */}
+      <div className="bde-recu" style={{ background: "#fff", color: encre, borderRadius: 14,
+        border: `1px solid ${trait}`, overflow: "hidden", position: "relative",
+        boxShadow: "0 18px 48px rgba(8, 20, 42, 0.16)" }}>
+
+        {/* Le filigrane, sous le contenu. */}
+        <div aria-hidden="true" style={{ position: "absolute", inset: 0, pointerEvents: "none",
+          display: "grid", placeItems: "center", overflow: "hidden" }}>
+          <div style={{ transform: "rotate(-32deg)", fontSize: "clamp(30px, 8vw, 62px)", fontWeight: 800,
+            color: "rgba(17, 20, 26, 0.035)", letterSpacing: "0.06em", whiteSpace: "nowrap", lineHeight: 2.1,
+            textAlign: "center" }}>
+            {paye ? "FONDS REMIS" : "TRANSFERT D’ARGENT"}<br />
+            {paye ? "FONDS REMIS" : "TRANSFERT D’ARGENT"}<br />
+            {paye ? "FONDS REMIS" : "TRANSFERT D’ARGENT"}
+          </div>
+        </div>
+
+        <div style={{ position: "relative" }}>
+          {/* ── En-tête ── */}
+          <div className="bde-recu-bloc" style={{ background: "#0A2647", color: "#fff", padding: "18px 20px",
+            display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+            <div style={{ width: 46, height: 46, borderRadius: 12, background: "#fff", display: "grid",
+              placeItems: "center", flexShrink: 0, overflow: "hidden" }}>
+              <img src={DEFAULT_LOGO} alt="" style={{ width: 42, height: 42, objectFit: "contain" }} />
+            </div>
+            <div style={{ flex: "1 1 190px", minWidth: 0 }}>
+              <div style={{ fontSize: 16.5, fontWeight: 800, letterSpacing: "-0.01em" }}>BA-DIABY EXPRESS</div>
+              <div style={{ fontSize: 12, color: "#B0C2DC", marginTop: 2 }}>
+                {paye ? "Reçu de paiement — transfert d’argent" : "Reçu de transfert d’argent"}
+              </div>
+            </div>
+            <div style={{ textAlign: "right", flexShrink: 0 }}>
+              <div style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: "0.08em", color: "#96ACC9" }}>N° DE REÇU</div>
+              <div style={{ fontSize: 14, fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>{transfert.reference}</div>
+              <div style={{ display: "inline-block", marginTop: 5, padding: "3px 10px", borderRadius: 999,
+                fontSize: 10, fontWeight: 800, letterSpacing: "0.05em", color: "#fff",
+                background: paye ? "#157A47" : (transfert.statut === "Annulé" || transfert.statut === "Expiré") ? "#D6273F" : "#B4740C" }}>
+                {String(transfert.statut || "Disponible au retrait").toUpperCase()}
+              </div>
+            </div>
+          </div>
+
+          <div style={{ padding: "18px 20px" }}>
+            {/* ── Le code, et le QR ── */}
+            <div className="bde-recu-bloc" style={{ display: "flex", gap: 14, flexWrap: "wrap",
+              alignItems: "stretch", marginBottom: 20 }}>
+              {!paye && code && (
+                <div style={{ flex: "1 1 240px", border: "1.6px solid #D6273F", borderRadius: 12, padding: "13px 15px" }}>
+                  <div style={{ ...etiquette, fontSize: 9.5 }}>Code de transaction</div>
+                  <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: "clamp(26px, 7vw, 34px)",
+                    fontWeight: 700, color: "#D6273F", letterSpacing: "0.04em", fontVariantNumeric: "tabular-nums",
+                    lineHeight: 1.15, marginTop: 4 }}>
+                    {codeLisible(code)}
+                  </div>
+                  <div style={{ fontSize: 11, color: gris, marginTop: 5, lineHeight: 1.45 }}>
+                    À communiquer au bénéficiaire uniquement.
+                  </div>
+                </div>
+              )}
+              {/* Rouvert depuis la fiche, le reçu ne réaffiche pas le code : il le dit, plutôt que de laisser un vide. */}
+              {!paye && !code && (
+                <div style={{ flex: "1 1 240px", border: `1px solid ${trait}`, borderRadius: 12,
+                  padding: "13px 15px", background: "#F7F9FC" }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 800, color: encre }}>Duplicata — sans code de retrait</div>
+                  <div style={{ fontSize: 11.5, color: gris, marginTop: 5, lineHeight: 1.5 }}>
+                    Le code n’est pas réaffiché. Pour le redonner à l’expéditeur, utilisez
+                    « Revoir le code » sur la fiche — ce geste est enregistré au journal.
+                  </div>
+                </div>
+              )}
+              {paye && (
+                <div style={{ flex: "1 1 240px", border: "1.6px solid #157A47", borderRadius: 12,
+                  padding: "13px 15px", background: "#F0F9F3" }}>
+                  <div style={{ ...etiquette, fontSize: 9.5 }}>Montant remis au bénéficiaire</div>
+                  <div style={{ fontSize: "clamp(24px, 6vw, 30px)", fontWeight: 800, color: "#157A47",
+                    lineHeight: 1.2, marginTop: 4 }}>
+                    {montantTransfert(transfert.montantRemis ?? transfert.montantARecevoir, transfert.deviseReception)}
+                  </div>
+                </div>
+              )}
+              <div style={{ flex: "0 0 auto", textAlign: "center", display: "grid", placeItems: "center",
+                minWidth: 104 }}>
+                {qr
+                  ? <img src={qr} alt={`QR de vérification du transfert ${transfert.reference}`}
+                      style={{ width: 96, height: 96, display: "block" }} />
+                  : <div style={{ width: 96, height: 96, border: `1px dashed ${trait}`, borderRadius: 8,
+                      display: "grid", placeItems: "center", fontSize: 10, color: gris, padding: 6,
+                      textAlign: "center" }}>QR indisponible</div>}
+                <div style={{ fontSize: 9.5, color: gris, marginTop: 4 }}>Vérifier ce reçu</div>
+              </div>
+            </div>
+
+            {/* ── L'opération ── */}
+            <div className="bde-recu-bloc" style={{ ...bloc, marginBottom: 16 }}>
+              {section("L’opération")}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: "0 16px" }}>
+                {champ("Date et heure", new Date(transfert.creeLe).toLocaleString("fr-FR"))}
+                {!paye && champ("Valable jusqu’au", new Date(transfert.expireLe).toLocaleDateString("fr-FR"))}
+                {paye && champ("Payé le", new Date(transfert.payeLe).toLocaleString("fr-FR"))}
+                {champ("Agence émettrice", transfert.agenceEnvoi)}
+                {champ("Agent", paye ? transfert.payePar : transfert.creePar)}
+              </div>
+            </div>
+
+            {/* ── Les deux parties ── */}
+            <div className="bde-recu-bloc" style={{ display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 16, marginBottom: 16 }}>
+              <div style={bloc}>
+                {section("Expéditeur")}
+                {champ("Nom complet", transfert.expediteur)}
+                {champ("Téléphone", transfert.expediteurTelephone)}
+                {champ("Pays", paysLisible(transfert.expediteurPays))}
+              </div>
+              <div style={bloc}>
+                {section("Bénéficiaire")}
+                {champ("Nom complet", paye ? (transfert.beneficiaireNomVerifie || transfert.beneficiaire) : transfert.beneficiaire)}
+                {champ("Téléphone", transfert.beneficiaireTelephone)}
+                {champ("Pays et ville", [transfert.beneficiaireVille, paysLisible(transfert.beneficiairePays)].filter(Boolean).join(", "))}
+              </div>
+            </div>
+
+            {/* ── Les montants ── */}
+            <div className="bde-recu-bloc" style={{ ...bloc, marginBottom: 16 }}>
+              {section("Montants")}
+              {[["Montant envoyé", montantTransfert(transfert.montantEnvoye, transfert.deviseEnvoi)],
+                ["Frais de transfert", montantTransfert(transfert.frais, transfert.deviseEnvoi)]].map(([l, v]) => (
+                <div key={l} style={{ display: "flex", justifyContent: "space-between", gap: 12,
+                  alignItems: "baseline", padding: "5px 0", fontSize: 13 }}>
+                  <span style={{ color: gris }}>{l}</span>
+                  <strong style={{ color: encre, whiteSpace: "nowrap" }}>{v}</strong>
+                </div>
+              ))}
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline",
+                padding: "9px 0 0", marginTop: 5, borderTop: `1px solid ${trait}`, fontSize: 14 }}>
+                <strong style={{ color: encre }}>Total payé par l’expéditeur</strong>
+                <strong style={{ color: encre, whiteSpace: "nowrap", fontSize: 15.5 }}>
+                  {montantTransfert(total, transfert.deviseEnvoi)}
+                </strong>
+              </div>
+            </div>
+
+            {/* ── La conversion, seulement s'il y en a une ── */}
+            {converti && (
+              <div className="bde-recu-bloc" style={{ background: "#F7F9FC", border: `1px solid ${trait}`,
+                borderRadius: 10, padding: "12px 14px", marginBottom: 16 }}>
+                <div style={{ ...etiquette, fontSize: 9.5 }}>Taux de change appliqué, figé à la création</div>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline",
+                  marginTop: 5, flexWrap: "wrap" }}>
+                  <strong style={{ fontSize: 14, color: encre }}>
+                    {tauxLisible(transfert.taux, transfert.deviseEnvoi, transfert.deviseReception)}
+                  </strong>
+                  <span style={{ fontSize: 12, color: gris }}>
+                    {transfert.deviseEnvoi} → {transfert.deviseReception}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {!paye && (
+              <div className="bde-recu-bloc" style={{ background: "#F0F9F3", border: "1px solid #157A47",
+                borderRadius: 10, padding: "13px 15px", marginBottom: 16, display: "flex",
+                justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                <span style={{ ...etiquette, fontSize: 10 }}>Le bénéficiaire reçoit</span>
+                <strong style={{ fontSize: "clamp(18px, 5vw, 22px)", color: "#157A47", whiteSpace: "nowrap" }}>
+                  {montantTransfert(transfert.montantARecevoir, transfert.deviseReception)}
+                </strong>
+              </div>
+            )}
+
+            {/* ── Détails de vérification ── */}
+            <div className="bde-recu-bloc" style={{ borderTop: `1px solid ${trait}`, paddingTop: 12,
+              display: "flex", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+              {qr && <img src={qr} alt="" style={{ width: 54, height: 54, flexShrink: 0 }} />}
+              <div style={{ flex: "1 1 210px", minWidth: 0, fontSize: 10.5, color: gris, lineHeight: 1.55 }}>
+                <div style={{ ...etiquette, fontSize: 9.5, marginBottom: 3 }}>Détails de vérification</div>
+                <div>Référence {transfert.reference} · Agence {transfert.agenceEnvoi || "—"}</div>
+                <div>Reçu généré le {new Date().toLocaleString("fr-FR")}</div>
+                <div style={{ wordBreak: "break-all" }}>Vérifiez en ligne : {lien}</div>
+                <div>Reçu généré électroniquement — valable sans signature ni cachet.</div>
+              </div>
+            </div>
+
+            {/* ── Service client ── */}
+            <div className="bde-recu-bloc" style={{ background: "#F9FAFB", border: `1px solid ${trait}`,
+              borderRadius: 10, padding: "12px 14px", marginTop: 14, fontSize: 11.5, color: gris, lineHeight: 1.6 }}>
+              <strong style={{ color: encre, fontSize: 12.5, display: "block", marginBottom: 3 }}>
+                Besoin d’aide ? Contactez notre service client
+              </strong>
+              {[entreprise.telephone, entreprise.telephone2].filter(Boolean).join("  ·  ")}
+              {(entreprise.telephone || entreprise.telephone2) && <br />}
+              {[entreprise.email, entreprise.siteWeb].filter(Boolean).join("  ·  ")}
+              {entreprise.adresseSiege && <><br />{entreprise.adresseSiege}</>}
+              {entreprise.rccm && <><br />RCCM {entreprise.rccm}</>}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Les gestes. Hors de la feuille : ils ne s'impriment pas. ── */}
+      <div className="bde-recu-actions" style={{ marginTop: 16 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {bouton(Download, travail === "pdf" ? "Génération…" : "Télécharger PDF", telecharger, true)}
+          {bouton(Printer, "Imprimer", () => window.print())}
+          {bouton(Send, "Partager", partager)}
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+          {bouton(MessageCircle, "WhatsApp", versWhatsApp)}
+          {bouton(Mail, "SMS", versSMS)}
+          {!paye && code && bouton(Copy, "Copier le code", () => {
+            navigator.clipboard?.writeText(code);
+            notify?.("Code copié — ne le collez que dans un message à l’expéditeur.");
+          })}
+        </div>
+
+        <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.55, marginTop: 12,
+          background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 12px" }}>
+          Le message partagé annonce le transfert et porte le lien de vérification, <strong>jamais le
+          code de retrait</strong> : un message se transfère et s’affiche sur un écran verrouillé.
+          Le code se remet à l’expéditeur, sur le papier.
+        </div>
+
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+          {onNouveau && (
+            <button onClick={onNouveau}
+              style={{ flex: "1 1 170px", background: "var(--surface2)", border: "1px solid var(--border)",
+                color: "var(--text)", borderRadius: 10, padding: "11px 15px", fontSize: 13, fontWeight: 700,
+                cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
+              <Plus size={15} /> Nouveau transfert
+            </button>
+          )}
+          <button onClick={onFermer}
+            style={{ flex: "1 1 120px", background: "none", border: "1px solid var(--border)",
+              color: "var(--muted)", borderRadius: 10, padding: "11px 15px", fontSize: 13, fontWeight: 700,
+              cursor: "pointer" }}>
+            Terminer
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
@@ -32753,6 +33470,7 @@ function NouveauTransfert({ data, session, config, onFait, onFermer, notify }) {
   const [envoi, setEnvoi] = useState(false);
   const [erreur, setErreur] = useState("");
   const [resultat, setResultat] = useState(null);
+  const [recu, setRecu] = useState(false);
 
   const [exp, setExp] = useState({ nom: "", prenom: "", telephone: "", pieceType: PIECES_IDENTITE[0], pieceNumero: "", adresse: "", pays: session?.paysAutorises?.[0] || "GN" });
   const [ben, setBen] = useState({ nom: "", prenom: "", telephone: "", pays: "GN", ville: "", agence: "" });
@@ -32831,6 +33549,14 @@ function NouveauTransfert({ data, session, config, onFait, onFermer, notify }) {
       frais: t.frais, taux: t.taux,
       montantARecevoir: t.montant_a_recevoir, deviseReception: t.devise_reception,
       creeLe: t.cree_le, creePar: t.cree_par_nom, agenceEnvoi: t.agence_envoi, expireLe: t.expire_le,
+      /*
+       * Le reçu montre les téléphones et le pays de l'expéditeur ; l'écran de succès, lui, n'en
+       * avait pas besoin. Ils viennent de la réponse du serveur, jamais du formulaire : ce qui est
+       * imprimé doit être ce qui a été enregistré, pas ce qui a été tapé.
+       */
+      expediteurTelephone: t.exp_telephone, expediteurPays: t.exp_pays,
+      beneficiaireTelephone: t.ben_telephone,
+      statut: t.statut,
     };
     return (
       <Modal title="Transfert enregistré" onClose={onFermer} wide>
@@ -32867,15 +33593,24 @@ function NouveauTransfert({ data, session, config, onFait, onFermer, notify }) {
         </div>
 
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button onClick={() => downloadRecuTransfert(vue, resultat.code, data?.entreprise)}
+          <button onClick={() => setRecu(true)}
             style={{ flex: 1, minWidth: 160, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 10, padding: "12px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
-            <Printer size={16} /> Imprimer le reçu
+            <Receipt size={16} /> Voir le reçu
+          </button>
+          <button onClick={() => downloadRecuTransfert(vue, resultat.code, data?.entreprise)}
+            style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 10, padding: "12px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 7 }}>
+            <Printer size={16} /> PDF
           </button>
           <button onClick={onFermer}
-            style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 10, padding: "12px 20px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+            style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 10, padding: "12px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
             Terminer
           </button>
         </div>
+
+        {recu && (
+          <RecuTransfert transfert={vue} code={resultat.code} data={data} notify={notify}
+            onFermer={() => setRecu(false)} />
+        )}
       </Modal>
     );
   }
@@ -32984,7 +33719,7 @@ function NouveauTransfert({ data, session, config, onFait, onFermer, notify }) {
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: "var(--muted)" }}>
                   <span>Taux appliqué</span>
-                  <span>1 {devis.deviseEnvoi} = {Number(devis.taux).toLocaleString("fr-FR", { maximumFractionDigits: 4 })} {devis.deviseReception}</span>
+                  <span>{tauxLisible(devis.taux, devis.deviseEnvoi, devis.deviseReception)}</span>
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px solid var(--border)", paddingTop: 8 }}>
                   <span style={{ color: "var(--ok-fg)", fontWeight: 700 }}>Le bénéficiaire reçoit</span>
@@ -33017,7 +33752,7 @@ function NouveauTransfert({ data, session, config, onFait, onFermer, notify }) {
               <strong style={{ color: "var(--ok-fg)", fontSize: 16 }}>{montantTransfert(devis.montantARecevoir, devis.deviseReception)}</strong>
             </div>
             <div style={{ fontSize: 11.5, color: "var(--muted)", borderTop: "1px solid var(--info-border)", paddingTop: 7 }}>
-              Frais {montantTransfert(devis.frais, devis.deviseEnvoi)} · taux 1 {devis.deviseEnvoi} = {Number(devis.taux).toLocaleString("fr-FR", { maximumFractionDigits: 4 })} {devis.deviseReception}.
+              Frais {montantTransfert(devis.frais, devis.deviseEnvoi)} · taux {tauxLisible(devis.taux, devis.deviseEnvoi, devis.deviseReception)}.
               Le taux est figé à la création : il ne changera plus, quoi qu’il arrive d’ici au retrait.
             </div>
           </div>
@@ -33071,6 +33806,7 @@ function PayerTransfert({ data, onFait, onFermer, notify }) {
   const [confirmation, setConfirmation] = useState(false);
   const [paiement, setPaiement] = useState(false);
   const [paye, setPaye] = useState(null);
+  const [recu, setRecu] = useState(false);
 
   async function chercher() {
     const chiffres = code.replace(/\D/g, "");
@@ -33143,14 +33879,24 @@ function PayerTransfert({ data, onFait, onFermer, notify }) {
           Le code est désormais inutilisable : toute nouvelle présentation sera refusée.
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button onClick={() => downloadRecuPaiementTransfert(paye, data?.entreprise)}
+          <button onClick={() => setRecu(true)}
             style={{ flex: 1, minWidth: 160, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 10, padding: "12px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
-            <Printer size={16} /> Reçu de paiement
+            <Receipt size={16} /> Voir le reçu
           </button>
-          <button onClick={onFermer} style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 10, padding: "12px 20px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+          <button onClick={() => downloadRecuPaiementTransfert(paye, data?.entreprise)}
+            style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 10, padding: "12px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 7 }}>
+            <Printer size={16} /> PDF
+          </button>
+          <button onClick={onFermer} style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 10, padding: "12px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
             Terminer
           </button>
         </div>
+
+        {/* Le reçu de paiement ne porte pas de code : celui-ci a servi, il ne doit plus circuler. */}
+        {recu && (
+          <RecuTransfert transfert={paye} code={null} data={data} notify={notify}
+            onFermer={() => setRecu(false)} />
+        )}
       </Modal>
     );
   }
@@ -33505,6 +34251,7 @@ function DetailTransfert({ transfert, data, session, notify, onFerme, onChange }
   const [annulation, setAnnulation] = useState(false);
   const [suppression, setSuppression] = useState(false);
   const [motifSuppression, setMotifSuppression] = useState("");
+  const [recu, setRecu] = useState(false);
   const [travail, setTravail] = useState("");
   const [erreur, setErreur] = useState("");
   const annulable = !["Payé", "Annulé"].includes(transfert.statut);
@@ -33562,7 +34309,7 @@ function DetailTransfert({ transfert, data, session, notify, onFerme, onChange }
         {ligne("Destination", [transfert.beneficiaireVille, paysLisible(transfert.beneficiairePays)].filter(Boolean).join(", "))}
         {ligne("Montant envoyé", montantTransfert(transfert.montantEnvoye, transfert.deviseEnvoi))}
         {ligne("Frais", montantTransfert(transfert.frais, transfert.deviseEnvoi))}
-        {ligne("Taux figé à la création", `1 ${transfert.deviseEnvoi} = ${Number(transfert.taux).toLocaleString("fr-FR", { maximumFractionDigits: 4 })} ${transfert.deviseReception}`)}
+        {ligne("Taux figé à la création", tauxLisible(transfert.taux, transfert.deviseEnvoi, transfert.deviseReception))}
         {ligne("Créé le", `${new Date(transfert.creeLe).toLocaleString("fr-FR")} — ${transfert.creePar} (${transfert.agenceEnvoi})`)}
         {ligne("Valable jusqu’au", new Date(transfert.expireLe).toLocaleDateString("fr-FR"))}
         {transfert.payeLe && ligne("Payé le", `${new Date(transfert.payeLe).toLocaleString("fr-FR")} — ${transfert.payePar} (${transfert.agencePaiement})`)}
@@ -33580,6 +34327,16 @@ function DetailTransfert({ transfert, data, session, notify, onFerme, onChange }
       {erreur && <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 10, padding: "10px 12px", marginBottom: 12, fontSize: 12.5, color: "var(--danger-fg)" }}>{erreur}</div>}
 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {/*
+          * Le reçu se rouvre à tout moment, quel que soit l'état du transfert — c'est la pièce
+          * qu'on ressort pour répondre à un client. Il ne porte le code que si l'agent vient de
+          * le redemander juste au-dessus : rouvrir une fiche ne doit pas faire réapparaître un
+          * code que l'écran avait justement cessé d'afficher.
+          */}
+        <button onClick={() => setRecu(true)}
+          style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", border: "none", color: "#fff", borderRadius: 10, padding: "10px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+          <Receipt size={14} /> Voir le reçu
+        </button>
         {perm("transfert.revoir_code") && annulable && !code && (
           <button onClick={revoirCode} disabled={travail === "code"}
             style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 10, padding: "10px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
@@ -33600,6 +34357,11 @@ function DetailTransfert({ transfert, data, session, notify, onFerme, onChange }
           </button>
         )}
       </div>
+
+      {recu && (
+        <RecuTransfert transfert={transfert} code={code} data={data} notify={notify}
+          onFermer={() => setRecu(false)} />
+      )}
 
       {suppression && (
         <Modal title="Supprimer ce transfert ?" onClose={() => setSuppression(false)} niveau={1}>

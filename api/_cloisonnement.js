@@ -651,6 +651,19 @@ function comptesDeLEquipe(base, envoye, moi, peut) {
   /* Même prudence que pour les partenaires : une liste qui ne contient même pas sa propre fiche
    * n'est pas une suppression de toute l'équipe, c'est un envoi incomplet. */
   const peutSupprimer = gere && envoyesParId.has(moi.id);
+  /*
+   * LA ZONE DE CELUI QUI ÉCRIT — DÉCLARÉE AVANT D'ÊTRE LUE.
+   *
+   * Ces deux lignes vivaient à la fin de la fonction, cinquante lignes APRÈS la boucle qui s'en
+   * sert. En JavaScript, un `const` lu avant sa déclaration ne vaut pas `undefined` : il lève une
+   * erreur. Toute écriture d'un compte qui tient les utilisateurs — donc chaque enregistrement de
+   * l'administrateur — s'arrêtait donc net, la fonction serveur répondait « base injoignable », et
+   * l'application mettait le travail en file d'attente. C'est le « 1 en attente d'enregistrement »
+   * resté affiché sur le téléphone du responsable.
+   */
+  const zoneDeMoi = String(moi.zoneOperation || moi.agence || "").trim().toLowerCase();
+  const compteDansMaZone = (u) => !zoneDeMoi || u?.id === moi.id
+    || String(u?.zoneOperation || u?.agence || "").trim().toLowerCase() === zoneDeMoi;
 
   const sortie = [];
   liste(base.users).forEach((u) => {
@@ -716,8 +729,6 @@ function comptesDeLEquipe(base, envoye, moi, peut) {
   const avantParId = new Map();
   liste(base.users).forEach((u) => { if (u && u.id) avantParId.set(u.id, u); });
   const estAdministrateur = moi.role === "Administrateur";
-  const zoneDeMoi = String(moi.zoneOperation || moi.agence || "").trim().toLowerCase();
-  const compteDansMaZone = (u) => !zoneDeMoi || u?.id === moi.id || String(u?.zoneOperation || u?.agence || "").trim().toLowerCase() === zoneDeMoi;
 
   const prisAilleurs = (id, candidat) => liste(base.users)
     .some((u) => u && u.id !== id && String(u.identifiant || "").trim().toLowerCase() === candidat);
@@ -816,9 +827,32 @@ export function collectionsQuiFondent(base, envoye) {
   for (const cle of COLLECTIONS_PROTEGEES) {
     const avant = base?.[cle];
     if (!Array.isArray(avant) || avant.length === 0) continue;
+    /*
+     * UNE CLÉ ABSENTE N'EST PAS UNE CLÉ VIDÉE, ET LA CONFONDRE A FAIT PEUR POUR RIEN.
+     *
+     * Une écriture qui ne parle pas d'une collection la laisse telle quelle : la fusion la
+     * reprend de la base, quelques lignes plus haut, et il ne s'est jamais rien passé. Elle était
+     * pourtant comptée ici comme « 343 → 0 », et l'écran annonçait à l'agent que son répertoire
+     * avait failli disparaître à chaque enregistrement. Le garde-fou criait à la place d'un
+     * silence.
+     */
+    if (!Object.prototype.hasOwnProperty.call(envoye || {}, cle)) continue;
     const apres = envoye?.[cle];
     const compte = Array.isArray(apres) ? apres.length : 0;
     const perdus = avant.length - compte;
+    /*
+     * VIDER UNE COLLECTION D'UN COUP N'EST PAS UN GESTE — quelle que soit sa taille.
+     *
+     * La règle de la moitié laissait passer les petites listes : trois comptes clients ramenés à
+     * zéro, c'est bien « moins de la moitié », mais c'est aussi trois disparitions pour une seule
+     * écriture. Une page qui propose zéro là où la base en a est une page qui ne les a jamais
+     * eues : elle ne demande pas une suppression, elle ignore qu'elles existent.
+     *
+     * Retirer LA DERNIÈRE entrée reste possible, comme retirer n'importe quelle entrée seule :
+     * une suppression à la fois est un geste, et c'est la seule façon dont l'application supprime.
+     * Un vrai vidage en masse passe, lui, par l'intention datée.
+     */
+    if (compte === 0 && perdus > PERTE_TOLEREE) { perdues.push({ cle, avant: avant.length, apres: 0 }); continue; }
     /*
      * Deux conditions, et les deux ensemble : on perd plus d'une entrée d'un coup, ET il en reste
      * moins de la moitié. Retirer un colis sur seize passe ; en perdre neuf, non.
@@ -828,6 +862,41 @@ export function collectionsQuiFondent(base, envoye) {
     }
   }
   return perdues;
+}
+
+/*
+ * L'IDENTITÉ D'UNE LIGNE — la même notion que dans src/lib/storage.js.
+ *
+ * Un colis se reconnaît à son numéro de suivi, un compte ou une dépense à son identifiant. Sans
+ * cela on ne saurait pas dire si deux lignes sont la même, et l'on ne pourrait que compter.
+ */
+const CLES_IDENTITE = ["id", "tracking", "numero", "cle", "key"];
+function identiteLigne(element) {
+  if (!element || typeof element !== "object" || Array.isArray(element)) return null;
+  const cle = CLES_IDENTITE.find((k) => typeof element[k] === "string" || typeof element[k] === "number");
+  return cle ? `${cle}:${element[cle]}` : null;
+}
+
+/**
+ * Réunit une collection : ce que la page envoie, PLUS ce qu'elle a laissé tomber.
+ *
+ * C'est la réponse à « refuser l'écriture conflictuelle sans jeter le travail ». Rendre purement
+ * et simplement la version de la base annulait aussi ce que l'agent venait de saisir : le colis
+ * qu'il ajoutait dans le même enregistrement disparaissait avec le refus. Ici, ses lignes à lui
+ * sont gardées telles qu'il les a écrites, et celles qu'il ne connaissait pas reviennent à leur
+ * place. Une page périmée ne peut donc plus rien SUPPRIMER — mais tout ce qu'elle ajoute ou
+ * corrige aboutit.
+ *
+ * Les lignes sans identité (rien à quoi les reconnaître) ne se réunissent pas : on garde alors la
+ * base, seule version dont on soit sûr.
+ */
+export function unirParIdentite(lignesBase, lignesEnvoyees) {
+  const base = liste(lignesBase);
+  const envoyees = liste(lignesEnvoyees);
+  if (!base.every((x) => identiteLigne(x)) || !envoyees.every((x) => identiteLigne(x))) return base;
+  const vues = new Set(envoyees.map(identiteLigne));
+  const manquantes = base.filter((x) => !vues.has(identiteLigne(x)));
+  return [...envoyees, ...manquantes];
 }
 
 /*
@@ -909,12 +978,66 @@ export function vueEquipeZone(donnees, compteId) {
   return vue;
 }
 
+/**
+ * CE COMPTE REÇOIT-IL UNE VUE RÉDUITE À SA ZONE ?
+ *
+ * `vueEquipeZone` ne rend à un responsable de zone que ce qui la concerne. C'est juste en lecture —
+ * et redoutable en écriture, parce que TOUTES les données de l'application tiennent dans un seul
+ * document : la page renvoie ce qu'elle a reçu, c'est-à-dire une version où tout ce qui est hors
+ * de sa zone a disparu. Sans le rattrapage ci-dessous, chaque enregistrement d'un agent de zone
+ * effacerait le travail des autres zones.
+ */
+export function estFiltreParZone(document, compteId) {
+  const moi = liste(document?.users).find((u) => u && u.id === compteId);
+  if (!moi || moi.role === "Administrateur" || moi.role === "Comptable") return false;
+  return !!String(moi.zoneOperation || moi.agence || "").trim();
+}
+
+/**
+ * Rend à l'écriture d'un compte de zone tout ce qu'il n'avait pas le droit de voir.
+ *
+ * Le principe tient en une phrase : CE QU'IL NE VOYAIT PAS, IL NE PEUT PAS L'AVOIR SUPPRIMÉ.
+ * On recalcule donc ce que la lecture lui avait montré, et l'on remet en place toute ligne de la
+ * base qui n'y figurait pas. Ses propres gestes restent entiers — il ajoute, corrige et supprime
+ * dans sa zone exactement comme avant.
+ *
+ * Sans cela, l'accident du 1er septembre était inévitable : l'agente de Conakry recevait un
+ * document sans les comptes clients des autres zones, sans le répertoire et sans les dépenses,
+ * et le renvoyait tel quel à chaque enregistrement — « clientAccounts : 8 → 0 ».
+ */
+export function reconstituerHorsZone(base, envoye, compteId) {
+  if (!estFiltreParZone(base, compteId)) return envoye;
+  const vueLue = vueEquipeZone(base, compteId);
+  const sortie = { ...envoye };
+  Object.keys(base).forEach((cle) => {
+    /* Les comptes et le journal ont déjà leur propre règle, plus fine que celle-ci. */
+    if (cle === "users" || cle === "activityLog") return;
+    if (!Array.isArray(base[cle]) || !Array.isArray(envoye?.[cle])) return;
+    const visibles = new Set(liste(vueLue?.[cle]).map(identiteLigne).filter(Boolean));
+    const invisibles = base[cle].filter((x) => {
+      const id = identiteLigne(x);
+      /* Une ligne sans identité ne se rattache à rien : on la garde plutôt que de la perdre. */
+      return !id || !visibles.has(id);
+    });
+    if (invisibles.length) sortie[cle] = unirParIdentite(invisibles, envoye[cle]);
+  });
+  return sortie;
+}
+
 export function fusionnerEcritureEquipe(actuel, propose, compteId, contexte = {}) {
   const base = actuel && typeof actuel === "object" && !Array.isArray(actuel) ? actuel : {};
-  const envoye = propose && typeof propose === "object" && !Array.isArray(propose) ? propose : {};
+  const recu = propose && typeof propose === "object" && !Array.isArray(propose) ? propose : {};
   const moi = liste(base.users).find((u) => u && u.id === compteId);
   if (!moi) return base;
   const peut = (cle) => effectivePermission(moi, cle);
+  /*
+   * D'ABORD, RENDRE CE QUE LA LECTURE AVAIT RETIRÉ.
+   *
+   * Un compte de zone n'a jamais reçu le document entier : le lui laisser réécrire tel quel
+   * effacerait les autres zones à chaque enregistrement. Tout ce qui suit travaille donc sur une
+   * écriture déjà complétée — les garde-fous d'après n'ont ainsi plus rien d'anormal à voir.
+   */
+  const envoye = reconstituerHorsZone(base, recu, compteId);
 
   const sortie = { ...envoye };
 
@@ -951,7 +1074,36 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId, contexte = {}
   const deliberee = intentionDeRemplacement(envoye);
   delete sortie[CHAMP_INTENTION];
   const fondues = deliberee ? [] : collectionsQuiFondent(base, envoye);
-  fondues.forEach(({ cle }) => { sortie[cle] = base[cle]; });
+  /*
+   * ON NE REND PLUS LA COLLECTION ENTIÈRE : ON LA RÉUNIT.
+   *
+   * Reposer la version de la base annulait aussi ce que l'agent venait de saisir — le colis
+   * ajouté dans le même enregistrement partait avec le refus, et il ne lui restait qu'un message.
+   * Désormais ses lignes sont gardées, et celles qu'il ne connaissait pas reviennent à leur
+   * place : une page périmée ne peut plus rien supprimer, mais tout ce qu'elle apporte aboutit.
+   */
+  fondues.forEach(({ cle }) => { sortie[cle] = unirParIdentite(base[cle], envoye[cle]); });
+
+  /*
+   * DEUX AGENTS DANS LA MÊME SECONDE — le cas que rien ne voyait.
+   *
+   * A et B ont chargé la même version. A enregistre son colis ; B enregistre le sien une
+   * demi-seconde plus tard, sur une copie d'AVANT celui de A. Il y a autant de colis des deux
+   * côtés : aucun compte ne bouge, aucun garde-fou ne se déclenche — et le colis de A disparaît
+   * en silence. C'est arrivé, et rien dans l'application n'aurait pu le montrer.
+   *
+   * Quand `contexte.conflit` dit que la page a écrit sur une version dépassée, aucune ligne ne
+   * peut plus disparaître : ce que la page ignore revient à sa place, ce qu'elle apporte est
+   * gardé. Sans bruit, ni journal, ni alerte — deux agents qui travaillent en même temps, c'est
+   * la vie normale d'une agence, pas un incident.
+   */
+  if (contexte?.conflit && !deliberee) {
+    COLLECTIONS_PROTEGEES.forEach((cle) => {
+      if (!Array.isArray(base?.[cle]) || base[cle].length === 0) return;
+      if (!Object.prototype.hasOwnProperty.call(envoye || {}, cle)) return;
+      sortie[cle] = unirParIdentite(base[cle], envoye[cle]);
+    });
+  }
 
   /*
    * LE JOURNAL DES ACCÈS NE SE RÉÉCRIT JAMAIS DEPUIS UN NAVIGATEUR.
@@ -1020,11 +1172,20 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId, contexte = {}
    * enregistrement, et personne ne saurait qu'une page périmée tourne quelque part — jusqu'au jour
    * où elle passe. C'est la trace qui permet d'aller la fermer.
    */
+  /*
+   * LE JOURNAL DIT MAINTENANT CE QUI S'EST RÉELLEMENT PASSÉ.
+   *
+   * « Enregistrement refusé » était faux, et cette inexactitude a coûté une frayeur : rien
+   * n'était refusé — le colis, l'encaissement, le changement de statut de la même écriture
+   * étaient bel et bien enregistrés. Seules les DISPARITIONS proposées étaient écartées. Un
+   * responsable qui lit « refusé » croit son travail perdu et le refait.
+   */
   const refus = fondues.length === 0 ? [] : [{
     id: `garde-${Date.now()}`,
     date: new Date().toISOString(),
-    action: "Enregistrement refusé — page périmée",
-    detail: fondues.map(({ cle, avant, apres }) => `${cle} : ${avant} → ${apres}`).join(" · "),
+    action: "Suppressions écartées — page incomplète",
+    detail: `${fondues.map(({ cle, avant, apres }) => `${cle} : ${avant} → ${apres}`).join(" · ")}`
+      + " · lignes rétablies, le reste de l’enregistrement est bien passé",
     utilisateur: signature,
     role: moi.role,
   }];
@@ -1050,6 +1211,8 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId, contexte = {}
       collections: fondues,
       appareil: typeof contexte?.appareil === "string" ? contexte.appareil.slice(0, 300) : "",
       adresse: typeof contexte?.adresse === "string" ? contexte.adresse.slice(0, 60) : "",
+      /* Deux causes bien différentes à distinguer : une page incomplète, ou deux agents en même temps. */
+      conflit: !!contexte?.conflit,
       vue: false,
     });
   }

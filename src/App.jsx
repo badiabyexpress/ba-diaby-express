@@ -632,6 +632,28 @@ export function autorisationModifierBordereau(session, bordereau) {
   return { autorise: true, motif: null };
 }
 
+/**
+ * UNE FICHE DE VOYAGE VALIDÉE NE SE ROUVRE QUE PAR L'ADMINISTRATEUR.
+ *
+ * La validation d'un voyage n'est pas un enregistrement de plus : elle arrête les comptes d'une
+ * rotation. Elle fige les recettes, les dépenses et le bilan, elle sort ses colis de tous les
+ * voyages suivants, et la fiche part signée. Rouvrir cette fiche, c'est défaire une pièce
+ * comptable déjà imprimée et remise — et supprimer le voyage, c'est la faire disparaître avec
+ * ses dépenses.
+ *
+ * Ces deux gestes étaient ouverts à quiconque pouvait consulter la comptabilité. Ils rejoignent
+ * la règle qui vaut déjà pour un bordereau parti : tant que c'est un brouillon, celui qui le tient
+ * en dispose ; une fois validé, il faut l'administrateur.
+ *
+ * Comme pour le bordereau, on rend le motif plutôt qu'un simple refus : un bouton qui disparaît
+ * sans explication se lit comme une panne, un bouton éteint avec sa raison se comprend.
+ */
+export function autorisationModifierVoyage(session, voyage) {
+  if (voyage?.statut !== "Validé") return { autorise: true, motif: null };
+  if (session?.role === "Administrateur") return { autorise: true, motif: null };
+  return { autorise: false, motif: "valide" };
+}
+
 const T = {
   fr: { dashboard: "Tableau de bord", colis: "Colis", tarif: "Tarification", clients: "Clients", admin: "Configuration", ia: "Assistant IA", logout: "Déconnexion", newColis: "Nouveau colis", search: "Rechercher", createAccount: "Créer un compte", bordereaux: "Bordereaux", paiements: "Paiements & Factures" },
   en: { dashboard: "Dashboard", colis: "Parcels", tarif: "Pricing", clients: "Clients", admin: "Settings", ia: "AI Assistant", logout: "Log out", newColis: "New parcel", search: "Search", createAccount: "Create account", bordereaux: "Waybills", paiements: "Payments & Invoices" },
@@ -4491,6 +4513,17 @@ function App() {
     { key: "compte", label: "Compte", icon: User },
   ].map((n) => ({ ...n, show: true, actif: ongletPartenaire === n.key, onSelect: () => setOngletPartenaire(n.key) }));
 
+  /*
+   * Où mène une ligne de la cloche. Un partenaire navigue entre ses onglets, l'équipe entre les
+   * vues du menu : la cloche donne une destination, c'est ici qu'on sait comment s'y rendre.
+   */
+  const allerDepuisLaCloche = (cible) => {
+    setMobileNavOpen(false);
+    if (session.role === "Partenaire") { setOngletPartenaire(cible); return; }
+    setView(cible);
+    if (cible === "admin") setAdminResetKey((k) => k + 1);
+  };
+
   const nav = session.role === "Partenaire" ? navPartenaire : [
     { key: "dashboard", label: t.dashboard, icon: LayoutDashboard, show: true },
     { key: "colis", label: t.colis, icon: Package, show: perm("colis.voir_propres") || perm("colis.voir_tous") },
@@ -4565,7 +4598,7 @@ function App() {
               <>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
                   <LogoIdentite taille={26} />
-                  <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 18, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  <div className="bde-brand-name" style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 18, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                     {identite.nom ? identite.nom : <>BA-DIABY <span style={{ color: "var(--brand-on-dark)" }}>EXPRESS</span></>}
                   </div>
                 </div>
@@ -4573,10 +4606,16 @@ function App() {
               </>
             )}
           </div>
-          <div style={{ padding: "0 12px 8px" }}>
-            <button onClick={() => setShowGlobalSearch(true)} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", background: "rgba(255,255,255,0.06)", border: "none", borderRadius: 8, padding: (collapsed && !isMobile) ? "9px 0" : "9px 12px", color: "rgba(255,255,255,0.7)", fontSize: 13, cursor: "pointer" }}>
+          <div style={{ padding: "0 12px 8px", display: "flex", flexDirection: (collapsed && !isMobile) ? "column" : "row", alignItems: "center", gap: 8 }}>
+            <button onClick={() => setShowGlobalSearch(true)} style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0, width: (collapsed && !isMobile) ? "100%" : undefined, justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", background: "rgba(255,255,255,0.06)", border: "none", borderRadius: 8, padding: (collapsed && !isMobile) ? "9px 0" : "9px 12px", color: "rgba(255,255,255,0.7)", fontSize: 13, cursor: "pointer" }}>
               <Search size={15} /> {!(collapsed && !isMobile) && "Recherche globale"}
             </button>
+            {/*
+              * La cloche vit ici, sur la première ligne du menu : c'est le seul endroit visible
+              * sans faire défiler et sans replier quoi que ce soit. Sur téléphone, elle est
+              * doublée dans la barre du haut — là, le menu est fermé la plupart du temps.
+              */}
+            <ClocheNotifications data={data} session={session} onAller={allerDepuisLaCloche} surFondSombre />
           </div>
           <nav style={{ padding: 12, display: "flex", flexDirection: "column", gap: 3, flex: 1, overflowY: "auto" }}>
             {nav.map((n) => (
@@ -4632,6 +4671,7 @@ function App() {
               <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 15, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1 }}>
                 {nav.find((n) => n.actif ?? (n.key === view))?.label || identite.nom || "BA-DIABY EXPRESS"}
               </div>
+              <ClocheNotifications data={data} session={session} onAller={allerDepuisLaCloche} surFondSombre />
               <button onClick={() => setShowGlobalSearch(true)} style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 8, width: 34, height: 34, display: "grid", placeItems: "center", color: "#fff", cursor: "pointer", flexShrink: 0 }}>
                 <Search size={16} />
               </button>
@@ -4698,7 +4738,7 @@ function App() {
             : syncing ? "Enregistrement…" : `${pendingSync} en attente d’enregistrement`}
         </div>
       )}
-      {toast && <div style={{ position: "fixed", bottom: 24, insetInlineEnd: 24, insetInlineStart: isMobile ? 24 : "auto", background: "#0A2647", color: "#fff", padding: "12px 18px", borderRadius: 12, fontSize: 13.5, boxShadow: "0 8px 24px rgba(10,38,71,0.3)", textAlign: "center" }}>{toast}</div>}
+      {toast && <div className="bde-toast" style={{ position: "fixed", bottom: 24, insetInlineEnd: 24, insetInlineStart: isMobile ? 24 : "auto", zIndex: 300, background: "rgba(10,38,71,0.94)", color: "#fff", padding: "13px 20px", borderRadius: 14, fontSize: 13.5, fontWeight: 500, boxShadow: "0 18px 44px -14px rgba(3,10,24,0.72)", textAlign: "center" }}>{toast}</div>}
     </Shell>
     </ContexteOuvrirColis.Provider>
   );
@@ -4965,8 +5005,31 @@ function Shell({ children, rtl, theme }) {
         /* Les polices sont déclarées dans index.html : chargées ici par @import, elles n'étaient
            demandées qu'après l'exécution du JavaScript, soit plusieurs secondes de retard en 4G. */
         * { box-sizing: border-box; }
+        /*
+         * LA PROFONDEUR ÉTAIT À L'ENVERS.
+         *
+         * En thème sombre, le sol de l'application (--surface2) était PLUS CLAIR que les cartes
+         * posées dessus (--surface) : #1B2438 contre #131A2B. Une carte plus foncée que son fond
+         * ne se lit pas comme un objet posé, elle se lit comme un trou — d'où l'impression de
+         * page plate et terne, quelle que soit la qualité du contenu. Tous les logiciels du genre
+         * font l'inverse : le fond est le point le plus sombre, les cartes s'en détachent vers le
+         * clair, et les champs de saisie s'y creusent vers le sombre.
+         *
+         * Les valeurs ci-dessous rétablissent cet ordre — sol < carte, et champ = sol. Comme
+         * l'ensemble de l'application passe par ces variables et n'écrit jamais une couleur en
+         * dur, la hiérarchie se met en place partout d'un coup, sans toucher un seul écran.
+         */
         :root, [data-theme="dark"] {
-          --bg: #0A0F1C; --surface: #131A2B; --surface2: #1B2438; --border: #242E47; --text: #F1F4FA; --muted: #8A97B5;
+          --bg: #080C17; --surface: #182138; --surface2: #0D1322; --border: #26324F; --text: #F1F4FA; --muted: #8A97B5;
+          /* Élévation : deux ombres superposées — un contact net, une diffusion large. C'est ce
+             qui distingue une carte « posée » d'une carte simplement bordée. */
+          --shadow-card: 0 1px 2px rgba(3, 7, 18, 0.40), 0 10px 28px -14px rgba(3, 7, 18, 0.75);
+          --shadow-lift: 0 2px 6px rgba(3, 7, 18, 0.45), 0 22px 48px -20px rgba(3, 7, 18, 0.85);
+          --shadow-modal: 0 40px 90px -24px rgba(0, 0, 0, 0.78), 0 2px 8px rgba(0, 0, 0, 0.45);
+          --ring: color-mix(in srgb, var(--brand-solid) 30%, transparent);
+          /* Filet clair sur l'arête haute des surfaces : une carte accroche la lumière par le
+             haut. Invisible consciemment, mais c'est ce qui fait « fini » plutôt que « plat ». */
+          --sheen: rgba(255, 255, 255, 0.055);
           /* Couleurs sémantiques : fonds, bordures et textes des blocs d’état (succès, alerte,
              erreur, information). Déclinées par thème afin qu’un encart ne reste jamais sombre
              sur une page claire — c’était la principale incohérence visuelle du site. */
@@ -4977,7 +5040,12 @@ function Shell({ children, rtl, theme }) {
           --neutral-fg: #AEB9D6; --bronze-bg: #1B140F; --placeholder: #6B77A0;
         }
         [data-theme="light"] {
-          --bg: #F3F5FA; --surface: #FFFFFF; --surface2: #EEF1F8; --border: #DCE2F0; --text: #101828; --muted: #5B6B82;
+          --bg: #F4F6FB; --surface: #FFFFFF; --surface2: #EDF1F8; --border: #E1E7F2; --text: #101828; --muted: #5B6B82;
+          --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.05), 0 10px 26px -16px rgba(16, 24, 40, 0.26);
+          --shadow-lift: 0 2px 5px rgba(16, 24, 40, 0.07), 0 22px 44px -22px rgba(16, 24, 40, 0.34);
+          --shadow-modal: 0 40px 90px -26px rgba(16, 24, 40, 0.32), 0 2px 8px rgba(16, 24, 40, 0.10);
+          --ring: color-mix(in srgb, var(--brand-solid) 22%, transparent);
+          --sheen: rgba(255, 255, 255, 0.9);
           --danger-bg: #FEF1F3; --danger-border: #F6CBD2; --danger-fg: #B3243A; --danger-fg-soft: #8E1A2A;
           --warn-bg: #FFF8E7; --warn-border: #EFD9A2; --warn-fg: #8A6008; --warn-fg-soft: #6F4D06;
           --ok-bg: #EAF9F0; --ok-bg-soft: #F1FBF5; --ok-border: #BCE5CC; --ok-fg: #107442; --ok-fg-alt: #0F6A43;
@@ -5044,15 +5112,14 @@ function Shell({ children, rtl, theme }) {
           .bde-client-actions button { min-height: 42px; padding: 9px 10px !important; font-size: 12px !important; }
           .bde-client-actions button:first-child, .bde-client-actions button:nth-child(2) { grid-column: span 2; }
         }
-        .bde-app-shell { background-image: radial-gradient(circle at 85% 0%, rgba(200,16,46,0.05), transparent 28%); }
+        .bde-app-shell { background: var(--surface2); }
         .bde-app-sidebar { box-shadow: 12px 0 36px rgba(3, 14, 32, 0.14); }
         .bde-app-sidebar nav button { transition: background 180ms ease, color 180ms ease, transform 160ms ease; }
         .bde-app-sidebar nav button:hover { background: rgba(255,255,255,0.10) !important; transform: translateX(2px); }
         .bde-app-sidebar nav button[style*="var(--brand-solid)"] { box-shadow: 0 8px 20px rgba(200,16,46,0.18); }
-        .bde-app-main { background: linear-gradient(135deg, color-mix(in srgb, var(--surface2) 94%, transparent), color-mix(in srgb, var(--surface) 28%, transparent)); }
         .bde-app-main input, .bde-app-main select, .bde-app-main textarea { transition: border-color 180ms ease, box-shadow 180ms ease, background 180ms ease; }
-        .bde-app-main input:focus, .bde-app-main select:focus, .bde-app-main textarea:focus { border-color: color-mix(in srgb, var(--brand-solid) 58%, var(--border)) !important; box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-solid) 12%, transparent) !important; outline: none; }
-        .bde-app-main button { transition: transform 160ms ease, box-shadow 180ms ease, border-color 180ms ease; }
+        .bde-app-main input:focus, .bde-app-main select:focus, .bde-app-main textarea:focus { border-color: color-mix(in srgb, var(--brand-solid) 58%, var(--border)) !important; box-shadow: 0 0 0 4px var(--ring) !important; outline: none; }
+        .bde-app-main button { transition: transform 160ms ease, box-shadow 180ms ease, border-color 180ms ease, filter 180ms ease; }
         .bde-app-main button:active { transform: scale(0.98); }
         .bde-mobile-topbar { box-shadow: 0 8px 24px rgba(3, 14, 32, 0.18); }
         @media (max-width: 768px) {
@@ -5062,6 +5129,160 @@ function Shell({ children, rtl, theme }) {
         }
         @media (prefers-reduced-motion: reduce) {
           .bde-app-sidebar nav button, .bde-app-main button, .bde-app-main input, .bde-app-main select, .bde-app-main textarea { transition: none !important; }
+        }
+
+        /* ==========================================================================
+           SYSTÈME VISUEL DE L'ESPACE DE TRAVAIL
+           --------------------------------------------------------------------------
+           Toutes les règles qui suivent ne touchent QUE l'apparence. Elles s'appuient
+           sur le fait que l'application n'écrit jamais une couleur en dur : une carte
+           est reconnaissable à son fond var(--surface), un champ au sien,
+           var(--surface2). On peut donc leur donner une identité commune — ombre,
+           arête, arrondi, transition — sans rouvrir un seul écran.
+           ========================================================================== */
+
+        /* Le sol : une teinte unie, avec une seule lueur de marque très diluée en haut
+           à droite. L'ancien dégradé en diagonale mélangeait deux surfaces et donnait
+           une page « sale » dont la couleur changeait selon l'endroit où l'on regardait. */
+        .bde-app-main {
+          background:
+            radial-gradient(1100px 460px at 88% -12%, color-mix(in srgb, var(--brand-solid) 7%, transparent), transparent 68%),
+            var(--surface2);
+        }
+
+        /* --- Cartes ------------------------------------------------------------ */
+        /* Une carte se pose : ombre de contact + diffusion, et un filet clair sur son
+           arête haute. Le drapeau important sur l'ombre remplace les ombres écrites au cas
+           par cas dans les écrans, qui n'étaient visibles ni en clair ni en sombre. */
+        .bde-app-main div[style*="var(--surface)"][style*="border-radius"] {
+          box-shadow: var(--shadow-card) !important;
+          border-color: var(--border);
+          background-image: linear-gradient(var(--sheen), transparent 42%);
+        }
+        /* Une carte cliquable réagit : elle monte d'un cheveu et son ombre s'étale. */
+        .bde-app-main button[style*="var(--surface2)"][style*="border-radius"]:hover:not(:disabled) {
+          transform: translateY(-1px);
+          box-shadow: var(--shadow-card);
+          border-color: color-mix(in srgb, var(--brand-solid) 32%, var(--border)) !important;
+        }
+
+        /* --- Chiffres ---------------------------------------------------------- */
+        /* Chiffres à chasse fixe partout où l'on compare des colonnes de montants :
+           sans cela, « 1 398 384 » et « 1 642 464 » n'ont pas la même largeur et l'œil
+           ne peut plus aligner les ordres de grandeur. C'est le détail qui sépare un
+           tableau de gestion d'un tableau de site vitrine. */
+        .bde-app-main table, .bde-stat, .bde-app-main input[inputmode="decimal"], .bde-app-main input[type="number"] {
+          font-variant-numeric: tabular-nums;
+          font-feature-settings: "tnum" 1;
+        }
+
+        /* --- Tableaux ---------------------------------------------------------- */
+        .bde-app-main table { box-shadow: var(--shadow-card); }
+        .bde-app-main table thead th { padding-top: 11px !important; padding-bottom: 11px !important; }
+        .bde-app-main table tbody td { border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+        .bde-app-main table tbody tr:first-child td { border-top: none; }
+        /* La zone défilante d'un tableau large annonce qu'elle défile : un voile se
+           forme sur le bord droit tant qu'il reste des colonnes à découvrir. */
+        .bde-app-main div:has(> table) {
+          background:
+            linear-gradient(to left, color-mix(in srgb, var(--surface2) 92%, transparent), transparent 34px) right center / 34px 100% no-repeat;
+          border-radius: 12px;
+        }
+
+        /* --- Champs ------------------------------------------------------------ */
+        /* La flèche native d'un menu déroulant est dessinée par le système : grise,
+           carrée, différente sur chaque machine, et franchement laide sur fond sombre.
+           On la remplace par un chevron cohérent avec le reste des icônes. */
+        .bde-app-main select, .bde-modal-card select {
+          -webkit-appearance: none; appearance: none;
+          background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238A97B5' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") !important;
+          background-repeat: no-repeat !important;
+          background-position: right 11px center !important;
+          padding-inline-end: 34px !important;
+        }
+        [dir="rtl"] .bde-app-main select, [dir="rtl"] .bde-modal-card select { background-position: left 11px center !important; }
+        [data-theme="light"] .bde-app-main select, [data-theme="light"] .bde-modal-card select {
+          background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%235B6B82' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") !important;
+        }
+        /* Un champ désactivé doit se voir désactivé, sinon on tape dedans sans comprendre. */
+        .bde-app-main input:disabled, .bde-app-main select:disabled, .bde-app-main textarea:disabled { opacity: 0.55; cursor: not-allowed; }
+        .bde-app-main button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+        /* --- Fenêtres ---------------------------------------------------------- */
+        .bde-modal-card { box-shadow: var(--shadow-modal) !important; border-radius: 18px !important; }
+        .bde-modal-backdrop { background: color-mix(in srgb, var(--bg) 74%, transparent) !important; }
+
+        /* --- Message flottant --------------------------------------------------- */
+        .bde-toast {
+          border: 1px solid rgba(255,255,255,0.14);
+          backdrop-filter: blur(10px);
+          animation: bde-toast-in 220ms cubic-bezier(0.23, 1, 0.32, 1);
+        }
+        @keyframes bde-toast-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* --- Barre latérale ----------------------------------------------------- */
+        /* Le nom de l'entreprise était coupé (« BA-DIABY EXPR… ») parce qu'il était
+           dimensionné pour un menu plus large que celui-ci. Il tient maintenant. */
+        .bde-brand-name { font-size: 16.5px !important; letter-spacing: -0.02em; }
+        .bde-app-sidebar nav button { letter-spacing: -0.005em; }
+        /* L'élément actif : le plein rouge reste, mais adouci par une arête claire en
+           haut et une ombre portée — il se détache du menu au lieu d'y être collé. */
+        .bde-app-sidebar nav button[style*="var(--brand-solid)"] {
+          background-image: linear-gradient(rgba(255,255,255,0.16), transparent 55%);
+          box-shadow: 0 6px 18px -4px rgba(206, 27, 51, 0.55);
+        }
+
+        /* --- Cartes de statistiques (KPI) --------------------------------------- */
+        .bde-stat { transition: transform 180ms ease, box-shadow 200ms ease, border-color 200ms ease; }
+        .bde-stat:hover { transform: translateY(-2px); box-shadow: var(--shadow-lift) !important; }
+
+        /* --- Titres ------------------------------------------------------------- */
+        /* Les titres serrent leur interlettrage : c'est ce qui donne son assurance à une
+           typographie de tableau de bord, là où l'espacement par défaut fait « brouillon ». */
+        .bde-app-main h1, .bde-app-main h2, .bde-app-main h3 { letter-spacing: -0.025em; text-wrap: balance; }
+
+        /* --- Pastilles d'état ---------------------------------------------------- */
+        /* Les badges de statut sont reconnaissables à leur forme : coin très arrondi et texte
+           court. On leur donne une arête assortie à leur teinte, pour qu'ils se détachent du fond
+           de la ligne au lieu d'y flotter. */
+        .bde-app-main span[style*="border-radius: 20px"], .bde-app-main span[style*="border-radius: 999px"] {
+          border: 1px solid color-mix(in srgb, currentColor 24%, transparent);
+          line-height: 1.35;
+        }
+
+        /* --- Accessibilité clavier ---------------------------------------------- */
+        /* Un anneau visible pour qui navigue au clavier, jamais pour qui clique à la souris. */
+        .bde-app-main :focus-visible, .bde-modal-card :focus-visible, .bde-app-sidebar :focus-visible {
+          outline: 2px solid var(--brand-solid); outline-offset: 2px; border-radius: 6px;
+        }
+
+        /* ==========================================================================
+           TÉLÉPHONE ET TABLETTE
+           Sur un écran de 390 px, chaque carte de statistique occupait la hauteur d'un
+           écran entier : quatre indicateurs, quatre pages à faire défiler avant de voir
+           quoi que ce soit d'autre. Elles passent à deux par ligne, resserrées.
+           ========================================================================== */
+        @media (max-width: 900px) {
+          .bde-stat { flex: 1 1 calc(50% - 14px) !important; min-width: 150px !important; }
+        }
+        @media (max-width: 640px) {
+          div:has(> .bde-stat) { gap: 10px !important; }
+          .bde-stat {
+            flex: 1 1 calc(50% - 5px) !important; min-width: 0 !important;
+            padding: 13px 14px !important; border-radius: 14px !important;
+          }
+          .bde-stat > div:first-child > div:first-child { font-size: 11.5px !important; line-height: 1.25; }
+          .bde-stat > div:first-child > div:last-child { width: 28px !important; height: 28px !important; border-radius: 9px !important; }
+          .bde-stat > div:first-child > div:last-child svg { width: 15px; height: 15px; }
+          .bde-stat > div:nth-child(2) { font-size: 21px !important; margin-top: 8px !important; }
+          /* La précision passe souvent sur deux lignes dans une demi-largeur : la puce doit
+             rester en tête de la première ligne, pas se centrer verticalement sur le bloc. */
+          .bde-stat > div:nth-child(3) { font-size: 11px !important; margin-top: 5px !important; align-items: flex-start !important; line-height: 1.35; }
+          .bde-stat > div:nth-child(3) > span:first-child { margin-top: 4px; }
+          /* Les cartes et les fenêtres respirent moins large, mais restent lisibles. */
+          .bde-app-main div[style*="var(--surface)"][style*="border-radius"] { padding-left: 14px !important; padding-right: 14px !important; }
+          .bde-modal-card { padding: 16px !important; border-radius: 16px !important; }
+          .bde-toast { inset-inline: 12px !important; bottom: 14px !important; }
         }
         .bde-home-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 0.82fr); gap: clamp(28px, 6vw, 72px); align-items: center; }
         .bde-hero-copy { padding: 8px 0; }
@@ -8100,15 +8321,315 @@ function soldesCaisseParAgent(data) {
     .sort((a, b) => b.totalEUR - a.totalEUR);
 }
 
-const StatCard = memo(function StatCard({ label, value, icon: Icon, tint, trend, trendColor, outline }) {
+/*
+ * UNE LIGNE DE RÉPARTITION.
+ *
+ * Le même dessin servait à trois endroits, recopié à chaque fois : une barre de 8 px à angles
+ * vifs, remplie d'un aplat, et un compte gris collé à droite. Trois défauts : la barre vide
+ * n'était pas distinguable du fond de la carte, la barre pleine s'arrêtait net, et le compte
+ * n'avait pas de chasse fixe — deux nombres de largeur différente sous la même colonne.
+ *
+ * Ici : un sillon marqué, une barre arrondie qui garde une largeur minimale tant qu'elle n'est
+ * pas à zéro (sinon un colis sur quatre cents devient invisible), la part en pourcentage, et le
+ * compte en chiffres à chasse fixe pour que la colonne s'aligne.
+ */
+function BarreRepartition({ libelle, valeur, total, teinte }) {
+  const part = total ? (valeur / total) * 100 : 0;
+  const vide = valeur === 0;
   return (
-    <div style={{ background: SURFACE, borderRadius: 16, padding: "20px 22px", flex: 1, minWidth: 190, border: `1.5px solid ${outline || BORDER}`, boxShadow: "0 2px 12px rgba(10,38,71,0.06)" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div style={{ fontSize: 13, color: MUTED, fontWeight: 600 }}>{label}</div>
-        <div style={{ width: 38, height: 38, borderRadius: 10, background: tint, display: "grid", placeItems: "center" }}><Icon size={18} color="#fff" /></div>
+    <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 9 }}>
+      <div style={{ width: 130, flexShrink: 0, fontSize: 12.5, color: vide ? "var(--muted)" : "var(--text)", fontWeight: vide ? 400 : 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{libelle}</div>
+      <div style={{ flex: 1, minWidth: 0, height: 7, background: "color-mix(in srgb, var(--surface2) 80%, var(--border))", borderRadius: 999, overflow: "hidden" }}>
+        <div style={{
+          width: vide ? 0 : `max(3px, ${part}%)`, height: "100%", borderRadius: 999,
+          background: `linear-gradient(90deg, color-mix(in srgb, ${teinte} 72%, transparent), ${teinte})`,
+          transition: "width 420ms cubic-bezier(0.23, 1, 0.32, 1)",
+        }} />
       </div>
-      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 29, fontWeight: 700, color: TEXT, marginTop: 12 }}>{value}</div>
-      {trend && <div style={{ fontSize: 12, color: trendColor || "var(--ok-fg)", marginTop: 7, fontWeight: 600 }}>{trend}</div>}
+      <div style={{ width: 40, flexShrink: 0, textAlign: "right", fontSize: 10.5, color: "var(--muted)", fontVariantNumeric: "tabular-nums" }}>
+        {vide ? "" : `${Math.round(part)} %`}
+      </div>
+      <div style={{ width: 26, flexShrink: 0, textAlign: "right", fontSize: 13, fontWeight: vide ? 400 : 700, color: vide ? "var(--muted)" : "var(--text)", fontVariantNumeric: "tabular-nums" }}>{valeur}</div>
+    </div>
+  );
+}
+
+/*
+ * CARTE D'INDICATEUR.
+ *
+ * Trois défauts la rendaient plus lourde qu'informative. La pastille d'icône était un aplat
+ * saturé avec un pictogramme blanc dedans : quatre carrés de couleur vive alignés en haut de
+ * page, qui tiraient l'œil bien plus fort que les chiffres eux-mêmes — or c'est le chiffre qu'on
+ * vient lire. Le libellé et la valeur avaient presque le même poids visuel. Et la précision sous
+ * le chiffre flottait, sans rien qui la rattache à la valeur.
+ *
+ * La pastille garde sa couleur, mais en fond très dilué avec le pictogramme teinté : elle
+ * identifie sans crier. Le libellé passe en petites capitales espacées — un rôle d'étiquette,
+ * pas de titre. Et la précision devient une puce discrète, posée sous le chiffre.
+ */
+/*
+ * TOUT CE QUI ATTEND UN GESTE, EN UN SEUL ENDROIT.
+ *
+ * Les pastilles existaient déjà, mais éparpillées sur sept entrées de menu : pour savoir s'il y
+ * avait quelque chose à faire, il fallait parcourir le menu du regard, entrée par entrée — et sur
+ * téléphone, ouvrir le menu d'abord. Un message client passait donc inaperçu jusqu'au moment où
+ * quelqu'un pensait à aller voir.
+ *
+ * Cette fonction rassemble les mêmes comptes, et RIEN DE PLUS : elle ne va chercher aucune donnée
+ * qu'un compte ne verrait pas ailleurs. Chaque source est conditionnée par la permission qui ouvre
+ * l'écran correspondant — sans quoi la cloche deviendrait une fuite : « 3 factures partenaires en
+ * retard » en apprend déjà beaucoup à qui n'a pas accès aux partenaires.
+ *
+ * Elle est exportée et pure : elle se vérifie sans ouvrir de navigateur.
+ */
+export function alertesDuCompte(data, session, maintenant = Date.now()) {
+  if (!data || !session) return [];
+  const perm = (cle) => effectivePermission(session, cle);
+  const alertes = [];
+  const ajouter = (a) => { if (a.compte > 0) alertes.push(a); };
+
+  // Un partenaire n'a que ses propres flux ; le reste ne le concerne pas et ne doit pas l'atteindre.
+  if (session.role === "Partenaire") {
+    const id = partenaireDeLaSession(session);
+    const moi = (data.users || []).find((u) => u.id === id);
+    ajouter({
+      cle: "partenaire-messages", gravite: "info", vue: "messages", icone: MessageCircle,
+      compte: messagesNonLusPour(moi, "partenaire"),
+      titre: (n) => `${n} message${n > 1 ? "s" : ""} de Ba-Diaby Express`,
+      detail: "Réponses à vos demandes.",
+    });
+    if (voitLesMontants(session)) {
+      ajouter({
+        cle: "partenaire-factures", gravite: "alerte", vue: "factures", icone: Receipt,
+        compte: (data.facturesPartenaire || []).filter((f) => f.partenaireId === id && statutFacturePartenaire(f) !== "Réglée").length,
+        titre: (n) => `${n} facture${n > 1 ? "s" : ""} à régler`,
+        detail: "Montants encore dus à Ba-Diaby Express.",
+      });
+    }
+    ajouter({
+      cle: "partenaire-prets", gravite: "info", vue: "accueil", icone: Package,
+      compte: (data.colis || []).filter((c) => c.partenaireId === id && estColisExpediable(c)).length,
+      titre: (n) => `${n} colis prêt${n > 1 ? "s" : ""} à partir`,
+      detail: "Vérifiés et en attente d’embarquement.",
+    });
+    return alertes;
+  }
+
+  /*
+   * Le refus d'un enregistrement passe devant tout le reste : il signale un appareil qui essaie
+   * d'effacer des données à chaque geste, et tant qu'il n'est pas fermé il recommencera.
+   */
+  ajouter({
+    cle: "ecrasement", gravite: "grave", vue: "dashboard", icone: AlertTriangle,
+    compte: (data.alertesEcrasement || []).filter((a) => a && !a.vue).length,
+    titre: (n) => `${n} enregistrement${n > 1 ? "s" : ""} refusé${n > 1 ? "s" : ""} — page périmée`,
+    detail: "Vos données sont intactes. Il reste un onglet à fermer quelque part.",
+  });
+
+  if (perm("espaceclient.gerer")) {
+    const messages = (data.clientAccounts || []).filter((c) => (c.messages || []).some((m) => m.expediteur === "client" && !m.lu)).length;
+    const preAlertes = (data.preAlertes || []).filter((p) => p.statut === "En attente").length;
+    const regroupements = (data.demandesRegroupement || []).filter((r) => r.statut === "En attente").length;
+    const signalements = (data.colis || []).reduce((s, c) => s + (c.signalements || []).filter((sig) => sig.statut === "Ouvert").length, 0);
+    const express = (data.colis || []).filter((c) => c.demandeExpress && c.demandeExpress.statut === "En attente").length;
+    ajouter({ cle: "messages-clients", gravite: "info", vue: "centreclients", icone: MessageCircle, compte: messages,
+      titre: (n) => `${n} message${n > 1 ? "s" : ""} client non lu${n > 1 ? "s" : ""}`, detail: "Depuis l’Espace Client." });
+    ajouter({ cle: "prealertes", gravite: "info", vue: "centreclients", icone: Package, compte: preAlertes,
+      titre: (n) => `${n} pré-alerte${n > 1 ? "s" : ""} à rapprocher`, detail: "Commandes annoncées, colis pas encore reçu." });
+    ajouter({ cle: "regroupements", gravite: "info", vue: "centreclients", icone: FileStack, compte: regroupements,
+      titre: (n) => `${n} demande${n > 1 ? "s" : ""} de regroupement`, detail: "Un client veut réunir plusieurs colis." });
+    ajouter({ cle: "signalements", gravite: "alerte", vue: "centreclients", icone: AlertTriangle, compte: signalements,
+      titre: (n) => `${n} problème${n > 1 ? "s" : ""} signalé${n > 1 ? "s" : ""}`, detail: "Un client déclare un souci sur son colis." });
+    ajouter({ cle: "express", gravite: "alerte", vue: "centreclients", icone: Plane, compte: express,
+      titre: (n) => `${n} demande${n > 1 ? "s" : ""} express`, detail: "Un client demande un acheminement accéléré." });
+  }
+
+  if (perm("factures.consulter")) {
+    ajouter({
+      cle: "declarations", gravite: "alerte", vue: "paiements", icone: Receipt,
+      compte: (data.colis || []).reduce((s, c) => s + (c.declarationsPaiement || []).filter((d) => d.statut === "En attente").length, 0),
+      titre: (n) => `${n} paiement${n > 1 ? "s" : ""} déclaré${n > 1 ? "s" : ""} à vérifier`,
+      detail: "Un client dit avoir payé — à confirmer avant d’encaisser.",
+    });
+  }
+
+  if (perm("config.acceder")) {
+    ajouter({
+      cle: "partenaires-verif", gravite: "alerte", vue: "partenaires", icone: Truck,
+      compte: (data.colis || []).filter((c) => estColisPartenaire(c) && statutValidationPartenaire(c) === "En attente" && c.status !== "Annulé").length,
+      titre: (n) => `${n} colis partenaire à vérifier`,
+      detail: "À contrôler avant de les embarquer.",
+    });
+    ajouter({ cle: "partenaires-messages", gravite: "info", vue: "partenaires", icone: MessageCircle,
+      compte: partenairesEnAttenteDeReponse(data.users).length,
+      titre: (n) => `${n} partenaire${n > 1 ? "s" : ""} attend${n > 1 ? "ent" : ""} une réponse`, detail: "Messages sans réponse de notre côté." });
+    ajouter({ cle: "partenaires-factures", gravite: "alerte", vue: "partenaires", icone: Receipt,
+      compte: toutesFacturesEnRetard(data).length,
+      titre: (n) => `${n} facture${n > 1 ? "s" : ""} partenaire en retard`, detail: "Au-delà du délai de règlement convenu." });
+    ajouter({ cle: "partenaires-depots", gravite: "info", vue: "partenaires", icone: Package,
+      compte: depotsAnnonces(data).length,
+      titre: (n) => `${n} dépôt${n > 1 ? "s" : ""} annoncé${n > 1 ? "s" : ""}`, detail: "Annoncés par un partenaire, pas encore reçus." });
+  }
+
+  /*
+   * Les colis oubliés et les espèces non versées ne portent aucune pastille dans le menu : on ne
+   * les découvrait qu'en descendant le tableau de bord. Ce sont pourtant les deux choses qui
+   * coûtent vraiment de l'argent quand on les oublie.
+   */
+  if (perm("colis.voir_propres") || perm("colis.voir_tous")) {
+    ajouter({
+      cle: "oublies", gravite: "alerte", vue: "colis", icone: Clock,
+      compte: (data.colis || []).filter((c) => colisVisiblePour(session, c) && c.status === "Enregistré"
+        && (maintenant - new Date(c.createdAt).getTime()) / 86400000 > 3).length,
+      titre: (n) => `${n} colis oublié${n > 1 ? "s" : ""}`,
+      detail: "Toujours « Enregistré » depuis plus de trois jours.",
+    });
+  }
+
+  if (perm("paiements.voir_propres") || perm("compta.consulter")) {
+    const monNom = `${session.prenom || ""} ${session.nom || ""}`.trim();
+    const toutesLesCaisses = perm("compta.consulter");
+    ajouter({
+      cle: "caisse", gravite: "alerte", vue: "caisse", icone: Wallet,
+      compte: soldesCaisseParAgent(data).filter((g) => (toutesLesCaisses || g.agent === monNom) && g.jours >= 3).length,
+      titre: (n) => (toutesLesCaisses ? `${n} caisse${n > 1 ? "s" : ""} en retard de versement` : "Espèces à remettre en caisse"),
+      detail: "Encaissé en espèces depuis plus de trois jours, pas encore versé.",
+    });
+  }
+
+  return alertes;
+}
+
+const GRAVITE_ALERTE = {
+  grave:  { fond: "var(--danger-bg)", bord: "var(--danger-border)", teinte: "var(--danger-fg)" },
+  alerte: { fond: "var(--warn-bg)",   bord: "var(--warn-border)",   teinte: "var(--warn-fg)" },
+  info:   { fond: "var(--info-bg)",   bord: "var(--info-border)",   teinte: "var(--info-fg)" },
+};
+
+/**
+ * La cloche — un seul endroit où regarder.
+ *
+ * Elle ne remplace pas les pastilles du menu : elle évite d'avoir à les chercher. Le compte
+ * qu'elle porte est la somme de ce qui attend un geste, et chaque ligne mène à l'écran qui permet
+ * de le faire.
+ */
+function ClocheNotifications({ data, session, onAller, surFondSombre = false }) {
+  const [ouvert, setOuvert] = useState(false);
+  const alertes = useMemo(() => alertesDuCompte(data, session), [data, session]);
+  const total = alertes.reduce((n, a) => n + a.compte, 0);
+  const plusGrave = alertes.some((a) => a.gravite === "grave") ? "grave"
+    : alertes.some((a) => a.gravite === "alerte") ? "alerte" : "info";
+
+  useEffect(() => {
+    if (!ouvert) return undefined;
+    const surTouche = (e) => { if (e.key === "Escape") setOuvert(false); };
+    window.addEventListener("keydown", surTouche);
+    return () => window.removeEventListener("keydown", surTouche);
+  }, [ouvert]);
+
+  const couleurPastille = plusGrave === "grave" ? "var(--danger-fg)" : plusGrave === "alerte" ? "#E0A63A" : "var(--info-fg)";
+
+  return (
+    <>
+      <button
+        onClick={() => setOuvert((o) => !o)}
+        aria-label={total > 0 ? `Notifications — ${total} en attente` : "Notifications — rien en attente"}
+        title={total > 0 ? `${total} chose${total > 1 ? "s" : ""} en attente` : "Rien en attente"}
+        style={{
+          position: "relative", width: 34, height: 34, borderRadius: 10, flexShrink: 0, cursor: "pointer",
+          display: "grid", placeItems: "center",
+          background: surFondSombre ? "rgba(255,255,255,0.10)" : "var(--surface2)",
+          border: surFondSombre ? "none" : "1px solid var(--border)",
+          color: surFondSombre ? "#fff" : "var(--text)",
+        }}>
+        <Bell size={16} />
+        {total > 0 && (
+          <span style={{
+            position: "absolute", top: -4, insetInlineEnd: -4, minWidth: 17, height: 17, padding: "0 4px",
+            borderRadius: 999, background: couleurPastille, color: plusGrave === "alerte" ? "#0A2647" : "#fff",
+            fontSize: 10, fontWeight: 800, display: "grid", placeItems: "center", lineHeight: 1,
+            border: "2px solid " + (surFondSombre ? "#0A2647" : "var(--surface)"),
+          }}>{total > 99 ? "99+" : total}</span>
+        )}
+      </button>
+
+      {ouvert && (
+        <>
+          <div onClick={() => setOuvert(false)} style={{ position: "fixed", inset: 0, zIndex: 90 }} />
+          <div className="bde-cloche-panneau" role="dialog" aria-label="Notifications" style={{
+            position: "fixed", top: 62, insetInlineEnd: 16, zIndex: 91,
+            width: "min(380px, calc(100vw - 24px))", maxHeight: "min(70vh, 560px)", overflowY: "auto",
+            background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16,
+            boxShadow: "var(--shadow-modal)", padding: 12,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "2px 4px 10px" }}>
+              <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 14.5, color: "var(--text)" }}>Notifications</div>
+              <button onClick={() => setOuvert(false)} aria-label="Fermer" style={{ background: "var(--surface2)", border: "none", borderRadius: 8, width: 26, height: 26, cursor: "pointer", display: "grid", placeItems: "center" }}>
+                <X size={13} color="var(--muted)" />
+              </button>
+            </div>
+
+            {alertes.length === 0 ? (
+              <div style={{ padding: "26px 16px", textAlign: "center" }}>
+                <div style={{ width: 44, height: 44, margin: "0 auto 10px", borderRadius: 14, display: "grid", placeItems: "center", background: "color-mix(in srgb, var(--ok-fg) 13%, transparent)", border: "1px solid color-mix(in srgb, var(--ok-fg) 24%, transparent)" }}>
+                  <CheckCircle2 size={20} color="var(--ok-fg)" />
+                </div>
+                <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>Rien n’attend</div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 }}>
+                  Tout ce qui demande un geste apparaîtra ici.
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                {alertes.map((a) => {
+                  const style = GRAVITE_ALERTE[a.gravite] || GRAVITE_ALERTE.info;
+                  const Icone = a.icone;
+                  return (
+                    <button key={a.cle} onClick={() => { setOuvert(false); onAller?.(a.vue); }}
+                      style={{
+                        display: "flex", alignItems: "flex-start", gap: 11, width: "100%", textAlign: "start", cursor: "pointer",
+                        background: style.fond, border: `1px solid ${style.bord}`, borderRadius: 12, padding: "11px 12px",
+                      }}>
+                      <div style={{ width: 30, height: 30, borderRadius: 9, flexShrink: 0, display: "grid", placeItems: "center", background: `color-mix(in srgb, ${style.teinte} 18%, transparent)` }}>
+                        <Icone size={15} color={style.teinte} />
+                      </div>
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: style.teinte, lineHeight: 1.35 }}>{a.titre(a.compte)}</div>
+                        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2, lineHeight: 1.45 }}>{a.detail}</div>
+                      </div>
+                      <ChevronRight size={15} color="var(--muted)" style={{ flexShrink: 0, marginTop: 6 }} />
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+const StatCard = memo(function StatCard({ label, value, icon: Icon, tint, trend, trendColor, outline }) {
+  const teinte = tint || "var(--info-fg)";
+  const couleurTendance = trendColor || "var(--ok-fg)";
+  return (
+    <div className="bde-stat" style={{ background: SURFACE, borderRadius: 16, padding: "18px 20px", flex: 1, minWidth: 190, border: `1px solid ${outline || BORDER}`, boxShadow: "0 2px 12px rgba(10,38,71,0.06)" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+        <div style={{ fontSize: 11, color: MUTED, fontWeight: 700, letterSpacing: "0.07em", textTransform: "uppercase" }}>{label}</div>
+        <div style={{
+          width: 36, height: 36, borderRadius: 11, display: "grid", placeItems: "center", flexShrink: 0,
+          background: `color-mix(in srgb, ${teinte} 16%, transparent)`,
+          border: `1px solid color-mix(in srgb, ${teinte} 26%, transparent)`,
+        }}><Icon size={17} color={teinte} /></div>
+      </div>
+      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 30, fontWeight: 700, color: TEXT, marginTop: 14, letterSpacing: "-0.02em", lineHeight: 1.05 }}>{value}</div>
+      {trend && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 9, fontSize: 12, color: couleurTendance, fontWeight: 600 }}>
+          <span style={{ width: 5, height: 5, borderRadius: "50%", background: couleurTendance, flexShrink: 0 }} />
+          {trend}
+        </div>
+      )}
     </div>
   );
 });
@@ -8306,7 +8827,7 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
       {(effectivePermission(session, "stats.globales") || effectivePermission(session, "stats.personnelles")) && (
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 20 }}>
         <StatCard label="Volume total" value={total} icon={Package} tint="#3D63FF" trend={`+${thisMonth} ce mois`} trendColor="var(--ok-fg)" />
-        <StatCard label="Revenus" value={fmt(ca, "EUR")} icon={DollarSign} tint="#16A163" trend={`${fmt(encaisse, "EUR")} encaissés`} trendColor="var(--ok-fg)" outline="#1E4430" />
+        <StatCard label="Revenus" value={fmt(ca, "EUR")} icon={DollarSign} tint="#16A163" trend={`${fmt(encaisse, "EUR")} encaissés`} trendColor="var(--ok-fg)" outline="color-mix(in srgb, var(--ok-fg) 36%, var(--border))" />
         <StatCard label="En transit" value={enTransit} icon={Plane} tint="#5B8DEF" trend="Actuellement en cours" trendColor="var(--muted)" />
         <StatCard label="À expédier" value={aExpedier} icon={AlertTriangle} tint="var(--danger-fg)" trend={aExpedier > 0 ? "Nécessite action" : "Rien en attente"} trendColor={aExpedier > 0 ? "var(--danger-fg)" : "var(--muted)"} />
       </div>
@@ -8397,15 +8918,15 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
       </div>
 
       <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 20, marginBottom: 20 }}>
-        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14.5, marginBottom: 12 }}>Répartition par destination</div>
-        {parPays.map((p) => (
-          <div key={p.code} style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
-            <div style={{ width: 130, fontSize: 13, color: "var(--text)" }}>{FLAGS[p.code]} {p.name}</div>
-            <div style={{ flex: 1, height: 8, background: "var(--surface2)", borderRadius: 6, overflow: "hidden" }}>
-              <div style={{ width: `${total ? (p.count / total) * 100 : 0}%`, height: "100%", background: "var(--brand-solid)" }} />
-            </div>
-            <div style={{ width: 24, textAlign: "right", fontSize: 13, color: "var(--muted)" }}>{p.count}</div>
-          </div>
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14.5, marginBottom: 14 }}>Répartition par destination</div>
+        {/*
+          * Les pays étaient listés dans l'ordre du catalogue, si bien que la page ouvrait sur dix
+          * barres vides avant celle qui portait tout le trafic. On classe du plus chargé au moins
+          * chargé — la même information, mais celle qui compte se lit en premier. Les destinations
+          * sans colis restent affichées : savoir qu'une route est à zéro est aussi un renseignement.
+          */}
+        {[...parPays].sort((a, b) => b.count - a.count).map((p) => (
+          <BarreRepartition key={p.code} libelle={<>{FLAGS[p.code]} {p.name}</>} valeur={p.count} total={total} teinte="var(--brand-solid)" />
         ))}
         {total === 0 && <div style={{ color: "var(--muted)", fontSize: 13 }}>Aucun colis enregistré pour le moment.</div>}
       </div>
@@ -8413,14 +8934,8 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
       {parProvenance.length > 0 && (
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 20, marginBottom: 20 }}>
           <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14.5, marginBottom: 12 }}>Répartition par site d’achat</div>
-          {parProvenance.sort((a, b) => b.count - a.count).map((p) => (
-            <div key={p.nom} style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
-              <div style={{ width: 130, fontSize: 13, color: "var(--text)" }}>{p.nom}</div>
-              <div style={{ flex: 1, height: 8, background: "var(--surface2)", borderRadius: 6, overflow: "hidden" }}>
-                <div style={{ width: `${total ? (p.count / total) * 100 : 0}%`, height: "100%", background: "#5B8DEF" }} />
-              </div>
-              <div style={{ width: 24, textAlign: "right", fontSize: 13, color: "var(--muted)" }}>{p.count}</div>
-            </div>
+          {[...parProvenance].sort((a, b) => b.count - a.count).map((p) => (
+            <BarreRepartition key={p.nom} libelle={p.nom} valeur={p.count} total={total} teinte="var(--info-fg)" />
           ))}
         </div>
       )}
@@ -11984,7 +12499,7 @@ function CategoriesProduitsPage({ data, persist, session, notify, onBack }) {
   );
 }
 
-const inputStyle = { width: "100%", border: `1.5px solid ${BORDER}`, borderRadius: 8, padding: "9px 11px", fontSize: 13.5, outline: "none", color: TEXT, background: SURFACE2 };
+const inputStyle = { width: "100%", border: `1px solid ${BORDER}`, borderRadius: 10, padding: "10px 12px", fontSize: 13.5, outline: "none", color: TEXT, background: SURFACE2 };
 const toggleBtn = { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, border: `1.5px solid ${BORDER}`, background: SURFACE2, borderRadius: 8, padding: "9px 0", fontSize: 13, cursor: "pointer", color: MUTED };
 const toggleActive = { background: BLUE, color: "#fff", borderColor: BLUE };
 
@@ -13450,17 +13965,25 @@ const TAILLES_PAGE_COLIS = [20, 50, 100, "tout"];
  * (Arrivé : le colis est là mais pas encore marqué disponible au retrait) ou le filtre actif.
  */
 const ColisStatCard = memo(function ColisStatCard({ label, value, icon: Icon, tint, active, highlight, onFiltrer }) {
+  // Même langage que les cartes du tableau de bord : pastille teintée plutôt qu'aplat saturé,
+  // libellé en petites capitales, chiffre à chasse fixe. Six pastilles vives alignées sur une
+  // ligne se disputaient l'attention et laissaient croire à six alertes.
+  const teinte = highlight ? "var(--warn-fg)" : tint;
   return (
-    <div style={{
+    <div className="bde-stat" style={{
       background: highlight ? "var(--warn-bg)" : "var(--surface)",
-      border: "1.5px solid " + (highlight ? "var(--warn-border)" : active ? tint : "var(--border)"),
-      borderRadius: 14, padding: "16px 18px", minWidth: 0,
+      border: "1px solid " + (highlight ? "var(--warn-border)" : active ? tint : "var(--border)"),
+      borderRadius: 14, padding: "15px 17px", minWidth: 0,
     }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <span style={{ fontSize: 12, color: highlight ? "var(--warn-fg)" : "var(--muted)", fontWeight: 600 }}>{label}</span>
-        <div style={{ width: 32, height: 32, borderRadius: 9, background: tint, flexShrink: 0, display: "grid", placeItems: "center" }}><Icon size={15} color="#fff" /></div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <span style={{ fontSize: 10.5, color: highlight ? "var(--warn-fg)" : "var(--muted)", fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", lineHeight: 1.3 }}>{label}</span>
+        <div style={{
+          width: 30, height: 30, borderRadius: 9, flexShrink: 0, display: "grid", placeItems: "center",
+          background: `color-mix(in srgb, ${teinte} 16%, transparent)`,
+          border: `1px solid color-mix(in srgb, ${teinte} 26%, transparent)`,
+        }}><Icon size={15} color={teinte} /></div>
       </div>
-      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 26, fontWeight: 700, color: highlight ? "var(--warn-fg)" : "var(--text)", marginTop: 10 }}>{value}</div>
+      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 26, fontWeight: 700, color: highlight ? "var(--warn-fg)" : "var(--text)", marginTop: 11, letterSpacing: "-0.02em", lineHeight: 1.05 }}>{value}</div>
       {onFiltrer && (
         <button onClick={onFiltrer} style={{ display: "flex", alignItems: "center", gap: 2, background: "none", border: "none", color: highlight ? "var(--warn-fg)" : "var(--info-fg)", fontSize: 11.5, fontWeight: 700, padding: 0, marginTop: 8, cursor: "pointer" }}>
           Filtrer <ChevronRight size={13} />
@@ -13807,7 +14330,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
     for (const c of colisSelectionnes) {
       try {
         if (type === "etiquette") await downloadLabel(c, data);
-        else if (type === "ticket") await downloadTicketThermal(c);
+        else if (type === "ticket") await downloadTicketThermal(c, data?.entreprise);
         else await downloadInvoice(c, data);
       } catch (e) { console.error(`Échec impression pour ${c.tracking}`, e); }
       await new Promise((r) => setTimeout(r, 400)); // laisse le navigateur traiter chaque téléchargement avant le suivant
@@ -14442,7 +14965,19 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
             </tbody>
           </table>
         </div>
-        {list.length === 0 && <div style={{ padding: 20, color: "var(--muted)", fontSize: 13.5 }}>Aucun colis à afficher.</div>}
+        {list.length === 0 && (
+          <div style={{ padding: "42px 24px", display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", gap: 4 }}>
+            <div style={{ width: 52, height: 52, borderRadius: 16, display: "grid", placeItems: "center", marginBottom: 8, background: "color-mix(in srgb, var(--info-fg) 12%, transparent)", border: "1px solid color-mix(in srgb, var(--info-fg) 22%, transparent)" }}>
+              <Package size={23} color="var(--info-fg)" />
+            </div>
+            <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)" }}>Aucun colis à afficher</div>
+            <div style={{ fontSize: 12.5, color: "var(--muted)", maxWidth: 320, lineHeight: 1.55 }}>
+              {(deferredQuery || statutFiltre || Object.values(filtres).some(Boolean))
+                ? "Aucun colis ne correspond à cette recherche ou à ces filtres. Essayez d’élargir la période ou de vider les filtres."
+                : "Les colis enregistrés apparaîtront ici, du plus récent au plus ancien."}
+            </div>
+          </div>
+        )}
         {list.length > 0 && (
           <div style={{ padding: "12px 18px", borderTop: "1px solid var(--border)", fontSize: 12, color: "var(--muted)" }}>
             {listeVisible.length} affiché{listeVisible.length > 1 ? "s" : ""} sur {list.length}
@@ -16332,6 +16867,22 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   const doc = preparerDocPdf(new jspdf.jsPDF());
   const label = direction === "import" ? `${country.city} → Conakry` : `Conakry → ${country.city}`;
   const poidsTotal = colisRoute.reduce((s, c) => s + c.poids, 0);
+  /*
+   * UN COLIS PARTENAIRE NE COMPTE PAS DANS L'ARGENT DU BORDEREAU.
+   *
+   * La fiche de voyage le dit depuis toujours : là où il y aurait un prix, elle écrit « — », et
+   * dans la colonne du reste, « Partenaire ». Le bordereau, lui, imprimait « 0 GNF » et
+   * « Non payé » — les deux mentions qui, sur un document remis au transporteur puis rangé dans
+   * un classeur, se lisent exactement comme un client qui doit de l'argent. Pire : ces zéros
+   * entraient dans « MONTANT TOTAL » et dans « Reste à percevoir », si bien qu'un bordereau
+   * chargé de colis partenaire annonçait une créance que personne ne devait.
+   *
+   * Ces colis appartiennent au partenaire, qui les facture à ses propres clients selon un tarif
+   * dont nous n'avons pas connaissance et que nous n'avons pas à faire figurer. Ils sont donc
+   * comptés en colis et en kilos — c'est ce qu'on charge dans l'avion — mais jamais en francs.
+   */
+  const colisFactures = colisRoute.filter((c) => !estColisPartenaire(c));
+  const nbPartenaires = colisRoute.length - colisFactures.length;
 
   // Bandeau d’en-tête — filet rouge au pied de la bande navy, comme sur l'étiquette et le ticket
   // d'envoi : même identité de marque bicolore sur tous les documents imprimés.
@@ -16379,7 +16930,7 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   };
   stat(14, "COLIS", colisRoute.length);
   stat(76, "POIDS TOTAL", `${poidsTotal.toFixed(1)} kg`);
-  stat(138, "MONTANT TOTAL", fmt(colisRoute.reduce((s, c) => s + c.prix, 0), cur), true);
+  stat(138, "MONTANT TOTAL", fmt(colisFactures.reduce((s, c) => s + c.prix, 0), cur), true);
   y += 26;
 
   /*
@@ -16390,6 +16941,8 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
    * partiellement payé, ou pas payé du tout. C'est la question posée à chaque remise.
    */
   const reglementDuColis = (c) => {
+    // Même mention que sur la fiche de voyage : ni « payé », ni « dû », le colis n'est pas à nous.
+    if (estColisPartenaire(c)) return { libelle: "Partenaire", teinte: [91, 141, 239] };
     const paye = Number(c.paye) || 0;
     if (paye <= 0.005) return { libelle: "Non payé", teinte: [200, 45, 60] };
     if ((Number(c.reste) || 0) <= 0.005) return { libelle: "Payé", teinte: [40, 140, 90] };
@@ -16398,7 +16951,7 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   const head = ["N° de suivi", "Destinataire", "Téléphone", "Articles", "Poids", "Statut", `Montant (${cur})`, "Règlement"];
   const body = colisRoute.map((c) => [
     c.tracking, c.destinataire, c.telephone, String(nombreArticles(c)),
-    `${c.poids} kg`, c.status, fmt(c.prix, cur), reglementDuColis(c).libelle,
+    `${c.poids} kg`, c.status, estColisPartenaire(c) ? "—" : fmt(c.prix, cur), reglementDuColis(c).libelle,
   ]);
 
   const hasAutoTable = await ensureAutoTable();
@@ -16495,9 +17048,9 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
    */
   if (finalY > 234) { doc.addPage(); finalY = 20; }
 
-  const totalFacture = colisRoute.reduce((s, c) => s + c.prix, 0);
-  const totalEncaisse = colisRoute.reduce((s, c) => s + c.paye, 0);
-  const totalRestant = colisRoute.reduce((s, c) => s + c.reste, 0);
+  const totalFacture = colisFactures.reduce((s, c) => s + c.prix, 0);
+  const totalEncaisse = colisFactures.reduce((s, c) => s + c.paye, 0);
+  const totalRestant = colisFactures.reduce((s, c) => s + c.reste, 0);
   const depensesPropres = (depensesLiees || []).filter((d) => Number(d.montant) > 0);
   const totalDepenses = depensesPropres.reduce((s, d) => s + (Number(d.montant) || 0), 0);
   doc.setFillColor(245, 247, 251); doc.rect(14, finalY + 5, 182, 12, "F");
@@ -16511,6 +17064,21 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   doc.text(`Reste à percevoir : ${fmt(totalRestant, cur)}`, 192, finalY + 12.5, { align: "right" });
 
   finalY += 24;
+  /*
+   * Sans cette ligne, un bordereau de vingt colis dont douze sont partenaires afficherait un
+   * total calculé sur huit, et le lecteur croirait à une erreur de saisie. Elle dit d'où vient
+   * l'écart entre le nombre de colis affiché en haut et le nombre de lignes qui portent un prix.
+   */
+  if (nbPartenaires > 0) {
+    if (finalY > 262) { doc.addPage(); finalY = 20; }
+    doc.setFont(undefined, "normal"); doc.setFontSize(8); doc.setTextColor(120, 130, 150);
+    const mention = doc.splitTextToSize(
+      `Dont ${nbPartenaires} colis partenaire${nbPartenaires > 1 ? "s" : ""} — transporté${nbPartenaires > 1 ? "s" : ""} pour un partenaire et non facturé${nbPartenaires > 1 ? "s" : ""} par Ba-Diaby Express : ils comptent dans les colis et les kilos, jamais dans les montants ci-dessus.`,
+      182,
+    );
+    doc.text(mention, 14, finalY);
+    finalY += mention.length * 3.6 + 4;
+  }
   if (depensesPropres.length > 0) {
     if (finalY > 252) { doc.addPage(); finalY = 20; }
     doc.setFillColor(10, 38, 71); doc.roundedRect(14, finalY, 182, 8, 2, 2, "F");
@@ -17251,7 +17819,7 @@ async function testerReseauEpson(ip) {
 }
 
 /** Reçu d’encaissement PDF pour un paiement précis — utile pour la comptabilité et le client. */
-async function downloadRecu(colis, paiement) {
+async function downloadRecu(colis, paiement, entreprise = {}) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a5" }));
   const W = 148, H = 210, M = 10;
@@ -17335,6 +17903,13 @@ async function downloadRecu(colis, paiement) {
   doc.setFontSize(7.3); doc.setTextColor(140, 140, 140);
   doc.text("Ce reçu fait foi d’encaissement pour la comptabilité de Ba-Diaby Express.", M, Z.pied);
   doc.text("badiabyexpress.bde@gmail.com · www.ba-diaby-express.com", M, Z.pied + 4);
+  /*
+   * Un reçu d'encaissement est une pièce comptable : il justifie une sortie d'argent chez celui
+   * qui l'a payé. Sans immatriculation, rien n'y atteste que l'encaisseur est une entreprise
+   * constituée — la mention y a donc autant sa place que sur la facture.
+   */
+  const rccmRecu = String(entreprise?.rccm || "").trim();
+  if (rccmRecu) doc.text(`RCCM ${rccmRecu}`, M, Z.pied + 8);
 
   openPdf(doc, `recu-${colis.tracking}-${paiement.id}.pdf`);
 }
@@ -18000,7 +18575,7 @@ async function downloadInvoice(colis, data, options = {}) {
  * tickets de caisse). Le QR permet au personnel connecté d’ouvrir le dossier complet du
  * colis dans l’application (suivi, paiements, historique).
  */
-async function downloadTicketThermal(colis) {
+async function downloadTicketThermal(colis, entreprise = {}) {
   const jspdf = await loadJsPDF();
   // colis.pays est le pays de route (l'origine pour un import) ; la devise affichée doit suivre
   // le destinataire réel, toujours la Guinée pour un import.
@@ -18122,7 +18697,13 @@ async function downloadTicketThermal(colis) {
     const merci = doc.splitTextToSize("Merci de votre confiance. Conservez ce ticket jusqu’à la livraison de votre colis.", W - 2 * M);
     doc.text(merci, W / 2, y, { align: "center" }); y += merci.length * 3.6 + 3;
     doc.setFont(undefined, "normal"); doc.setFontSize(6.2); doc.setTextColor(...MUTED);
-    const legal = doc.splitTextToSize("Ba-Diaby Express — Conakry, Guinée · badiabyexpress.bde@gmail.com · Transport soumis aux CGV.", W - 2 * M);
+    // Le ticket est le seul papier que repart avec le client au comptoir : l'immatriculation y
+    // figure au même titre que sur la facture, pour dire de quelle entreprise il vient.
+    const rccmTicket = String(entreprise?.rccm || "").trim();
+    const legal = doc.splitTextToSize(
+      `Ba-Diaby Express — Conakry, Guinée · badiabyexpress.bde@gmail.com${rccmTicket ? ` · RCCM ${rccmTicket}` : ""} · Transport soumis aux CGV.`,
+      W - 2 * M,
+    );
     doc.text(legal, W / 2, y, { align: "center" }); y += legal.length * 3;
 
     return y;
@@ -19888,12 +20469,12 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
 
   async function handleDownloadTicketThermal() {
     setTicketThermalState("loading");
-    try { await downloadTicketThermal(colis); setTicketThermalState("idle"); }
+    try { await downloadTicketThermal(colis, data?.entreprise); setTicketThermalState("idle"); }
     catch (e) { console.error(e); setTicketThermalState("error"); }
   }
   async function handleDownloadRecu(paiement) {
     setRecuState(paiement.id);
-    try { await downloadRecu(colis, paiement); setRecuState("idle"); }
+    try { await downloadRecu(colis, paiement, data?.entreprise); setRecuState("idle"); }
     catch (e) { console.error(e); setRecuState("error"); }
   }
   function validerEncaissement() {
@@ -23209,6 +23790,12 @@ function VoyagesPage({ data, persist, session, notify }) {
 
   const voyageCourant = ouvert && ouvert !== "nouveau" ? voyages.find((v) => v.id === ouvert) : null;
   const enLecture = !!voyageCourant && voyageCourant.statut === "Validé";
+  /*
+   * Une fiche validée arrête les comptes d'une rotation : la rouvrir ou la supprimer défait une
+   * pièce comptable déjà imprimée. Ces deux gestes reviennent donc à l'administrateur seul, comme
+   * pour un bordereau déjà parti.
+   */
+  const droitRouvrir = autorisationModifierVoyage(session, voyageCourant);
   const monNom = `${session?.prenom || ""} ${session?.nom || ""}`.trim() || session?.identifiant || "";
 
   /** Colis déjà rattachés à un autre voyage — brouillon compris, sinon on les compterait deux fois. */
@@ -23333,6 +23920,10 @@ function VoyagesPage({ data, persist, session, notify }) {
   }
 
   function rouvrir(v) {
+    if (!autorisationModifierVoyage(session, v).autorise) {
+      notify?.("Fiche validée — seul un administrateur peut la rouvrir.");
+      return;
+    }
     persist({
       ...data,
       voyages: voyages.map((x) => (x.id === v.id ? { ...x, statut: "Brouillon", valideeLe: null, valideePar: null } : x)),
@@ -23342,6 +23933,16 @@ function VoyagesPage({ data, persist, session, notify }) {
   }
 
   function supprimer(v) {
+    /*
+     * Supprimer une fiche validée efface une pièce comptable ET ses dépenses, et rend ses colis à
+     * la liste des voyages suivants. Un brouillon, lui, n'engage rien : celui qui le tient peut
+     * le jeter.
+     */
+    if (!autorisationModifierVoyage(session, v).autorise) {
+      notify?.("Fiche validée — seul un administrateur peut la supprimer.");
+      setVoyageASupprimer(null);
+      return;
+    }
     persist({
       ...data,
       voyages: voyages.filter((x) => x.id !== v.id),
@@ -23416,9 +24017,17 @@ function VoyagesPage({ data, persist, session, notify }) {
                   <button onClick={() => imprimerFiche(v)} style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 11px", color: "var(--text)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
                     <Printer size={13} /> Fiche
                   </button>
-                  <button onClick={() => setVoyageASupprimer(v)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer", padding: 4 }} title="Supprimer ce voyage">
-                    <Trash2 size={14} />
-                  </button>
+                  {(() => {
+                    // La liste dit la même chose que la fiche : le bouton reste, éteint, et dit pourquoi.
+                    const droit = autorisationModifierVoyage(session, v);
+                    return (
+                      <button onClick={() => droit.autorise && setVoyageASupprimer(v)} disabled={!droit.autorise}
+                        style={{ background: "none", border: "none", color: droit.autorise ? "var(--danger-fg)" : "var(--muted)", cursor: droit.autorise ? "pointer" : "not-allowed", padding: 4, opacity: droit.autorise ? 1 : 0.5 }}
+                        title={droit.autorise ? "Supprimer ce voyage" : "Fiche validée — seul un administrateur peut la supprimer."}>
+                        <Trash2 size={14} />
+                      </button>
+                    );
+                  })()}
                 </div>
               </div>
             </div>
@@ -23800,9 +24409,17 @@ function VoyagesPage({ data, persist, session, notify }) {
             <button onClick={() => imprimerFiche(voyageCourant)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
               <Printer size={16} /> Rééditer la fiche (PDF)
             </button>
-            <button onClick={() => rouvrir(voyageCourant)} style={{ background: "var(--surface)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+            <button onClick={() => rouvrir(voyageCourant)} disabled={!droitRouvrir.autorise}
+              title={droitRouvrir.autorise ? undefined : "Une fiche validée arrête les comptes du voyage : seul un administrateur peut la rouvrir."}
+              style={{ background: "var(--surface)", border: "1px solid var(--border)", color: droitRouvrir.autorise ? "var(--text)" : "var(--muted)", borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: droitRouvrir.autorise ? "pointer" : "not-allowed" }}>
               Rouvrir pour modifier
             </button>
+            {!droitRouvrir.autorise && (
+              <div style={{ alignSelf: "center", fontSize: 12, color: "var(--muted)", maxWidth: 340, lineHeight: 1.5 }}>
+                Cette fiche est validée : elle arrête les comptes du voyage et ses colis sont sortis
+                des voyages suivants. Seul un administrateur peut la rouvrir.
+              </div>
+            )}
           </>
         )}
       </div>
@@ -29210,7 +29827,7 @@ async function construireFacturePartenaireDoc(facture, partenaire, colisFactures
  * Aucun montant n'y figure : ce que le partenaire nous doit ne regarde pas son correspondant, et
  * ce qu'il facture à ses clients ne nous regarde pas.
  */
-async function construireBordereauRemiseDoc(partenaire, lot, agent) {
+async function construireBordereauRemiseDoc(partenaire, lot, agent, entreprise = {}) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF());
   const W = 210, M = 16;
@@ -29295,10 +29912,18 @@ async function construireBordereauRemiseDoc(partenaire, lot, agent) {
   doc.text("Signature du correspondant", M, y + 23);
   doc.text(`Notre agent — ${agent || "—"}`, W / 2 + 4, y + 23);
 
+  // Ce bordereau est signé par une autre entreprise : il dit qui il engage.
+  const rccmRemise = String(entreprise?.rccm || "").trim();
+  if (rccmRemise) {
+    const yPied = Math.min(y + 34, 288);
+    doc.setFontSize(8); doc.setTextColor(...MUTED);
+    doc.text(`BA-DIABY EXPRESS — RCCM ${rccmRemise}`, M, yPied);
+  }
+
   return doc;
 }
 
-async function construireRelevePartenaireDoc(partenaire, mois, factures, colis) {
+async function construireRelevePartenaireDoc(partenaire, mois, factures, colis, entreprise = {}) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF());
   const W = 210, M = 16;
@@ -29418,6 +30043,18 @@ async function construireRelevePartenaireDoc(partenaire, mois, factures, colis) 
   doc.text(doc.splitTextToSize(
     "Relevé établi au tarif convenu avec le partenaire, sur des colis vérifiés et pesés par nos agents. "
     + "Les prix que le partenaire applique à ses propres clients n'y figurent pas.", W - 2 * M), M, y);
+
+  /*
+   * Le relevé est la pièce que le partenaire remet à son comptable quand un solde est contesté :
+   * il porte donc la même immatriculation que la facture qu'il récapitule.
+   */
+  const rccmReleve = String(entreprise?.rccm || "").trim();
+  if (rccmReleve) {
+    y += 10;
+    if (y > 280) { doc.addPage(); y = 24; }
+    doc.setFontSize(8); doc.setTextColor(...MUTED);
+    doc.text(`BA-DIABY EXPRESS — RCCM ${rccmReleve}`, M, y);
+  }
 
   return doc;
 }
@@ -29714,7 +30351,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
   async function imprimerReleve(mois) {
     const sesColis = (data.colis || []).filter((c) => c.partenaireId === partenaire.id);
     try {
-      const doc = await construireRelevePartenaireDoc(partenaire, mois, sesFactures, sesColis);
+      const doc = await construireRelevePartenaireDoc(partenaire, mois, sesFactures, sesColis, data?.entreprise);
       const etiquette = `${String(mois.mois + 1).padStart(2, "0")}-${mois.annee}`;
       openPdf(doc, `releve-${(reglagesPartenaire(partenaire).nomCommercial || partenaire.nom || "partenaire").replace(/\s+/g, "-").toLowerCase()}-${etiquette}.pdf`);
     } catch (e) {
@@ -29760,7 +30397,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
     const trackings = new Set(lot.colis.map((c) => c.tracking));
     const marque = { le: new Date().toISOString(), par: monNom, correspondant: lot.correspondant?.nom || "" };
     try {
-      const doc = await construireBordereauRemiseDoc(partenaire, lot, monNom);
+      const doc = await construireBordereauRemiseDoc(partenaire, lot, monNom, data?.entreprise);
       openPdf(doc, `remise-${(reglagesPartenaire(partenaire).nomCommercial || partenaire.nom || "partenaire").replace(/\s+/g, "-").toLowerCase()}-${lot.pays}.pdf`);
     } catch (e) {
       console.error(e);

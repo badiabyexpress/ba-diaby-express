@@ -554,6 +554,45 @@ const CHAMPS_DE_POUVOIR = ["role", "permissionsOverride", "paysAutorises", "agen
  * ouvrent les écrans correspondants, pour qu'un geste possible à l'écran ne soit jamais refusé
  * par le serveur, ni l'inverse.
  */
+/*
+ * UN RÉGLAGE ABSENT N'EST PAS UN RÉGLAGE EFFACÉ — À TOUTES LES PROFONDEURS.
+ *
+ * La règle existait, mais elle ne descendait que d'un cran : elle rendait à `notifWhatsApp` une
+ * étape entière qui manquait, jamais une case manquante À L'INTÉRIEUR d'une étape. Or c'est
+ * exactement ainsi que ce réglage est bâti — une étape, et sous elle « expéditeur »,
+ * « destinataire », « partenaire ».
+ *
+ * Le résultat s'est vu en production : sur sept étapes sur neuf, la case « expéditeur » avait
+ * purement disparu de la base — pas mise à faux, ABSENTE — et avec elle « partenaire ». Les
+ * destinataires continuaient d'être prévenus, les expéditeurs ne l'étaient plus, et rien dans
+ * l'écran des réglages ne montrait de case décochée : il n'y avait plus de case du tout à
+ * l'endroit où le code allait lire.
+ *
+ * On rend donc tout champ absent, à n'importe quelle profondeur. Deux limites voulues :
+ * — un champ PRÉSENT et vide reste vide ; on doit toujours pouvoir effacer un réglage à la main ;
+ * — les tableaux ne sont pas fusionnés, ils sont remplacés : retirer un élément d'une liste de
+ *   réglages est un geste légitime, et une fusion le rendrait impossible.
+ */
+function completerChampsManquants(avant, apres) {
+  let modifie = false;
+  const complete = { ...apres };
+  Object.keys(avant).forEach((champ) => {
+    const valeurAvant = avant[champ];
+    if (!Object.prototype.hasOwnProperty.call(apres, champ)) {
+      complete[champ] = valeurAvant;
+      modifie = true;
+      return;
+    }
+    const valeurApres = apres[champ];
+    const objetAvant = valeurAvant && typeof valeurAvant === "object" && !Array.isArray(valeurAvant);
+    const objetApres = valeurApres && typeof valeurApres === "object" && !Array.isArray(valeurApres);
+    if (!objetAvant || !objetApres) return;
+    const fusionne = completerChampsManquants(valeurAvant, valeurApres);
+    if (fusionne !== valeurApres) { complete[champ] = fusionne; modifie = true; }
+  });
+  return modifie ? complete : apres;
+}
+
 const SECTIONS_REGLAGES = [
   ["branding", "config.acceder"],
   ["entreprise", "config.acceder"],
@@ -1145,14 +1184,8 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId, contexte = {}
     const apres = sortie[cle];
     if (!avant || typeof avant !== "object" || Array.isArray(avant)) return;
     if (!apres || typeof apres !== "object" || Array.isArray(apres)) return;
-    const complete = { ...apres };
-    let manquant = false;
-    Object.keys(avant).forEach((champ) => {
-      if (Object.prototype.hasOwnProperty.call(apres, champ)) return;
-      complete[champ] = avant[champ];
-      manquant = true;
-    });
-    if (manquant) sortie[cle] = complete;
+    const complete = completerChampsManquants(avant, apres);
+    if (complete !== apres) sortie[cle] = complete;
   });
 
   sortie.users = preserverIdentifiants(base.users, comptesDeLEquipe(base, envoye, moi, peut));

@@ -4565,7 +4565,7 @@ function App() {
               <>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
                   <LogoIdentite taille={26} />
-                  <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 18, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  <div className="bde-brand-name" style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 18, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                     {identite.nom ? identite.nom : <>BA-DIABY <span style={{ color: "var(--brand-on-dark)" }}>EXPRESS</span></>}
                   </div>
                 </div>
@@ -4698,7 +4698,7 @@ function App() {
             : syncing ? "Enregistrement…" : `${pendingSync} en attente d’enregistrement`}
         </div>
       )}
-      {toast && <div style={{ position: "fixed", bottom: 24, insetInlineEnd: 24, insetInlineStart: isMobile ? 24 : "auto", background: "#0A2647", color: "#fff", padding: "12px 18px", borderRadius: 12, fontSize: 13.5, boxShadow: "0 8px 24px rgba(10,38,71,0.3)", textAlign: "center" }}>{toast}</div>}
+      {toast && <div className="bde-toast" style={{ position: "fixed", bottom: 24, insetInlineEnd: 24, insetInlineStart: isMobile ? 24 : "auto", zIndex: 300, background: "rgba(10,38,71,0.94)", color: "#fff", padding: "13px 20px", borderRadius: 14, fontSize: 13.5, fontWeight: 500, boxShadow: "0 18px 44px -14px rgba(3,10,24,0.72)", textAlign: "center" }}>{toast}</div>}
     </Shell>
     </ContexteOuvrirColis.Provider>
   );
@@ -4965,8 +4965,31 @@ function Shell({ children, rtl, theme }) {
         /* Les polices sont déclarées dans index.html : chargées ici par @import, elles n'étaient
            demandées qu'après l'exécution du JavaScript, soit plusieurs secondes de retard en 4G. */
         * { box-sizing: border-box; }
+        /*
+         * LA PROFONDEUR ÉTAIT À L'ENVERS.
+         *
+         * En thème sombre, le sol de l'application (--surface2) était PLUS CLAIR que les cartes
+         * posées dessus (--surface) : #1B2438 contre #131A2B. Une carte plus foncée que son fond
+         * ne se lit pas comme un objet posé, elle se lit comme un trou — d'où l'impression de
+         * page plate et terne, quelle que soit la qualité du contenu. Tous les logiciels du genre
+         * font l'inverse : le fond est le point le plus sombre, les cartes s'en détachent vers le
+         * clair, et les champs de saisie s'y creusent vers le sombre.
+         *
+         * Les valeurs ci-dessous rétablissent cet ordre — sol < carte, et champ = sol. Comme
+         * l'ensemble de l'application passe par ces variables et n'écrit jamais une couleur en
+         * dur, la hiérarchie se met en place partout d'un coup, sans toucher un seul écran.
+         */
         :root, [data-theme="dark"] {
-          --bg: #0A0F1C; --surface: #131A2B; --surface2: #1B2438; --border: #242E47; --text: #F1F4FA; --muted: #8A97B5;
+          --bg: #080C17; --surface: #182138; --surface2: #0D1322; --border: #26324F; --text: #F1F4FA; --muted: #8A97B5;
+          /* Élévation : deux ombres superposées — un contact net, une diffusion large. C'est ce
+             qui distingue une carte « posée » d'une carte simplement bordée. */
+          --shadow-card: 0 1px 2px rgba(3, 7, 18, 0.40), 0 10px 28px -14px rgba(3, 7, 18, 0.75);
+          --shadow-lift: 0 2px 6px rgba(3, 7, 18, 0.45), 0 22px 48px -20px rgba(3, 7, 18, 0.85);
+          --shadow-modal: 0 40px 90px -24px rgba(0, 0, 0, 0.78), 0 2px 8px rgba(0, 0, 0, 0.45);
+          --ring: color-mix(in srgb, var(--brand-solid) 30%, transparent);
+          /* Filet clair sur l'arête haute des surfaces : une carte accroche la lumière par le
+             haut. Invisible consciemment, mais c'est ce qui fait « fini » plutôt que « plat ». */
+          --sheen: rgba(255, 255, 255, 0.055);
           /* Couleurs sémantiques : fonds, bordures et textes des blocs d’état (succès, alerte,
              erreur, information). Déclinées par thème afin qu’un encart ne reste jamais sombre
              sur une page claire — c’était la principale incohérence visuelle du site. */
@@ -4977,7 +5000,12 @@ function Shell({ children, rtl, theme }) {
           --neutral-fg: #AEB9D6; --bronze-bg: #1B140F; --placeholder: #6B77A0;
         }
         [data-theme="light"] {
-          --bg: #F3F5FA; --surface: #FFFFFF; --surface2: #EEF1F8; --border: #DCE2F0; --text: #101828; --muted: #5B6B82;
+          --bg: #F4F6FB; --surface: #FFFFFF; --surface2: #EDF1F8; --border: #E1E7F2; --text: #101828; --muted: #5B6B82;
+          --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.05), 0 10px 26px -16px rgba(16, 24, 40, 0.26);
+          --shadow-lift: 0 2px 5px rgba(16, 24, 40, 0.07), 0 22px 44px -22px rgba(16, 24, 40, 0.34);
+          --shadow-modal: 0 40px 90px -26px rgba(16, 24, 40, 0.32), 0 2px 8px rgba(16, 24, 40, 0.10);
+          --ring: color-mix(in srgb, var(--brand-solid) 22%, transparent);
+          --sheen: rgba(255, 255, 255, 0.9);
           --danger-bg: #FEF1F3; --danger-border: #F6CBD2; --danger-fg: #B3243A; --danger-fg-soft: #8E1A2A;
           --warn-bg: #FFF8E7; --warn-border: #EFD9A2; --warn-fg: #8A6008; --warn-fg-soft: #6F4D06;
           --ok-bg: #EAF9F0; --ok-bg-soft: #F1FBF5; --ok-border: #BCE5CC; --ok-fg: #107442; --ok-fg-alt: #0F6A43;
@@ -5044,15 +5072,14 @@ function Shell({ children, rtl, theme }) {
           .bde-client-actions button { min-height: 42px; padding: 9px 10px !important; font-size: 12px !important; }
           .bde-client-actions button:first-child, .bde-client-actions button:nth-child(2) { grid-column: span 2; }
         }
-        .bde-app-shell { background-image: radial-gradient(circle at 85% 0%, rgba(200,16,46,0.05), transparent 28%); }
+        .bde-app-shell { background: var(--surface2); }
         .bde-app-sidebar { box-shadow: 12px 0 36px rgba(3, 14, 32, 0.14); }
         .bde-app-sidebar nav button { transition: background 180ms ease, color 180ms ease, transform 160ms ease; }
         .bde-app-sidebar nav button:hover { background: rgba(255,255,255,0.10) !important; transform: translateX(2px); }
         .bde-app-sidebar nav button[style*="var(--brand-solid)"] { box-shadow: 0 8px 20px rgba(200,16,46,0.18); }
-        .bde-app-main { background: linear-gradient(135deg, color-mix(in srgb, var(--surface2) 94%, transparent), color-mix(in srgb, var(--surface) 28%, transparent)); }
         .bde-app-main input, .bde-app-main select, .bde-app-main textarea { transition: border-color 180ms ease, box-shadow 180ms ease, background 180ms ease; }
-        .bde-app-main input:focus, .bde-app-main select:focus, .bde-app-main textarea:focus { border-color: color-mix(in srgb, var(--brand-solid) 58%, var(--border)) !important; box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-solid) 12%, transparent) !important; outline: none; }
-        .bde-app-main button { transition: transform 160ms ease, box-shadow 180ms ease, border-color 180ms ease; }
+        .bde-app-main input:focus, .bde-app-main select:focus, .bde-app-main textarea:focus { border-color: color-mix(in srgb, var(--brand-solid) 58%, var(--border)) !important; box-shadow: 0 0 0 4px var(--ring) !important; outline: none; }
+        .bde-app-main button { transition: transform 160ms ease, box-shadow 180ms ease, border-color 180ms ease, filter 180ms ease; }
         .bde-app-main button:active { transform: scale(0.98); }
         .bde-mobile-topbar { box-shadow: 0 8px 24px rgba(3, 14, 32, 0.18); }
         @media (max-width: 768px) {
@@ -5062,6 +5089,160 @@ function Shell({ children, rtl, theme }) {
         }
         @media (prefers-reduced-motion: reduce) {
           .bde-app-sidebar nav button, .bde-app-main button, .bde-app-main input, .bde-app-main select, .bde-app-main textarea { transition: none !important; }
+        }
+
+        /* ==========================================================================
+           SYSTÈME VISUEL DE L'ESPACE DE TRAVAIL
+           --------------------------------------------------------------------------
+           Toutes les règles qui suivent ne touchent QUE l'apparence. Elles s'appuient
+           sur le fait que l'application n'écrit jamais une couleur en dur : une carte
+           est reconnaissable à son fond var(--surface), un champ au sien,
+           var(--surface2). On peut donc leur donner une identité commune — ombre,
+           arête, arrondi, transition — sans rouvrir un seul écran.
+           ========================================================================== */
+
+        /* Le sol : une teinte unie, avec une seule lueur de marque très diluée en haut
+           à droite. L'ancien dégradé en diagonale mélangeait deux surfaces et donnait
+           une page « sale » dont la couleur changeait selon l'endroit où l'on regardait. */
+        .bde-app-main {
+          background:
+            radial-gradient(1100px 460px at 88% -12%, color-mix(in srgb, var(--brand-solid) 7%, transparent), transparent 68%),
+            var(--surface2);
+        }
+
+        /* --- Cartes ------------------------------------------------------------ */
+        /* Une carte se pose : ombre de contact + diffusion, et un filet clair sur son
+           arête haute. Le drapeau important sur l'ombre remplace les ombres écrites au cas
+           par cas dans les écrans, qui n'étaient visibles ni en clair ni en sombre. */
+        .bde-app-main div[style*="var(--surface)"][style*="border-radius"] {
+          box-shadow: var(--shadow-card) !important;
+          border-color: var(--border);
+          background-image: linear-gradient(var(--sheen), transparent 42%);
+        }
+        /* Une carte cliquable réagit : elle monte d'un cheveu et son ombre s'étale. */
+        .bde-app-main button[style*="var(--surface2)"][style*="border-radius"]:hover:not(:disabled) {
+          transform: translateY(-1px);
+          box-shadow: var(--shadow-card);
+          border-color: color-mix(in srgb, var(--brand-solid) 32%, var(--border)) !important;
+        }
+
+        /* --- Chiffres ---------------------------------------------------------- */
+        /* Chiffres à chasse fixe partout où l'on compare des colonnes de montants :
+           sans cela, « 1 398 384 » et « 1 642 464 » n'ont pas la même largeur et l'œil
+           ne peut plus aligner les ordres de grandeur. C'est le détail qui sépare un
+           tableau de gestion d'un tableau de site vitrine. */
+        .bde-app-main table, .bde-stat, .bde-app-main input[inputmode="decimal"], .bde-app-main input[type="number"] {
+          font-variant-numeric: tabular-nums;
+          font-feature-settings: "tnum" 1;
+        }
+
+        /* --- Tableaux ---------------------------------------------------------- */
+        .bde-app-main table { box-shadow: var(--shadow-card); }
+        .bde-app-main table thead th { padding-top: 11px !important; padding-bottom: 11px !important; }
+        .bde-app-main table tbody td { border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+        .bde-app-main table tbody tr:first-child td { border-top: none; }
+        /* La zone défilante d'un tableau large annonce qu'elle défile : un voile se
+           forme sur le bord droit tant qu'il reste des colonnes à découvrir. */
+        .bde-app-main div:has(> table) {
+          background:
+            linear-gradient(to left, color-mix(in srgb, var(--surface2) 92%, transparent), transparent 34px) right center / 34px 100% no-repeat;
+          border-radius: 12px;
+        }
+
+        /* --- Champs ------------------------------------------------------------ */
+        /* La flèche native d'un menu déroulant est dessinée par le système : grise,
+           carrée, différente sur chaque machine, et franchement laide sur fond sombre.
+           On la remplace par un chevron cohérent avec le reste des icônes. */
+        .bde-app-main select, .bde-modal-card select {
+          -webkit-appearance: none; appearance: none;
+          background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238A97B5' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") !important;
+          background-repeat: no-repeat !important;
+          background-position: right 11px center !important;
+          padding-inline-end: 34px !important;
+        }
+        [dir="rtl"] .bde-app-main select, [dir="rtl"] .bde-modal-card select { background-position: left 11px center !important; }
+        [data-theme="light"] .bde-app-main select, [data-theme="light"] .bde-modal-card select {
+          background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%235B6B82' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") !important;
+        }
+        /* Un champ désactivé doit se voir désactivé, sinon on tape dedans sans comprendre. */
+        .bde-app-main input:disabled, .bde-app-main select:disabled, .bde-app-main textarea:disabled { opacity: 0.55; cursor: not-allowed; }
+        .bde-app-main button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+        /* --- Fenêtres ---------------------------------------------------------- */
+        .bde-modal-card { box-shadow: var(--shadow-modal) !important; border-radius: 18px !important; }
+        .bde-modal-backdrop { background: color-mix(in srgb, var(--bg) 74%, transparent) !important; }
+
+        /* --- Message flottant --------------------------------------------------- */
+        .bde-toast {
+          border: 1px solid rgba(255,255,255,0.14);
+          backdrop-filter: blur(10px);
+          animation: bde-toast-in 220ms cubic-bezier(0.23, 1, 0.32, 1);
+        }
+        @keyframes bde-toast-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* --- Barre latérale ----------------------------------------------------- */
+        /* Le nom de l'entreprise était coupé (« BA-DIABY EXPR… ») parce qu'il était
+           dimensionné pour un menu plus large que celui-ci. Il tient maintenant. */
+        .bde-brand-name { font-size: 16.5px !important; letter-spacing: -0.02em; }
+        .bde-app-sidebar nav button { letter-spacing: -0.005em; }
+        /* L'élément actif : le plein rouge reste, mais adouci par une arête claire en
+           haut et une ombre portée — il se détache du menu au lieu d'y être collé. */
+        .bde-app-sidebar nav button[style*="var(--brand-solid)"] {
+          background-image: linear-gradient(rgba(255,255,255,0.16), transparent 55%);
+          box-shadow: 0 6px 18px -4px rgba(206, 27, 51, 0.55);
+        }
+
+        /* --- Cartes de statistiques (KPI) --------------------------------------- */
+        .bde-stat { transition: transform 180ms ease, box-shadow 200ms ease, border-color 200ms ease; }
+        .bde-stat:hover { transform: translateY(-2px); box-shadow: var(--shadow-lift) !important; }
+
+        /* --- Titres ------------------------------------------------------------- */
+        /* Les titres serrent leur interlettrage : c'est ce qui donne son assurance à une
+           typographie de tableau de bord, là où l'espacement par défaut fait « brouillon ». */
+        .bde-app-main h1, .bde-app-main h2, .bde-app-main h3 { letter-spacing: -0.025em; text-wrap: balance; }
+
+        /* --- Pastilles d'état ---------------------------------------------------- */
+        /* Les badges de statut sont reconnaissables à leur forme : coin très arrondi et texte
+           court. On leur donne une arête assortie à leur teinte, pour qu'ils se détachent du fond
+           de la ligne au lieu d'y flotter. */
+        .bde-app-main span[style*="border-radius: 20px"], .bde-app-main span[style*="border-radius: 999px"] {
+          border: 1px solid color-mix(in srgb, currentColor 24%, transparent);
+          line-height: 1.35;
+        }
+
+        /* --- Accessibilité clavier ---------------------------------------------- */
+        /* Un anneau visible pour qui navigue au clavier, jamais pour qui clique à la souris. */
+        .bde-app-main :focus-visible, .bde-modal-card :focus-visible, .bde-app-sidebar :focus-visible {
+          outline: 2px solid var(--brand-solid); outline-offset: 2px; border-radius: 6px;
+        }
+
+        /* ==========================================================================
+           TÉLÉPHONE ET TABLETTE
+           Sur un écran de 390 px, chaque carte de statistique occupait la hauteur d'un
+           écran entier : quatre indicateurs, quatre pages à faire défiler avant de voir
+           quoi que ce soit d'autre. Elles passent à deux par ligne, resserrées.
+           ========================================================================== */
+        @media (max-width: 900px) {
+          .bde-stat { flex: 1 1 calc(50% - 14px) !important; min-width: 150px !important; }
+        }
+        @media (max-width: 640px) {
+          div:has(> .bde-stat) { gap: 10px !important; }
+          .bde-stat {
+            flex: 1 1 calc(50% - 5px) !important; min-width: 0 !important;
+            padding: 13px 14px !important; border-radius: 14px !important;
+          }
+          .bde-stat > div:first-child > div:first-child { font-size: 11.5px !important; line-height: 1.25; }
+          .bde-stat > div:first-child > div:last-child { width: 28px !important; height: 28px !important; border-radius: 9px !important; }
+          .bde-stat > div:first-child > div:last-child svg { width: 15px; height: 15px; }
+          .bde-stat > div:nth-child(2) { font-size: 21px !important; margin-top: 8px !important; }
+          /* La précision passe souvent sur deux lignes dans une demi-largeur : la puce doit
+             rester en tête de la première ligne, pas se centrer verticalement sur le bloc. */
+          .bde-stat > div:nth-child(3) { font-size: 11px !important; margin-top: 5px !important; align-items: flex-start !important; line-height: 1.35; }
+          .bde-stat > div:nth-child(3) > span:first-child { margin-top: 4px; }
+          /* Les cartes et les fenêtres respirent moins large, mais restent lisibles. */
+          .bde-app-main div[style*="var(--surface)"][style*="border-radius"] { padding-left: 14px !important; padding-right: 14px !important; }
+          .bde-modal-card { padding: 16px !important; border-radius: 16px !important; }
+          .bde-toast { inset-inline: 12px !important; bottom: 14px !important; }
         }
         .bde-home-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 0.82fr); gap: clamp(28px, 6vw, 72px); align-items: center; }
         .bde-hero-copy { padding: 8px 0; }
@@ -8100,15 +8281,72 @@ function soldesCaisseParAgent(data) {
     .sort((a, b) => b.totalEUR - a.totalEUR);
 }
 
-const StatCard = memo(function StatCard({ label, value, icon: Icon, tint, trend, trendColor, outline }) {
+/*
+ * UNE LIGNE DE RÉPARTITION.
+ *
+ * Le même dessin servait à trois endroits, recopié à chaque fois : une barre de 8 px à angles
+ * vifs, remplie d'un aplat, et un compte gris collé à droite. Trois défauts : la barre vide
+ * n'était pas distinguable du fond de la carte, la barre pleine s'arrêtait net, et le compte
+ * n'avait pas de chasse fixe — deux nombres de largeur différente sous la même colonne.
+ *
+ * Ici : un sillon marqué, une barre arrondie qui garde une largeur minimale tant qu'elle n'est
+ * pas à zéro (sinon un colis sur quatre cents devient invisible), la part en pourcentage, et le
+ * compte en chiffres à chasse fixe pour que la colonne s'aligne.
+ */
+function BarreRepartition({ libelle, valeur, total, teinte }) {
+  const part = total ? (valeur / total) * 100 : 0;
+  const vide = valeur === 0;
   return (
-    <div style={{ background: SURFACE, borderRadius: 16, padding: "20px 22px", flex: 1, minWidth: 190, border: `1.5px solid ${outline || BORDER}`, boxShadow: "0 2px 12px rgba(10,38,71,0.06)" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div style={{ fontSize: 13, color: MUTED, fontWeight: 600 }}>{label}</div>
-        <div style={{ width: 38, height: 38, borderRadius: 10, background: tint, display: "grid", placeItems: "center" }}><Icon size={18} color="#fff" /></div>
+    <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 9 }}>
+      <div style={{ width: 130, flexShrink: 0, fontSize: 12.5, color: vide ? "var(--muted)" : "var(--text)", fontWeight: vide ? 400 : 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{libelle}</div>
+      <div style={{ flex: 1, minWidth: 0, height: 7, background: "color-mix(in srgb, var(--surface2) 80%, var(--border))", borderRadius: 999, overflow: "hidden" }}>
+        <div style={{
+          width: vide ? 0 : `max(3px, ${part}%)`, height: "100%", borderRadius: 999,
+          background: `linear-gradient(90deg, color-mix(in srgb, ${teinte} 72%, transparent), ${teinte})`,
+          transition: "width 420ms cubic-bezier(0.23, 1, 0.32, 1)",
+        }} />
       </div>
-      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 29, fontWeight: 700, color: TEXT, marginTop: 12 }}>{value}</div>
-      {trend && <div style={{ fontSize: 12, color: trendColor || "var(--ok-fg)", marginTop: 7, fontWeight: 600 }}>{trend}</div>}
+      <div style={{ width: 40, flexShrink: 0, textAlign: "right", fontSize: 10.5, color: "var(--muted)", fontVariantNumeric: "tabular-nums" }}>
+        {vide ? "" : `${Math.round(part)} %`}
+      </div>
+      <div style={{ width: 26, flexShrink: 0, textAlign: "right", fontSize: 13, fontWeight: vide ? 400 : 700, color: vide ? "var(--muted)" : "var(--text)", fontVariantNumeric: "tabular-nums" }}>{valeur}</div>
+    </div>
+  );
+}
+
+/*
+ * CARTE D'INDICATEUR.
+ *
+ * Trois défauts la rendaient plus lourde qu'informative. La pastille d'icône était un aplat
+ * saturé avec un pictogramme blanc dedans : quatre carrés de couleur vive alignés en haut de
+ * page, qui tiraient l'œil bien plus fort que les chiffres eux-mêmes — or c'est le chiffre qu'on
+ * vient lire. Le libellé et la valeur avaient presque le même poids visuel. Et la précision sous
+ * le chiffre flottait, sans rien qui la rattache à la valeur.
+ *
+ * La pastille garde sa couleur, mais en fond très dilué avec le pictogramme teinté : elle
+ * identifie sans crier. Le libellé passe en petites capitales espacées — un rôle d'étiquette,
+ * pas de titre. Et la précision devient une puce discrète, posée sous le chiffre.
+ */
+const StatCard = memo(function StatCard({ label, value, icon: Icon, tint, trend, trendColor, outline }) {
+  const teinte = tint || "var(--info-fg)";
+  const couleurTendance = trendColor || "var(--ok-fg)";
+  return (
+    <div className="bde-stat" style={{ background: SURFACE, borderRadius: 16, padding: "18px 20px", flex: 1, minWidth: 190, border: `1px solid ${outline || BORDER}`, boxShadow: "0 2px 12px rgba(10,38,71,0.06)" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+        <div style={{ fontSize: 11, color: MUTED, fontWeight: 700, letterSpacing: "0.07em", textTransform: "uppercase" }}>{label}</div>
+        <div style={{
+          width: 36, height: 36, borderRadius: 11, display: "grid", placeItems: "center", flexShrink: 0,
+          background: `color-mix(in srgb, ${teinte} 16%, transparent)`,
+          border: `1px solid color-mix(in srgb, ${teinte} 26%, transparent)`,
+        }}><Icon size={17} color={teinte} /></div>
+      </div>
+      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 30, fontWeight: 700, color: TEXT, marginTop: 14, letterSpacing: "-0.02em", lineHeight: 1.05 }}>{value}</div>
+      {trend && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 9, fontSize: 12, color: couleurTendance, fontWeight: 600 }}>
+          <span style={{ width: 5, height: 5, borderRadius: "50%", background: couleurTendance, flexShrink: 0 }} />
+          {trend}
+        </div>
+      )}
     </div>
   );
 });
@@ -8306,7 +8544,7 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
       {(effectivePermission(session, "stats.globales") || effectivePermission(session, "stats.personnelles")) && (
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 20 }}>
         <StatCard label="Volume total" value={total} icon={Package} tint="#3D63FF" trend={`+${thisMonth} ce mois`} trendColor="var(--ok-fg)" />
-        <StatCard label="Revenus" value={fmt(ca, "EUR")} icon={DollarSign} tint="#16A163" trend={`${fmt(encaisse, "EUR")} encaissés`} trendColor="var(--ok-fg)" outline="#1E4430" />
+        <StatCard label="Revenus" value={fmt(ca, "EUR")} icon={DollarSign} tint="#16A163" trend={`${fmt(encaisse, "EUR")} encaissés`} trendColor="var(--ok-fg)" outline="color-mix(in srgb, var(--ok-fg) 36%, var(--border))" />
         <StatCard label="En transit" value={enTransit} icon={Plane} tint="#5B8DEF" trend="Actuellement en cours" trendColor="var(--muted)" />
         <StatCard label="À expédier" value={aExpedier} icon={AlertTriangle} tint="var(--danger-fg)" trend={aExpedier > 0 ? "Nécessite action" : "Rien en attente"} trendColor={aExpedier > 0 ? "var(--danger-fg)" : "var(--muted)"} />
       </div>
@@ -8397,15 +8635,15 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
       </div>
 
       <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 20, marginBottom: 20 }}>
-        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14.5, marginBottom: 12 }}>Répartition par destination</div>
-        {parPays.map((p) => (
-          <div key={p.code} style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
-            <div style={{ width: 130, fontSize: 13, color: "var(--text)" }}>{FLAGS[p.code]} {p.name}</div>
-            <div style={{ flex: 1, height: 8, background: "var(--surface2)", borderRadius: 6, overflow: "hidden" }}>
-              <div style={{ width: `${total ? (p.count / total) * 100 : 0}%`, height: "100%", background: "var(--brand-solid)" }} />
-            </div>
-            <div style={{ width: 24, textAlign: "right", fontSize: 13, color: "var(--muted)" }}>{p.count}</div>
-          </div>
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14.5, marginBottom: 14 }}>Répartition par destination</div>
+        {/*
+          * Les pays étaient listés dans l'ordre du catalogue, si bien que la page ouvrait sur dix
+          * barres vides avant celle qui portait tout le trafic. On classe du plus chargé au moins
+          * chargé — la même information, mais celle qui compte se lit en premier. Les destinations
+          * sans colis restent affichées : savoir qu'une route est à zéro est aussi un renseignement.
+          */}
+        {[...parPays].sort((a, b) => b.count - a.count).map((p) => (
+          <BarreRepartition key={p.code} libelle={<>{FLAGS[p.code]} {p.name}</>} valeur={p.count} total={total} teinte="var(--brand-solid)" />
         ))}
         {total === 0 && <div style={{ color: "var(--muted)", fontSize: 13 }}>Aucun colis enregistré pour le moment.</div>}
       </div>
@@ -8413,14 +8651,8 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
       {parProvenance.length > 0 && (
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 20, marginBottom: 20 }}>
           <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14.5, marginBottom: 12 }}>Répartition par site d’achat</div>
-          {parProvenance.sort((a, b) => b.count - a.count).map((p) => (
-            <div key={p.nom} style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
-              <div style={{ width: 130, fontSize: 13, color: "var(--text)" }}>{p.nom}</div>
-              <div style={{ flex: 1, height: 8, background: "var(--surface2)", borderRadius: 6, overflow: "hidden" }}>
-                <div style={{ width: `${total ? (p.count / total) * 100 : 0}%`, height: "100%", background: "#5B8DEF" }} />
-              </div>
-              <div style={{ width: 24, textAlign: "right", fontSize: 13, color: "var(--muted)" }}>{p.count}</div>
-            </div>
+          {[...parProvenance].sort((a, b) => b.count - a.count).map((p) => (
+            <BarreRepartition key={p.nom} libelle={p.nom} valeur={p.count} total={total} teinte="var(--info-fg)" />
           ))}
         </div>
       )}
@@ -11984,7 +12216,7 @@ function CategoriesProduitsPage({ data, persist, session, notify, onBack }) {
   );
 }
 
-const inputStyle = { width: "100%", border: `1.5px solid ${BORDER}`, borderRadius: 8, padding: "9px 11px", fontSize: 13.5, outline: "none", color: TEXT, background: SURFACE2 };
+const inputStyle = { width: "100%", border: `1px solid ${BORDER}`, borderRadius: 10, padding: "10px 12px", fontSize: 13.5, outline: "none", color: TEXT, background: SURFACE2 };
 const toggleBtn = { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, border: `1.5px solid ${BORDER}`, background: SURFACE2, borderRadius: 8, padding: "9px 0", fontSize: 13, cursor: "pointer", color: MUTED };
 const toggleActive = { background: BLUE, color: "#fff", borderColor: BLUE };
 
@@ -13450,17 +13682,25 @@ const TAILLES_PAGE_COLIS = [20, 50, 100, "tout"];
  * (Arrivé : le colis est là mais pas encore marqué disponible au retrait) ou le filtre actif.
  */
 const ColisStatCard = memo(function ColisStatCard({ label, value, icon: Icon, tint, active, highlight, onFiltrer }) {
+  // Même langage que les cartes du tableau de bord : pastille teintée plutôt qu'aplat saturé,
+  // libellé en petites capitales, chiffre à chasse fixe. Six pastilles vives alignées sur une
+  // ligne se disputaient l'attention et laissaient croire à six alertes.
+  const teinte = highlight ? "var(--warn-fg)" : tint;
   return (
-    <div style={{
+    <div className="bde-stat" style={{
       background: highlight ? "var(--warn-bg)" : "var(--surface)",
-      border: "1.5px solid " + (highlight ? "var(--warn-border)" : active ? tint : "var(--border)"),
-      borderRadius: 14, padding: "16px 18px", minWidth: 0,
+      border: "1px solid " + (highlight ? "var(--warn-border)" : active ? tint : "var(--border)"),
+      borderRadius: 14, padding: "15px 17px", minWidth: 0,
     }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <span style={{ fontSize: 12, color: highlight ? "var(--warn-fg)" : "var(--muted)", fontWeight: 600 }}>{label}</span>
-        <div style={{ width: 32, height: 32, borderRadius: 9, background: tint, flexShrink: 0, display: "grid", placeItems: "center" }}><Icon size={15} color="#fff" /></div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <span style={{ fontSize: 10.5, color: highlight ? "var(--warn-fg)" : "var(--muted)", fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", lineHeight: 1.3 }}>{label}</span>
+        <div style={{
+          width: 30, height: 30, borderRadius: 9, flexShrink: 0, display: "grid", placeItems: "center",
+          background: `color-mix(in srgb, ${teinte} 16%, transparent)`,
+          border: `1px solid color-mix(in srgb, ${teinte} 26%, transparent)`,
+        }}><Icon size={15} color={teinte} /></div>
       </div>
-      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 26, fontWeight: 700, color: highlight ? "var(--warn-fg)" : "var(--text)", marginTop: 10 }}>{value}</div>
+      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 26, fontWeight: 700, color: highlight ? "var(--warn-fg)" : "var(--text)", marginTop: 11, letterSpacing: "-0.02em", lineHeight: 1.05 }}>{value}</div>
       {onFiltrer && (
         <button onClick={onFiltrer} style={{ display: "flex", alignItems: "center", gap: 2, background: "none", border: "none", color: highlight ? "var(--warn-fg)" : "var(--info-fg)", fontSize: 11.5, fontWeight: 700, padding: 0, marginTop: 8, cursor: "pointer" }}>
           Filtrer <ChevronRight size={13} />
@@ -14442,7 +14682,19 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
             </tbody>
           </table>
         </div>
-        {list.length === 0 && <div style={{ padding: 20, color: "var(--muted)", fontSize: 13.5 }}>Aucun colis à afficher.</div>}
+        {list.length === 0 && (
+          <div style={{ padding: "42px 24px", display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", gap: 4 }}>
+            <div style={{ width: 52, height: 52, borderRadius: 16, display: "grid", placeItems: "center", marginBottom: 8, background: "color-mix(in srgb, var(--info-fg) 12%, transparent)", border: "1px solid color-mix(in srgb, var(--info-fg) 22%, transparent)" }}>
+              <Package size={23} color="var(--info-fg)" />
+            </div>
+            <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)" }}>Aucun colis à afficher</div>
+            <div style={{ fontSize: 12.5, color: "var(--muted)", maxWidth: 320, lineHeight: 1.55 }}>
+              {(deferredQuery || statutFiltre || Object.values(filtres).some(Boolean))
+                ? "Aucun colis ne correspond à cette recherche ou à ces filtres. Essayez d’élargir la période ou de vider les filtres."
+                : "Les colis enregistrés apparaîtront ici, du plus récent au plus ancien."}
+            </div>
+          </div>
+        )}
         {list.length > 0 && (
           <div style={{ padding: "12px 18px", borderTop: "1px solid var(--border)", fontSize: 12, color: "var(--muted)" }}>
             {listeVisible.length} affiché{listeVisible.length > 1 ? "s" : ""} sur {list.length}

@@ -18,7 +18,7 @@
  * retirée.
  */
 
-export const ROLES = ["Administrateur", "Agent", "Comptable", "Chauffeur", "Partenaire"];
+export const ROLES = ["Administrateur", "Responsable de zone", "Agent", "Comptable", "Chauffeur", "Partenaire"];
 
 export const PERMISSIONS_SCHEMA = [
   { group: "COLIS", permissions: [
@@ -130,6 +130,7 @@ export const PERMISSIONS_SCHEMA = [
 
 export const ROLE_DEFAULT_PERMISSIONS = {
   "Administrateur": PERMISSIONS_SCHEMA.flatMap((g) => g.permissions.map((p) => p.key)),
+  "Responsable de zone": ["colis.voir_propres", "colis.voir_tous", "colis.creer", "colis.modifier", "colis.changer_statut", "colis.enregistrer_paiement", "colis.importer_excel", "colis.bordereau_reception", "colis.reglement_groupe", "bordereaux.consulter", "bordereaux.creer", "bordereaux.modifier", "bordereaux.valider", "factures.consulter", "factures.creer", "factures.modifier", "paiements.voir_propres", "clients.consulter", "espaceclient.gerer", "stats.personnelles", "equipe.pointage", "users.gerer", "ia.utiliser"],
   "Agent": ["colis.voir_propres", "colis.voir_tous", "colis.creer", "colis.modifier", "colis.changer_statut", "colis.enregistrer_paiement", "bordereaux.consulter", "bordereaux.creer", "bordereaux.modifier", "bordereaux.valider", "factures.consulter", "factures.creer", "factures.modifier", "paiements.voir_propres", "clients.consulter", "stats.personnelles", "ia.utiliser"],
   "Comptable": ["colis.voir_tous", "factures.consulter", "factures.creer", "factures.modifier", "clients.consulter", "bordereaux.consulter", "compta.consulter", "compta.gerer_depenses", "compta.charges_fixes", "compta.marges", "stats.globales", "stats.exporter"],
   "Chauffeur": ["colis.voir_propres", "colis.changer_statut", "stats.personnelles"],

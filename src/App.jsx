@@ -3008,6 +3008,17 @@ function nettoyerTextePdf(valeur) {
  * ne peut réintroduire le problème, y compris dans du code ajouté plus tard.
  */
 function preparerDocPdf(doc) {
+  // Métadonnées intégrées à chaque export : elles facilitent l’archivage, la recherche et l’identification
+  // du document sans modifier son contenu visible ni les montants métier.
+  if (typeof doc.setProperties === "function") {
+    doc.setProperties({
+      title: "Document Ba-Diaby Express",
+      subject: "Transport de colis et suivi logistique",
+      author: "Ba-Diaby Express",
+      creator: "Ba-Diaby Express",
+      keywords: "Ba-Diaby Express, transport, colis, suivi",
+    });
+  }
   const originale = doc.text.bind(doc);
   doc.text = function (texte, ...reste) {
     const propre = Array.isArray(texte) ? texte.map(nettoyerTextePdf) : nettoyerTextePdf(texte);
@@ -3055,14 +3066,21 @@ async function loadXLSXLib() {
  * environnements en iframe (aucune erreur visible), alors que l’ouverture d’un onglet
  * est généralement autorisée. L’utilisateur peut ensuite l’enregistrer depuis le navigateur.
  */
+function nomFichierPdfSûr(filename) {
+  return String(filename || "document-ba-diaby-express.pdf")
+    .normalize("NFKD").replace(/[\\u0300-\\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/-{2,}/g, "-").replace(/^-|-$/g, "")
+    .slice(0, 150) || "document-ba-diaby-express.pdf";
+}
 function openPdf(doc, filename) {
+  const nomSûr = nomFichierPdfSûr(filename);
   try {
     const blobUrl = doc.output("bloburl");
     const w = window.open(blobUrl, "_blank");
     if (!w) throw new Error("popup bloqué");
   } catch (e) {
     console.error("Ouverture en onglet impossible, tentative de téléchargement direct.", e);
-    doc.save(filename);
+    doc.save(nomSûr);
   }
 }
 /*
@@ -4043,7 +4061,10 @@ function App() {
     if (baseDemandee) return;
     let vivant = true;
     fetch("/api/public?vitrine=1")
-      .then((r) => (r.ok ? r.json() : null))
+      .then(async (r) => {
+        const type = r.headers.get("content-type") || "";
+        return r.ok && type.includes("application/json") ? r.json() : null;
+      })
       .then((d) => { if (vivant && d) setDonneesPubliques(d); })
       // La vitrine reste affichable sans : elle montrera l'identité par défaut plutôt que rien.
       .catch(() => {});
@@ -4458,11 +4479,11 @@ function App() {
   return (
     <ContexteOuvrirColis.Provider value={peutOuvrirColis ? ouvrirColis : null}>
     <Shell rtl={rtl} theme={theme}>
-      <div style={{ display: "flex", minHeight: "100vh", background: "var(--surface2)" }}>
+      <div className="bde-app-shell" style={{ display: "flex", minHeight: "100vh", background: "var(--surface2)" }}>
         {isMobile && mobileNavOpen && (
           <div onClick={() => setMobileNavOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 40 }} />
         )}
-        <aside style={{
+        <aside className="bde-app-sidebar" style={{
           width: isMobile ? 240 : (collapsed ? 72 : 240),
           transition: isMobile ? "transform 0.2s ease" : "width 0.18s ease",
           background: "#0A2647", color: "#fff", display: "flex", flexDirection: "column", flexShrink: 0,
@@ -4547,9 +4568,9 @@ function App() {
             </button>
           </div>
         </aside>
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+        <div className="bde-app-workspace" style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
           {isMobile && (
-            <div style={{ position: "sticky", top: 0, zIndex: 20, display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", background: "#0A2647", color: "#fff" }}>
+            <div className="bde-mobile-topbar" style={{ position: "sticky", top: 0, zIndex: 20, display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", background: "#0A2647", color: "#fff" }}>
               <button onClick={() => setMobileNavOpen(true)} style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 8, width: 34, height: 34, display: "grid", placeItems: "center", color: "#fff", cursor: "pointer", flexShrink: 0 }}>
                 <Menu size={18} />
               </button>
@@ -4561,7 +4582,7 @@ function App() {
               </button>
             </div>
           )}
-          <main style={{ flex: 1, padding: isMobile ? "16px 14px" : "28px 32px", overflowY: "auto", minWidth: 0 }}>
+          <main className="bde-app-main" style={{ flex: 1, padding: isMobile ? "16px 14px" : "28px 32px", overflowY: "auto", minWidth: 0 }}>
             <BandeauEcrasement data={data} persist={persist} session={session} />
             {view === "dashboard" && (session.role === "Partenaire" ? <PartnerDashboard data={data} session={session} persist={persist} verifier={persisterEtVerifier} notify={notify} onglet={ongletPartenaire} /> : <Dashboard data={data} session={session} onNavigate={setView} onNouveauColis={() => { setView("colis"); setOuvrirFormulaireColis((n) => n + 1); }} />)}
             {view === "colis" && <ColisView data={data} persist={persist} verifier={persisterEtVerifier} session={session} notify={notify} t={t} demandeOuverture={demandeColis} onDemandeTraitee={() => setDemandeColis(null)} ouvrirFormulaire={ouvrirFormulaireColis} />}
@@ -4941,7 +4962,112 @@ function Shell({ children, rtl, theme }) {
            pour que les tableaux ne débordent jamais de l’écran sur mobile. */
         div:has(> table) { overflow-x: auto; -webkit-overflow-scrolling: touch; }
         table { min-width: 560px; }
+        .bde-public-tracking form { padding: 7px; border: 1px solid rgba(255,255,255,0.18); border-radius: 14px; background: rgba(255,255,255,0.08); box-shadow: 0 18px 45px rgba(0,0,0,0.20); }
+        .bde-public-tracking form input { background: rgba(255,255,255,0.96) !important; }
+        .bde-public-tracking form button { transition: transform 160ms ease, box-shadow 180ms ease; }
+        .bde-public-tracking form button:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 10px 20px rgba(0,0,0,0.18); }
+        .bde-public-tracking > div[style*="maxWidth: 480"] { border: 1px solid rgba(255,255,255,0.26); }
+        .bde-modal-backdrop { backdrop-filter: blur(5px); }
+        .bde-modal-card { animation: bde-modal-in 180ms cubic-bezier(0.23,1,0.32,1); }
+        @keyframes bde-modal-in { from { opacity: 0; transform: translateY(8px) scale(0.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
+        .bde-app-main table { border-collapse: separate !important; border-spacing: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; }
+        .bde-app-main table thead th { background: color-mix(in srgb, var(--surface2) 86%, transparent); color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: 0.03em; text-transform: uppercase; }
+        .bde-app-main table tbody tr { transition: background 160ms ease; }
+        .bde-app-main table tbody tr:hover { background: color-mix(in srgb, var(--brand-solid) 5%, var(--surface)); }
+        .bde-home-page { background-image: radial-gradient(circle at 50% -10%, rgba(200,16,46,0.13), transparent 34%), radial-gradient(circle at 100% 42%, rgba(35,83,150,0.10), transparent 30%); }
+        .bde-client-login, .bde-client-portal { background-image: radial-gradient(circle at 50% -12%, rgba(200,16,46,0.10), transparent 34%), radial-gradient(circle at 100% 22%, rgba(35,83,150,0.08), transparent 32%); }
+        .bde-client-login form { box-shadow: 0 24px 60px rgba(10,38,71,0.12) !important; }
+        .bde-client-content { min-width: 0; }
+        .bde-client-header > div:first-child { letter-spacing: -0.02em; }
+        .bde-client-actions button { transition: transform 160ms ease, border-color 180ms ease, box-shadow 180ms ease, background 180ms ease; }
+        .bde-client-actions button:hover { transform: translateY(-1px); border-color: color-mix(in srgb, var(--brand-solid) 45%, var(--border)) !important; box-shadow: 0 8px 20px rgba(10,38,71,0.08); }
+        .bde-client-portal .bde-client-content > div { min-width: 0; }
         @media (max-width: 768px) {
+          .bde-client-content { padding: 22px 14px 42px !important; }
+          .bde-client-header { align-items: flex-start !important; }
+          .bde-client-actions { width: 100%; display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px !important; }
+          .bde-client-actions button { min-height: 42px; padding: 9px 10px !important; font-size: 12px !important; }
+          .bde-client-actions button:first-child, .bde-client-actions button:nth-child(2) { grid-column: span 2; }
+        }
+        .bde-app-shell { background-image: radial-gradient(circle at 85% 0%, rgba(200,16,46,0.05), transparent 28%); }
+        .bde-app-sidebar { box-shadow: 12px 0 36px rgba(3, 14, 32, 0.14); }
+        .bde-app-sidebar nav button { transition: background 180ms ease, color 180ms ease, transform 160ms ease; }
+        .bde-app-sidebar nav button:hover { background: rgba(255,255,255,0.10) !important; transform: translateX(2px); }
+        .bde-app-sidebar nav button[style*="var(--brand-solid)"] { box-shadow: 0 8px 20px rgba(200,16,46,0.18); }
+        .bde-app-main { background: linear-gradient(135deg, color-mix(in srgb, var(--surface2) 94%, transparent), color-mix(in srgb, var(--surface) 28%, transparent)); }
+        .bde-app-main input, .bde-app-main select, .bde-app-main textarea { transition: border-color 180ms ease, box-shadow 180ms ease, background 180ms ease; }
+        .bde-app-main input:focus, .bde-app-main select:focus, .bde-app-main textarea:focus { border-color: color-mix(in srgb, var(--brand-solid) 58%, var(--border)) !important; box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-solid) 12%, transparent) !important; outline: none; }
+        .bde-app-main button { transition: transform 160ms ease, box-shadow 180ms ease, border-color 180ms ease; }
+        .bde-app-main button:active { transform: scale(0.98); }
+        .bde-mobile-topbar { box-shadow: 0 8px 24px rgba(3, 14, 32, 0.18); }
+        @media (max-width: 768px) {
+          .bde-app-main { padding-top: 18px !important; }
+          .bde-app-main > div { max-width: 100% !important; }
+          .bde-mobile-topbar { padding-top: max(12px, env(safe-area-inset-top)) !important; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .bde-app-sidebar nav button, .bde-app-main button, .bde-app-main input, .bde-app-main select, .bde-app-main textarea { transition: none !important; }
+        }
+        .bde-home-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 0.82fr); gap: clamp(28px, 6vw, 72px); align-items: center; }
+        .bde-hero-copy { padding: 8px 0; }
+        .bde-hero-actions { min-width: 0; }
+        .bde-hero-actions .bde-announcement { margin: 0 0 16px; max-width: none; }
+        .bde-hero-actions .bde-tracking-form { margin-bottom: 0; }
+        .bde-home-main { position: relative; }
+        .bde-feature-grid { margin-top: 52px !important; }
+        .bde-feature-card { background: color-mix(in srgb, var(--surface) 92%, transparent) !important; }
+        .bde-destinations-heading { margin-bottom: 22px; }
+        .bde-public-header { box-shadow: 0 8px 30px rgba(3, 9, 24, 0.12); }
+        .bde-hero-kicker { display: inline-flex; align-items: center; gap: 8px; margin-bottom: 14px; padding: 7px 11px; border: 1px solid color-mix(in srgb, var(--brand-solid) 38%, var(--border)); border-radius: 999px; background: color-mix(in srgb, var(--surface) 82%, transparent); color: var(--brand-solid); font-size: 10px; font-weight: 800; letter-spacing: 1.1px; }
+        .bde-hero-kicker::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--brand-solid); box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-solid) 16%, transparent); }
+        .bde-tracking-form { padding: 7px; border: 1px solid var(--border); border-radius: 14px; background: color-mix(in srgb, var(--surface) 68%, transparent); box-shadow: 0 14px 35px rgba(10,38,71,0.10); }
+        .bde-tracking-form input { border: 0 !important; background: transparent !important; }
+        .bde-tracking-form button { min-height: 44px; box-shadow: 0 8px 18px rgba(200,16,46,0.20); transition: transform 160ms ease, box-shadow 160ms ease; }
+        .bde-tracking-form button:hover { transform: translateY(-1px); box-shadow: 0 11px 24px rgba(200,16,46,0.28); }
+        .bde-public-nav a, .bde-public-nav button { transition: color 180ms ease, background 180ms ease, transform 160ms ease; }
+        .bde-public-nav a:hover, .bde-public-nav button:hover { color: var(--text) !important; }
+        .bde-public-nav button:last-child:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(200,16,46,0.28) !important; }
+        .bde-feature-card { transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease; }
+        .bde-feature-card:hover { transform: translateY(-3px); border-color: color-mix(in srgb, var(--brand-solid) 42%, var(--border)); box-shadow: 0 16px 34px rgba(10,38,71,0.12) !important; }
+        .bde-destinations-grid button, .bde-ring button { transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease; }
+        .bde-destinations-grid button:hover, .bde-ring button:hover { transform: translateY(-3px); border-color: var(--brand-solid) !important; box-shadow: 0 12px 24px rgba(10,38,71,0.16) !important; }
+        .bde-tracking-form input:focus-visible, .bde-announcement:focus-visible, button:focus-visible, a:focus-visible, select:focus-visible { outline: 3px solid color-mix(in srgb, var(--brand-solid) 55%, transparent); outline-offset: 3px; }
+        .bde-home-contact { box-shadow: 0 18px 45px rgba(10,38,71,0.08); }
+        @media (prefers-reduced-motion: reduce) {
+          *, *::before, *::after { scroll-behavior: auto !important; transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+        }
+        @media (max-width: 768px) {
+          .bde-public-header { padding: 12px 16px !important; align-items: center !important; }
+          .bde-public-nav { gap: 2px !important; }
+          .bde-home-hero { display: block !important; margin-top: 24px !important; padding: 0 16px !important; text-align: center !important; }
+          .bde-hero-actions { margin-top: 22px; }
+          .bde-hero-copy p { margin-inline: auto !important; }
+          .bde-hero-kicker { margin-bottom: 12px; font-size: 9px; letter-spacing: 0.9px; }
+          .bde-home-hero h1 { font-size: 29px !important; line-height: 1.14 !important; margin-bottom: 10px !important; }
+          .bde-home-hero > p, .bde-hero-copy > p { font-size: 14px !important; line-height: 1.45 !important; margin-bottom: 20px !important; }
+          .bde-announcement { margin-bottom: 20px !important; padding: 14px 15px !important; }
+          .bde-announcement > div:nth-child(2) { font-size: 15px !important; line-height: 1.4 !important; }
+          .bde-tracking-form { margin-bottom: 28px !important; }
+          .bde-home-main { padding: 0 16px 36px !important; }
+          .bde-feature-grid { grid-template-columns: 1fr !important; gap: 9px !important; margin: 0 0 34px !important; }
+          .bde-feature-card { display: grid; grid-template-columns: 34px 1fr; column-gap: 11px; align-items: center; padding: 12px 13px !important; border-radius: 12px !important; }
+          .bde-feature-card > div:first-child { width: 34px !important; height: 34px !important; grid-row: span 2; margin: 0 !important; }
+          .bde-feature-card h2 { font-size: 14px !important; margin: 0 0 2px !important; }
+          .bde-feature-card p { font-size: 12px !important; line-height: 1.35 !important; }
+          .bde-destinations-heading { margin-bottom: 16px !important; }
+          .bde-destinations-grid { gap: 8px !important; }
+          .bde-destinations-grid button { padding: 10px 8px !important; }
+          .bde-destinations-grid button div:first-child { font-size: 22px !important; margin-bottom: 3px !important; }
+          .bde-home-contact { margin-top: 28px !important; padding: 18px 15px !important; }
+          .bde-home-contact h2 { font-size: 16px !important; }
+          .bde-home-contact > div:last-child { width: 100%; }
+          .bde-home-contact > div:last-child button, .bde-home-contact > div:last-child a { flex: 1; justify-content: center; }
+          .bde-public-header > div:first-child { font-size: 16px !important; }
+          .bde-public-nav a[href="#contact"] { display: none; }
+          .bde-public-nav a, .bde-public-nav button { font-size: 12px !important; padding: 8px 6px !important; }
+          .bde-feature-card p { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+          .bde-home-main section { scroll-margin-top: 80px; }
+          .bde-public-nav a[href="#services"], .bde-public-nav a[href="#destinations"] { display: none; }
           /* Empêche le zoom automatique sur iOS quand on touche un champ (nécessite 16px minimum) */
           input, select, textarea { font-size: 16px !important; }
           /* Les grilles à 2 colonnes fixes passent à 1 colonne sur petit écran */
@@ -5009,7 +5135,10 @@ function CguPage() {
   const [data, setData] = useState(null);
   useEffect(() => {
     fetch("/api/public?cgu=1")
-      .then((r) => (r.ok ? r.json() : null))
+      .then(async (r) => {
+        const type = r.headers.get("content-type") || "";
+        return r.ok && type.includes("application/json") ? r.json() : null;
+      })
       .then((d) => d && setData(d))
       // Les mentions restent lisibles avec les coordonnées par défaut : mieux vaut une page
       // complète avec un numéro générique qu'une page vide.
@@ -5391,10 +5520,13 @@ function PublicTrackingPage() {
     setLoading(true); setPanne(false);
     try {
       const reponse = await fetch(`/api/public?suivi=${encodeURIComponent(propre)}`);
-      if (!reponse.ok) throw new Error(`HTTP ${reponse.status}`);
+      const type = reponse.headers.get("content-type") || "";
+      if (!reponse.ok || !type.includes("application/json")) {
+        throw new Error(`Réponse de suivi indisponible (HTTP ${reponse.status})`);
+      }
       setData(await reponse.json());
     } catch (e) {
-      console.error("Suivi indisponible", e);
+      console.warn("Suivi indisponible", e);
       setData(null); setPanne(true);
     } finally {
       setLoading(false);
@@ -5455,7 +5587,7 @@ function PublicTrackingPage() {
   const autresDevisesReste = [...new Set([expCur, destCur].filter((c) => c && c !== "GNF"))];
 
   return (
-    <div dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "linear-gradient(135deg,#0A2647 0%,#0A2647 55%,#C8102E 250%)", display: "flex", flexDirection: "column", alignItems: "center", padding: "40px 16px" }}>
+      <div className="bde-public-tracking" dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "linear-gradient(135deg,#0A2647 0%,#0A2647 55%,#C8102E 250%)", display: "flex", flexDirection: "column", alignItems: "center", padding: "40px 16px" }}>
       <div style={{ width: "100%", maxWidth: 560, display: "flex", justifyContent: "flex-end", marginBottom: 20 }}>
         <ClientLangSwitch lang={lang} onChange={setLang} />
       </div>
@@ -5473,9 +5605,10 @@ function PublicTrackingPage() {
       </div>
       <div style={{ fontSize: 13.5, color: "rgba(255,255,255,0.78)", marginBottom: 28 }}>{T("Suivi de colis")}</div>
 
-      <form onSubmit={rechercher} style={{ display: "flex", gap: 8, width: "100%", maxWidth: 420, marginBottom: 24 }}>
-        <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="Numéro de suivi (ex : BDE123456)" style={{ ...inputStyle, flex: 1, fontSize: 15, padding: "13px 16px", border: "none" }} />
-        <button type="submit" style={{ background: "#fff", color: "#0A2647", border: "none", borderRadius: 8, padding: "0 22px", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>{T("Suivre")}</button>
+      <form onSubmit={rechercher} aria-label="Suivi de colis" style={{ display: "flex", gap: 8, width: "100%", maxWidth: 420, marginBottom: 24 }}>
+        <label htmlFor="public-tracking-code" style={{ position: "absolute", width: 1, height: 1, padding: 0, margin: -1, overflow: "hidden", clip: "rect(0, 0, 0, 0)", whiteSpace: "nowrap", border: 0 }}>Numéro de suivi</label>
+        <input id="public-tracking-code" value={code} onChange={(e) => setCode(e.target.value)} placeholder="Numéro de suivi (ex : BDE123456)" autoComplete="off" style={{ ...inputStyle, flex: 1, fontSize: 15, padding: "13px 16px", border: "none" }} />
+        <button type="submit" disabled={!code.trim() || loading} style={{ background: "#fff", color: "#0A2647", border: "none", borderRadius: 8, padding: "0 22px", fontWeight: 700, fontSize: 14, cursor: code.trim() && !loading ? "pointer" : "not-allowed", opacity: code.trim() && !loading ? 1 : 0.65 }}>{T("Suivre")}</button>
       </form>
 
       {loading && searched && <div style={{ color: "rgba(255,255,255,0.8)", fontSize: 13 }}>{T("Recherche en cours…")}</div>}
@@ -5484,6 +5617,13 @@ function PublicTrackingPage() {
         <div style={{ background: "var(--surface)", borderRadius: 14, padding: 20, width: "100%", maxWidth: 420, textAlign: "center", boxShadow: "0 24px 60px rgba(10,38,71,0.35)" }}>
           <div style={{ fontSize: 13.5, color: "var(--text)", fontWeight: 600 }}>{T("Aucun colis trouvé")}</div>
           <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>{T("Vérifiez le numéro de suivi et réessayez.")}</div>
+        </div>
+      )}
+
+      {panne && !loading && (
+        <div role="alert" style={{ background: "rgba(255,255,255,0.96)", border: "1px solid rgba(214,39,63,0.35)", borderRadius: 14, padding: 20, width: "100%", maxWidth: 420, textAlign: "center", boxShadow: "0 24px 60px rgba(10,38,71,0.35)" }}>
+          <div style={{ fontSize: 13.5, color: "#9F1D32", fontWeight: 700 }}>{T("Service de suivi temporairement indisponible")}</div>
+          <div style={{ fontSize: 12, color: "#5B6472", marginTop: 5 }}>{T("Réessayez dans un instant ou contactez l’agence.")}</div>
         </div>
       )}
 
@@ -6566,6 +6706,58 @@ function GuideCommandeModal({ compte, agence, onClose }) {
   );
 }
 
+function ReservationAerienneModal({ reservations, onSubmit, onClose }) {
+  const [destination, setDestination] = useState("");
+  const [poids, setPoids] = useState("");
+  const [dateSouhaitee, setDateSouhaitee] = useState("");
+  const [description, setDescription] = useState("");
+  const pays = COUNTRIES.filter((c) => c.code !== "GN");
+
+  function submit(e) {
+    e.preventDefault();
+    const poidsNombre = Number(poids);
+    if (!destination || !Number.isFinite(poidsNombre) || poidsNombre <= 0) return;
+    onSubmit({ destination, poids: poidsNombre, dateSouhaitee: dateSouhaitee || null, description: description.trim() });
+    setDestination(""); setPoids(""); setDateSouhaitee(""); setDescription("");
+  }
+
+  return (
+    <Modal onClose={onClose} title="Réserver un envoi aérien" wide saisieEnCours={!!destination || !!poids || !!description}>
+      <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 16, lineHeight: 1.55 }}>
+        Indiquez votre destination et le poids réel prévu. La réservation est traitée par l’agence, qui vous confirmera le tarif aérien correspondant au poids saisi.
+      </div>
+      <form onSubmit={submit}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 9, marginBottom: 9 }}>
+          <label style={{ fontSize: 12, color: "var(--muted)" }}>Destination
+            <select value={destination} onChange={(e) => setDestination(e.target.value)} required style={{ ...inputStyle, width: "100%", marginTop: 5 }}>
+              <option value="">Choisir un pays</option>
+              {pays.map((p) => <option key={p.code} value={p.code}>{p.name}{p.city ? ` — ${p.city}` : ""}</option>)}
+            </select>
+          </label>
+          <label style={{ fontSize: 12, color: "var(--muted)" }}>Poids réel (kg)
+            <input type="number" min="0.1" step="0.1" value={poids} onChange={(e) => setPoids(e.target.value)} required placeholder="Ex. 5" style={{ ...inputStyle, width: "100%", marginTop: 5 }} />
+          </label>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 9, marginBottom: 9 }}>
+          <label style={{ fontSize: 12, color: "var(--muted)" }}>Date souhaitée (facultatif)
+            <input type="date" value={dateSouhaitee} onChange={(e) => setDateSouhaitee(e.target.value)} style={{ ...inputStyle, width: "100%", marginTop: 5 }} />
+          </label>
+          <label style={{ fontSize: 12, color: "var(--muted)" }}>Description (facultatif)
+            <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Nature du colis" style={{ ...inputStyle, width: "100%", marginTop: 5 }} />
+          </label>
+        </div>
+        <button type="submit" disabled={!destination || !(Number(poids) > 0)} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 18px", fontSize: 13, fontWeight: 700, cursor: destination && Number(poids) > 0 ? "pointer" : "not-allowed", opacity: destination && Number(poids) > 0 ? 1 : 0.65 }}>Envoyer la demande</button>
+      </form>
+      <div style={{ borderTop: "1px solid var(--border)", marginTop: 20, paddingTop: 15, fontSize: 12, fontWeight: 700, color: "var(--text)" }}>Mes demandes ({reservations.length})</div>
+      {reservations.length === 0 ? <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 8 }}>Aucune demande de réservation pour le moment.</div> : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 9 }}>
+          {reservations.map((r) => <div key={r.id} style={{ background: "var(--surface2)", borderRadius: 9, padding: "10px 12px", fontSize: 12.5, color: "var(--text)" }}><strong>{pays.find((p) => p.code === r.destination)?.name || r.destination}</strong> · {r.poids} kg · <span style={{ color: "var(--muted)" }}>{r.statut}</span><div style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>{new Date(r.dateCreation).toLocaleDateString("fr-FR")}{r.dateSouhaitee ? ` · départ souhaité le ${new Date(r.dateSouhaitee).toLocaleDateString("fr-FR")}` : ""}</div></div>)}
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 function ClientPreAlerteModal({ preAlertes, onAdd, onRemove, onClose, onVoirGuide }) {
   const [trackingExterne, setTrackingExterne] = useState("");
   const [provenance, setProvenance] = useState("Shein");
@@ -6915,6 +7107,7 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
   const [filtreStatut, setFiltreStatut] = useState("tous");
   const [showProfil, setShowProfil] = useState(false);
   const [showPreAlerte, setShowPreAlerte] = useState(false);
+  const [showReservation, setShowReservation] = useState(false);
   const [showPaiements, setShowPaiements] = useState(false);
   const [notifications, setNotifications] = useState([]);
   const [declarantPour, setDeclarantPour] = useState(null);
@@ -7066,8 +7259,13 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
     const demande = { id: `regr${Date.now()}`, clientAccountId: compte.id, trackings, note, statut: "En attente", dateCreation: new Date().toISOString() };
     persist({ ...data, demandesRegroupement: [demande, ...(data.demandesRegroupement || [])] });
   }
+  function demanderReservationAerienne(champs) {
+    const demande = { id: `resa${Date.now()}`, clientAccountId: compte.id, mode: "aerien", ...champs, statut: "En attente", dateCreation: new Date().toISOString() };
+    persist({ ...data, demandesReservation: [demande, ...(data.demandesReservation || [])] });
+  }
 
   const mesPreAlertesEnAttenteCount = compte ? (data.preAlertes || []).filter((p) => p.clientAccountId === compte.id && p.statut === "En attente").length : 0;
+  const mesReservations = compte ? (data.demandesReservation || []).filter((r) => r.clientAccountId === compte.id) : [];
   const statsClient = {
     total: mesColis.length,
     enAttente: mesPreAlertesEnAttenteCount,
@@ -7097,7 +7295,7 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
 
   if (!compte) {
     return (
-      <div dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", flexDirection: "column", alignItems: "center", padding: "60px 16px" }}>
+      <div className="bde-client-login" dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "var(--bg)", display: "flex", flexDirection: "column", alignItems: "center", padding: "60px 16px" }}>
         <div style={{ width: "100%", maxWidth: 420, display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
           <ClientLangSwitch lang={lang} onChange={setLang} />
         </div>
@@ -7134,12 +7332,13 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
   }
 
   return (
-    <div dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "var(--bg)" }}>
-      <div style={{ maxWidth: 900, margin: "0 auto", padding: "32px 20px 60px" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexWrap: "wrap", gap: 10 }}>
+      <div className="bde-client-portal" dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "var(--bg)" }}>
+        <div className="bde-client-content" style={{ maxWidth: 900, margin: "0 auto", padding: "32px 20px 60px" }}>
+          <div className="bde-client-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexWrap: "wrap", gap: 10 }}>
           <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 22, color: "var(--text)" }}>{T("Espace Client")}</div>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <div className="bde-client-actions" style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button onClick={() => setShowGuide(true)} style={{ background: "var(--brand-solid)", border: "none", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "#fff", fontWeight: 700, cursor: "pointer" }}>{T("Comment commander")}</button>
+            <button onClick={() => setShowReservation(true)} style={{ background: "var(--brand-solid)", border: "1px solid var(--brand-solid)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "#fff", fontWeight: 700, cursor: "pointer" }}>Réserver un envoi aérien</button>
             <button onClick={() => setShowPreAlerte(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Pré-alerte colis")}</button>
             <button onClick={() => setShowVerif(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Vérifier une référence")}</button>
             <button onClick={() => {
@@ -7200,6 +7399,7 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
         )}
 
         {showProfil && <ClientProfilModal compte={compte} onSave={majProfil} onClose={() => setShowProfil(false)} />}
+        {showReservation && <ReservationAerienneModal reservations={mesReservations} onSubmit={(champs) => { demanderReservationAerienne(champs); setShowReservation(false); }} onClose={() => setShowReservation(false)} />}
         {showPreAlerte && <ClientPreAlerteModal preAlertes={mesPreAlertes} onAdd={ajouterPreAlerte} onRemove={retirerPreAlerte} onClose={() => setShowPreAlerte(false)} onVoirGuide={() => { setShowPreAlerte(false); setShowGuide(true); }} />}
         {showPaiements && <ClientPaiementsModal colisListe={mesColis} onClose={() => setShowPaiements(false)} devise={deviseClient} onDeclarer={(c) => { setShowPaiements(false); setDeclarantPour(c); }} />}
         {declarantPour && <DeclarationPaiementModal colis={declarantPour} onDeclarer={(m, d, mo, r) => { declarerPaiement(declarantPour, m, d, mo, r); setDeclarantPour(null); }} onClose={() => setDeclarantPour(null)} />}
@@ -7465,25 +7665,32 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
   const prochainDepart = selectedPays ? departsAVenir(data.departs, selectedPays)[0] : null;
 
   return (
-    <div dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "var(--bg)" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "20px 24px", maxWidth: 1100, margin: "0 auto" }}>
+    <div className="bde-home-page" dir={lang === "ar" ? "rtl" : "ltr"} style={{ minHeight: "100vh", background: "var(--bg)" }}>
+      <header className="bde-public-header" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 20, padding: "18px 24px", maxWidth: 1100, margin: "0 auto", position: "sticky", top: 0, zIndex: 10, background: "color-mix(in srgb, var(--bg) 92%, transparent)", backdropFilter: "blur(14px)", borderBottom: "1px solid color-mix(in srgb, var(--border) 55%, transparent)" }}>
         <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 19, color: "var(--text)" }}>
           <img src={data.branding?.logo || DEFAULT_LOGO} alt="logo" style={{ width: 26, height: 26, borderRadius: 6, objectFit: "cover", verticalAlign: "middle", marginInlineEnd: 8 }} />
           {nomPublic.split(" ")[0]} <span style={{ color: "var(--danger-fg)" }}>{nomPublic.split(" ").slice(1).join(" ")}</span>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <nav className="bde-public-nav" aria-label="Navigation principale" style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <a href="#services" style={{ color: "var(--muted)", textDecoration: "none", fontSize: 13, fontWeight: 600, padding: "8px 10px" }}>Nos services</a>
+          <a href="#destinations" style={{ color: "var(--muted)", textDecoration: "none", fontSize: 13, fontWeight: 600, padding: "8px 10px" }}>Destinations</a>
+          <a href="#contact" style={{ color: "var(--muted)", textDecoration: "none", fontSize: 13, fontWeight: 600, padding: "8px 10px" }}>Contact</a>
           <button onClick={() => {
             const url = new URL(window.location.href);
             url.search = ""; url.searchParams.set("client", "1");
             window.location.href = url.toString();
-          }} style={{ background: "none", border: "none", fontSize: 13, fontWeight: 600, color: "var(--text)", cursor: "pointer" }}>Espace Client</button>
-          <button onClick={onConnexionClick} style={{ background: "var(--surface)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "9px 18px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Se connecter</button>
-        </div>
-      </div>
+          }} style={{ background: "none", border: "none", fontSize: 13, fontWeight: 600, color: "var(--text)", cursor: "pointer", padding: "8px 10px" }}>Espace Client</button>
+          <button onClick={onConnexionClick} style={{ background: "var(--brand-solid)", border: "1.5px solid var(--brand-solid)", color: "#fff", borderRadius: 9, padding: "9px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", boxShadow: "0 8px 20px rgba(200,16,46,0.18)" }}>Se connecter</button>
+        </nav>
+      </header>
 
-      <div style={{ maxWidth: 720, margin: "40px auto 0", padding: "0 24px", textAlign: "center" }}>
-        <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: "clamp(26px, 5vw, 40px)", color: "var(--text)", margin: "0 0 12px", lineHeight: 1.2 }}>{tagline}</h1>
-        <p style={{ fontSize: 15, color: "var(--muted)", marginBottom: 32 }}>Transport de colis rapide et fiable entre la Guinée et {destinations.length} destinations dans le monde.</p>
+      <div className="bde-home-hero" style={{ maxWidth: 1040, margin: "56px auto 0", padding: "0 24px", textAlign: "start" }}>
+        <div className="bde-hero-copy">
+          <div className="bde-hero-kicker">EXPÉDITION INTERNATIONALE</div>
+          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: "clamp(30px, 5vw, 48px)", color: "var(--text)", margin: "0 0 14px", lineHeight: 1.1, letterSpacing: "-0.035em" }}>{tagline}</h1>
+          <p style={{ fontSize: 16, color: "var(--muted)", margin: 0, maxWidth: 510, lineHeight: 1.6 }}>Transport de colis rapide et fiable entre la Guinée et {destinations.length} destinations dans le monde.</p>
+        </div>
+        <div className="bde-hero-actions">
 
         {/*
           * L'ANNONCE EN COURS, EN HAUT ET SANS RIEN CLIQUER.
@@ -7494,7 +7701,7 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
           * s'affiche donc avant tout le reste, et disparaît d'elle-même à sa date.
           */}
         {annonceEnCours(data.annoncePublique) && (
-          <div style={{ maxWidth: 560, margin: "0 auto 32px", background: "var(--surface)", border: "1.5px solid var(--brand-solid)", borderRadius: 14, padding: "18px 20px", textAlign: "start" }}>
+          <div className="bde-announcement" style={{ maxWidth: 560, margin: "0 auto 32px", background: "var(--surface)", border: "1.5px solid var(--brand-solid)", borderRadius: 14, padding: "18px 20px", textAlign: "start" }}>
             <div style={{ fontSize: 11.5, fontWeight: 700, letterSpacing: 0.6, textTransform: "uppercase", color: "var(--brand-solid)", marginBottom: 7 }}>
               {data.annoncePublique.titre}
             </div>
@@ -7508,19 +7715,33 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
         )}
 
         {trackingActif && (
-          <form onSubmit={suivre} style={{ display: "flex", gap: 8, maxWidth: 460, margin: "0 auto 40px", flexWrap: "wrap", justifyContent: "center" }}>
+          <form className="bde-tracking-form" onSubmit={suivre} style={{ display: "flex", gap: 8, maxWidth: 460, margin: "0 0 40px", flexWrap: "wrap", justifyContent: "center" }}>
             <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="Entrez votre numéro de suivi (ex : BDE123456)" style={{ ...inputStyle, flex: 1, minWidth: 220, fontSize: 14.5, padding: "13px 16px" }} />
             <button type="submit" style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "0 22px", fontWeight: 700, fontSize: 14, cursor: "pointer" }}>Suivre mon colis</button>
           </form>
         )}
+        </div>
       </div>
 
-      <div style={{ maxWidth: 1000, margin: "0 auto", padding: "0 24px 60px" }}>
-        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", letterSpacing: 0.5, textAlign: "center", marginBottom: 6 }}>NOS DESTINATIONS</div>
+      <main className="bde-home-main" style={{ maxWidth: 1000, margin: "0 auto", padding: "0 24px 60px" }}>
+        <section id="services" className="bde-feature-grid" aria-labelledby="services-title" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 14, margin: "12px 0 56px" }}>
+          {[{ icon: Truck, title: "Transport fiable", text: "Des départs organisés entre la Guinée et vos destinations." }, { icon: Search, title: "Suivi en ligne", text: "Consultez l’avancement de votre colis avec votre numéro." }, { icon: Receipt, title: "Tarifs transparents", text: "Une prise en charge claire, avec des informations utiles à chaque étape." }].map(({ icon: Icon, title, text }) => (
+            <article key={title} className="bde-feature-card" style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16, padding: "20px 18px", textAlign: "start", boxShadow: "0 10px 30px rgba(10,38,71,0.06)" }}>
+              <div style={{ width: 40, height: 40, display: "grid", placeItems: "center", borderRadius: 11, background: "var(--ok-bg-soft)", color: "var(--brand-solid)", marginBottom: 12 }}><Icon size={20} /></div>
+              <h2 id={title === "Transport fiable" ? "services-title" : undefined} style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 16, margin: "0 0 7px", color: "var(--text)" }}>{title}</h2>
+              <p style={{ fontSize: 13, lineHeight: 1.55, color: "var(--muted)", margin: 0 }}>{text}</p>
+            </article>
+          ))}
+        </section>
+
+        <section id="destinations" aria-labelledby="destinations-title">
+        <div className="bde-destinations-heading">
+        <div id="destinations-title" style={{ fontSize: 12, fontWeight: 700, color: "var(--muted)", letterSpacing: 0.5, textAlign: "center", marginBottom: 6 }}>NOS DESTINATIONS</div>
         <div style={{ fontSize: 11.5, color: "var(--muted)", textAlign: "center", marginBottom: 24 }}>Cliquez sur un pays pour voir le prochain départ</div>
+        </div>
 
         {isMobile ? (
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12 }}>
+          <div className="bde-destinations-grid" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 12 }}>
             {destinations.map((c) => (
               <button key={c.code} onClick={() => setSelectedPays(c.code)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "16px 14px", textAlign: "center", cursor: "pointer" }}>
                 <div style={{ fontSize: 26, marginBottom: 6 }}>{FLAGS[c.code]}</div>
@@ -7552,7 +7773,19 @@ function SiteVitrineHomePage({ data, onConnexionClick }) {
             })}
           </div>
         )}
-      </div>
+        </section>
+
+        <section id="contact" className="bde-home-contact" aria-labelledby="contact-title" style={{ marginTop: 12, background: "linear-gradient(135deg, var(--surface) 0%, var(--surface2) 100%)", border: "1px solid var(--border)", borderRadius: 18, padding: "26px 22px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 18, flexWrap: "wrap" }}>
+          <div>
+            <h2 id="contact-title" style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 19, color: "var(--text)", margin: "0 0 7px" }}>Besoin d’aide pour votre envoi ?</h2>
+            <p style={{ margin: 0, fontSize: 13.5, lineHeight: 1.55, color: "var(--muted)", maxWidth: 560 }}>Retrouvez vos colis dans l’espace client ou contactez l’agence avec votre numéro de suivi.</p>
+          </div>
+          <div style={{ display: "flex", gap: 9, flexWrap: "wrap" }}>
+            <button onClick={() => { const url = new URL(window.location.href); url.search = ""; url.searchParams.set("client", "1"); window.location.href = url.toString(); }} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Ouvrir mon espace</button>
+            {data.entreprise?.email && <a href={`mailto:${data.entreprise.email}`} style={{ display: "inline-flex", alignItems: "center", background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 15px", fontSize: 13, fontWeight: 700, textDecoration: "none" }}>Écrire à l’agence</a>}
+          </div>
+        </section>
+      </main>
 
       {selectedCountry && (
         <Modal onClose={() => setSelectedPays(null)} title={`${FLAGS[selectedCountry.code]} ${selectedCountry.name}`}>
@@ -12588,6 +12821,7 @@ function CentreClientsPage({ data, persist, notify, session }) {
     return new Date(derB) - new Date(derA);
   });
   const demandes = (data.demandesRegroupement || []).sort((a, b) => new Date(b.dateCreation) - new Date(a.dateCreation));
+  const reservations = (data.demandesReservation || []).slice().sort((a, b) => new Date(b.dateCreation) - new Date(a.dateCreation));
   const clientsById = Object.fromEntries(clients.map((c) => [c.id, c]));
   const preAlertes = data.preAlertes || [];
   const signalementsOuverts = data.colis.flatMap((c) => (c.signalements || []).filter((s) => s.statut === "Ouvert").map((s) => ({ ...s, colis: c })))
@@ -12642,6 +12876,7 @@ function CentreClientsPage({ data, persist, notify, session }) {
 
   const messagesNonLus = clients.filter((c) => (c.messages || []).some((m) => m.expediteur === "client" && !m.lu)).length;
   const regroupementsEnAttente = demandes.filter((d) => d.statut === "En attente").length;
+  const reservationsEnAttente = reservations.filter((r) => r.statut === "En attente").length;
   const preAlertesEnAttente = preAlertes.filter((p) => p.statut === "En attente").length;
   const expressEnAttente = demandesExpress.length;
 
@@ -12660,6 +12895,11 @@ function CentreClientsPage({ data, persist, notify, session }) {
       persist({ ...data, clientAccounts: clients.map((c) => (c.id === client.id ? updated : c)) });
     }
   }
+  function majReservation(id, statut) {
+    persist({ ...data, demandesReservation: reservations.map((r) => (r.id === id ? { ...r, statut, dateMaj: new Date().toISOString(), traitePar: `${session.prenom} ${session.nom}`.trim() || session.identifiant } : r)), activityLog: pushActivity(data, session, `Réservation aérienne ${statut.toLowerCase()}`, id) });
+    notify?.(statut === "Acceptée" ? "Réservation aérienne acceptée" : "Réservation aérienne refusée");
+  }
+
   function majDemande(id, statut) {
     const demande = demandes.find((d) => d.id === id);
     if (statut === "Acceptée" && demande) {
@@ -12761,6 +13001,7 @@ function CentreClientsPage({ data, persist, notify, session }) {
     ["messages", "Messages", messagesNonLus],
     ["prealertes", "Pré-alertes", preAlertesEnAttente],
     ["regroupements", "Regroupements", regroupementsEnAttente],
+    ["reservations", "Réservations aériennes", reservationsEnAttente],
     ["signalements", "Signalements", signalementsOuverts.length],
     ["express", "Livraison express", expressEnAttente],
     ["comptes", "Comptes inscrits", (data.clientAccounts || []).length],
@@ -12794,6 +13035,19 @@ function CentreClientsPage({ data, persist, notify, session }) {
 
       {ongletActif === "campagnes" && effectivePermission(session, "clients.campagnes") && (
         <CampagnesPage data={data} persist={persist} session={session} notify={notify} />
+      )}
+
+      {ongletActif === "reservations" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {reservations.length === 0 ? <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>Aucune demande de réservation aérienne.</div> : reservations.map((r) => {
+            const client = clientsById[r.clientAccountId];
+            const destination = COUNTRIES.find((p) => p.code === r.destination);
+            return <div key={r.id} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+              <div style={{ minWidth: 220 }}><div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{destination?.name || r.destination} · {r.poids} kg · aérien</div><div style={{ fontSize: 12, color: "var(--muted)", marginTop: 4 }}>{client ? `${client.prenom} ${client.nom}` : "Client supprimé"}{client?.telephone ? ` · ${client.telephone}` : ""}{r.dateSouhaitee ? ` · départ souhaité le ${new Date(r.dateSouhaitee).toLocaleDateString("fr-FR")}` : ""}</div><div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3 }}>{r.description || "Aucune description"} · reçue le {new Date(r.dateCreation).toLocaleDateString("fr-FR")}</div></div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>{r.statut !== "En attente" && <span style={{ color: r.statut === "Acceptée" ? "var(--ok-fg)" : "var(--danger-fg)", fontSize: 12.5, fontWeight: 700 }}>{r.statut}</span>}{r.statut === "En attente" && <><button onClick={() => majReservation(r.id, "Acceptée")} style={{ background: "var(--ok-fg)", color: "#fff", border: "none", borderRadius: 8, padding: "8px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Accepter</button><button onClick={() => majReservation(r.id, "Refusée")} style={{ background: "none", color: "var(--danger-fg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "8px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>Refuser</button></>}</div>
+            </div>;
+          })}
+        </div>
       )}
 
       {ongletActif === "comptes" && (
@@ -13205,8 +13459,8 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
   const baseList = useMemo(() => {
     return data.colis
       .filter((c) => (isChauffeur ? c.status === "Disponible au retrait" : true))
-      .filter((c) => colisDeLAgence(c, session.agence));
-  }, [data.colis, isChauffeur, session.agence]);
+      .filter((c) => colisDeLAgence(c, session.zoneOperation || session.agence));
+  }, [data.colis, isChauffeur, session.zoneOperation, session.agence]);
   const [statutFiltre, setStatutFiltre] = useState(null);
   const list = useMemo(() => {
     const q = pourRecherche(deferredQuery);
@@ -14215,7 +14469,7 @@ function BordereauCreation({ data, session, onCancel, onCreate }) {
   const country = COUNTRIES.find((c) => c.code === pays);
 
   const dejaInclus = new Set((data.bordereaux || []).filter((b) => normalizeBordereauStatut(b.statut) !== "Livré").flatMap((b) => b.colisTrackings));
-  const eligibles = data.colis.filter((c) => c.pays === pays && (c.direction || "export") === direction && c.status !== "Livré" && c.status !== "Annulé" && !dejaInclus.has(c.tracking) && colisDeLAgence(c, session?.agence));
+  const eligibles = data.colis.filter((c) => c.pays === pays && (c.direction || "export") === direction && c.status !== "Livré" && c.status !== "Annulé" && !dejaInclus.has(c.tracking) && colisDeLAgence(c, session?.zoneOperation || session?.agence));
 
   function toggle(tracking) {
     setSelectedTrackings((list) => (list.includes(tracking) ? list.filter((t) => t !== tracking) : [...list, tracking]));
@@ -14427,7 +14681,10 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
 
   async function telechargerPdf() {
     setGenPdf(true);
-    try { await downloadRouteManifest(colisInclus, country, bordereau.direction, bordereau, devise); }
+    try {
+      const depensesLiees = (data.depenses || []).filter((d) => d.bordereauId === bordereau.id || d.bordereauNumero === bordereau.numero || String(d.nom || "").endsWith(`(${bordereau.numero})`));
+      await downloadRouteManifest(colisInclus, country, bordereau.direction, bordereau, devise, depensesLiees);
+    }
     catch (e) { console.error(e); notify?.("Échec de génération du PDF"); }
     setGenPdf(false);
   }
@@ -14441,7 +14698,7 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
     // Même règle qu'en comptabilité : un montant illisible arrête la saisie, il ne devient pas zéro.
     const montantDepense = montantSaisi(depenseForm?.montant);
     if (montantDepense === null || montantDepense <= 0) { setDepenseForm({ ...depenseForm, erreur: "Montant illisible. Tapez le nombre, par exemple 500 000." }); return; }
-    const entry = { id: `dep${Date.now()}`, type: "Dépense", nom: `${depenseForm.nom} (${bordereau.numero})`, montant: Math.round(montantDepense), date: new Date().toISOString() };
+    const entry = { id: `dep${Date.now()}`, type: "Dépense", nom: depenseForm.nom.trim(), bordereauId: bordereau.id, bordereauNumero: bordereau.numero, montant: Math.round(montantDepense), devise: "GNF", date: new Date().toISOString() };
     persist({ ...data, depenses: [entry, ...(data.depenses || [])], activityLog: pushActivity(data, session, "Dépense liée à un bordereau", `${bordereau.numero} — ${entry.nom}`) });
     notify?.("Dépense ajoutée");
     setDepenseForm(null);
@@ -14884,7 +15141,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
    * sitesLocaux) — un enregistrement fait depuis un autre pays n'a pas d'agence à choisir, il n'y
    * a que le pays d'opération (déjà déterminé par le pays expéditeur, verrouillé plus haut).
    */
-  const agenceImposee = session?.agence || "";
+  const agenceImposee = session?.zoneOperation || session?.agence || "";
   const siteLocalParDefaut = sitesLocaux(sites)[0];
   const [agence, setAgence] = useState(() => {
     if (agenceImposee) return agenceImposee;
@@ -15837,7 +16094,7 @@ async function downloadReceptionBordereau(compte, colisSelectionnes, tarifs) {
   openPdf(doc, `bordereau-reception-${compte.nom}-${numero}.pdf`);
 }
 
-async function downloadRouteManifest(colisRoute, country, direction, bordereau, deviseAffichage) {
+async function downloadRouteManifest(colisRoute, country, direction, bordereau, deviseAffichage, depensesLiees = []) {
   const cur = deviseAffichage || country.currency;
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF());
@@ -16009,6 +16266,8 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   const totalFacture = colisRoute.reduce((s, c) => s + c.prix, 0);
   const totalEncaisse = colisRoute.reduce((s, c) => s + c.paye, 0);
   const totalRestant = colisRoute.reduce((s, c) => s + c.reste, 0);
+  const depensesPropres = (depensesLiees || []).filter((d) => Number(d.montant) > 0);
+  const totalDepenses = depensesPropres.reduce((s, d) => s + (Number(d.montant) || 0), 0);
   doc.setFillColor(245, 247, 251); doc.rect(14, finalY + 5, 182, 12, "F");
   doc.setFontSize(9); doc.setFont(undefined, "bold"); doc.setTextColor(10, 38, 71);
   // Le reste à percevoir est calé sur le bord droit du panneau : en francs guinéens, la ligne est
@@ -16019,7 +16278,29 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   doc.setTextColor(226, 63, 82);
   doc.text(`Reste à percevoir : ${fmt(totalRestant, cur)}`, 192, finalY + 12.5, { align: "right" });
 
-  const sigY = finalY + 30;
+  finalY += 24;
+  if (depensesPropres.length > 0) {
+    if (finalY > 252) { doc.addPage(); finalY = 20; }
+    doc.setFillColor(10, 38, 71); doc.roundedRect(14, finalY, 182, 8, 2, 2, "F");
+    doc.setFont(undefined, "bold"); doc.setFontSize(8); doc.setTextColor(255, 255, 255);
+    doc.text("DÉPENSES LIÉES AU BORDEREAU", 18, finalY + 5.3);
+    finalY += 11;
+    doc.setFont(undefined, "normal"); doc.setFontSize(8); doc.setTextColor(30, 40, 55);
+    depensesPropres.forEach((d, i) => {
+      if (finalY > 276) { doc.addPage(); finalY = 20; }
+      if (i % 2 === 0) { doc.setFillColor(245, 247, 251); doc.rect(14, finalY - 3.5, 182, 7, "F"); }
+      doc.text(String(d.nom || "Dépense"), 18, finalY + 1);
+      doc.text(`${fmt(Number(d.montant) || 0, d.devise || "GNF")}`, 192, finalY + 1, { align: "right" });
+      finalY += 7;
+    });
+    doc.setDrawColor(190, 198, 210); doc.line(14, finalY, 196, finalY);
+    doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(214, 39, 63);
+    doc.text("TOTAL DÉPENSES", 18, finalY + 7);
+    doc.text(fmt(totalDepenses, "GNF"), 192, finalY + 7, { align: "right" });
+    finalY += 14;
+  }
+
+  const sigY = finalY + 16;
   doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(90, 100, 120);
   doc.text("Signature de l’agent :", 14, sigY);
   doc.setDrawColor(180); doc.line(14, sigY + 14, 85, sigY + 14);
@@ -18160,8 +18441,10 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
    * pesées. Deux champs pour une même grandeur, c'est un jour où ils se contredisent, et le prix
    * qui suit celui que le client ne voit pas.
    */
-  const poidsEnLigne = +produits.reduce((somme, p) => somme + (Number(p.poids) || 0), 0).toFixed(2);
-  const poidsRetenu = enLigne ? poidsEnLigne : (montantSaisi(poids) ?? 0);
+  const poidsProduits = +produits.reduce((somme, p) => somme + (Number(p.poids) || 0), 0).toFixed(2);
+  // Dès qu’un colis est détaillé article par article, le poids total doit suivre les lignes.
+  // L’ancien code recalculait le prix depuis les articles mais conservait le champ poids historique.
+  const poidsRetenu = produits.length > 0 ? poidsProduits : (montantSaisi(poids) ?? 0);
   const baremeEnLigne = enLigne ? tarifAchatEnLigne(poidsRetenu, tarifsReception) : null;
   /* Le scan d’étiquette, comme au comptoir : il propose, l’agent pèse et confirme. */
   const [scan, setScan] = useState(false);
@@ -18265,7 +18548,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
    * l'appliquer une seconde fois ferait dire à la correction un autre prix que la facture remise
    * au client le jour de l'enregistrement.
    */
-  const discountVolume = enLigne ? 0 : remiseVolumePourcent(poids, remiseVolumeConfig);
+  const discountVolume = enLigne ? 0 : remiseVolumePourcent(poidsRetenu, remiseVolumeConfig);
   const prixApresFidelite = +(prixBrut * (1 - discountLoyalty / 100) * (1 - discountVolume / 100)).toFixed(2);
   const rabaisEUR = +((Number(rabaisMontant) || 0) / (LIVE_RATES[rabaisDevise] || CURRENCIES[rabaisDevise] || 1)).toFixed(2);
   const prix = Math.max(+(prixApresFidelite - rabaisEUR).toFixed(2), 0);
@@ -18602,7 +18885,8 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
             <div style={{ gridColumn: "1 / -1", fontSize: 13, fontWeight: 700, color: "var(--text)" }}>
               {enLigne ? "Articles de la commande" : "Poids & contenu"}
             </div>
-            {!enLigne && <Field label="Poids (kg)"><input value={poids} onChange={(e) => setPoids(e.target.value)} style={inputStyle} inputMode="decimal" /></Field>}
+            {!enLigne && produits.length === 0 && <Field label="Poids (kg)"><input value={poids} onChange={(e) => setPoids(e.target.value)} style={inputStyle} inputMode="decimal" /></Field>}
+            {!enLigne && produits.length > 0 && <div style={{ gridColumn: "1 / -1", background: "var(--info-bg-alt)", border: "1px solid var(--info-border)", borderRadius: 10, padding: "10px 13px", fontSize: 12.5, color: "var(--info-fg)" }}>Poids total calculé automatiquement depuis les articles : <strong>{poidsRetenu.toFixed(2)} kg</strong></div>}
             <div style={{ gridColumn: "1 / -1" }} />
             {/*
               * LE COMPTOIR, TEL QU'IL A SERVI À SAISIR LE COLIS.
@@ -28489,22 +28773,31 @@ async function construireFacturePartenaireDoc(facture, partenaire, colisFactures
 
   doc.setFont(undefined, "normal"); doc.setFontSize(9);
   colisFactures.forEach((c, i) => {
-    if (y > 262) { doc.addPage(); y = 24; }
-    if (i % 2 === 1) { doc.setFillColor(247, 249, 252); doc.rect(M, y, W - 2 * M, 8, "F"); }
-    doc.setTextColor(...INK);
-    doc.text(String(c.tracking || "—"), colX[0], y + 5.4);
-    doc.text(doc.splitTextToSize(clientDuColisPartenaire(c), 56)[0], colX[1], y + 5.4);
+    // La colonne Contenu s'arrête avant le Poids : l'ancienne largeur de 60 mm empiétait sur
+    // « 8 kg » dès qu'un article avait un libellé un peu long.
+    const largeurClient = colX[2] - colX[1] - 5;
+    const largeurContenu = colX[3] - colX[2] - 5;
+    const clientLignes = doc.splitTextToSize(clientDuColisPartenaire(c), largeurClient);
     // Le timbre refacturé apparaît sur la ligne : le partenaire doit pouvoir vérifier qu'il paie
     // un envoi postal, et non une majoration de transport inexpliquée.
     const contenu = ((c.produits || []).map((p) => `${p.quantite || 1}× ${p.nom || "article"}`).join(", ") || "—")
       + (Number(c.fraisPostePartenaire) > 0 ? ` + poste ${fmt(Number(c.fraisPostePartenaire), facture.devise)}` : "");
+    const contenuLignes = doc.splitTextToSize(contenu, largeurContenu);
+    const hauteurLigne = Math.max(8, Math.max(clientLignes.length, contenuLignes.length) * 4.2 + 3);
+    if (y + hauteurLigne > 262) { doc.addPage(); y = 24; }
+    if (i % 2 === 1) { doc.setFillColor(247, 249, 252); doc.rect(M, y, W - 2 * M, hauteurLigne, "F"); }
+    doc.setFont(undefined, "normal"); doc.setTextColor(...INK);
+    doc.text(String(c.tracking || "—"), colX[0], y + 5.4);
+    doc.text(clientLignes, colX[1], y + 5.2);
     doc.setTextColor(...MUTED);
-    doc.text(doc.splitTextToSize(contenu, 60)[0], colX[2], y + 5.4);
-    doc.text(`${Number(c.poids) || 0} kg`, colX[3], y + 5.4, { align: "right" });
+    doc.text(contenuLignes, colX[2], y + 5.2);
+    const ligneCentre = y + hauteurLigne / 2 + 1.5;
+    doc.setTextColor(...MUTED);
+    doc.text(`${Number(c.poids) || 0} kg`, colX[3], ligneCentre, { align: "right" });
     doc.setTextColor(...INK); doc.setFont(undefined, "bold");
-    doc.text(fmt(Number(c.prixPartenaire) || 0, facture.devise), colX[4], y + 5.4, { align: "right" });
+    doc.text(fmt(Number(c.prixPartenaire) || 0, facture.devise), colX[4], ligneCentre, { align: "right" });
     doc.setFont(undefined, "normal");
-    y += 8;
+    y += hauteurLigne;
   });
 
   if (y > 250) { doc.addPage(); y = 24; }
@@ -30672,7 +30965,7 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
   const [telephone, setTelephone] = useState(user.telephone || "");
   const [role, setRole] = useState(user.role);
   const [paysOperation, setPaysOperation] = useState(user.paysOperation || "GN");
-  const [agence, setAgence] = useState(user.agence || "");
+  const [agence, setAgence] = useState(user.zoneOperation || user.agence || "");
   const [paysAutorises, setPaysAutorises] = useState(user.paysAutorises || COUNTRIES.filter((c) => c.code !== "GN").map((c) => c.code));
   const [permissionsOverride, setPermissionsOverride] = useState(user.permissionsOverride || {});
   const isAdmin = role === "Administrateur";
@@ -30733,6 +31026,7 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
       ...(peutChangerIdentifiant && vise ? { identifiant: vise } : {}),
       prenom, nom, email, telephone, role, paysOperation,
       agence: role === "Administrateur" || role === "Comptable" ? "" : agence,
+      zoneOperation: role === "Administrateur" || role === "Comptable" ? "" : agence,
       paysAutorises: isAdmin ? [] : paysAutorises,
       permissionsOverride: isAdmin ? {} : permissionsOverride,
     });
@@ -30820,8 +31114,8 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
               </div>
             </Field>
           )}
-          {(role === "Agent" || role === "Chauffeur") && (
-            <Field label="Agence assignée">
+          {(role === "Agent" || role === "Responsable de zone" || role === "Chauffeur") && (
+            <Field label={role === "Responsable de zone" ? "Zone opérationnelle assignée" : "Agence / zone assignée"}>
               <select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>
                 <option value="">Toutes les agences (aucune restriction)</option>
                 {sitesPourPays(sites, paysOperation).map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}
@@ -30963,7 +31257,7 @@ function UserForm({ onClose, onSave, existing, sites }) {
       prenom: estPartenaire ? "" : prenom,
       nom: estPartenaire ? nomEntreprise.trim() : nom,
       email: email.trim(), telephone, identifiant: identifiant.trim(), ...identifiants, role, paysOperation,
-      agence: role === "Administrateur" || role === "Comptable" ? "" : agence, twoFA,
+      agence: role === "Administrateur" || role === "Comptable" ? "" : agence, zoneOperation: role === "Administrateur" || role === "Comptable" ? "" : agence, twoFA,
       paysAutorises: role === "Administrateur" ? [] : paysAutorises,
       // Le contrat s'ouvre ensuite déjà rempli de ce que l'administrateur vient de saisir.
       ...(estPartenaire ? { partenaire: { nomCommercial: nomEntreprise.trim(), telephone, email: email.trim() } } : {}),
@@ -31018,9 +31312,9 @@ function UserForm({ onClose, onSave, existing, sites }) {
             <div style={{ fontSize: 11, color: "var(--muted)", marginTop: -8, marginBottom: 10 }}>Pays où travaille cette personne — son point expéditeur. Détermine l’agence proposée et les destinations autorisées par défaut.</div>
           </div>
         )}
-        {(role === "Agent" || role === "Chauffeur") && (
+        {(role === "Agent" || role === "Responsable de zone" || role === "Chauffeur") && (
           <div style={{ gridColumn: "1 / -1" }}>
-            <Field label="Agence assignée">
+            <Field label={role === "Responsable de zone" ? "Zone opérationnelle assignée" : "Agence / zone assignée"}>
               <select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>
                 <option value="">Toutes les agences (aucune restriction)</option>
                 {sitesPourPays(sites, paysOperation).map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}
@@ -31125,8 +31419,9 @@ function Modal({ title, children, onClose, wide, niveau = 0, saisieEnCours = fal
   return (
     <div
       onMouseDown={(e) => { if (e.target === e.currentTarget) demanderFermeture(); }}
+      className="bde-modal-backdrop"
       style={{ position: "fixed", inset: 0, background: "rgba(4,7,14,0.65)", display: "grid", placeItems: "center", zIndex: 50 + niveau * 10, padding: 12 }} onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 14, padding: 20, width: wide ? "min(94vw, 620px)" : "min(94vw, 420px)", maxHeight: "90vh", overflowY: "auto", boxShadow: "0 24px 60px rgba(0,0,0,0.5)" }}>
+      <div className="bde-modal-card" onClick={(e) => e.stopPropagation()} style={{ background: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 14, padding: 20, width: wide ? "min(94vw, 620px)" : "min(94vw, 420px)", maxHeight: "90vh", overflowY: "auto", boxShadow: "0 24px 60px rgba(0,0,0,0.5)" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
           <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 17, color: TEXT }}>{title}</div>
           <button onClick={demanderFermeture} style={{ background: SURFACE2, border: "none", borderRadius: 8, width: 28, height: 28, cursor: "pointer", display: "grid", placeItems: "center", flexShrink: 0 }}><X size={15} color={MUTED} /></button>

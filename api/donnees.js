@@ -35,7 +35,7 @@ import { sessionDeLaRequete, empreinteDuCompte } from "./_session.js";
 import {
   vueClient, fusionnerEcritureClient,
   vuePartenaire, fusionnerEcriturePartenaire, partenaireDuCompte,
-  fusionnerEcritureEquipe, collectionsQuiFondent, intentionDeRemplacement,
+  fusionnerEcritureEquipe, vueEquipeZone, collectionsQuiFondent, intentionDeRemplacement,
 } from "./_cloisonnement.js";
 import { envoyerAlerteEcrasement } from "./_alerte.js";
 
@@ -219,7 +219,7 @@ export default async function handler(req, res) {
       }
       const valeurLue = estClient ? vueClient(ligne.value, compteId)
         : estPartenaire ? vuePartenaire(ligne.value, partenaireDuCompte(ligne.value, compteId))
-          : ligne.value;
+          : vueEquipeZone(ligne.value, compteId);
       return res.status(200).json({ value: valeurLue, updated_at: ligne.updated_at || null });
     }
 

@@ -1775,6 +1775,39 @@ function peutCreerColisEnLigne(session, data) {
   return sitesOperationEtranger(data).some((s) => String(s.nom || "").trim().toLowerCase() === sienne);
 }
 
+/** Un colis d’achat en ligne — reconnu partout de la même façon. */
+export function estColisEnLigne(colis) {
+  return !!colis?.achatEnLigne || colis?.expediteur === "Commande en ligne";
+}
+
+/**
+ * QUI CORRIGE UN COLIS D'ACHAT EN LIGNE.
+ *
+ * VOIR ET ENCAISSER NE SONT PAS MODIFIER. L'équipe de Conakry voit ces colis, lit leurs
+ * références, les cherche au comptoir, les remet et les encaisse : c'est son métier, et rien
+ * ici ne l'en empêche. Corriger un poids, en revanche, c'est refaire le prix — d'un colis qu'on
+ * n'a jamais eu sur la balance, et après que le client a reçu sa facture. Ce geste reste donc à
+ * l'équipe du site de départ, celle qui a pesé.
+ *
+ * Trois façons d'y avoir droit, et une seule est un réglage :
+ *   — l'administrateur, qui doit pouvoir corriger de n'importe où ;
+ *   — l'équipe du site de départ, à qui le droit vient de son site, sans rien à cocher ;
+ *   — quiconque l'administrateur désigne nommément, par « colis.enligne_modifier ».
+ *
+ * `colis.modifier` reste exigé par-dessus : ce droit-ci ouvre une porte, il n'en perce pas une.
+ */
+export function autorisationModifierColisEnLigne(session, data) {
+  if (!effectivePermission(session, "colis.modifier")) return { autorise: false, motif: "permission" };
+  if (peutCreerColisEnLigne(session, data)) return { autorise: true, motif: null };
+  if (effectivePermission(session, "colis.enligne_modifier")) return { autorise: true, motif: "derogation" };
+  return { autorise: false, motif: "site" };
+}
+
+/** Le nom des sites d’où partent les commandes — pour dire à qui revient la correction. */
+export function nomsSitesDepartEnLigne(data) {
+  return sitesOperationEtranger(data).map((s) => String(s.nom || "").trim()).filter(Boolean);
+}
+
 function tarifAchatEnLigne(poidsTotal, tarifs) {
   const poids = Math.max(Number(poidsTotal) || 0, 0);
   const { tauxParKg, total, palier } = calcReceptionFee(poids, tarifs);
@@ -17076,7 +17109,7 @@ async function downloadInvoice(colis, data, options = {}) {
    * éditée, et deux tirages du même colis n'annonceraient pas le même prix. On facture donc dans la
    * devise du barème, et l'euro s'affiche à côté — les deux références sont là, une seule fait foi.
    */
-  const enLigne = !!colis.achatEnLigne || colis.expediteur === "Commande en ligne";
+  const enLigne = estColisEnLigne(colis);
   const primaryCur = enLigne ? "GNF" : (COUNTRIES.find((c) => c.code === (colis.expediteurPays || "GN"))?.currency || "GNF");
   const secondaryCur = enLigne
     ? (COUNTRIES.find((c) => c.code === (colis.pays || "FR"))?.currency || "EUR")
@@ -17883,7 +17916,7 @@ function EncaisserGroupeModal({ data, session, onEncaisser, onClose }) {
   );
 }
 
-function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeConfig, categories, session, partenaire }) {
+function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeConfig, categories, session, partenaire, modificationAutorisee = true, sitesDepartEnLigne = [] }) {
   /*
    * Modifier un colis partenaire n'est pas modifier un colis ordinaire.
    *
@@ -18020,7 +18053,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
    * pas choisie sur chaque article — et cette catégorie prenait ensuite la main sur le palier :
    * ouvrir la fiche pour corriger un numéro de téléphone changeait le prix du colis.
    */
-  const enLigne = !!colis.achatEnLigne || colis.expediteur === "Commande en ligne";
+  const enLigne = estColisEnLigne(colis);
   /*
    * LE POIDS D'UNE LIGNE EST CELUI DE LA LIGNE, PAS CELUI D'UNE UNITÉ — comme au comptoir. Sur un
    * colis en ligne, le poids total n'est donc pas un champ à part : c'est la somme des lignes
@@ -18030,6 +18063,23 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   const poidsEnLigne = +produits.reduce((somme, p) => somme + (Number(p.poids) || 0), 0).toFixed(2);
   const poidsRetenu = enLigne ? poidsEnLigne : (montantSaisi(poids) ?? 0);
   const baremeEnLigne = enLigne ? tarifAchatEnLigne(poidsRetenu, tarifsReception) : null;
+  /* Le scan d’étiquette, comme au comptoir : il propose, l’agent pèse et confirme. */
+  const [scan, setScan] = useState(false);
+  /*
+   * Ce que le scan a à dire — « ajouté », « figure déjà dans la liste ». En gris sous le bouton :
+   * ce n'est pas une erreur de saisie, et le rouge de `err` ferait chercher un champ fautif.
+   */
+  const [noteScan, setNoteScan] = useState("");
+  /*
+   * La fenêtre de vérification se replie sous 560 px — on corrige souvent depuis un téléphone,
+   * devant le carton. On mesure plutôt que de deviner : les styles sont écrits en ligne.
+   */
+  const [etroitEdition, setEtroitEdition] = useState(() => (typeof window !== "undefined" ? window.innerWidth < 560 : false));
+  useEffect(() => {
+    const mesurer = () => setEtroitEdition(window.innerWidth < 560);
+    window.addEventListener("resize", mesurer);
+    return () => window.removeEventListener("resize", mesurer);
+  }, []);
   /* La boutique commune, quand toutes les lignes viennent du même site — comme au comptoir. */
   const boutiqueCommune = produits.length > 0 && produits.every((p) => p.commande && p.commande === produits[0].commande)
     ? produits[0].commande
@@ -18204,6 +18254,14 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
       const rang = etapesEdition.findIndex((et) => et.key === cle);
       if (rang >= 0) setStep(rang);
     };
+    /*
+     * La règle du site de départ se revérifie ici, et pas seulement sur le bouton : un bouton
+     * qu'on n'affiche pas n'est pas un geste qu'on ne peut pas faire.
+     */
+    if (enLigne && !modificationAutorisee) {
+      setErr(`La correction d’un colis d’achat en ligne revient à ${sitesDepartEnLigne.length ? `l’équipe de ${sitesDepartEnLigne.join(" ou ")}` : "l’équipe du site de départ"} — c’est là qu’il a été pesé. Un administrateur peut vous en donner le droit.`);
+      return;
+    }
     if (!enLigne && !expediteur.trim()) { refus("Indiquez l’expéditeur.", "expediteur"); return; }
     if (!destinataire.trim()) { refus("Indiquez le destinataire — la personne qui réceptionne le colis.", "destinataire"); return; }
     if (!telephone.trim() && !estPartenaire) { refus("Indiquez le téléphone du destinataire.", "destinataire"); return; }
@@ -18496,10 +18554,26 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
                     </div>
                   </div>
                 ))}
-                <button type="button" onClick={() => setProduits((liste) => [...liste, { ...emptyProduit(), reference: "", commande: boutiqueCommune }])}
-                  style={{ width: "100%", border: "1.5px dashed var(--border)", borderRadius: 12, padding: "12px 0", background: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>
-                  + Ajouter un article
-                </button>
+                {/*
+                  * LE SCAN AUSSI, ICI — c'est même ici qu'il sert le plus.
+                  *
+                  * On rouvre une fiche justement parce qu'un article manque ou qu'une référence
+                  * est fausse. Le scanner n'existait qu'au comptoir de création : l'agent devait
+                  * donc recopier à la main, dans l'écran fait pour réparer une référence, les
+                  * vingt caractères qu'il venait de mal lire.
+                  */}
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button type="button" onClick={() => setProduits((liste) => [...liste, { ...emptyProduit(), reference: "", commande: boutiqueCommune }])}
+                    style={{ flex: "1 1 180px", border: "1.5px dashed var(--border)", borderRadius: 12, padding: "12px 0", background: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>
+                    + Ajouter un article
+                  </button>
+                  <button type="button" onClick={() => { setNoteScan(""); setScan(true); }}
+                    style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, flex: "0 1 auto", background: "var(--surface)", border: "1.5px solid var(--border)", borderRadius: 12, padding: "12px 16px", fontSize: 12.5, fontWeight: 700, color: "var(--text)", cursor: "pointer" }}>
+                    <Camera size={14} /> Scanner une étiquette
+                  </button>
+                </div>
+                <AideScanEtiquette />
+                {noteScan && <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6 }}>{noteScan}</div>}
                 <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: "12px 14px", marginTop: 14 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", fontSize: 12.5, color: "var(--text)" }}>
                     <span>Poids constaté — somme des lignes pesées</span>
@@ -18823,6 +18897,29 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
           </div>
         </div>
       </form>
+      {/*
+        * Le scan vit au-dessus du formulaire, pas dedans : c'est une fenêtre, et un formulaire
+        * n'en contient pas. Ce qu'il rapporte entre dans les articles exactement comme au
+        * comptoir — une ligne vide se remplit plutôt qu'une nouvelle ne s'ouvre.
+        */}
+      {scan && (
+        <ScanArticleEnLigne
+          referencesExistantes={produits.map((p) => p.reference)}
+          boutiqueParDefaut={boutiqueCommune}
+          etroit={etroitEdition}
+          notify={setNoteScan}
+          onClose={() => setScan(false)}
+          onAjouter={(ligne) => {
+            setProduits((liste) => {
+              const neuve = { ...emptyProduit(), ...ligne, nom: ligne.commande || ligne.reference || "Article commandé", categorie: "", personnalise: false };
+              const vide = liste.findIndex((p) => !String(p.reference || "").trim() && !Number(p.poids));
+              if (vide >= 0) return liste.map((p, i) => (i === vide ? { ...neuve, id: p.id } : p));
+              return [...liste, neuve];
+            });
+            setErr("");
+          }}
+        />
+      )}
     </Modal>
   );
 }
@@ -19313,7 +19410,34 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
             * qu'il venait lui-même de mal saisir. Un droit affiché et sans effet est pire que pas
             * de droit du tout : personne ne cherche l'erreur là où le réglage dit que c'est bon.
             */}
-          {effectivePermission(session, "colis.modifier") && <button onClick={() => setEditing(true)} style={smallBtn}>Modifier</button>}
+          {/*
+            * UN COLIS D'ACHAT EN LIGNE SE CORRIGE LÀ OÙ IL A ÉTÉ PESÉ.
+            *
+            * Il est visible de toute l'équipe — c'est à Conakry qu'on le remet — et il s'encaisse
+            * ici comme ailleurs : le bouton « Encaisser » ci-dessus n'est pas touché. Mais son
+            * prix ne vient que du poids constaté à Paris. Le rouvrir depuis un autre site, c'est
+            * refaire un montant déjà facturé au client sur la foi d'une balance qu'on n'a pas.
+            *
+            * On ne fait pas disparaître le bouton en silence : on dit à qui la correction revient,
+            * sans quoi l'agente cherche un droit manquant là où il n'y en a pas.
+            */}
+          {(() => {
+            if (!estColisEnLigne(colis)) {
+              return effectivePermission(session, "colis.modifier")
+                ? <button onClick={() => setEditing(true)} style={smallBtn}>Modifier</button>
+                : null;
+            }
+            const droit = autorisationModifierColisEnLigne(session, data);
+            if (droit.autorise) return <button onClick={() => setEditing(true)} style={smallBtn}>Modifier</button>;
+            if (droit.motif !== "site") return null;
+            const depart = nomsSitesDepartEnLigne(data);
+            return (
+              <span style={{ display: "inline-flex", alignItems: "center", background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "9px 12px", fontSize: 11.5, lineHeight: 1.4, maxWidth: 280 }}>
+                Correction réservée à {depart.length ? `l’équipe de ${depart.join(" ou ")}` : "l’équipe du site de départ"} —
+                c’est là que le colis a été pesé. Un administrateur peut vous en donner le droit.
+              </span>
+            );
+          })()}
 
           <div style={{ position: "relative" }}>
             <button ref={docBtnRef} onClick={toggleDocMenu} style={smallBtn}>Ticket d’envoi <ChevronDown size={13} /></button>
@@ -19526,6 +19650,19 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
               <div key={p.id || idx} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "9px 0", borderTop: idx === 0 ? "none" : "1px solid var(--border)" }}>
                 <div>
                   <div style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>{p.nom || "—"}</div>
+                  {/*
+                    * LA RÉFÉRENCE DE COMMANDE SE LIT ICI, ET C'EST AU COMPTOIR QU'ELLE SERT.
+                    *
+                    * Sur un achat en ligne, c'est elle qui relie le carton à la commande : le
+                    * client la donne, l'agente la cherche. Elle était enregistrée, imprimée sur la
+                    * facture, et invisible sur la fiche — le seul écran qu'on ouvre devant le
+                    * client.
+                    */}
+                  {p.reference && (
+                    <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2, wordBreak: "break-all" }}>
+                      Réf. {p.reference}{p.commande ? ` · ${p.commande}` : ""}
+                    </div>
+                  )}
                   <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
                     Qté {p.quantite || 1} · {p.poids ? `${p.poids} kg` : "—"}
                   </div>
@@ -19863,7 +20000,11 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
           onAnnuler={() => setConfirmerSuppression(false)}
         />
       )}
-      {editing && <EditColisForm colis={colis} categories={data?.categories} remiseVolumeConfig={data?.remiseVolume} tarifsReception={data?.receptionTarifs} session={session} partenaire={partenaireDuColis(data, colis)} onClose={() => setEditing(false)} onSave={(patch) => { onUpdate(patch); setEditing(false); }} />}
+      {editing && <EditColisForm colis={colis} categories={data?.categories} remiseVolumeConfig={data?.remiseVolume} tarifsReception={data?.receptionTarifs} session={session} partenaire={partenaireDuColis(data, colis)}
+        /* Un bouton qu'on n'affiche pas n'est pas un geste qu'on ne peut pas faire : la règle est revérifiée à l'enregistrement. */
+        modificationAutorisee={!estColisEnLigne(colis) || autorisationModifierColisEnLigne(session, data).autorise}
+        sitesDepartEnLigne={nomsSitesDepartEnLigne(data)}
+        onClose={() => setEditing(false)} onSave={(patch) => { onUpdate(patch); setEditing(false); }} />}
       {showImpressionDirecte && <ImpressionDirecteModal colis={colis} data={data} onClose={() => setShowImpressionDirecte(false)} />}
       {bonSortieOuvert && (
         <Modal onClose={() => setBonSortieOuvert(false)} title="Enregistrer la remise du colis">
@@ -23674,6 +23815,201 @@ function ligneArticleEnLigne() {
   return { id: `a${Date.now()}${Math.random().toString(36).slice(2, 5)}`, reference: "", commande: "", quantite: "1", poids: "" };
 }
 
+/**
+ * SCANNER UNE ÉTIQUETTE POUR AJOUTER UN ARTICLE — LE MÊME GESTE PARTOUT.
+ *
+ * Une référence de commande fait quinze à vingt caractères sans signification : « GSHN0293841X ».
+ * La recopier à la main devant un carton, c'est trente secondes et une chance sérieuse de se
+ * tromper d'un caractère — et une référence fausse ne se rattrape pas, elle ne correspond à rien
+ * nulle part. Le code-barres de l'étiquette la donne exactement.
+ *
+ * Ce geste ne vivait qu'au comptoir de réception. Or c'est à la CORRECTION qu'on en a le plus
+ * besoin : on rouvre une fiche justement parce qu'un article manque ou qu'une référence est
+ * fausse — et l'on se retrouvait à la retaper à la main dans l'écran fait pour la réparer. Il est
+ * donc ici, en un seul endroit, et les deux écrans s'en servent.
+ *
+ * RIEN DE CE QUI EST SCANNÉ N'ENTRE DIRECTEMENT DANS LE FORMULAIRE : tout passe d'abord par un
+ * écran de vérification. Le code-barres est sûr, la lecture du texte ne l'est pas.
+ *
+ * ET LE POIDS N'EST PAS SCANNÉ, CE N'EST PAS UN OUBLI. Celui imprimé sur l'étiquette est celui
+ * déclaré par la boutique. La facture dit « poids constaté à la réception » et c'est là-dessus que
+ * le prix se fonde : le reprendre de l'étiquette reviendrait à facturer sur la parole du vendeur
+ * plutôt que sur la balance de l'agence.
+ */
+function ScanArticleEnLigne({ referencesExistantes = [], boutiqueParDefaut = "", etroit = false, notify, onAjouter, onClose }) {
+  const [verif, setVerif] = useState(null);
+  const [lecture, setLecture] = useState("");
+  /* En quittant l’écran, on rend la mémoire du lecteur : ces écrans se tiennent sur un téléphone. */
+  useEffect(() => () => { libererLecteurTexte(); }, []);
+
+  async function referenceScannee(valeur, image) {
+    const brut = String(valeur || "").trim();
+    if (!brut) { onClose?.(); return; }
+    /*
+     * Nos propres étiquettes portent un QR qui est une adresse de suivi. Scanner l'une d'elles ici
+     * inscrirait « https://badiabyexpress.com/?suivi=1&code=BDE270812 » comme référence de
+     * commande. On n'en garde que le numéro.
+     */
+    let reference = brut;
+    if (/^https?:\/\//i.test(brut)) {
+      try { reference = new URL(brut).searchParams.get("code") || brut; } catch (e) { /* on garde le brut */ }
+    }
+    if (referencesExistantes.some((r) => String(r || "").trim() === reference)) {
+      notify?.(`${reference} figure déjà dans la liste.`);
+      onClose?.();
+      return;
+    }
+
+    /*
+     * On propose la fiche, on ne l'inscrit pas. L'agent voit ce qui a été lu, corrige ce qu'il
+     * faut, et confirme — c'est le seul moment où l'on peut encore rattraper une lecture fausse.
+     */
+    setVerif({ reference, commande: boutiqueParDefaut, quantite: "1", poids: "", poidsEtiquette: null, etat: image ? "lecture" : "pret" });
+
+    if (!image) return;
+    setLecture("Préparation de la lecture…");
+    const resultat = await lireTexteEtiquette(image, (m) => {
+      if (m.status === "loading tesseract core" || m.status === "loading language traineddata") {
+        setLecture(`Premier usage : téléchargement du lecteur (${Math.round((m.progress || 0) * 100)} %)…`);
+      } else if (m.status === "recognizing text") {
+        setLecture(`Lecture de l’étiquette (${Math.round((m.progress || 0) * 100)} %)…`);
+      }
+    });
+    setLecture("");
+    setVerif((v) => (v && v.reference === reference
+      ? {
+        ...v,
+        etat: "pret",
+        poidsEtiquette: resultat.lu ? resultat.poids : null,
+        poids: resultat.lu && resultat.poids ? String(resultat.poids) : "",
+        echecLecture: resultat.lu ? null : (resultat.raison || "lecture"),
+      }
+      : v));
+  }
+
+  /** Ce que l’agent a validé entre dans la liste des articles. */
+  function confirmerVerification() {
+    if (!verif) return;
+    const poids = Number(String(verif.poids).replace(",", "."));
+    if (!Number.isFinite(poids) || poids <= 0) { setVerif({ ...verif, erreur: "Pesez l’article : c’est le poids qui fait le prix." }); return; }
+    onAjouter({
+      reference: verif.reference,
+      commande: verif.commande || boutiqueParDefaut,
+      quantite: String(Math.max(Number(verif.quantite) || 1, 1)),
+      poids: String(poids),
+    });
+    setVerif(null);
+    notify?.(`${verif.reference} ajouté — ${poids} kg.`);
+    onClose?.();
+  }
+
+  if (verif) {
+    return (
+      <Modal onClose={() => { setVerif(null); onClose?.(); }} title="Vérifiez avant d’ajouter">
+        {verif.etat === "lecture" ? (
+          <div style={{ padding: "18px 0", fontSize: 13, color: "var(--muted)", lineHeight: 1.6 }}>
+            <div style={{ color: "var(--text)", fontWeight: 600, marginBottom: 6 }}>{lecture || "Lecture de l’étiquette…"}</div>
+            Le code-barres est lu. On cherche maintenant le poids imprimé sur l’étiquette.
+          </div>
+        ) : (
+          <>
+            <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.55 }}>
+              Voici ce qui a été lu sur l’étiquette. Corrigez ce qu’il faut, puis confirmez.
+            </div>
+
+            <Field label="Référence (lue sur le code-barres)">
+              <input value={verif.reference} onChange={(e) => setVerif({ ...verif, reference: e.target.value, erreur: "" })} style={{ ...inputStyle, marginBottom: 0 }} />
+            </Field>
+
+            <Field label="Commande passée sur">
+              <select value={verif.commande || ""} onChange={(e) => setVerif({ ...verif, commande: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }}>
+                <option value="">Boutique…</option>
+                {VENDEURS_EN_LIGNE.map((v) => <option key={v} value={v}>{v}</option>)}
+              </select>
+            </Field>
+            {/*
+              * La boutique n'est pas sur l'étiquette : celle-ci est imprimée par le transporteur,
+              * pas par le vendeur. C'est à l'agent de la dire — d'où le rappel, pour qu'il ne
+              * cherche pas une lecture qui ne viendra jamais.
+              */}
+            <div style={{ fontSize: 11.5, color: "var(--muted)", margin: "-6px 0 14px" }}>
+              L’étiquette est imprimée par le transporteur : elle ne dit pas chez qui la commande a été passée.
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: etroit ? "1fr" : "1fr 1fr", gap: 12 }}>
+              <Field label="Quantité">
+                <input type="number" min="1" value={verif.quantite} onChange={(e) => setVerif({ ...verif, quantite: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} />
+              </Field>
+              <Field label="Poids pesé (kg) *">
+                <input type="number" min="0" step="0.001" value={verif.poids} onChange={(e) => setVerif({ ...verif, poids: e.target.value, erreur: "" })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="ex : 3.758" />
+              </Field>
+            </div>
+
+            {/*
+              * LE POIDS LU EST UNE PROPOSITION, PAS UNE MESURE.
+              *
+              * Celui de l'étiquette est déclaré par la boutique ; la facture dit « poids constaté
+              * à la réception », et c'est la balance de l'agence qui fait foi. Le dire ici, à
+              * l'endroit exact où le chiffre s'affiche, est la seule façon d'éviter qu'on facture
+              * un jour sur la parole du vendeur.
+              */}
+            {verif.poidsEtiquette ? (
+              <div style={{ display: "flex", gap: 9, alignItems: "flex-start", background: "var(--warn-bg)", color: "var(--warn-fg)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 12px", fontSize: 12, marginTop: 4, lineHeight: 1.5 }}>
+                <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                <div>
+                  <strong>{verif.poidsEtiquette} kg lus sur l’étiquette.</strong> C’est le poids <em>déclaré par la boutique</em>.
+                  Le prix se calcule sur le poids constaté à la réception : confirmez-le à la balance avant d’ajouter.
+                </div>
+              </div>
+            ) : (
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 4, lineHeight: 1.5 }}>
+                {verif.echecLecture === "moteur-indisponible"
+                  ? "La lecture du texte n’est pas disponible sur cet appareil. Saisissez le poids à la balance."
+                  : "Aucun poids n’a pu être lu sur l’étiquette — froissée, floue, ou absente. Pesez l’article."}
+              </div>
+            )}
+
+            {verif.erreur && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginTop: 10 }}>{verif.erreur}</div>}
+
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 18, flexWrap: "wrap" }}>
+              <button type="button" onClick={() => { setVerif(null); onClose?.(); }} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 12.5, color: "var(--muted)", cursor: "pointer" }}>Annuler</button>
+              <button type="button" onClick={confirmerVerification} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 8, padding: "10px 18px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                Confirmer et ajouter
+              </button>
+            </div>
+          </>
+        )}
+      </Modal>
+    );
+  }
+
+  return (
+    <ScannerModal
+      titre="Scanner une étiquette"
+      aide="Approchez le code-barres de l’étiquette. La référence se remplit toute seule ; le poids reste à peser — c’est lui qui fait le prix, et celui imprimé par la boutique n’est qu’une déclaration."
+      onClose={onClose}
+      onScan={referenceScannee}
+    />
+  );
+}
+
+/**
+ * Le rappel qui accompagne le bouton de scan — le même dans les deux écrans.
+ *
+ * Il vit À CÔTÉ DU BOUTON, et non dans la fenêtre du scanner : sur une étiquette nette, la lecture
+ * prend une demi-seconde, et un message affiché pendant le scan disparaît avant d'avoir été lu. Or
+ * c'est justement celui qu'il ne faut pas manquer — un agent qui croit le poids rempli validera un
+ * colis facturé sur la déclaration de la boutique, pas sur sa balance.
+ */
+function AideScanEtiquette() {
+  return (
+    <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 10, lineHeight: 1.5 }}>
+      Le scan remplit la référence. <strong style={{ color: "var(--text)" }}>Le poids reste à peser</strong> :
+      c’est lui qui fait le prix, et celui imprimé par la boutique n’est qu’une déclaration.
+    </div>
+  );
+}
+
 ComptabilitePage = memo(ComptabilitePage);
 function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
   const [recherche, setRecherche] = useState("");
@@ -23692,13 +24028,6 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
   const [erreurArticles, setErreurArticles] = useState("");
   const [scan, setScan] = useState(false);
   /*
-   * Rien de ce qui est SCANNÉ n'entre directement dans le formulaire : tout passe d'abord par un
-   * écran de vérification. Le code-barres est sûr, la lecture du texte ne l'est pas — et le poids
-   * lu sur l'étiquette est celui DÉCLARÉ par la boutique, jamais celui de notre balance.
-   */
-  const [verif, setVerif] = useState(null);
-  const [lecture, setLecture] = useState("");
-  /*
    * Le comptoir se tient souvent sur un téléphone. On mesure la fenêtre plutôt que de deviner :
    * une media query CSS n'était pas possible ici, les styles étant écrits en ligne.
    */
@@ -23708,8 +24037,6 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
     window.addEventListener("resize", mesurer);
     return () => window.removeEventListener("resize", mesurer);
   }, []);
-  /* En quittant le comptoir, on rend la mémoire du lecteur : le comptoir se tient sur un téléphone. */
-  useEffect(() => () => { libererLecteurTexte(); }, []);
 
   const tarifs = data.receptionTarifs || { paliers: [{ max: 10, tarif: 100000 }, { max: 40, tarif: 95000 }, { max: 100, tarif: 92000 }] };
   /*
@@ -23924,83 +24251,6 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
    * qui rendent ensuite tout comptage impossible. Un bouton la pose sur toutes les lignes d'un
    * coup ; la liste par ligne reste là pour le colis qui mêle deux commandes.
    */
-  /**
-   * LA RÉFÉRENCE VIENT DU CODE-BARRES, PAS DU CLAVIER.
-   *
-   * Une référence de commande fait quinze à vingt caractères sans signification : « GSHN0293841X ».
-   * La recopier à la main devant un carton, c'est trente secondes et une chance sérieuse de se
-   * tromper d'un caractère — et une référence fausse ne se rattrape pas, elle ne correspond à rien
-   * nulle part. Le code-barres de l'étiquette la donne exactement.
-   *
-   * Elle se pose sur la première ligne encore vide, ou en ouvre une nouvelle : on scanne les
-   * étiquettes les unes après les autres, et l'on saisit les poids ensuite, à la balance.
-   *
-   * LE POIDS N'EST PAS SCANNÉ, ET CE N'EST PAS UN OUBLI. Celui imprimé sur l'étiquette est celui
-   * déclaré par la boutique. La facture dit « poids constaté à la réception » et c'est là-dessus
-   * que le prix se fonde : le reprendre de l'étiquette reviendrait à facturer sur la parole du
-   * vendeur plutôt que sur la balance de l'agence.
-   */
-  async function referenceScannee(valeur, image) {
-    const brut = String(valeur || "").trim();
-    setScan(false);
-    if (!brut) return;
-    /*
-     * Nos propres étiquettes portent un QR qui est une adresse de suivi. Scanner l'une d'elles ici
-     * inscrirait « https://badiabyexpress.com/?suivi=1&code=BDE270812 » comme référence de
-     * commande. On n'en garde que le numéro.
-     */
-    let reference = brut;
-    if (/^https?:\/\//i.test(brut)) {
-      try { reference = new URL(brut).searchParams.get("code") || brut; } catch (e) { /* on garde le brut */ }
-    }
-    if (articles.some((a) => a.reference.trim() === reference)) {
-      notify?.(`${reference} figure déjà dans la liste.`);
-      return;
-    }
-
-    /*
-     * On propose la fiche, on ne l'inscrit pas. L'agent voit ce qui a été lu, corrige ce qu'il
-     * faut, et confirme — c'est le seul moment où l'on peut encore rattraper une lecture fausse.
-     */
-    setVerif({ reference, commande: boutiqueCommune, quantite: "1", poids: "", poidsEtiquette: null, etat: image ? "lecture" : "pret" });
-
-    if (!image) return;
-    setLecture("Préparation de la lecture…");
-    const resultat = await lireTexteEtiquette(image, (m) => {
-      if (m.status === "loading tesseract core" || m.status === "loading language traineddata") {
-        setLecture(`Premier usage : téléchargement du lecteur (${Math.round((m.progress || 0) * 100)} %)…`);
-      } else if (m.status === "recognizing text") {
-        setLecture(`Lecture de l’étiquette (${Math.round((m.progress || 0) * 100)} %)…`);
-      }
-    });
-    setLecture("");
-    setVerif((v) => (v && v.reference === reference
-      ? {
-        ...v,
-        etat: "pret",
-        poidsEtiquette: resultat.lu ? resultat.poids : null,
-        poids: resultat.lu && resultat.poids ? String(resultat.poids) : "",
-        echecLecture: resultat.lu ? null : (resultat.raison || "lecture"),
-      }
-      : v));
-  }
-
-  /** Ce que l'agent a validé entre dans la liste des articles. */
-  function confirmerVerification() {
-    if (!verif) return;
-    const poids = Number(String(verif.poids).replace(",", "."));
-    if (!Number.isFinite(poids) || poids <= 0) { setVerif({ ...verif, erreur: "Pesez l’article : c’est le poids qui fait le prix." }); return; }
-    setArticles((liste) => {
-      const ligne = { ...ligneArticleEnLigne(), reference: verif.reference, commande: verif.commande || boutiqueCommune, quantite: String(Math.max(Number(verif.quantite) || 1, 1)), poids: String(poids) };
-      const vide = liste.findIndex((a) => !a.reference.trim() && !Number(a.poids));
-      if (vide >= 0) return liste.map((a, i) => (i === vide ? { ...ligne, id: a.id } : a));
-      return [...liste, ligne];
-    });
-    setErreurArticles("");
-    setVerif(null);
-    notify?.(`${verif.reference} ajouté — ${poids} kg.`);
-  }
-
   function poserCommandePartout(boutique) {
     setArticles((l) => l.map((a) => ({ ...a, commande: boutique })));
     setErreurArticles("");
@@ -24238,18 +24488,7 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
                       <Camera size={14} /> Scanner une étiquette
                     </button>
                   </div>
-                  {/*
-                    * L'avertissement vit ICI, et non dans la fenêtre du scanner.
-                    *
-                    * Sur une étiquette nette, la lecture prend une demi-seconde : le message
-                    * affiché pendant le scan disparaît avant d'avoir été lu. Or c'est justement
-                    * celui qu'il ne faut pas manquer — un agent qui croit le poids rempli validera
-                    * un colis facturé sur la déclaration de la boutique, pas sur sa balance.
-                    */}
-                  <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 10, lineHeight: 1.5 }}>
-                    Le scan remplit la référence. <strong style={{ color: "var(--text)" }}>Le poids reste à peser</strong> :
-                    c’est lui qui fait le prix, et celui imprimé par la boutique n’est qu’une déclaration.
-                  </div>
+                  <AideScanEtiquette />
                 </div>
               )}
 
@@ -24349,90 +24588,23 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
           )}
         </>
       )}
-      {verif && (
-        <Modal onClose={() => setVerif(null)} title="Vérifiez avant d’ajouter">
-          {verif.etat === "lecture" ? (
-            <div style={{ padding: "18px 0", fontSize: 13, color: "var(--muted)", lineHeight: 1.6 }}>
-              <div style={{ color: "var(--text)", fontWeight: 600, marginBottom: 6 }}>{lecture || "Lecture de l’étiquette…"}</div>
-              Le code-barres est lu. On cherche maintenant le poids imprimé sur l’étiquette.
-            </div>
-          ) : (
-            <>
-              <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.55 }}>
-                Voici ce qui a été lu sur l’étiquette. Corrigez ce qu’il faut, puis confirmez.
-              </div>
-
-              <Field label="Référence (lue sur le code-barres)">
-                <input value={verif.reference} onChange={(e) => setVerif({ ...verif, reference: e.target.value, erreur: "" })} style={{ ...inputStyle, marginBottom: 0 }} />
-              </Field>
-
-              <Field label="Commande passée sur">
-                <select value={verif.commande || ""} onChange={(e) => setVerif({ ...verif, commande: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }}>
-                  <option value="">Boutique…</option>
-                  {VENDEURS_EN_LIGNE.map((v) => <option key={v} value={v}>{v}</option>)}
-                </select>
-              </Field>
-              {/*
-                * La boutique n'est pas sur l'étiquette : celle-ci est imprimée par le
-                * transporteur, pas par le vendeur. C'est à l'agent de la dire — d'où le rappel,
-                * pour qu'il ne cherche pas une lecture qui ne viendra jamais.
-                */}
-              <div style={{ fontSize: 11.5, color: "var(--muted)", margin: "-6px 0 14px" }}>
-                L’étiquette est imprimée par le transporteur : elle ne dit pas chez qui la commande a été passée.
-              </div>
-
-              <div style={{ display: "grid", gridTemplateColumns: etroit ? "1fr" : "1fr 1fr", gap: 12 }}>
-                <Field label="Quantité">
-                  <input type="number" min="1" value={verif.quantite} onChange={(e) => setVerif({ ...verif, quantite: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} />
-                </Field>
-                <Field label="Poids pesé (kg) *">
-                  <input type="number" min="0" step="0.001" value={verif.poids} onChange={(e) => setVerif({ ...verif, poids: e.target.value, erreur: "" })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="ex : 3.758" />
-                </Field>
-              </div>
-
-              {/*
-                * LE POIDS LU EST UNE PROPOSITION, PAS UNE MESURE.
-                *
-                * Celui de l'étiquette est déclaré par la boutique ; la facture dit « poids
-                * constaté à la réception », et c'est la balance de l'agence qui fait foi. Le dire
-                * ici, à l'endroit exact où le chiffre s'affiche, est la seule façon d'éviter qu'on
-                * facture un jour sur la parole du vendeur.
-                */}
-              {verif.poidsEtiquette ? (
-                <div style={{ display: "flex", gap: 9, alignItems: "flex-start", background: "var(--warn-bg)", color: "var(--warn-fg)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 12px", fontSize: 12, marginTop: 4, lineHeight: 1.5 }}>
-                  <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-                  <div>
-                    <strong>{verif.poidsEtiquette} kg lus sur l’étiquette.</strong> C’est le poids <em>déclaré par la boutique</em>.
-                    Le prix se calcule sur le poids constaté à la réception : confirmez-le à la balance avant d’ajouter.
-                  </div>
-                </div>
-              ) : (
-                <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 4, lineHeight: 1.5 }}>
-                  {verif.echecLecture === "moteur-indisponible"
-                    ? "La lecture du texte n’est pas disponible sur cet appareil. Saisissez le poids à la balance."
-                    : "Aucun poids n’a pu être lu sur l’étiquette — froissée, floue, ou absente. Pesez l’article."}
-                </div>
-              )}
-
-              {verif.erreur && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginTop: 10 }}>{verif.erreur}</div>}
-
-              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 18, flexWrap: "wrap" }}>
-                <button onClick={() => setVerif(null)} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 12.5, color: "var(--muted)", cursor: "pointer" }}>Annuler</button>
-                <button onClick={confirmerVerification} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 8, padding: "10px 18px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
-                  Confirmer et ajouter
-                </button>
-              </div>
-            </>
-          )}
-        </Modal>
-      )}
-
       {scan && (
-        <ScannerModal
-          titre="Scanner une étiquette"
-          aide="Approchez le code-barres de l’étiquette. La référence se remplit toute seule ; le poids reste à peser — c’est lui qui fait le prix, et celui imprimé par la boutique n’est qu’une déclaration."
+        <ScanArticleEnLigne
+          referencesExistantes={articles.map((a) => a.reference)}
+          boutiqueParDefaut={boutiqueCommune}
+          etroit={etroit}
+          notify={notify}
           onClose={() => setScan(false)}
-          onScan={referenceScannee}
+          onAjouter={(ligne) => {
+            setArticles((liste) => {
+              const neuve = { ...ligneArticleEnLigne(), ...ligne };
+              /* Une ligne vide attend déjà : on la remplit plutôt que d’en ouvrir une de plus. */
+              const vide = liste.findIndex((a) => !a.reference.trim() && !Number(a.poids));
+              if (vide >= 0) return liste.map((a, i) => (i === vide ? { ...neuve, id: a.id } : a));
+              return [...liste, neuve];
+            });
+            setErreurArticles("");
+          }}
         />
       )}
     </Modal>

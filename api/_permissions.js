@@ -36,6 +36,20 @@ export const PERMISSIONS_SCHEMA = [
      * d'un colis à l'unité. Non accordées à l'Agent par défaut : c'est à l'administrateur de
      * désigner nommément les agences/agents autorisés, comme pour l'Espace Client.
      */
+    /*
+     * UN COLIS D'ACHAT EN LIGNE SE CORRIGE LÀ OÙ IL A ÉTÉ PESÉ.
+     *
+     * Ces colis-là naissent au site de départ — Paris : c'est là qu'arrivent les commandes, là
+     * qu'on les pèse, et le poids EST le prix. L'équipe de Conakry les voit, les cherche au
+     * comptoir, les remet et les encaisse : c'est son métier. Mais corriger un poids depuis
+     * Conakry, c'est refaire le prix d'un colis qu'on n'a jamais eu sur la balance — et le refaire
+     * après que le client a reçu sa facture.
+     *
+     * L'équipe du site de départ n'a pas besoin de ce droit : il lui vient de son site. Celui-ci
+     * sert à l'administrateur pour désigner nommément quelqu'un d'ailleurs — un responsable à
+     * Conakry qui doit pouvoir rattraper une saisie sans attendre Paris.
+     */
+    { key: "colis.enligne_modifier", label: "Modifier un colis d’achat en ligne depuis un autre site que celui de départ" },
     { key: "colis.importer_excel", label: "Importer des colis depuis Excel" },
     { key: "colis.bordereau_reception", label: "Générer un bordereau de réception" },
     { key: "colis.reglement_groupe", label: "Encaisser plusieurs colis en une fois (règlement groupé)" },

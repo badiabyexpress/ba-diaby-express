@@ -33503,15 +33503,31 @@ function DetailTransfert({ transfert, data, session, notify, onFerme, onChange }
   const [code, setCode] = useState(null);
   const [motif, setMotif] = useState("");
   const [annulation, setAnnulation] = useState(false);
+  const [suppression, setSuppression] = useState(false);
+  const [motifSuppression, setMotifSuppression] = useState("");
   const [travail, setTravail] = useState("");
   const [erreur, setErreur] = useState("");
   const annulable = !["Payé", "Annulé"].includes(transfert.statut);
+  /*
+   * Retirer un transfert des listes n'est pas une permission qu'on accorde : c'est le rôle. Une
+   * clé « supprimer un transfert » se donnerait un jour à quelqu'un pour dépanner, et resterait.
+   */
+  const estAdmin = session?.role === "Administrateur";
 
   async function revoirCode() {
     setTravail("code"); setErreur("");
     try {
       const r = await appelTransferts(`?revoir=${encodeURIComponent(transfert.id)}&motif=${encodeURIComponent("Reçu perdu par le client")}`);
       setCode(r.code);
+    } catch (e) { setErreur(e.message); } finally { setTravail(""); }
+  }
+
+  async function supprimer() {
+    setSuppression(false); setTravail("supprimer"); setErreur("");
+    try {
+      await appelTransferts("", { method: "POST", body: JSON.stringify({ action: "supprimer", id: transfert.id, motif: motifSuppression }) });
+      notify?.("Transfert retiré des listes — le journal en garde la trace.");
+      onChange?.(); onFerme();
     } catch (e) { setErreur(e.message); } finally { setTravail(""); }
   }
 
@@ -33576,7 +33592,43 @@ function DetailTransfert({ transfert, data, session, notify, onFerme, onChange }
             <Ban size={14} /> Annuler le transfert
           </button>
         )}
+        {estAdmin && (
+          <button onClick={() => setSuppression(true)}
+            title="Retirer ce transfert des listes. La ligne et le journal sont conservés."
+            style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 10, padding: "10px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+            <Trash2 size={14} /> Supprimer
+          </button>
+        )}
       </div>
+
+      {suppression && (
+        <Modal title="Supprimer ce transfert ?" onClose={() => setSuppression(false)} niveau={1}>
+          <div style={{ fontSize: 13, color: "var(--text)", marginBottom: 12, lineHeight: 1.6 }}>
+            Il disparaîtra de toutes les listes et de tous les totaux. La ligne, elle, reste en
+            base et le journal garde tout : c’est ce qui permet de répondre à un client ou à un
+            contrôle dans six mois.
+          </div>
+          <div style={{ background: transfert.statut === "Payé" ? "var(--warn-bg)" : "var(--info-bg)",
+                        border: `1px solid ${transfert.statut === "Payé" ? "var(--warn-border)" : "var(--info-border)"}`,
+                        borderRadius: 10, padding: "11px 13px", fontSize: 12.5, color: "var(--text)", lineHeight: 1.55, marginBottom: 14 }}>
+            {transfert.statut === "Payé"
+              ? <>Ce transfert a <strong>déjà été payé</strong> : l’argent est réellement sorti du tiroir.
+                  La caisse n’est donc pas retouchée — le retirer des listes ne doit pas faire
+                  réapparaître des billets qui ne sont plus là.</>
+              : <>Il n’a pas été payé : une sortie de caisse de <strong>{montantTransfert(Number(transfert.montantEnvoye) + Number(transfert.frais), transfert.deviseEnvoi)}</strong> sera
+                  inscrite, comme pour une annulation. Assurez-vous que l’expéditeur a bien été remboursé.</>}
+          </div>
+          <Field label="Pourquoi le supprimer ? *">
+            <textarea value={motifSuppression} onChange={(e) => setMotifSuppression(e.target.value)} rows={3}
+              placeholder="Saisie de test, double saisie, erreur de manipulation…"
+              style={{ ...inputStyle, resize: "vertical" }} />
+          </Field>
+          <button onClick={supprimer} disabled={motifSuppression.trim().length < 3 || travail === "supprimer"}
+            style={{ width: "100%", background: motifSuppression.trim().length < 3 ? "var(--surface2)" : "var(--danger-fg)", color: motifSuppression.trim().length < 3 ? "var(--muted)" : "#fff", border: "none", borderRadius: 10, padding: "12px 0", fontSize: 13.5, fontWeight: 700, cursor: motifSuppression.trim().length < 3 ? "not-allowed" : "pointer" }}>
+            {travail === "supprimer" ? "Suppression…" : "Retirer des listes"}
+          </button>
+        </Modal>
+      )}
 
       {annulation && (
         <Modal title="Annuler ce transfert ?" onClose={() => setAnnulation(false)} niveau={1}>

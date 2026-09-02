@@ -15,8 +15,10 @@
  *    `payer_transfert()` en SQL qui verrouille la ligne et tranche. Deux agents qui présentent le
  *    même code au même instant sont départagés par Postgres, pas par du JavaScript qui a lu avant.
  *
- * 3. Rien ne se supprime. Une annulation est une écriture de plus, jamais un effacement, et les
- *    déclencheurs de la base refusent la suppression même à la clé de service.
+ * 3. Rien ne se détruit. Une annulation est une écriture de plus, jamais un effacement, et les
+ *    déclencheurs de la base refusent la suppression de ligne même à la clé de service. Un
+ *    administrateur peut RETIRER un transfert de ses listes — la ligne reste, le journal garde
+ *    tout, et la caisse est ajustée quand l'argent n'était pas encore sorti.
  *
  * LE PLAFOND SUR LA RECHERCHE PAR CODE
  *
@@ -164,7 +166,7 @@ async function lire(req, res, { compte, document, config, perm }) {
     const code = normaliserCode(q.code);
     if (!code) return res.status(400).json({ error: "Un code de transfert compte huit chiffres." });
 
-    const trouves = await selection(`transferts?code_hash=eq.${empreinteCode(code)}&select=*`);
+    const trouves = await selection(`transferts?code_hash=eq.${empreinteCode(code)}&supprime_le=is.null&select=*`);
     const t = Array.isArray(trouves) ? trouves[0] : null;
 
     /*
@@ -185,7 +187,7 @@ async function lire(req, res, { compte, document, config, perm }) {
     if (!perm("transfert.revoir_code")) {
       return res.status(403).json({ error: "Vous n’avez pas le droit de réafficher un code de retrait." });
     }
-    const lignes = await selection(`transferts?id=eq.${litteral(q.revoir)}&select=*`);
+    const lignes = await selection(`transferts?id=eq.${litteral(q.revoir)}&supprime_le=is.null&select=*`);
     const t = Array.isArray(lignes) ? lignes[0] : null;
     if (!t) return res.status(404).json({ error: "Transfert introuvable." });
     if (t.statut === "Payé" || t.statut === "Annulé") {
@@ -260,7 +262,11 @@ async function lire(req, res, { compte, document, config, perm }) {
   }
 
   const limite = Math.min(Number(q.limite) || 200, 1000);
-  const lignes = await selection(`transferts?select=*${portee}${filtres.join("")}&order=cree_le.desc&limit=${limite}`);
+  /*
+   * Un transfert supprimé ne figure plus nulle part : ni dans la liste, ni dans les totaux. Il
+   * n'est pas effacé pour autant — le journal le montre encore, et c'est là qu'on va le chercher.
+   */
+  const lignes = await selection(`transferts?select=*&supprime_le=is.null${portee}${filtres.join("")}&order=cree_le.desc&limit=${limite}`);
   const vus = lignes.map(vueAvantPaiement);
   return res.status(200).json({
     transferts: vus,
@@ -343,6 +349,7 @@ async function ecrire(req, res, { compte, document, config, perm, contexteActeur
   if (action === "creer") return creer(req, res, { compte, document, config, perm, contexteActeur });
   if (action === "payer") return payer(req, res, { compte, perm, contexteActeur, ip });
   if (action === "annuler") return annuler(req, res, { compte, perm, contexteActeur });
+  if (action === "supprimer") return supprimer(req, res, { compte, contexteActeur });
   if (action === "expirer") {
     if (!perm("transfert.voir_tous")) return res.status(403).json({ error: "Réservé à l’administration." });
     const n = await rpcSansCharge("expirer_transferts");
@@ -482,6 +489,7 @@ async function payer(req, res, { compte, perm, contexteActeur, ip }) {
     deja_paye: "Ce transfert a déjà été payé.",
     annule: "Ce transfert a été annulé.",
     expire: "Ce transfert a expiré : le code ne vaut plus. L’expéditeur doit se rapprocher de son agence.",
+    supprime: "Ce transfert a été retiré par l’administration : ne remettez pas d’argent. L’expéditeur doit se rapprocher de son agence.",
   };
   const raison = resultat?.raison || "introuvable";
   if (raison === "introuvable") {
@@ -499,6 +507,41 @@ async function payer(req, res, { compte, perm, contexteActeur, ip }) {
       motif: resultat?.motif || null,
     },
   });
+}
+
+/*
+ * SUPPRIMER — le seul geste du module qui ne s'accorde pas par permission.
+ *
+ * Toutes les autres actions passent par une clé qu'on peut donner nommément à quelqu'un. Pas
+ * celle-ci : elle retire une opération financière des listes de l'entreprise, et elle est
+ * réservée à l'administrateur, point. Une permission « supprimer un transfert » se donnerait un
+ * jour à quelqu'un pour dépanner, et resterait.
+ *
+ * Elle ne détruit rien : la ligne demeure en base, le journal garde tout, et la caisse reste
+ * juste — l'encaissement d'un transfert non payé est rendu, celui d'un transfert payé ne l'est
+ * pas, parce que l'argent est réellement sorti du tiroir.
+ */
+async function supprimer(req, res, { compte, contexteActeur }) {
+  if (compte.role !== "Administrateur") {
+    return res.status(403).json({ error: "Seul un administrateur peut supprimer un transfert." });
+  }
+  const c = req.body || {};
+  const motif = String(c.motif || "").trim();
+  if (motif.length < 3) {
+    return res.status(400).json({ error: "Une suppression se motive : dites pourquoi, en quelques mots." });
+  }
+  const resultat = await rpc("supprimer_transfert", {
+    ...contexteActeur,
+    id: c.id,
+    acteur_id: compte.id, acteur_nom: nomDe(compte), agence: agenceDe(compte) || null,
+    motif,
+  });
+  if (resultat?.ok) return res.status(200).json({ transfert: resultat.transfert });
+  const messages = {
+    introuvable: "Transfert introuvable.",
+    deja_supprime: "Ce transfert a déjà été supprimé.",
+  };
+  return res.status(409).json({ error: messages[resultat?.raison] || "La suppression n’a pas abouti." });
 }
 
 async function annuler(req, res, { compte, perm, contexteActeur }) {
@@ -521,6 +564,7 @@ async function annuler(req, res, { compte, perm, contexteActeur }) {
     introuvable: "Transfert introuvable.",
     deja_paye: "Ce transfert a déjà été payé : il ne peut plus être annulé.",
     deja_annule: "Ce transfert est déjà annulé.",
+    supprime: "Ce transfert a été retiré des listes : il n’y a plus rien à annuler.",
   };
   return res.status(409).json({ error: messages[resultat?.raison] || "L’annulation n’a pas abouti." });
 }

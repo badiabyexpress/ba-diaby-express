@@ -332,6 +332,25 @@ function colisDeLAgence(colis, agence) {
   return site.toLowerCase() === sienne.toLowerCase();
 }
 
+/**
+ * QUELS COLIS CETTE PERSONNE VOIT — la permission d'abord, l'agence ensuite.
+ *
+ * La liste des colis se filtrait par agence, et par agence seulement. « Voir tous les colis »
+ * existait, s'affichait dans l'écran des droits, était accordée à l'Agent par défaut — et cette
+ * liste-ci ne l'a jamais lue. Deux agents de deux agences ne voyaient donc chacun que la leur,
+ * quoi qu'on coche sur leur fiche : la permission ne pouvait rien changer parce que rien ne
+ * l'interrogeait.
+ *
+ * L'ordre compte. Le droit passe avant l'agence : c'est lui qui dit ce que la personne a le droit
+ * de voir, l'agence ne dit que d'où elle travaille. Pour restreindre quelqu'un à son agence, on
+ * lui retire « Voir tous les colis » — un seul interrupteur, le même qui commande déjà ce que le
+ * serveur lui envoie.
+ */
+function colisVisiblePour(session, colis) {
+  if (effectivePermission(session, "colis.voir_tous")) return true;
+  return colisDeLAgence(colis, session?.zoneOperation || session?.agence);
+}
+
 function telephonePourPays(data, pays) {
   return numerosPourPays(data, pays)[0] || "";
 }
@@ -8152,7 +8171,7 @@ function BandeauEcrasement({ data, persist, session }) {
 
 function Dashboard({ data, session, onNavigate, onNouveauColis }) {
   const stats = useMemo(() => {
-    const colis = data.colis.filter((c) => colisDeLAgence(c, session.agence));
+    const colis = data.colis.filter((c) => colisVisiblePour(session, c));
     const total = colis.length;
     const now = new Date();
     const thisMonth = colis.filter((c) => { const d = new Date(c.createdAt); return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear(); }).length;
@@ -13451,6 +13470,177 @@ const ColisStatCard = memo(function ColisStatCard({ label, value, icon: Icon, ti
   );
 });
 
+/*
+ * LES FILTRES DE LA LISTE DES COLIS.
+ *
+ * La recherche libre suffit quand on cherche UN colis dont on connaît le numéro. Elle ne répond
+ * pas aux questions qu'on se pose vraiment devant la liste : « qu'est-ce qui part de France et
+ * n'est pas encore payé ? », « qu'est-ce que Bambeto a enregistré cette semaine ? ». Il fallait
+ * jusqu'ici faire défiler cinq cents lignes et compter de tête.
+ *
+ * Trois principes tiennent cet écran :
+ *   — LES CHOIX VIENNENT DES DONNÉES. Les pays proposés sont ceux d'où des colis partent
+ *     réellement, avec leur nombre à côté. Un filtre qui ne rend rien ne se propose pas ;
+ *   — CE QUI EST FILTRÉ SE VOIT. Chaque filtre actif devient une pastille qu'on retire d'un
+ *     doigt : refermer le panneau ne laisse jamais une liste tronquée sans qu'on sache pourquoi ;
+ *   — LE COMPTE EST TOUJOURS LÀ. « 27 colis sur 505 » se lit d'un coup d'œil.
+ */
+const FILTRES_COLIS_VIDES = { depart: "", arrivee: "", site: "", reglement: "", periode: "" };
+const PERIODES_COLIS = [
+  { cle: "7", label: "7 derniers jours", jours: 7 },
+  { cle: "30", label: "30 derniers jours", jours: 30 },
+  { cle: "90", label: "3 derniers mois", jours: 90 },
+];
+const REGLEMENTS_COLIS = [
+  { cle: "impaye", label: "Rien encaissé" },
+  { cle: "partiel", label: "Partiellement réglé" },
+  { cle: "paye", label: "Intégralement réglé" },
+];
+
+/** Le colis passe-t-il les filtres ? Une seule fonction, pour l’écran comme pour les bancs. */
+export function colisPasseLesFiltres(colis, filtres, maintenant = Date.now()) {
+  const f = { ...FILTRES_COLIS_VIDES, ...(filtres || {}) };
+  if (f.depart && String(colis?.expediteurPays || "GN") !== f.depart) return false;
+  if (f.arrivee && String(colis?.destinatairePays || colis?.pays || "") !== f.arrivee) return false;
+  if (f.site && String(colis?.site || "").trim().toLowerCase() !== f.site.trim().toLowerCase()) return false;
+  if (f.reglement) {
+    const paye = Number(colis?.paye) || 0;
+    const reste = Number(colis?.reste) || 0;
+    if (f.reglement === "impaye" && paye > 0.005) return false;
+    if (f.reglement === "paye" && reste > 0.005) return false;
+    if (f.reglement === "partiel" && !(paye > 0.005 && reste > 0.005)) return false;
+  }
+  if (f.periode) {
+    const jours = PERIODES_COLIS.find((x) => x.cle === f.periode)?.jours;
+    const quand = Date.parse(colis?.createdAt || "");
+    if (jours && (!Number.isFinite(quand) || maintenant - quand > jours * 86400000)) return false;
+  }
+  return true;
+}
+
+/** Ce que la recherche libre regarde — tout ce par quoi on désigne un colis à voix haute. */
+export function colisCorrespondALaRecherche(colis, q) {
+  if (!q) return true;
+  return [
+    colis?.tracking, colis?.destinataire, colis?.expediteur, colis?.telephone,
+    colis?.expediteurTelephone, colis?.referenceCommande, colis?.emplacement, colis?.repere,
+    colis?.destinataireEmail, ...(colis?.produits || []).map((p) => p?.reference),
+  ].some((champ) => pourRecherche(champ).includes(q));
+}
+
+function FiltresColis({ filtres, onChange, base, resultats, session }) {
+  const [ouvert, setOuvert] = useState(false);
+  const actifs = Object.entries(filtres).filter(([, v]) => v);
+  /* Les choix viennent des colis eux-mêmes : proposer un pays sans colis n'aide personne. */
+  const compter = (lire) => {
+    const par = new Map();
+    base.forEach((c) => {
+      const v = lire(c);
+      if (!v) return;
+      par.set(v, (par.get(v) || 0) + 1);
+    });
+    return [...par.entries()].sort((a, b) => b[1] - a[1]);
+  };
+  const departs = compter((c) => String(c.expediteurPays || "GN"));
+  const arrivees = compter((c) => String(c.destinatairePays || c.pays || ""));
+  const sites = compter((c) => String(c.site || "").trim());
+  const nomPays = (code) => `${FLAGS[code] || ""} ${COUNTRIES.find((x) => x.code === code)?.name || code}`.trim();
+  const libelle = (cle, valeur) => {
+    if (cle === "depart") return `Départ : ${nomPays(valeur)}`;
+    if (cle === "arrivee") return `Arrivée : ${nomPays(valeur)}`;
+    if (cle === "site") return `Agence : ${valeur}`;
+    if (cle === "reglement") return REGLEMENTS_COLIS.find((r) => r.cle === valeur)?.label || valeur;
+    if (cle === "periode") return PERIODES_COLIS.find((r) => r.cle === valeur)?.label || valeur;
+    return valeur;
+  };
+  const champ = (cle, titre, options, formater) => (
+    <Field label={titre}>
+      <select value={filtres[cle]} onChange={(e) => onChange({ ...filtres, [cle]: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }}>
+        <option value="">Tous</option>
+        {options.map(([v, n]) => <option key={v} value={v}>{formater(v)} · {n}</option>)}
+      </select>
+    </Field>
+  );
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+        <button type="button" onClick={() => setOuvert((o) => !o)} style={{
+          display: "flex", alignItems: "center", gap: 7,
+          background: actifs.length ? "var(--info-bg)" : "var(--surface)",
+          color: actifs.length ? "var(--info-fg)" : "var(--text)",
+          border: `1.5px solid ${actifs.length ? "var(--info-border)" : "var(--border)"}`,
+          borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer",
+        }}>
+          {/*
+            * « Filtres » et non « Filtrer » : les cartes de statistiques portent déjà ce mot, et
+            * deux boutons qui se nomment pareil dans le même écran ne se distinguent ni à la voix,
+            * ni au lecteur d'écran, ni au banc d'essai.
+            */}
+          <SlidersHorizontal size={16} /> Filtres
+          {actifs.length > 0 && <span style={{ background: "var(--info-fg)", color: "#fff", borderRadius: 999, padding: "1px 8px", fontSize: 11.5 }}>{actifs.length}</span>}
+          <ChevronDown size={14} style={{ transform: ouvert ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+        </button>
+        {/*
+          * Le compte, toujours visible. C'est lui qui dit si le filtre a mordu — et il évite de
+          * faire défiler la liste pour compter à la main.
+          */}
+        <span style={{ fontSize: 12.5, color: "var(--muted)" }}>
+          {resultats === base.length
+            ? `${base.length} colis`
+            : <><strong style={{ color: "var(--text)" }}>{resultats}</strong> colis sur {base.length}</>}
+        </span>
+      </div>
+
+      {/* Les pastilles restent visibles même panneau refermé : une liste tronquée doit dire pourquoi. */}
+      {actifs.length > 0 && (
+        <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginTop: 10 }}>
+          {actifs.map(([cle, valeur]) => (
+            <button key={cle} type="button" onClick={() => onChange({ ...filtres, [cle]: "" })} style={{
+              display: "flex", alignItems: "center", gap: 6, background: "var(--info-bg)", color: "var(--info-fg)",
+              border: "1px solid var(--info-border)", borderRadius: 999, padding: "5px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer",
+            }}>
+              {libelle(cle, valeur)} <X size={12} />
+            </button>
+          ))}
+          <button type="button" onClick={() => onChange({ ...FILTRES_COLIS_VIDES })} style={{
+            background: "none", border: "1px solid var(--border)", color: "var(--muted)",
+            borderRadius: 999, padding: "5px 12px", fontSize: 12, cursor: "pointer",
+          }}>Tout effacer</button>
+        </div>
+      )}
+
+      {ouvert && (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginTop: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 12 }}>
+            {departs.length > 1 && champ("depart", "Pays de départ", departs, nomPays)}
+            {arrivees.length > 1 && champ("arrivee", "Pays d’arrivée", arrivees, nomPays)}
+            {sites.length > 1 && champ("site", "Agence d’enregistrement", sites, (v) => v)}
+            <Field label="Règlement">
+              <select value={filtres.reglement} onChange={(e) => onChange({ ...filtres, reglement: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }}>
+                <option value="">Tous</option>
+                {REGLEMENTS_COLIS.map((r) => <option key={r.cle} value={r.cle}>{r.label}</option>)}
+              </select>
+            </Field>
+            <Field label="Enregistré">
+              <select value={filtres.periode} onChange={(e) => onChange({ ...filtres, periode: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }}>
+                <option value="">Depuis toujours</option>
+                {PERIODES_COLIS.map((r) => <option key={r.cle} value={r.cle}>{r.label}</option>)}
+              </select>
+            </Field>
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 }}>
+            La recherche ci-dessus trouve un colis par son numéro, le nom de l’expéditeur ou du
+            destinataire, un téléphone, une référence de commande ou un emplacement.
+            {!effectivePermission(session, "colis.voir_tous")
+              && " Vous ne voyez que les colis de votre agence : c’est le droit « Voir tous les colis » qui ouvre les autres."}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ColisView({ data, persist, verifier, session, notify, t, demandeOuverture, onDemandeTraitee, ouvrirFormulaire }) {
   const [showForm, setShowForm] = useState(false);
   const [showFormPartenaire, setShowFormPartenaire] = useState(false);
@@ -13495,15 +13685,18 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
   const baseList = useMemo(() => {
     return data.colis
       .filter((c) => (isChauffeur ? c.status === "Disponible au retrait" : true))
-      .filter((c) => colisDeLAgence(c, session.zoneOperation || session.agence));
+      .filter((c) => colisVisiblePour(session, c));
   }, [data.colis, isChauffeur, session.zoneOperation, session.agence]);
   const [statutFiltre, setStatutFiltre] = useState(null);
+  const [filtres, setFiltres] = useState({ ...FILTRES_COLIS_VIDES });
   const list = useMemo(() => {
     const q = pourRecherche(deferredQuery);
+    const maintenant = Date.now();
     return baseList
       .filter((c) => !statutFiltre || c.status === statutFiltre)
-      .filter((c) => !q || pourRecherche(c.tracking).includes(q) || pourRecherche(c.destinataire).includes(q) || pourRecherche(c.referenceCommande).includes(q) || pourRecherche(c.emplacement).includes(q));
-  }, [baseList, statutFiltre, deferredQuery]);
+      .filter((c) => colisPasseLesFiltres(c, filtres, maintenant))
+      .filter((c) => colisCorrespondALaRecherche(c, q));
+  }, [baseList, statutFiltre, deferredQuery, filtres]);
   /*
    * Un numéro cliqué ailleurs dans l'application ouvre sa fiche ici.
    *
@@ -14106,6 +14299,9 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
           <Camera size={16} /> Scanner
         </button>
       </div>
+      {!isChauffeur && (
+        <FiltresColis filtres={filtres} onChange={setFiltres} base={baseList} resultats={list.length} session={session} />
+      )}
       {aRelancer.length > 0 && (
         <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 12, padding: "14px 16px", marginBottom: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
@@ -14505,7 +14701,7 @@ function BordereauCreation({ data, session, onCancel, onCreate }) {
   const country = COUNTRIES.find((c) => c.code === pays);
 
   const dejaInclus = new Set((data.bordereaux || []).filter((b) => normalizeBordereauStatut(b.statut) !== "Livré").flatMap((b) => b.colisTrackings));
-  const eligibles = data.colis.filter((c) => c.pays === pays && (c.direction || "export") === direction && c.status !== "Livré" && c.status !== "Annulé" && !dejaInclus.has(c.tracking) && colisDeLAgence(c, session?.zoneOperation || session?.agence));
+  const eligibles = data.colis.filter((c) => c.pays === pays && (c.direction || "export") === direction && c.status !== "Livré" && c.status !== "Annulé" && !dejaInclus.has(c.tracking) && colisVisiblePour(session, c));
 
   function toggle(tracking) {
     setSelectedTrackings((list) => (list.includes(tracking) ? list.filter((t) => t !== tracking) : [...list, tracking]));

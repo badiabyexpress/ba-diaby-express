@@ -35,7 +35,7 @@ import { sessionDeLaRequete, empreinteDuCompte } from "./_session.js";
 import {
   vueClient, fusionnerEcritureClient,
   vuePartenaire, fusionnerEcriturePartenaire, partenaireDuCompte,
-  fusionnerEcritureEquipe,
+  fusionnerEcritureEquipe, collectionsQuiFondent, intentionDeRemplacement,
 } from "./_cloisonnement.js";
 import { envoyerAlerteEcrasement } from "./_alerte.js";
 
@@ -267,6 +267,48 @@ export default async function handler(req, res) {
        * avant : le garde-fou de fonte reste sa protection.
        */
       const versionLue = typeof corps.baseVersion === "string" ? corps.baseVersion : null;
+
+      /*
+       * UNE SAUVEGARDE QUI CONTIENT MOINS QUE LE DOCUMENT VIVANT N'EST PAS UNE SAUVEGARDE.
+       *
+       * C'est un piège posé pour plus tard : le jour où quelqu'un la restaure, elle rend
+       * l'entreprise à l'état de la page qui l'a écrite. La copie du 2 septembre en portait la
+       * preuve — 6 colis, aucun compte client, deux utilisateurs, là où le document vivant en
+       * comptait 46, huit et neuf. Une page incomplète l'avait écrite au passage, et rien ne
+       * l'en empêchait : le tamis ne protégeait que `bde-data`.
+       *
+       * On applique donc à la sauvegarde le même regard qu'à l'écriture ordinaire : si elle fait
+       * fondre une collection du document vivant, elle est refusée. La copie d'aujourd'hui sera
+       * simplement réécrite au prochain chargement d'une page saine.
+       */
+      if (clef.startsWith("bde-backup-") && !intentionDeRemplacement(valeur)) {
+        const lectureVivant = await fetch(
+          `${url}/rest/v1/${TABLE}?key=eq.bde-data&select=value`,
+          { headers: entetes },
+        );
+        if (lectureVivant.ok) {
+          const lignesVivant = await lectureVivant.json();
+          const vivant = Array.isArray(lignesVivant) ? lignesVivant[0]?.value : null;
+          /*
+           * Pour une sauvegarde, une collection ABSENTE est une perte — elle ne sera pas dans la
+           * copie. On la compte donc comme vide, là où une écriture ordinaire la laisse simplement
+           * en place.
+           */
+          const propose = { ...valeur };
+          if (vivant) Object.keys(vivant).forEach((cle) => {
+            if (!Object.prototype.hasOwnProperty.call(propose, cle)) propose[cle] = [];
+          });
+          const fondues = vivant ? collectionsQuiFondent(vivant, propose) : [];
+          if (fondues.length) {
+            console.error("Sauvegarde refusée — document incomplet :",
+              fondues.map((f) => `${f.cle} ${f.avant}→${f.apres}`).join(", "));
+            return res.status(409).json({
+              error: "Sauvegarde refusée : elle contient moins que les données en cours.",
+              collections: fondues,
+            });
+          }
+        }
+      }
 
       let aEcrire = valeur;
       let alerteAEnvoyer = null;

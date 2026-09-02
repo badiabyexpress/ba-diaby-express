@@ -3442,6 +3442,20 @@ async function autoBackupIfNeeded(data) {
   try {
     const today = new Date().toISOString().slice(0, 10);
     const key = `${BACKUP_PREFIX}${today}`;
+    /*
+     * ON LAISSE LE SERVEUR PASSER LE PREMIER.
+     *
+     * La tâche planifiée sauvegarde à 2 h UTC, depuis la base elle-même — la copie la plus sûre
+     * qui soit. Cette sauvegarde-ci, elle, part de ce qu'une page a en mémoire. Or le premier
+     * agent qui ouvrait l'application après minuit la posait à 00 h 03, et la tâche trouvait
+     * ensuite « déjà faite » : c'est la copie du navigateur qui devenait la sauvegarde du jour,
+     * tous les jours. Celle du 2 septembre en portait la marque — 6 colis là où la base en avait
+     * 46.
+     *
+     * On attend donc 4 h UTC. Passé cette heure, si le serveur n'a rien écrit, c'est que la tâche
+     * ne tourne pas : le filet reprend son rôle, et l'application sauvegarde elle-même.
+     */
+    if (new Date().getUTCHours() < 4) return;
     try { await storage.get(key, true); return; } catch (e) { /* pas encore de sauvegarde aujourd’hui, on continue */ }
     await storage.set(key, JSON.stringify(data), true);
     const list = await storage.list(BACKUP_PREFIX, true);

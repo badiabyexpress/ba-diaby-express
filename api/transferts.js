@@ -164,7 +164,7 @@ async function lire(req, res, { compte, document, config, perm }) {
       return res.status(403).json({ error: "Vous n’avez pas le droit de payer un transfert." });
     }
     const code = normaliserCode(q.code);
-    if (!code) return res.status(400).json({ error: "Un code de transfert compte huit chiffres." });
+    if (!code) return res.status(400).json({ error: "Un code de transfert compte huit caractères — par exemple AB47 0309." });
 
     const trouves = await selection(`transferts?code_hash=eq.${empreinteCode(code)}&supprime_le=is.null&select=*`);
     const t = Array.isArray(trouves) ? trouves[0] : null;
@@ -448,7 +448,7 @@ async function payer(req, res, { compte, perm, contexteActeur, ip }) {
   }
   const c = req.body || {};
   const code = normaliserCode(c.code);
-  if (!code) return res.status(400).json({ error: "Un code de transfert compte huit chiffres." });
+  if (!code) return res.status(400).json({ error: "Un code de transfert compte huit caractères — par exemple AB47 0309." });
 
   /*
    * L'IDENTITÉ DU BÉNÉFICIAIRE EST EXIGÉE PAR LE SERVEUR, PAS SEULEMENT PAR L'ÉCRAN.

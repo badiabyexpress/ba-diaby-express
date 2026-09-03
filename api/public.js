@@ -248,13 +248,15 @@ export default async function handler(req, res) {
        * UN TRANSFERT D'ARGENT SE SUIT AU MÊME ENDROIT QU'UN COLIS.
        *
        * Le client ne sait pas qu'il y a deux systèmes derrière : il tape ce qu'on lui a donné.
-       * On reconnaît donc un code de retrait (huit chiffres, avec ou sans le préfixe) et une
+       * On reconnaît donc un code de retrait — deux lettres et six chiffres depuis septembre,
+       * huit chiffres pour ceux émis avant, avec ou sans le préfixe — et une
        * référence (TX-…), et on répond avec ce qu'un inconnu peut voir sans nuire à personne :
        * l'état, la destination, le montant à recevoir, et des initiales. Ni téléphone, ni pièce
        * d'identité, ni nom complet de l'autre partie — un code tapé au hasard ne doit jamais
        * renseigner sur des gens qu'on ne connaît pas.
        */
-      const estCodeTransfert = /^(TRF[\s-]*)?\d{8}$/i.test(code.replace(/\s/g, " ").trim());
+      const sansSeparateurs = code.toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/^TRF/, "");
+      const estCodeTransfert = /^[A-Z]{2}\d{6}$/.test(sansSeparateurs) || /^\d{8}$/.test(sansSeparateurs);
       const estReferenceTransfert = /^TX-\d{8}-\d{6}$/i.test(code);
       if ((estCodeTransfert || estReferenceTransfert) && secretDisponible()) {
         const trouve = await chercherTransfertPublic(code, estCodeTransfert);
@@ -270,7 +272,7 @@ export default async function handler(req, res) {
           }
           return res.status(200).json({ colis: [], users: [] });
         }
-        // Un code à huit chiffres qui ne correspond à rien peut aussi être un numéro de colis :
+        // Un code de huit caractères qui ne correspond à rien peut aussi être un numéro de colis :
         // on continue la recherche plus bas plutôt que de refuser tout de suite.
       }
       const trouve = (donnees.colis || []).find((c) => String(c.tracking || "").toUpperCase() === code);

@@ -34095,9 +34095,43 @@ function tauxLisible(taux, deviseEnvoi, deviseReception) {
 }
 
 function codeLisible(code) {
-  const chiffres = String(code || "").replace(/\D/g, "");
-  if (chiffres.length !== 8) return code || "";
-  return `TRF ${chiffres.slice(0, 4)} ${chiffres.slice(4)}`;
+  /*
+   * Le code porte désormais deux lettres, deux chiffres au hasard, puis le jour et le mois du
+   * dépôt : « TRF AB47 0309 ». Ne garder que les chiffres, comme avant, en effaçait les lettres —
+   * l'agent lisait « TRF 4703 09 » et dictait un code faux.
+   *
+   * La coupure en deux groupes de quatre n'est pas cosmétique : « AB470309 » se dicte mal,
+   * « AB47 0309 » se dicte — et le second groupe est la date, ce qui le rend facile à retenir.
+   * Les anciens codes à huit chiffres se lisent de la même façon.
+   */
+  const propre = String(code || "").toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/^TRF/, "");
+  if (propre.length !== 8) return code || "";
+  return `TRF ${propre.slice(0, 4)} ${propre.slice(4)}`;
+}
+
+/*
+ * Ce que l'agent tape, ramené à la forme comparable.
+ *
+ * Il recopie d'un reçu froissé ou prend sous la dictée : les espaces, les tirets, les minuscules
+ * et le « TRF » de tête passent. Un code juste ne doit jamais être refusé pour un tiret.
+ */
+function codeACopier(code) {
+  /*
+   * PAS DE TIRET DANS CE QU'ON COLLE.
+   *
+   * « TRF-AB470309 » est la forme INTERNE : c'est elle qui sert au calcul de l'empreinte, et elle
+   * ne peut pas changer sans rendre inutilisables les codes déjà émis. Mais elle n'a rien à faire
+   * dans un message WhatsApp : le tiret se recopie mal, se prend pour une césure, et l'expéditeur
+   * le retape de travers.
+   *
+   * On colle donc les huit caractères nus — « AB470309 » — que la saisie du comptoir accepte
+   * telle quelle, avec ou sans espaces.
+   */
+  return String(code || "").toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/^TRF/, "");
+}
+
+function codeTransfertSaisi(brut) {
+  return String(brut || "").toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/^TRF/, "").slice(0, 8);
 }
 
 /* ── LE REÇU DE TRANSFERT D'ARGENT ─────────────────────────────────────────────
@@ -34820,7 +34854,7 @@ function RecuTransfert({ transfert, code, data, notify, onFermer, onNouveau, niv
           {bouton(MessageCircle, "WhatsApp", versWhatsApp)}
           {bouton(Mail, "SMS", versSMS)}
           {!paye && code && bouton(Copy, "Copier le code", () => {
-            navigator.clipboard?.writeText(code);
+            navigator.clipboard?.writeText(codeACopier(code));
             notify?.("Code copié — ne le collez que dans un message à l’expéditeur.");
           })}
         </div>
@@ -34968,7 +35002,7 @@ function NouveauTransfert({ data, session, config, onFait, onFermer, notify }) {
           <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 32, fontWeight: 700, color: "var(--brand-solid)", letterSpacing: "0.04em", fontVariantNumeric: "tabular-nums" }}>
             {codeLisible(resultat.code)}
           </div>
-          <button onClick={() => { navigator.clipboard?.writeText(resultat.code); notify?.("Code copié"); }}
+          <button onClick={() => { navigator.clipboard?.writeText(codeACopier(resultat.code)); notify?.("Code copié"); }}
             style={{ marginTop: 10, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 14px", fontSize: 12, fontWeight: 600, color: "var(--text)", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 }}>
             <Copy size={13} /> Copier le code
           </button>
@@ -35203,11 +35237,11 @@ function PayerTransfert({ data, onFait, onFermer, notify }) {
   const [recu, setRecu] = useState(false);
 
   async function chercher() {
-    const chiffres = code.replace(/\D/g, "");
-    if (chiffres.length !== 8) { setErreur("Un code de transfert compte huit chiffres."); return; }
+    const saisi = codeTransfertSaisi(code);
+    if (saisi.length !== 8) { setErreur("Un code de transfert compte huit caractères — par exemple AB47 0309."); return; }
     setRecherche(true); setErreur(""); setDetailRefus(null); setTrouve(null);
     try {
-      const r = await appelTransferts(`?code=${encodeURIComponent(chiffres)}`);
+      const r = await appelTransferts(`?code=${encodeURIComponent(saisi)}`);
       setTrouve(r.transfert);
       // Le nom annoncé au départ pré-remplit la vérification : l'agent CORRIGE ce qu'il lit sur
       // la pièce, il ne le recopie pas — un champ vide se remplit sans regarder.
@@ -35228,7 +35262,7 @@ function PayerTransfert({ data, onFait, onFermer, notify }) {
         method: "POST",
         body: JSON.stringify({
           action: "payer",
-          code: code.replace(/\D/g, ""),
+          code: codeTransfertSaisi(code),
           benNomVerifie: verif.nom, benTelephoneVerifie: verif.telephone,
           benPieceType: verif.pieceType, benPieceNumero: verif.pieceNumero,
           montantRemis: montantSaisi(verif.montantRemis),
@@ -35300,7 +35334,7 @@ function PayerTransfert({ data, onFait, onFermer, notify }) {
       <Field label="Code de transfert présenté par le bénéficiaire">
         <div style={{ display: "flex", gap: 8 }}>
           <input aria-label="Code de transfert" value={code} onChange={(e) => setCode(e.target.value)} onKeyDown={(e) => e.key === "Enter" && chercher()}
-            placeholder="TRF 4827 3195" inputMode="numeric" autoFocus
+            placeholder="TRF AB47 0309" autoCapitalize="characters" spellCheck={false} autoFocus
             style={{ ...inputStyle, marginBottom: 0, fontSize: 18, fontWeight: 700, letterSpacing: "0.06em", fontVariantNumeric: "tabular-nums" }} />
           <button onClick={chercher} disabled={recherche}
             style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 10, padding: "0 20px", fontSize: 13.5, fontWeight: 700, cursor: recherche ? "wait" : "pointer", whiteSpace: "nowrap" }}>

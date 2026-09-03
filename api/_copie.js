@@ -32,7 +32,7 @@
  * anodin.
  */
 
-import { expediteurCourriel } from "./_expediteur.js";
+import { expediteurCourriel, reponseCourriel } from "./_expediteur.js";
 
 const RESEND = "https://api.resend.com/emails";
 
@@ -154,6 +154,8 @@ export async function envoyerCopieHorsBase(document, jour) {
       headers: { Authorization: `Bearer ${cle}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         from: expediteur,
+        /* Sans elle, répondre à ce message écrit dans le vide : voir reponseCourriel(). */
+        ...(reponseCourriel() ? { reply_to: reponseCourriel() } : {}),
         to: [destinataire],
         subject: sujet,
         html,

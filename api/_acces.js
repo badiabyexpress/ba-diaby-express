@@ -26,7 +26,7 @@
 
 import crypto from "node:crypto";
 import { destinataireAlerte } from "./_alerte.js";
-import { expediteurCourriel, enteteCourriel } from "./_expediteur.js";
+import { expediteurCourriel, enteteCourriel, reponseCourriel } from "./_expediteur.js";
 
 const RESEND = "https://api.resend.com/emails";
 
@@ -196,7 +196,11 @@ export async function envoyerAlerteConnexion(document, entree) {
     const reponse = await fetch(RESEND, {
       method: "POST",
       headers: { Authorization: `Bearer ${cle}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: expediteur, to: [destinataire], subject: sujet, html }),
+      body: JSON.stringify({
+        from: expediteur, to: [destinataire], subject: sujet, html,
+        /* Sans elle, répondre à ce message écrit dans le vide : voir reponseCourriel(). */
+        ...(reponseCourriel() ? { reply_to: reponseCourriel() } : {}),
+      }),
     });
     if (!reponse.ok) {
       const detail = await reponse.text().catch(() => "");

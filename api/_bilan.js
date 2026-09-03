@@ -21,7 +21,7 @@
  * un bilan qu'on croit recevoir et qui n'arrive pas est pire que pas de bilan du tout.
  */
 
-import { expediteurCourriel, enteteCourriel } from "./_expediteur.js";
+import { expediteurCourriel, enteteCourriel, reponseCourriel } from "./_expediteur.js";
 
 const RESEND = "https://api.resend.com/emails";
 const VERSION_GRAPH = "v21.0";
@@ -191,7 +191,11 @@ export async function envoyerBilanEmail(document, chiffres) {
     const reponse = await fetch(RESEND, {
       method: "POST",
       headers: { Authorization: `Bearer ${cle}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: expediteur, to: [destinataire], subject: sujet, html }),
+      body: JSON.stringify({
+        from: expediteur, to: [destinataire], subject: sujet, html,
+        /* Sans elle, répondre à ce message écrit dans le vide : voir reponseCourriel(). */
+        ...(reponseCourriel() ? { reply_to: reponseCourriel() } : {}),
+      }),
     });
     if (!reponse.ok) {
       const detail = await reponse.text().catch(() => "");

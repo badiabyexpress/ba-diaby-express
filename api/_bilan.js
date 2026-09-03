@@ -190,7 +190,7 @@ export async function envoyerBilanEmail(document, chiffres) {
  * chez Meta. Il manque l'une des trois, on le dit et l'on s'arrête là : le courriel, lui, est déjà
  * parti avec le détail complet.
  */
-export async function envoyerBilanWhatsApp(chiffres) {
+export async function envoyerBilanWhatsApp(chiffres, destinataireEssai = null) {
   const jeton = process.env.WHATSAPP_TOKEN;
   /*
    * LE NOM DE LA VARIABLE, ET LA PANNE QU'IL A CAUSÉE.
@@ -208,7 +208,19 @@ export async function envoyerBilanWhatsApp(chiffres) {
    * que d'être ignorée en silence.
    */
   const numeroId = process.env.WHATSAPP_PHONE_ID || process.env.WHATSAPP_PHONE_NUMBER_ID;
-  const destinataire = String(process.env.BILAN_WHATSAPP || "").replace(/\D/g, "");
+  /*
+   * UN NUMÉRO D'ESSAI, POUR SAVOIR LEQUEL DES DEUX EST FAUTIF.
+   *
+   * « Meta a accepté » et « le téléphone a reçu » sont deux choses différentes : l'API rend un
+   * identifiant de message dès qu'elle accepte la demande, sans rien promettre de la livraison. Un
+   * numéro qui n'est pas sur WhatsApp, un chiffre de travers, une ligne qui a changé de main —
+   * l'envoi est « réussi » et personne ne reçoit rien.
+   *
+   * Tant qu'on ne pouvait essayer que le numéro de la variable d'environnement, chaque hypothèse
+   * coûtait une modification dans Vercel et un redéploiement. On accepte donc un destinataire pour
+   * l'essai, sans rien changer à l'envoi de nuit, qui garde le sien.
+   */
+  const destinataire = String(destinataireEssai || process.env.BILAN_WHATSAPP || "").replace(/\D/g, "");
   if (!jeton || !numeroId) return { envoye: false, raison: "whatsapp-non-configure" };
   if (!destinataire) return { envoye: false, raison: "aucun-numero-de-bilan", modele: MODELE_BILAN };
 

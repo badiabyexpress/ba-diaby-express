@@ -346,11 +346,15 @@ export default async function handler(req, res) {
     }
     const chiffres = chiffresDuJour(vivant.valeur);
     const parEmail = await envoyerBilanEmail(vivant.valeur, chiffres);
-    const parWhatsApp = await envoyerBilanWhatsApp(chiffres);
+    /* Un destinataire d'essai, s'il en est proposé un : voir envoyerBilanWhatsApp. */
+    const numeroEssai = String(req.body?.destinataire || "").replace(/\D/g, "").slice(0, 20) || null;
+    const parWhatsApp = await envoyerBilanWhatsApp(chiffres, numeroEssai);
     const etatBilan = {
       jour: chiffres.jour,
       email: !!parEmail.envoye,
       raisonEmail: parEmail.envoye ? null : parEmail.raison || null,
+      /* La réponse exacte de Resend : « refus-resend-422 » ne se répare pas, sa phrase si. */
+      detailEmail: parEmail.envoye ? null : parEmail.detail || null,
       whatsapp: !!parWhatsApp.envoye,
       raisonWhatsApp: parWhatsApp.envoye ? null : parWhatsApp.raison || null,
       detailWhatsApp: parWhatsApp.envoye ? null : parWhatsApp.detail || null,
@@ -359,7 +363,16 @@ export default async function handler(req, res) {
       essai: new Date().toISOString(),
     };
     await noterVeille({ bilan: etatBilan });
-    return res.status(200).json({ ok: true, essai: true, bilan: etatBilan, chiffres });
+    return res.status(200).json({
+      ok: true, essai: true, bilan: etatBilan, chiffres,
+      /*
+       * L'identifiant rendu par Meta et le numéro réellement visé. C'est ce qui permet de dire
+       * « Meta a accepté, pour CE numéro » plutôt que « envoyé » — un mot qui laisse croire que le
+       * téléphone a reçu quelque chose.
+       */
+      whatsappId: parWhatsApp?.id || null,
+      whatsappVers: parWhatsApp?.destinataire || null,
+    });
   }
 
   const clef = cleDuJour();
@@ -570,6 +583,7 @@ export default async function handler(req, res) {
           jour: bilan.chiffres.jour,
           email: !!bilan.parEmail?.envoye,
           raisonEmail: bilan.parEmail?.envoye ? null : bilan.parEmail?.raison || null,
+          detailEmail: bilan.parEmail?.envoye ? null : bilan.parEmail?.detail || null,
           whatsapp: !!bilan.parWhatsApp?.envoye,
           raisonWhatsApp: bilan.parWhatsApp?.envoye ? null : bilan.parWhatsApp?.raison || null,
           detailWhatsApp: bilan.parWhatsApp?.envoye ? null : bilan.parWhatsApp?.detail || null,

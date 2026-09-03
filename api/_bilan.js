@@ -21,6 +21,8 @@
  * un bilan qu'on croit recevoir et qui n'arrive pas est pire que pas de bilan du tout.
  */
 
+import { expediteurCourriel } from "./_expediteur.js";
+
 const RESEND = "https://api.resend.com/emails";
 const VERSION_GRAPH = "v21.0";
 
@@ -29,6 +31,22 @@ export const MODELE_BILAN = "bde_bilan_quotidien";
 
 const liste = (x) => (Array.isArray(x) ? x : []);
 const nombre = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
+
+/**
+ * Le numéro sous la forme que Meta attend : indicatif du pays, puis le numéro. Rien devant.
+ *
+ * Meta refuse « 00224… » avec « (#131009) Parameter value is not valid » — un message qui ne dit
+ * ni quel paramètre, ni pourquoi. Or « 00 » est exactement la façon dont un numéro international
+ * s'écrit en Guinée, et sur un clavier de téléphone c'est ce que l'on tape. On retire donc ce
+ * préfixe de composition, comme on retire déjà le « + » et les espaces : ce sont trois manières
+ * d'écrire le même numéro, et aucune n'est une faute de la part de qui la saisit.
+ *
+ * On ne retire jamais un « 0 » seul : dans un numéro national il fait partie du numéro.
+ */
+export function numeroPourMeta(valeur) {
+  const chiffres = String(valeur || "").replace(/\D/g, "");
+  return chiffres.startsWith("00") ? chiffres.slice(2) : chiffres;
+}
 
 /** Le jour visé, en heure de Conakry — qui est l'heure universelle, sans décalage ni été. */
 export function jourPrecedent(maintenant = new Date()) {
@@ -159,7 +177,9 @@ export function corpsBilan(chiffres, document) {
 
 export async function envoyerBilanEmail(document, chiffres) {
   const cle = process.env.RESEND_API_KEY;
-  const expediteur = process.env.EMAIL_FROM;
+  /* Jamais la variable brute : voir api/_expediteur.js — c'est ce qui a fait refuser
+   * chaque courriel automatique par Resend pendant des semaines. */
+  const expediteur = expediteurCourriel();
   if (!cle || !expediteur) return { envoye: false, raison: "courriel-non-configure" };
   const destinataire = String(process.env.ALERTE_EMAIL || "").trim()
     || liste(document?.users).find((u) => u?.role === "Administrateur" && String(u.email || "").includes("@"))?.email;
@@ -220,7 +240,7 @@ export async function envoyerBilanWhatsApp(chiffres, destinataireEssai = null) {
    * coûtait une modification dans Vercel et un redéploiement. On accepte donc un destinataire pour
    * l'essai, sans rien changer à l'envoi de nuit, qui garde le sien.
    */
-  const destinataire = String(destinataireEssai || process.env.BILAN_WHATSAPP || "").replace(/\D/g, "");
+  const destinataire = numeroPourMeta(destinataireEssai || process.env.BILAN_WHATSAPP);
   if (!jeton || !numeroId) return { envoye: false, raison: "whatsapp-non-configure" };
   if (!destinataire) return { envoye: false, raison: "aucun-numero-de-bilan", modele: MODELE_BILAN };
 

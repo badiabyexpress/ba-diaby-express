@@ -35,6 +35,7 @@ import { releveDeFraude, signauxDeFraude, corpsAlerteFraude } from "./_fraude.js
 import { destinataireAlerte } from "./_alerte.js";
 import { purgerDocumentsDevinables } from "./_documents.js";
 import crypto from "node:crypto";
+import { expediteurCourriel } from "./_expediteur.js";
 
 const PREFIXE = "bde-backup-";
 /*
@@ -221,7 +222,9 @@ const RESEND_URL = "https://api.resend.com/emails";
 
 async function envoyerAlerteFraude(document, signaux) {
   const cle = process.env.RESEND_API_KEY;
-  const expediteur = process.env.EMAIL_FROM;
+  /* Jamais la variable brute : voir api/_expediteur.js — c'est ce qui a fait refuser
+   * chaque courriel automatique par Resend pendant des semaines. */
+  const expediteur = expediteurCourriel();
   if (!cle || !expediteur) return { envoye: false, raison: "courriel-non-configure" };
   const destinataire = destinataireAlerte(document);
   if (!destinataire) return { envoye: false, raison: "aucun-destinataire" };

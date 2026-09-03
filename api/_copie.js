@@ -32,6 +32,8 @@
  * anodin.
  */
 
+import { expediteurCourriel } from "./_expediteur.js";
+
 const RESEND = "https://api.resend.com/emails";
 
 /*
@@ -125,7 +127,9 @@ export function corpsCopie({ jour, octets, colis, comptes }, document) {
  */
 export async function envoyerCopieHorsBase(document, jour) {
   const cle = process.env.RESEND_API_KEY;
-  const expediteur = process.env.EMAIL_FROM;
+  /* Jamais la variable brute : voir api/_expediteur.js — c'est ce qui a fait refuser
+   * chaque courriel automatique par Resend pendant des semaines. */
+  const expediteur = expediteurCourriel();
   if (!cle || !expediteur) return { envoye: false, raison: "courriel-non-configure" };
 
   const destinataire = destinataireCopie(document);

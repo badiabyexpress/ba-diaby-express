@@ -8,7 +8,7 @@ import { ROLES, PERMISSIONS_SCHEMA, ROLE_DEFAULT_PERMISSIONS, effectivePermissio
  * correspondre à l'autre, et le propre d'une alerte qui ne part plus est de ne rien dire.
  */
 import { signauxDeFraude } from "../api/_fraude.js";
-import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree, relireDuServeur } from "./lib/storage.js";
+import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree, relireDuServeur, oublierCacheLocal } from "./lib/storage.js";
 
 /* ---------- design tokens ----------
 Identité : Navy #0A2647 · Rouge de marque #C8102E · Blanc #FFFFFF
@@ -3920,12 +3920,25 @@ function BoutonInstallation({ compact }) {
  * ramenait à l'écran de connexion.
  *
  * Une fois connecté dans la journée, agent comme client doit rester connecté sur son appareil
- * tant qu'il l'utilise au moins une fois toutes les 6 h — d'où un délai large plutôt que les
- * 10 minutes d'origine, pensées pour un usage bureautique classique et trop courtes pour un
- * usage ponctuel entre deux colis.
+ * tant qu'il l'utilise régulièrement — d'où un délai large plutôt que les 10 minutes d'origine,
+ * pensées pour un usage bureautique classique et trop courtes pour un usage ponctuel entre deux
+ * colis.
+ *
+ * POURQUOI 2 H POUR UN AGENT, ET 1 H POUR UN CLIENT.
+ *
+ * C'était 6 h pour les deux : un téléphone posé sur un comptoir à 9 h rouvrait la session à 15 h,
+ * déjà connecté, avec le fichier clients dedans.
+ *
+ * Le compte à rebours ne repart qu'à une vraie action ; quelqu'un qui travaille ne l'atteint donc
+ * jamais. Il ne se déclenche qu'après une inaction réelle, et c'est là qu'il faut arbitrer :
+ * — 2 h pour un agent, parce qu'une tournée de livraison ou une pause déjeuner ne doit pas le
+ *   déconnecter. Se reconnecter demande du réseau, et dans un dépôt il n'y en a pas toujours :
+ *   un délai trop court se paierait en comptes partagés et en mots de passe écrits sur un cahier ;
+ * — 1 h pour un client, qui consulte ses colis quelques minutes, souvent depuis un téléphone
+ *   emprunté, et qui se reconnectera sans peine de chez lui.
  */
-const MINUTES_INACTIVITE_AGENT = 360;
-const MINUTES_INACTIVITE_CLIENT = 360;
+const MINUTES_INACTIVITE_AGENT = 120;
+const MINUTES_INACTIVITE_CLIENT = 60;
 const CLE_SESSION_CLIENT = "bde-session-client";
 const CLE_SESSION = "bde-session";
 const CLE_JETON = "bde-jeton";
@@ -5045,7 +5058,7 @@ function App() {
               style={{ display: "flex", alignItems: "center", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", gap: 8, width: "100%", fontSize: 13, color: "#fff", background: "none", border: "none", cursor: "pointer", marginBottom: 8, padding: 0 }}>
               <ShieldCheck size={15} /> {!(collapsed && !isMobile) && "Sécurité de mon compte"}
             </button>
-            <button onClick={() => { ecrireSessionEnregistree(null); ecrireJeton(null); ecrireJetonSession(null); setVersionAcces((n) => n + 1); setSession(null); setView("dashboard"); setOngletPartenaire("accueil"); setShowLogin(false); const url = new URL(window.location.href); url.searchParams.delete("connexion"); window.history.replaceState({}, "", url); }} title={(collapsed && !isMobile) ? t.logout : undefined} style={{ display: "flex", alignItems: "center", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", gap: 8, width: "100%", fontSize: 13, color: "var(--brand-on-dark)", background: "none", border: "none", cursor: "pointer" }}>
+            <button onClick={() => { oublierCacheLocal(); ecrireSessionEnregistree(null); ecrireJeton(null); ecrireJetonSession(null); setVersionAcces((n) => n + 1); setSession(null); setView("dashboard"); setOngletPartenaire("accueil"); setShowLogin(false); const url = new URL(window.location.href); url.searchParams.delete("connexion"); window.history.replaceState({}, "", url); }} title={(collapsed && !isMobile) ? t.logout : undefined} style={{ display: "flex", alignItems: "center", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", gap: 8, width: "100%", fontSize: 13, color: "var(--brand-on-dark)", background: "none", border: "none", cursor: "pointer" }}>
               <LogOut size={15} /> {!(collapsed && !isMobile) && t.logout}
             </button>
           </div>
@@ -8214,7 +8227,7 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
             <button onClick={() => setShowProfil(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Mon profil")}</button>
             {mesColis.length > 0 && <button onClick={() => downloadClientManifest(compte, mesColis, deviseClient)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Mon bordereau (PDF)")}</button>}
             <ClientLangSwitch lang={lang} onChange={setLang} />
-            <button onClick={() => { ecrireSessionClient(null); setCompte(null); setIdentifiant(""); setMotdepasse(""); setMode("login"); }} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--muted)", fontWeight: 600, cursor: "pointer" }}>{T("Déconnexion")}</button>
+            <button onClick={() => { oublierCacheLocal(); ecrireSessionClient(null); setCompte(null); setIdentifiant(""); setMotdepasse(""); setMode("login"); }} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--muted)", fontWeight: 600, cursor: "pointer" }}>{T("Déconnexion")}</button>
           </div>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 24 }}>

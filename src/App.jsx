@@ -17018,6 +17018,20 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
    */
   const colisFactures = colisRoute.filter((c) => !estColisPartenaire(c));
   const nbPartenaires = colisRoute.length - colisFactures.length;
+  /*
+   * CE QUE LES PARTENAIRES DOIVENT À L'ENTREPRISE — comme sur la fiche de voyage.
+   *
+   * Le bordereau taisait ces montants. C'était le choix d'origine, et il se défendait : ce papier
+   * est remis au transporteur. Mais il sert aussi à faire le compte d'une remise, et sur une
+   * route où la moitié des colis viennent de partenaires, un « MONTANT TOTAL » calculé sur
+   * l'autre moitié n'aide personne.
+   *
+   * C'est le prix DU CONTRAT entre nous et le partenaire, stocké dans la devise de ce contrat
+   * (voir detailPrixPartenaire) — d'où le passage par versEUR avant fmt. Ce que le partenaire
+   * facture ensuite à son propre client n'est enregistré nulle part et ne figure pas ici.
+   */
+  const prixPartenaireBase = (c) => versEUR(Number(c.prixPartenaire) || 0, c.devisePartenaire);
+  const totalPartenaires = colisRoute.filter(estColisPartenaire).reduce((s, c) => s + prixPartenaireBase(c), 0);
 
   // Bandeau d’en-tête — filet rouge au pied de la bande navy, comme sur l'étiquette et le ticket
   // d'envoi : même identité de marque bicolore sur tous les documents imprimés.
@@ -17065,7 +17079,8 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   };
   stat(14, "COLIS", colisRoute.length);
   stat(76, "POIDS TOTAL", `${poidsTotal.toFixed(1)} kg`);
-  stat(138, "MONTANT TOTAL", fmt(colisFactures.reduce((s, c) => s + c.prix, 0), cur), true);
+  // Tout ce que la route a produit, colis partenaires compris : c'est le chiffre qu'on cherche ici.
+  stat(138, "MONTANT TOTAL", fmt(colisFactures.reduce((s, c) => s + c.prix, 0) + totalPartenaires, cur), true);
   y += 26;
 
   /*
@@ -17076,8 +17091,13 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
    * partiellement payé, ou pas payé du tout. C'est la question posée à chaque remise.
    */
   const reglementDuColis = (c) => {
-    // Même mention que sur la fiche de voyage : ni « payé », ni « dû », le colis n'est pas à nous.
-    if (estColisPartenaire(c)) return { libelle: "Partenaire", teinte: [91, 141, 239] };
+    /*
+     * « Sur facture », comme sur la fiche de voyage. La colonne répond à une seule question, posée
+     * à chaque remise : faut-il encaisser quelque chose pour ce colis ? Pour un colis partenaire
+     * la réponse est non — l'argent arrive sur la facture mensuelle. Un « Non payé » enverrait le
+     * transporteur réclamer une somme qui n'est pas due par la personne en face.
+     */
+    if (estColisPartenaire(c)) return { libelle: "Sur facture", teinte: [91, 141, 239] };
     const paye = Number(c.paye) || 0;
     if (paye <= 0.005) return { libelle: "Non payé", teinte: [200, 45, 60] };
     if ((Number(c.reste) || 0) <= 0.005) return { libelle: "Payé", teinte: [40, 140, 90] };
@@ -17086,7 +17106,9 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   const head = ["N° de suivi", "Destinataire", "Téléphone", "Articles", "Poids", "Statut", `Montant (${cur})`, "Règlement"];
   const body = colisRoute.map((c) => [
     c.tracking, c.destinataire, c.telephone, String(nombreArticles(c)),
-    `${c.poids} kg`, c.status, estColisPartenaire(c) ? "—" : fmt(c.prix, cur), reglementDuColis(c).libelle,
+    `${c.poids} kg`, c.status,
+    estColisPartenaire(c) ? fmt(prixPartenaireBase(c), cur) : fmt(c.prix, cur),
+    reglementDuColis(c).libelle,
   ]);
 
   const hasAutoTable = await ensureAutoTable();
@@ -17192,7 +17214,12 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   doc.setFontSize(9); doc.setFont(undefined, "bold"); doc.setTextColor(10, 38, 71);
   // Le reste à percevoir est calé sur le bord droit du panneau : en francs guinéens, la ligne est
   // longue, et posée à une abscisse fixe elle sortait de la feuille.
-  doc.text(`Facturé : ${fmt(totalFacture, cur)}`, 18, finalY + 12.5);
+  /*
+   * Ces trois chiffres ne parlent que des CLIENTS, et le libellé le dit maintenant. Y verser le
+   * facturé partenaire ferait mentir « reste à percevoir » : cet argent-là ne se réclame pas au
+   * comptoir ni au transporteur, il part sur la facture mensuelle du partenaire.
+   */
+  doc.text(`Facturé clients : ${fmt(totalFacture, cur)}`, 18, finalY + 12.5);
   doc.setTextColor(62, 160, 90);
   doc.text(`Encaissé : ${fmt(totalEncaisse, cur)}`, 105, finalY + 12.5, { align: "center" });
   doc.setTextColor(226, 63, 82);
@@ -17200,15 +17227,22 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
 
   finalY += 24;
   /*
-   * Sans cette ligne, un bordereau de vingt colis dont douze sont partenaires afficherait un
-   * total calculé sur huit, et le lecteur croirait à une erreur de saisie. Elle dit d'où vient
-   * l'écart entre le nombre de colis affiché en haut et le nombre de lignes qui portent un prix.
+   * La mention disait que les colis partenaires ne comptent « jamais dans les montants ci-dessus ».
+   * Ce n'est plus vrai : ils portent désormais le tarif de leur contrat, et le MONTANT TOTAL les
+   * additionne. Elle dit maintenant l'autre chose, celle qui reste vraie et qui compte à la remise :
+   * cet argent ne s'encaisse pas ici.
    */
   if (nbPartenaires > 0) {
-    if (finalY > 262) { doc.addPage(); finalY = 20; }
+    if (finalY > 258) { doc.addPage(); finalY = 20; }
+    const s = nbPartenaires > 1 ? "s" : "";
+    doc.setFont(undefined, "bold"); doc.setFontSize(8.5); doc.setTextColor(10, 38, 71);
+    doc.text(`Facturé aux partenaires (${nbPartenaires} colis) : ${fmt(totalPartenaires, cur)}`, 14, finalY);
+    finalY += 5;
     doc.setFont(undefined, "normal"); doc.setFontSize(8); doc.setTextColor(120, 130, 150);
     const mention = doc.splitTextToSize(
-      `Dont ${nbPartenaires} colis partenaire${nbPartenaires > 1 ? "s" : ""} — transporté${nbPartenaires > 1 ? "s" : ""} pour un partenaire et non facturé${nbPartenaires > 1 ? "s" : ""} par Ba-Diaby Express : ils comptent dans les colis et les kilos, jamais dans les montants ci-dessus.`,
+      `Ce${s === "s" ? "s" : ""} ${nbPartenaires} colis partenaire${s} ${s === "s" ? "sont facturés" : "est facturé"} au partenaire,`
+      + ` au tarif de son contrat, et compté${s} dans le montant total. Rien n'est à encaisser pour`
+      + ` ${s === "s" ? "eux" : "lui"} à la remise : le règlement se fait sur la facture mensuelle du partenaire.`,
       182,
     );
     doc.text(mention, 14, finalY);

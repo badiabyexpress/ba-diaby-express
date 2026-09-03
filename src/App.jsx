@@ -2974,6 +2974,42 @@ function trackingUrlFor(tracking) {
  * Le code reste imprimé en toutes lettres sur le reçu de l'expéditeur — c'est à lui qu'il est
  * remis, en main propre, avec l'avertissement qui va avec.
  */
+/*
+ * LES NUMÉROS DE SUIVI SONT CLIQUABLES SUR LE PAPIER AUSSI.
+ *
+ * À l'écran, un numéro de colis ouvre sa fiche depuis une vingtaine d'endroits. Sur la fiche de
+ * voyage et sur le bordereau — les deux documents qu'on relit vraiment pour faire les comptes —
+ * c'était du texte mort : pour savoir qui est « BDE310814 », il fallait le recopier à la main
+ * dans la recherche. Douze caractères, plusieurs dizaines de fois par jour, avec chaque fois la
+ * possibilité d'en rater un.
+ *
+ * Un PDF sait porter des liens. On pose donc, sur la cellule du numéro, la même adresse que celle
+ * des QR codes déjà imprimés sur les cartons : la page de suivi publique. Elle a trois qualités
+ * qu'aucune adresse interne n'aurait ici — elle s'ouvre sans compte, depuis n'importe quel
+ * téléphone, et elle ne montre que ce qu'un porteur du numéro peut légitimement voir. Un
+ * bordereau se remet au transporteur : il ne doit pas ouvrir nos écrans.
+ *
+ * La couleur et le soulignement sont indispensables : un lien qu'on ne voit pas n'est pas un lien.
+ */
+const LIEN_PDF = [22, 92, 170];
+
+function poserLiensSuivi(doc, donnees, colonne = 0) {
+  const cellule = donnees?.cell;
+  if (!cellule || donnees.section !== "body") return;
+  if (donnees.column?.index !== colonne) return;
+  const code = String(cellule.raw ?? "").trim();
+  if (!code) return;
+  doc.link(cellule.x, cellule.y, cellule.width, cellule.height, { url: trackingUrlFor(code) });
+}
+
+/* Le même geste sur le chemin de repli, qui écrit le tableau ligne à ligne sans le greffon. */
+function texteAvecLienSuivi(doc, code, x, y) {
+  const texte = String(code ?? "");
+  if (!texte) return;
+  doc.setTextColor(...LIEN_PDF);
+  doc.textWithLink(texte, x, y, { url: trackingUrlFor(texte) });
+}
+
 function lienVerificationTransfert(reference) {
   return `${adressePublique()}/verify-transfer/${encodeURIComponent(reference)}`;
 }
@@ -17224,7 +17260,7 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
        * à droite, et la somme des largeurs fait exactement les 182 mm utiles d'une page A4.
        */
       columnStyles: {
-        0: { cellWidth: 24 },  // N° de suivi
+        0: { cellWidth: 24, textColor: LIEN_PDF },  // N° de suivi — cliquable, voir poserLiensSuivi
         1: { cellWidth: 30 },  // Destinataire
         2: { cellWidth: 24 },  // Téléphone
         3: { cellWidth: 14, halign: "center" },  // Articles
@@ -17239,6 +17275,8 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
         const c = colisRoute[donnees.row.index];
         if (c) { donnees.cell.styles.textColor = reglementDuColis(c).teinte; donnees.cell.styles.fontStyle = "bold"; }
       },
+      /* Le numéro de suivi mène à la fiche du colis, comme sur la fiche de voyage. */
+      didDrawCell: (donnees) => poserLiensSuivi(doc, donnees),
       margin: { left: 14, right: 14 },
     });
     finalY = doc.lastAutoTable.finalY || y + 8;
@@ -17273,6 +17311,7 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
         doc.setFont(undefined, j === 6 || j === 7 ? "bold" : "normal");
         cellules.forEach((ligne, k) => {
           const yl = finalY + 4 + k * 3.4;
+          if (j === 0 && k === 0) { texteAvecLienSuivi(doc, ligne, colX[j] + 1.5, yl); doc.setTextColor(30, 40, 55); return; }
           if (j === 6) doc.text(ligne, colX[j] + largeurs[j] - 1.5, yl, { align: "right" });
           else if (j === 3) doc.text(ligne, colX[j] + largeurs[j] / 2, yl, { align: "center" });
           else doc.text(ligne, colX[j] + 1.5, yl);
@@ -23939,9 +23978,11 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data, devis
       theme: "grid", headStyles: { fillColor: NAVY, textColor: 255, fontSize: 7.5 },
       styles: { fontSize: 7.5, textColor: [40, 40, 40], overflow: "linebreak", cellPadding: 1.3 },
       // Les trois colonnes d'argent sont calées à droite : c'est ainsi qu'on additionne de tête.
-      columnStyles: { 0: { cellWidth: 24 }, 1: { cellWidth: 42 }, 2: { cellWidth: 14 }, 3: { cellWidth: 16 },
+      columnStyles: { 0: { cellWidth: 24, textColor: LIEN_PDF }, 1: { cellWidth: 42 }, 2: { cellWidth: 14 }, 3: { cellWidth: 16 },
                       4: { cellWidth: 30, halign: "right" }, 5: { cellWidth: 28, halign: "right" }, 6: { cellWidth: 28, halign: "right" } },
       margin: { left: 14, right: 14 },
+      /* Le numéro de suivi mène à la fiche du colis — voir poserLiensSuivi. */
+      didDrawCell: (donnees) => poserLiensSuivi(doc, donnees),
     });
     y = doc.lastAutoTable.finalY + 7;
   } else {
@@ -23964,9 +24005,11 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data, devis
       const hauteur = Math.max(...lignes.map((l) => l.length)) * 3.2 + 2.4;
       if (y + hauteur > 272) { doc.addPage(); y = 20; }
       if (i % 2 === 1) { doc.setFillColor(238, 243, 250); doc.rect(14, y, 182, hauteur, "F"); }
-      lignes.forEach((cellules, j) => cellules.forEach((ligne, k) => (j >= 4
-        ? doc.text(ligne, colX[j] + largeurs[j] - 1.5, y + 3.8 + k * 3.2, { align: "right" })
-        : doc.text(ligne, colX[j] + 1.5, y + 3.8 + k * 3.2))));
+      lignes.forEach((cellules, j) => cellules.forEach((ligne, k) => {
+        if (j === 0 && k === 0) { texteAvecLienSuivi(doc, ligne, colX[j] + 1.5, y + 3.8); doc.setTextColor(40, 40, 40); return; }
+        if (j >= 4) doc.text(ligne, colX[j] + largeurs[j] - 1.5, y + 3.8 + k * 3.2, { align: "right" });
+        else doc.text(ligne, colX[j] + 1.5, y + 3.8 + k * 3.2);
+      }));
       y += hauteur;
     });
     y += 7;

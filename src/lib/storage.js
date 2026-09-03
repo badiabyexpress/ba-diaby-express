@@ -148,6 +148,49 @@ function ecrireCache(key, valeur) {
  */
 const versionsLues = new Map();
 export function versionLue(key) { return versionsLues.get(key) || null; }
+
+/**
+ * EFFACER LA COPIE LOCALE DES DONNÉES — à la déconnexion volontaire, et là seulement.
+ *
+ * Le cache est ce qui permet d'ouvrir l'application sans réseau. Pour un agent, il contient le
+ * document de travail : les clients, leurs téléphones, leurs adresses, les colis, les factures. Il
+ * restait sur l'appareil après la déconnexion — si bien qu'un ordinateur d'agence partagé, ou un
+ * téléphone rendu, gardait le fichier clients à disposition du suivant.
+ *
+ * Le coût est nul. Pour se reconnecter il faut du réseau, et avec du réseau le cache se
+ * reconstitue à la première lecture : il n'y a rien à perdre entre les deux.
+ *
+ * CE QUI N'EST PAS EFFACÉ : LA FILE D'ATTENTE.
+ *
+ * `bde-outbox` porte le travail enregistré hors ligne et pas encore parti — des colis, des
+ * encaissements. L'effacer serait perdre du travail, c'est-à-dire l'exact contraire du but
+ * poursuivi ici. On ne touche qu'aux clés de cache, jamais à elle.
+ *
+ * ET SEULEMENT SUR UNE DÉCONNEXION VOULUE.
+ *
+ * Une expiration automatique n'appelle pas cette fonction : elle survient souvent en pleine
+ * tournée, et un agent qui reprend son téléphone doit retrouver de quoi travailler. La menace que
+ * l'on ferme ici est celle de l'appareil qu'on remet à quelqu'un — et cela passe toujours par le
+ * bouton.
+ */
+export function oublierCacheLocal() {
+  let effacees = 0;
+  try {
+    const aEffacer = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const cle = localStorage.key(i);
+      if (cle && cle.startsWith(CACHE_PREFIX)) aEffacer.push(cle);
+    }
+    /* On collecte avant de supprimer : retirer une clé pendant qu'on parcourt en saute une. */
+    aEffacer.forEach((cle) => { localStorage.removeItem(cle); effacees++; });
+  } catch (e) { /* stockage indisponible : il n'y a alors rien qui traîne */ }
+  /*
+   * Les numéros de version vont avec le cache. Les garder ferait annoncer au serveur « je modifie
+   * la version 12 » alors qu'on n'a plus rien lu du tout.
+   */
+  versionsLues.clear();
+  return effacees;
+}
 function cleFile() { return `${QUEUE_KEY}${tiroir ? `:${tiroir.replace(/:$/, "")}` : ""}`; }
 
 /* ------------------------------------------------------------------------------------------

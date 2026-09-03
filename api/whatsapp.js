@@ -44,9 +44,20 @@ import { refusSaufEquipe } from "./_session.js";
 
 const VERSION_GRAPH = "v21.0";
 
-/** Numéro en chiffres seuls, forme attendue par Meta (« 224621654796 »). */
+/**
+ * Numéro en chiffres seuls, forme attendue par Meta (« 224621654796 »).
+ *
+ * Le « 00 » de composition internationale est retiré au même titre que le « + » et les espaces.
+ * Meta refuse « 00224… » par « (#131009) Parameter value is not valid » — un message qui ne dit ni
+ * quel paramètre ni pourquoi — et « 00 » est précisément la façon dont un numéro international
+ * s'écrit en Guinée. Un client dont la fiche porte cette forme ne recevait donc rien, sans que le
+ * refus ne soit rattaché à sa cause.
+ *
+ * Un « 0 » seul n'est jamais retiré : dans un numéro national, il fait partie du numéro.
+ */
 function numeroMeta(brut) {
-  return String(brut).replace(/^whatsapp:/, "").replace(/\D/g, "");
+  const chiffres = String(brut).replace(/^whatsapp:/, "").replace(/\D/g, "");
+  return chiffres.startsWith("00") ? chiffres.slice(2) : chiffres;
 }
 
 function configuration() {

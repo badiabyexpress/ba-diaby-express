@@ -26,6 +26,7 @@
 
 import crypto from "node:crypto";
 import { destinataireAlerte } from "./_alerte.js";
+import { expediteurCourriel } from "./_expediteur.js";
 
 const RESEND = "https://api.resend.com/emails";
 
@@ -182,7 +183,9 @@ export function corpsAlerteConnexion(entree, document) {
 
 export async function envoyerAlerteConnexion(document, entree) {
   const cle = process.env.RESEND_API_KEY;
-  const expediteur = process.env.EMAIL_FROM;
+  /* Jamais la variable brute : voir api/_expediteur.js — c'est ce qui a fait refuser
+   * chaque courriel automatique par Resend pendant des semaines. */
+  const expediteur = expediteurCourriel();
   if (!cle || !expediteur) return { envoye: false, raison: "courriel-non-configure" };
   const destinataire = destinataireAlerte(document);
   if (!destinataire) return { envoye: false, raison: "aucun-destinataire" };

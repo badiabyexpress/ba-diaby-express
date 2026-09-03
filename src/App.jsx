@@ -29597,6 +29597,35 @@ function EtatVeille({ data, notify }) {
   const teinteCopie = copieOk ? "ok" : "danger";
   const dernierSucces = horsBase?.dernierSucces ? new Date(horsBase.dernierSucces) : null;
 
+  /*
+   * LE BILAN QUOTIDIEN — et ce qui l'empêche d'arriver.
+   *
+   * Il est calculé et envoyé chaque nuit depuis le serveur, par courriel et par WhatsApp. Son état
+   * était consigné dans le relevé et affiché nulle part : exactement ce qui a laissé la copie hors
+   * site échouer huit nuits de suite sans que personne l'apprenne.
+   *
+   * Un bilan qu'on croit recevoir et qui n'arrive jamais est pire que pas de bilan : on cesse
+   * d'ouvrir l'application le matin en pensant que le message viendra. On dit donc ce qui manque,
+   * en nommant le geste — pas le code d'erreur.
+   */
+  const bilanNuit = veille?.bilan || null;
+  const bilanWhatsAppOk = bilanNuit?.whatsapp === true;
+  const bilanEmailOk = bilanNuit?.email === true;
+  const bilanComplet = bilanWhatsAppOk && bilanEmailOk;
+  const teinteBilan = bilanComplet ? "ok" : (bilanEmailOk ? "warn" : "danger");
+  /*
+   * Chaque motif rendu par le serveur est traduit en un geste. « modele-absent-ou-non-approuve »
+   * ne se répare pas ; « déposez le modèle dans WhatsApp Manager » se répare.
+   */
+  const QUOI_FAIRE_WHATSAPP = {
+    "whatsapp-non-configure": "Le jeton WhatsApp n’est pas posé sur le serveur. Ajoutez WHATSAPP_TOKEN et WHATSAPP_PHONE_NUMBER_ID dans les variables d’environnement de Vercel.",
+    "aucun-numero-de-bilan": "Il manque le numéro qui doit recevoir le bilan. Ajoutez BILAN_WHATSAPP dans les variables d’environnement de Vercel — le numéro complet avec l’indicatif, sans espaces ni signe plus.",
+    "modele-absent-ou-non-approuve": "Meta n’autorise, hors des vingt-quatre heures suivant un message du destinataire, que des modèles approuvés. Déposez le modèle nommé ci-dessous dans WhatsApp Manager → Modèles de message, avec quatre variables dans le corps, puis attendez sa validation.",
+    reseau: "Le serveur n’a pas pu joindre Meta cette nuit. Si cela se répète, vérifiez que le jeton n’a pas expiré.",
+  };
+  const gesteWhatsApp = QUOI_FAIRE_WHATSAPP[bilanNuit?.raisonWhatsApp]
+    || (bilanNuit?.raisonWhatsApp ? "Refus de Meta. Le motif exact est indiqué ci-dessous." : null);
+
   return (
     <>
       <div style={{ background: `var(--${teinte}-bg)`, border: `1px solid var(--${teinte}-border)`, borderRadius: 10, padding: "11px 13px", marginBottom: 10, display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
@@ -29628,6 +29657,58 @@ function EtatVeille({ data, notify }) {
                   Motif du refus : <code>{horsBase.raison || "inconnu"}</code>
                   {horsBase.detail ? <> — {String(horsBase.detail).slice(0, 180)}</> : null}
                 </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {bilanNuit && (
+        <div style={{ background: `var(--${teinteBilan}-bg)`, border: `1px solid var(--${teinteBilan}-border)`, borderRadius: 10, padding: "11px 13px", marginBottom: 14, display: "flex", gap: 10, alignItems: "flex-start" }}>
+          {bilanComplet ? <CheckCircle2 size={15} color={`var(--${teinteBilan}-fg)`} style={{ flexShrink: 0, marginTop: 2 }} />
+            : <AlertTriangle size={15} color={`var(--${teinteBilan}-fg)`} style={{ flexShrink: 0, marginTop: 2 }} />}
+          <div style={{ fontSize: 12.5, color: `var(--${teinteBilan}-fg)`, lineHeight: 1.55, flex: 1, minWidth: 200 }}>
+            {bilanComplet ? (
+              <>Bilan de la journée envoyé cette nuit, par courriel et sur WhatsApp.</>
+            ) : (
+              <>
+                <strong>
+                  {bilanEmailOk
+                    ? "Le bilan quotidien part par courriel, mais pas sur WhatsApp."
+                    : "Le bilan quotidien n’est envoyé nulle part."}
+                </strong>
+                {/*
+                  Le courriel d'abord : c'est lui qui porte le détail complet, et il ne dépend
+                  d'aucun modèle à faire approuver. Sans lui, il n'y a pas de bilan du tout.
+                */}
+                {!bilanEmailOk && (
+                  <div style={{ marginTop: 6 }}>
+                    <strong>Courriel :</strong>{" "}
+                    {bilanNuit.raisonEmail === "courriel-non-configure"
+                      ? "RESEND_API_KEY ou EMAIL_FROM manquent dans les variables d’environnement de Vercel."
+                      : bilanNuit.raisonEmail === "aucun-destinataire"
+                        ? "Aucune adresse où l’envoyer. Renseignez ALERTE_EMAIL dans Vercel, ou l’adresse e-mail d’un compte administrateur."
+                        : <>refusé — <code>{bilanNuit.raisonEmail || "motif inconnu"}</code></>}
+                  </div>
+                )}
+                {!bilanWhatsAppOk && (
+                  <div style={{ marginTop: 6 }}>
+                    <strong>WhatsApp :</strong> {gesteWhatsApp || "non tenté."}
+                    {bilanNuit.modele && (
+                      <div style={{ marginTop: 4 }}>
+                        Modèle attendu : <code>{bilanNuit.modele}</code>
+                      </div>
+                    )}
+                    {bilanNuit.detailWhatsApp && (
+                      <div style={{ marginTop: 4, fontSize: 11.5, opacity: 0.85 }}>
+                        Réponse de Meta : {String(bilanNuit.detailWhatsApp).slice(0, 180)}
+                      </div>
+                    )}
+                    <div style={{ marginTop: 4, fontSize: 11.5, opacity: 0.85 }}>
+                      Motif : <code>{bilanNuit.raisonWhatsApp || "inconnu"}</code>
+                    </div>
+                  </div>
+                )}
               </>
             )}
           </div>

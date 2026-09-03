@@ -518,9 +518,25 @@ export default async function handler(req, res) {
       documents: documents?.fait
         ? { effaces: documents.effaces }
         : { effaces: 0, raison: documents?.raison || "inconnue" },
+      /*
+       * L'ÉTAT DU BILAN, AVEC SES MOTIFS — pas seulement deux booléens.
+       *
+       * On gardait « email: false, whatsapp: false » et rien d'autre : impossible de distinguer
+       * « la variable n'est pas posée » de « Meta refuse le modèle » ou de « le numéro est faux ».
+       * C'est la même erreur que celle qui a laissé la copie hors site échouer huit nuits de suite
+       * sous un « refus-resend-422 » que personne ne pouvait interpréter. Un motif qu'on ne garde
+       * pas est une panne qu'on ne répare pas.
+       */
       bilan: bilan && bilan.chiffres
-        ? { jour: bilan.chiffres.jour, email: !!bilan.parEmail?.envoye, whatsapp: !!bilan.parWhatsApp?.envoye,
-          raisonWhatsApp: bilan.parWhatsApp?.envoye ? null : bilan.parWhatsApp?.raison || null }
+        ? {
+          jour: bilan.chiffres.jour,
+          email: !!bilan.parEmail?.envoye,
+          raisonEmail: bilan.parEmail?.envoye ? null : bilan.parEmail?.raison || null,
+          whatsapp: !!bilan.parWhatsApp?.envoye,
+          raisonWhatsApp: bilan.parWhatsApp?.envoye ? null : bilan.parWhatsApp?.raison || null,
+          detailWhatsApp: bilan.parWhatsApp?.envoye ? null : bilan.parWhatsApp?.detail || null,
+          modele: bilan.parWhatsApp?.modele || null,
+        }
         : bilan,
     };
     await noterVeille(compte);

@@ -29612,7 +29612,11 @@ function EtatVeille({ data, notify }) {
   const bilanWhatsAppOk = bilanNuit?.whatsapp === true;
   const bilanEmailOk = bilanNuit?.email === true;
   const bilanComplet = bilanWhatsAppOk && bilanEmailOk;
-  const teinteBilan = bilanComplet ? "ok" : (bilanEmailOk ? "warn" : "danger");
+  /*
+   * Trois teintes, pas deux : une seule voie qui marche n'est pas la même chose que rien du tout.
+   * Le vert n'est donné qu'aux deux, parce que chacune protège d'une panne de l'autre.
+   */
+  const teinteBilan = bilanComplet ? "ok" : ((bilanEmailOk || bilanWhatsAppOk) ? "warn" : "danger");
   /*
    * Chaque motif rendu par le serveur est traduit en un geste. « modele-absent-ou-non-approuve »
    * ne se répare pas ; « déposez le modèle dans WhatsApp Manager » se répare.
@@ -29638,15 +29642,55 @@ function EtatVeille({ data, notify }) {
    * deux envois. Le message qui revient est celui du serveur, mot pour mot.
    */
   const [essaiBilan, setEssaiBilan] = useState(false);
+  /*
+   * Un numéro d'essai, facultatif. Sans lui, chaque hypothèse — « le numéro est faux », « cette
+   * ligne n'a pas WhatsApp » — coûtait une modification dans Vercel et un redéploiement.
+   */
+  const [numeroEssai, setNumeroEssai] = useState("");
+
+  /*
+   * L'ADRESSE D'EXPÉDITION RÉELLEMENT CONFIGURÉE, VUE DU SERVEUR.
+   *
+   * Resend affichait « badiabyexpress.com — Verified », et le site recevait quand même
+   * « refus-resend-422 » sur chaque envoi. Les deux étaient vrais : le domaine est bien vérifié, et
+   * l'adresse d'expédition ne lui appartient pas. Un envoi depuis une autre adresse que le domaine
+   * vérifié est refusé, avec un code qui ne le dit pas.
+   *
+   * On ne peut pas le deviner depuis le navigateur : EMAIL_FROM est un secret de serveur. Mais
+   * api/email.js sait répondre « voici le domaine que je vois », sans livrer l'adresse complète —
+   * et c'est exactement ce qu'il faut confronter à la ligne verte de Resend.
+   */
+  const [expediteur, setExpediteur] = useState(null);
+  useEffect(() => {
+    let vivant = true;
+    appelServeurQuiDepense("/api/email?etat=1")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((corps) => { if (vivant && corps) setExpediteur(corps); })
+      .catch(() => {});
+    return () => { vivant = false; };
+  }, []);
+
   async function testerLeBilan() {
     setEssaiBilan(true);
     try {
-      const reponse = await appelServeurQuiDepense("/api/veille?bilan=1", { method: "POST" });
+      const reponse = await appelServeurQuiDepense("/api/veille?bilan=1", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(numeroEssai.trim() ? { destinataire: numeroEssai.trim() } : {}),
+      });
       const corps = await reponse.json().catch(() => ({}));
       if (!reponse.ok) { notify?.(corps.error || "Envoi impossible pour le moment."); return; }
       const b = corps.bilan || {};
+      /*
+       * « ACCEPTÉ PAR META », ET NON « ENVOYÉ ».
+       *
+       * L'API rend un identifiant de message dès qu'elle accepte la demande, sans rien promettre de
+       * la livraison. Un numéro qui n'est pas sur WhatsApp, un chiffre de travers, une ligne qui a
+       * changé de main : l'appel « réussit » et personne ne reçoit rien. Écrire « envoyé » ferait
+       * chercher la panne partout sauf là où elle est.
+       */
       notify?.(b.whatsapp
-        ? "Bilan envoyé sur WhatsApp. Vérifiez le téléphone."
+        ? `Meta a accepté le message pour le ${corps.whatsappVers || "numéro configuré"}. S’il n’arrive pas, c’est que cette ligne n’est pas sur WhatsApp ou que le numéro est faux.`
         : `WhatsApp refusé : ${b.raisonWhatsApp || "motif inconnu"}${b.detailWhatsApp ? ` — ${String(b.detailWhatsApp).slice(0, 120)}` : ""}`);
     } catch (e) {
       notify?.("Serveur injoignable — essai impossible.");
@@ -29707,12 +29751,22 @@ function EtatVeille({ data, notify }) {
               </>
             ) : (
               <>
+                {/*
+                  QUATRE CAS, ET J'EN AVAIS ÉCRIT DEUX.
+                  Le texte ne prévoyait que « le courriel marche, pas WhatsApp » — jamais l'inverse.
+                  Le jour où WhatsApp est parti et le courriel non, l'écran a donc annoncé « n'est
+                  envoyé nulle part » alors que le message était bien arrivé sur le téléphone. Un
+                  bandeau qui se trompe dans le sens alarmant fait chercher une panne qui n'existe
+                  pas ; il use la confiance aussi sûrement que celui qui rassure à tort.
+                */}
                 <strong>
                   {!bilanNuit
                     ? "Le bilan quotidien n’a encore jamais été tenté."
                     : bilanEmailOk
                       ? "Le bilan quotidien part par courriel, mais pas sur WhatsApp."
-                      : "Le bilan quotidien n’est envoyé nulle part."}
+                      : bilanWhatsAppOk
+                        ? "Le bilan quotidien part sur WhatsApp, mais pas par courriel."
+                        : "Le bilan quotidien n’est envoyé nulle part."}
                 </strong>
                 {/*
                   Le courriel d'abord : c'est lui qui porte le détail complet, et il ne dépend
@@ -29726,6 +29780,28 @@ function EtatVeille({ data, notify }) {
                       : bilanNuit.raisonEmail === "aucun-destinataire"
                         ? "Aucune adresse où l’envoyer. Renseignez ALERTE_EMAIL dans Vercel, ou l’adresse e-mail d’un compte administrateur."
                         : <>refusé — <code>{bilanNuit.raisonEmail || "motif inconnu"}</code></>}
+                    {bilanNuit.detailEmail && (
+                      <div style={{ marginTop: 4, fontSize: 11.5, opacity: 0.85 }}>
+                        Réponse de Resend : {String(bilanNuit.detailEmail).slice(0, 200)}
+                      </div>
+                    )}
+                    {/*
+                      LA LIGNE QUI TRANCHE.
+                      Resend peut afficher « Verified » en vert et refuser tous les envois : il
+                      vérifie un DOMAINE, et n'accepte que les adresses qui en font partie. Confronter
+                      ce qu'il a vérifié à ce que le serveur envoie prend une seconde ; sans cette
+                      ligne, on cherche du côté du DNS, qui est justement le seul endroit correct.
+                    */}
+                    {expediteur && (
+                      <div style={{ marginTop: 4, fontSize: 11.5, opacity: 0.85 }}>
+                        {expediteur.domaine
+                          ? <>Le serveur envoie depuis le domaine <code>{expediteur.domaine}</code> — il doit
+                            être exactement celui qui est « Verified » chez Resend, sinon tout envoi est refusé.</>
+                          : expediteur.expediteur
+                            ? <>EMAIL_FROM est mal formée : attendu « Nom &lt;adresse@domaine&gt; ».</>
+                            : <>EMAIL_FROM n’est pas posée dans Vercel.</>}
+                      </div>
+                    )}
                   </div>
                 )}
                 {bilanNuit && !bilanWhatsAppOk && (
@@ -29750,11 +29826,18 @@ function EtatVeille({ data, notify }) {
                   UNE VARIABLE D'ENVIRONNEMENT N'EST LUE QU'AU DÉPLOIEMENT SUIVANT.
                   C'est le piège qui fait perdre le plus de temps : la variable est bien posée, on
                   la voit dans Vercel, et le serveur qui tourne ne la connaît pas encore.
+
+                  Mais on ne le dit QUE quand une variable est en cause. Affiché sous un refus de
+                  Resend, ce conseil envoie redéployer pour rien — et un écran qui donne le mauvais
+                  geste coûte plus qu'un écran qui se tait.
                 */}
-                <div style={{ marginTop: 8, fontSize: 11.5, opacity: 0.85 }}>
-                  Si vous venez d’ajouter une variable dans Vercel, redéployez d’abord :
-                  une variable n’est lue qu’au déploiement suivant.
-                </div>
+                {/^(whatsapp-non-configure|aucun-numero-de-bilan|courriel-non-configure|aucun-destinataire)$/
+                  .test(bilanNuit?.raisonWhatsApp || bilanNuit?.raisonEmail || "") && (
+                  <div style={{ marginTop: 8, fontSize: 11.5, opacity: 0.85 }}>
+                    Si vous venez d’ajouter une variable dans Vercel, redéployez d’abord :
+                    une variable n’est lue qu’au déploiement suivant.
+                  </div>
+                )}
               </>
             )}
             {/*
@@ -29762,10 +29845,24 @@ function EtatVeille({ data, notify }) {
               attend le lendemain matin, on découvre qu'il manquait autre chose. Trois erreurs de
               saisie et l'on y passe la semaine.
             */}
-            <button onClick={testerLeBilan} disabled={essaiBilan}
-              style={{ marginTop: 10, background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: essaiBilan ? "default" : "pointer", opacity: essaiBilan ? 0.6 : 1 }}>
-              {essaiBilan ? "Envoi…" : "Envoyer le bilan maintenant"}
-            </button>
+            <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <button onClick={testerLeBilan} disabled={essaiBilan}
+                style={{ background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: essaiBilan ? "default" : "pointer", opacity: essaiBilan ? 0.6 : 1 }}>
+                {essaiBilan ? "Envoi…" : "Envoyer le bilan maintenant"}
+              </button>
+              {/*
+                Le numéro d'essai. Facultatif, et il ne change rien à l'envoi de nuit : il sert à
+                savoir SI c'est le numéro qui cloche, sans passer par Vercel et un redéploiement
+                pour chaque hypothèse.
+              */}
+              <input value={numeroEssai} onChange={(e) => setNumeroEssai(e.target.value)}
+                inputMode="numeric" placeholder="essayer un autre numéro" aria-label="Numéro d’essai"
+                style={{ background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 10px", fontSize: 12, width: 190 }} />
+            </div>
+            <div style={{ marginTop: 6, fontSize: 11.5, opacity: 0.8 }}>
+              Le numéro d’essai ne change pas l’envoi de nuit — il sert à savoir si c’est la ligne
+              qui pose problème. Avec l’indicatif, sans espaces ni signe plus.
+            </div>
           </div>
         </div>
       )}

@@ -7605,6 +7605,8 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
    */
   const [defiClient, setDefiClient] = useState("");
   const [codeSaisi, setCodeSaisi] = useState("");
+  /* Le téléphone n'est pas là : on saisit alors l'un des codes imprimés à l'activation. */
+  const [secoursClient, setSecoursClient] = useState(false);
   const [showPw, setShowPw] = useState(false);
   const [err, setErr] = useState("");
   const [compte, setCompte] = useState(null);
@@ -7784,7 +7786,12 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
     if (!reponse?.utilisateur) { setErr("Code incorrect."); return; }
     if (reponse.session) ecrireJetonSession(reponse.session, reponse.sessionExpireA);
     onBesoinBase?.();
-    setDefiClient("");
+    if (reponse.secoursUtilise) {
+      window.alert(reponse.secoursRestants > 0
+        ? tc(`Code de secours utilisé. Il vous en reste ${reponse.secoursRestants}. Rayez-le sur votre feuille.`, lang)
+        : tc("C’était votre dernier code de secours. Allez dans « Mon profil » pour en imprimer de nouveaux.", lang));
+    }
+    setDefiClient(""); setSecoursClient(false);
     installerCompte(reponse.utilisateur, null);
   }
 
@@ -7921,16 +7928,27 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
               <div style={{ fontWeight: 700, fontSize: 15, color: "var(--text)" }}>{T("Double authentification")}</div>
             </div>
             <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>
-              {T("Recopiez le code à six chiffres affiché par votre application d’authentification. Il change toutes les trente secondes.")}
+              {secoursClient
+                ? T("Entrez l’un des codes de secours imprimés lors de l’activation. Chacun ne sert qu’une fois.")
+                : T("Recopiez le code à six chiffres affiché par votre application d’authentification. Il change toutes les trente secondes.")}
             </div>
             <input value={codeSaisi} onChange={(e) => setCodeSaisi(e.target.value)}
-              inputMode="numeric" autoComplete="one-time-code" maxLength={6} autoFocus
-              placeholder="000000" aria-label={T("Code à six chiffres")}
-              style={{ ...inputStyle, textAlign: "center", fontSize: 23, letterSpacing: 8, padding: "12px 14px", marginBottom: 12 }} />
+              inputMode={secoursClient ? "text" : "numeric"} autoComplete="one-time-code"
+              maxLength={secoursClient ? 13 : 6} autoFocus autoCapitalize="characters" spellCheck={false}
+              placeholder={secoursClient ? "ABCDE-FGHJK" : "000000"}
+              aria-label={secoursClient ? T("Code de secours") : T("Code à six chiffres")}
+              style={{ ...inputStyle, textAlign: "center", fontSize: secoursClient ? 19 : 23, letterSpacing: secoursClient ? 3 : 8, padding: "12px 14px", marginBottom: 12 }} />
             {err && <div style={{ color: "var(--danger-fg)", fontSize: 13, marginBottom: 10, lineHeight: 1.5 }}>{err}</div>}
             <button type="submit" style={{ width: "100%", background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "13px 0", fontSize: 15, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}>{T("Vérifier")}</button>
-            <button type="button" onClick={() => { setDefiClient(""); setCodeSaisi(""); setErr(""); }}
-              style={{ width: "100%", marginTop: 12, background: "none", border: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>
+            {/* La sortie de secours, visible depuis l'écran même qui bloque. */}
+            <button type="button" onClick={() => { setSecoursClient((s) => !s); setCodeSaisi(""); setErr(""); }}
+              style={{ width: "100%", marginTop: 12, background: "none", border: "none", color: "var(--brand-on-dark)", fontSize: 12.5, fontWeight: 600, cursor: "pointer", textDecoration: "underline" }}>
+              {secoursClient
+                ? T("Revenir au code du téléphone")
+                : T("Je n’ai pas mon téléphone — utiliser un code de secours")}
+            </button>
+            <button type="button" onClick={() => { setDefiClient(""); setCodeSaisi(""); setSecoursClient(false); setErr(""); }}
+              style={{ width: "100%", marginTop: 8, background: "none", border: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>
               {T("Revenir à l’écran de connexion")}
             </button>
           </form>
@@ -8469,6 +8487,8 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
    */
   const [defi, setDefi] = useState("");
   const [otpInput, setOtpInput] = useState("");
+  /* Le téléphone n'est pas là : on saisit alors l'un des codes imprimés à l'activation. */
+  const [secours, setSecours] = useState(false);
   const [showPw, setShowPw] = useState(false);
   /*
    * L'équipe n'avait pas de sortie de secours.
@@ -8586,6 +8606,15 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
     if (!reponse?.utilisateur) { setErr("Code incorrect."); return; }
     if (reponse.token) { ecrireJeton(reponse.token, reponse.expireA); onJeton?.(); }
     if (reponse.session) { ecrireJetonSession(reponse.session, reponse.sessionExpireA); onJeton?.(); }
+    /*
+     * Un code de secours vient de servir : il ne servira plus. On le dit, avec ce qui reste — la
+     * réserve se découvre vide au pire moment si personne ne la compte à voix haute.
+     */
+    if (reponse.secoursUtilise) {
+      window.alert(reponse.secoursRestants > 0
+        ? `Code de secours utilisé. Il vous en reste ${reponse.secoursRestants}.\n\nRayez-le sur votre feuille. Pensez à refaire une liste depuis « Sécurité de mon compte ».`
+        : "C’était votre DERNIER code de secours.\n\nAllez tout de suite dans « Sécurité de mon compte » pour en imprimer de nouveaux : sans eux, perdre votre téléphone fermerait ce compte définitivement.");
+    }
     onLogin(reponse.utilisateur);
   }
 
@@ -8609,18 +8638,31 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
         <div style={{ width: "min(92vw, 400px)", background: "var(--surface)", borderRadius: 18, padding: "38px 34px", boxShadow: "0 28px 70px rgba(10,38,71,0.4)" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 8 }}><ShieldCheck size={20} color="var(--brand-on-dark)" /><div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 16, color: "var(--text)" }}>Double authentification</div></div>
           <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>
-            Ouvrez votre application d’authentification et recopiez le code à six chiffres affiché en face de
-            <strong style={{ color: "var(--text)" }}> Ba-Diaby Express</strong>. Il change toutes les trente secondes.
+            {secours
+              ? <>Entrez l’un des codes de secours imprimés lors de l’activation. Chacun ne sert
+                <strong style={{ color: "var(--text)" }}> qu’une fois</strong>.</>
+              : <>Ouvrez votre application d’authentification et recopiez le code à six chiffres affiché en face de
+                <strong style={{ color: "var(--text)" }}> Ba-Diaby Express</strong>. Il change toutes les trente secondes.</>}
           </div>
           <div>
             <input value={otpInput} onChange={(e) => setOtpInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && verifyOtp(e)}
-              inputMode="numeric" autoComplete="one-time-code" maxLength={6} autoFocus
-              placeholder="000000" aria-label="Code à six chiffres"
-              style={{ ...inputStyle, marginBottom: 12, textAlign: "center", fontSize: 23, letterSpacing: 8, padding: "12px 14px" }} />
+              inputMode={secours ? "text" : "numeric"} autoComplete="one-time-code"
+              maxLength={secours ? 13 : 6} autoFocus autoCapitalize="characters" spellCheck={false}
+              placeholder={secours ? "ABCDE-FGHJK" : "000000"}
+              aria-label={secours ? "Code de secours" : "Code à six chiffres"}
+              style={{ ...inputStyle, marginBottom: 12, textAlign: "center", fontSize: secours ? 19 : 23, letterSpacing: secours ? 3 : 8, padding: "12px 14px" }} />
             {err && <div style={{ color: "var(--danger-fg)", fontSize: 13, marginBottom: 10, lineHeight: 1.5 }}>{err}</div>}
             <button type="button" onClick={verifyOtp} style={{ width: "100%", background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "13px 0", fontWeight: 700, fontSize: 15, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}>Vérifier</button>
-            <button type="button" onClick={() => { setPending(null); setDefi(""); setOtpInput(""); setErr(""); }}
-              style={{ width: "100%", marginTop: 10, background: "none", border: "none", color: "var(--muted)", fontSize: 12.5, cursor: "pointer" }}>
+            {/*
+              La sortie de secours doit être VISIBLE depuis l'écran qui bloque. Cachée dans une aide
+              en ligne, elle n'existe pas pour la personne dont le téléphone vient de tomber.
+            */}
+            <button type="button" onClick={() => { setSecours((s) => !s); setOtpInput(""); setErr(""); }}
+              style={{ width: "100%", marginTop: 12, background: "none", border: "none", color: "var(--brand-on-dark)", fontSize: 12.5, fontWeight: 600, cursor: "pointer", textDecoration: "underline" }}>
+              {secours ? "Revenir au code du téléphone" : "Je n’ai pas mon téléphone — utiliser un code de secours"}
+            </button>
+            <button type="button" onClick={() => { setPending(null); setDefi(""); setOtpInput(""); setSecours(false); setErr(""); }}
+              style={{ width: "100%", marginTop: 8, background: "none", border: "none", color: "var(--muted)", fontSize: 12.5, cursor: "pointer" }}>
               Revenir à l’écran de connexion
             </button>
           </div>
@@ -10514,22 +10556,46 @@ function nombreArticles(colis) {
  * Le secret ne redescend jamais ensuite : les lectures le retirent pour tout le monde, équipe
  * comprise (voir api/_cloisonnement.js). Le retirer exige le mot de passe — sans quoi un téléphone
  * déverrouillé attrapé sur un comptoir suffirait à désarmer la protection posée pour ce cas précis.
+ *
+ * LES CODES DE SECOURS, ET POURQUOI ILS NE SONT PAS UNE OPTION
+ *
+ * Un second facteur bien fait tient à un objet. Téléphone perdu, volé, noyé, ou simplement
+ * remplacé sans avoir pensé à transférer l'application — et la personne est dehors. DÉFINITIVEMENT :
+ * le secret est réimposé depuis la base à chaque enregistrement, et personne, pas même un
+ * administrateur, ne peut le retirer depuis l'application. Pour le seul compte administrateur de
+ * l'entreprise, cela reviendrait à confier les clés de la maison à un appareil qui se casse.
+ *
+ * Huit codes sont donc tirés à l'activation, affichés UNE SEULE FOIS, à imprimer et à ranger.
+ * Chacun remplace le téléphone une fois. L'écran refuse de se refermer tant qu'on n'a pas déclaré
+ * les avoir mis de côté : une liste fermée sans être notée est pire que pas de liste du tout, on
+ * la croit quelque part.
  */
 function DoubleAuthentification({ compte, onChange, nu = false }) {
   const [actif, setActif] = useState(!!compte?.totpActif);
-  const [etape, setEtape] = useState("repos");   // repos | inscription | retrait
+  const [etape, setEtape] = useState("repos");   // repos | inscription | codes | retrait | refaire
   const [secret, setSecret] = useState("");
   const [qr, setQr] = useState("");
   const [code, setCode] = useState("");
   const [motdepasse, setMotdepasse] = useState("");
+  const [codesSecours, setCodesSecours] = useState(null);
+  const [notes, setNotes] = useState(false);
+  const [copie, setCopie] = useState(false);
   const [err, setErr] = useState("");
   const [occupe, setOccupe] = useState(false);
 
   /* La fiche peut arriver après le premier rendu : l'état affiché suit celui de la base. */
   useEffect(() => { setActif(!!compte?.totpActif); }, [compte?.totpActif]);
 
+  /*
+   * Combien de codes restent en réserve. La liste elle-même ne descend jamais — le serveur n'en
+   * garde que des empreintes — mais le nombre, lui, doit se voir : on ne doit pas découvrir la
+   * réserve vide le jour où l'on n'a plus qu'elle pour entrer.
+   */
+  const restants = Number(compte?.totpSecoursRestants ?? 0);
+
   function fermer() {
-    setEtape("repos"); setSecret(""); setQr(""); setCode(""); setMotdepasse(""); setErr("");
+    setEtape("repos"); setSecret(""); setQr(""); setCode(""); setMotdepasse("");
+    setCodesSecours(null); setNotes(false); setCopie(false); setErr("");
   }
 
   async function commencer() {
@@ -10554,8 +10620,67 @@ function DoubleAuthentification({ compte, onChange, nu = false }) {
     setOccupe(false);
     if (r?.erreur) { setErr(r.erreur); return; }
     setActif(true);
-    fermer();
+    /*
+     * On ne referme PAS : les codes de secours n'existent en clair qu'à cet instant. Les faire
+     * disparaître avec la modale reviendrait à activer une serrure et à jeter le double des clés.
+     */
+    setCodesSecours(r.codesSecours || []);
+    setSecret(""); setQr(""); setCode(""); setNotes(false);
+    setEtape("codes");
     onChange?.();
+  }
+
+  /** Refaire la liste — après en avoir usé, ou quand la feuille a été perdue. */
+  async function refaireCodes(e) {
+    e.preventDefault();
+    setErr(""); setOccupe(true);
+    const r = await appelDoubleAuthentification("totp-secours", { motdepasse });
+    setOccupe(false);
+    if (r?.erreur) { setErr(r.erreur); return; }
+    setMotdepasse(""); setNotes(false);
+    setCodesSecours(r.codesSecours || []);
+    setEtape("codes");
+    onChange?.();
+  }
+
+  /*
+   * Imprimer, plutôt que « télécharger ».
+   *
+   * Un fichier de codes de secours qui reste dans le dossier « Téléchargements » d'un ordinateur
+   * partagé, c'est le second facteur rangé à côté du premier. Une feuille se met dans un tiroir,
+   * et c'est précisément l'endroit où elle doit être.
+   */
+  function imprimerCodes() {
+    const fenetre = window.open("", "_blank", "width=520,height=680");
+    if (!fenetre) { setErr("Votre navigateur a bloqué la fenêtre d’impression. Recopiez les codes à la main."); return; }
+    const lignes = (codesSecours || []).map((c) => `<li>${c}</li>`).join("");
+    fenetre.document.write(`<!doctype html><html lang="fr"><head><meta charset="utf-8">
+      <title>Codes de secours — Ba-Diaby Express</title>
+      <style>
+        body{font-family:system-ui,sans-serif;padding:32px;color:#111}
+        h1{font-size:17px;margin:0 0 4px} p{font-size:12.5px;color:#444;line-height:1.6;max-width:46em}
+        ul{list-style:none;padding:0;margin:20px 0;display:grid;grid-template-columns:1fr 1fr;gap:10px}
+        li{font-family:ui-monospace,monospace;font-size:17px;letter-spacing:2px;border:1px solid #bbb;
+           border-radius:6px;padding:9px 12px;text-align:center}
+      </style></head><body>
+      <h1>Codes de secours — ${compte?.identifiant || "compte"}</h1>
+      <p>Chacun de ces codes remplace <strong>une seule fois</strong> le code de votre téléphone, si
+      vous l’avez perdu. Rangez cette feuille ailleurs que près de l’ordinateur, et rayez chaque code
+      après usage. Ba-Diaby Express ne peut pas les retrouver : ils ne sont pas conservés en clair.</p>
+      <ul>${lignes}</ul>
+      <p>Émis le ${new Date().toLocaleDateString("fr-FR")}. Imprimer une nouvelle liste annule celle-ci.</p>
+      </body></html>`);
+    fenetre.document.close();
+    fenetre.focus();
+    fenetre.print();
+  }
+
+  async function copierCodes() {
+    try {
+      await navigator.clipboard.writeText((codesSecours || []).join("\n"));
+      setCopie(true);
+      setTimeout(() => setCopie(false), 2200);
+    } catch (e) { setErr("Copie impossible sur cet appareil. Recopiez les codes à la main."); }
   }
 
   async function retirer(e) {
@@ -10591,13 +10716,93 @@ function DoubleAuthentification({ compte, onChange, nu = false }) {
 
       {err && etape === "repos" && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10, lineHeight: 1.5 }}>{err}</div>}
 
+      {/*
+        LA RÉSERVE, ANNONCÉE AVANT D'ÊTRE VIDE.
+        Zéro code restant, c'est un compte qui tient à un seul téléphone — et qui se ferme
+        définitivement avec lui. Ça se dit en rouge, pas en petit.
+      */}
+      {etape === "repos" && actif && (
+        <div style={{
+          background: restants === 0 ? "var(--danger-bg)" : restants <= 2 ? "var(--warn-bg)" : "var(--surface2)",
+          color: restants === 0 ? "var(--danger-fg)" : restants <= 2 ? "var(--warn-fg)" : "var(--muted)",
+          borderRadius: 10, padding: "10px 12px", fontSize: 12, lineHeight: 1.55, marginBottom: 12,
+        }}>
+          {restants === 0
+            ? <><strong>Aucun code de secours.</strong> Si vous perdez ce téléphone, ce compte se ferme
+              définitivement — personne ne pourra le rouvrir depuis l’application. Imprimez une liste.</>
+            : <><strong>{restants} code{restants > 1 ? "s" : ""} de secours</strong> en réserve.
+              Chacun remplace votre téléphone une fois, s’il est perdu.</>}
+        </div>
+      )}
+
       {etape === "repos" && (actif ? (
-        <button onClick={() => { setErr(""); setEtape("retrait"); }} style={boutonSobre}>Retirer la double authentification</button>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={() => { setErr(""); setMotdepasse(""); setEtape("refaire"); }} style={boutonPlein}>
+            {restants === 0 ? "Imprimer des codes de secours" : "Refaire mes codes de secours"}
+          </button>
+          <button onClick={() => { setErr(""); setMotdepasse(""); setEtape("retrait"); }} style={boutonSobre}>Retirer</button>
+        </div>
       ) : (
         <button onClick={commencer} disabled={occupe} style={boutonPlein}>
           {occupe ? "Préparation…" : "Activer la double authentification"}
         </button>
       ))}
+
+      {etape === "codes" && (
+        <div>
+          <div style={{ background: "var(--warn-bg)", color: "var(--warn-fg)", borderRadius: 10, padding: "11px 13px", fontSize: 12.5, lineHeight: 1.55, marginBottom: 12 }}>
+            <strong>C’est la seule fois où ces codes s’affichent.</strong> Ils ne sont pas conservés en
+            clair : ni vous ni nous ne pourrons les retrouver ensuite. Imprimez-les et rangez la feuille
+            ailleurs que près de l’ordinateur.
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+            {(codesSecours || []).map((c) => (
+              <div key={c} style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "9px 6px", textAlign: "center", fontFamily: "ui-monospace, monospace", fontSize: 14, letterSpacing: 1.5, color: "var(--text)" }}>{c}</div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+            <button type="button" onClick={imprimerCodes} style={{ ...boutonSobre, flex: 1 }}>Imprimer</button>
+            <button type="button" onClick={copierCodes} style={{ ...boutonSobre, flex: 1 }}>{copie ? "Copié ✓" : "Copier"}</button>
+          </div>
+          <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.55, marginBottom: 10 }}>
+            Chacun remplace <strong style={{ color: "var(--text)" }}>une seule fois</strong> le code de
+            votre téléphone. Rayez-le après usage. Refaire une liste annule celle-ci.
+          </div>
+          {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10, lineHeight: 1.5 }}>{err}</div>}
+          {/*
+            La case à cocher n'est pas une formalité : elle est le seul moment où quelqu'un se
+            demande où il vient de ranger la feuille. Sans elle, on referme et on croit l'avoir.
+          */}
+          <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 12.5, color: "var(--text)", cursor: "pointer", marginBottom: 10, lineHeight: 1.5 }}>
+            <input type="checkbox" checked={notes} onChange={(e) => setNotes(e.target.checked)} style={{ marginTop: 2 }} />
+            J’ai imprimé ou recopié ces codes, et je sais où ils sont rangés.
+          </label>
+          <button type="button" onClick={fermer} disabled={!notes}
+            style={{ ...boutonPlein, width: "100%", opacity: notes ? 1 : 0.45, cursor: notes ? "pointer" : "not-allowed" }}>
+            Terminer
+          </button>
+        </div>
+      )}
+
+      {etape === "refaire" && (
+        <form onSubmit={refaireCodes}>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10, lineHeight: 1.55 }}>
+            Une nouvelle liste de huit codes remplacera l’ancienne, qui cessera aussitôt de valoir.
+            Votre mot de passe est demandé : ces codes contournent le second facteur, une session
+            volée ne doit pas pouvoir s’en fabriquer une série neuve.
+          </div>
+          <input type="password" value={motdepasse} onChange={(e) => setMotdepasse(e.target.value)}
+            autoComplete="current-password" placeholder="Votre mot de passe"
+            style={{ ...inputStyle, marginBottom: 10 }} />
+          {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10, lineHeight: 1.5 }}>{err}</div>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="submit" disabled={occupe} style={{ ...boutonPlein, flex: 1 }}>
+              {occupe ? "…" : "Générer huit codes"}
+            </button>
+            <button type="button" onClick={fermer} style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 9, padding: "11px 16px", fontSize: 13, cursor: "pointer" }}>Annuler</button>
+          </div>
+        </form>
+      )}
 
       {etape === "inscription" && (
         <form onSubmit={activer}>

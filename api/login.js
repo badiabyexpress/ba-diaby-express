@@ -37,6 +37,7 @@ import {
 } from "./_session.js";
 import {
   genererSecret, verifierCode, uriInscription, CHAMPS_TOTP_SECRETS,
+  genererCodesSecours, empreintesDesCodes, verifierSecours, codesSecoursRestants,
 } from "./_totp.js";
 import { passage, adresseDe, refuser } from "./_verrou.js";
 import {
@@ -215,7 +216,12 @@ function compteSansSecrets(compte) {
     motdepasseIter: _iter, motdepasseAlgo: _algo, ...reste
   } = compte;
   CHAMPS_TOTP_SECRETS.forEach((champ) => { delete reste[champ]; });
-  return { ...reste, totpActif: !!compte.totpSecret, totpEnPreparation: !!compte.totpEnAttente };
+  return {
+    ...reste,
+    totpActif: !!compte.totpSecret,
+    totpEnPreparation: !!compte.totpEnAttente,
+    totpSecoursRestants: codesSecoursRestants(compte.totpSecours),
+  };
 }
 
 /*
@@ -248,7 +254,7 @@ function journaliserAcces({ compte, identifiantSaisi, resultat, req, espaceClien
  * Le jeton Supabase n'est fabriqué que si son secret est connu ; le jeton de session, lui, ne
  * dépend d'aucune clé introuvable (voir api/_session.js) et c'est celui qui ouvre api/donnees.js.
  */
-function delivrerSession(res, { compte, espaceClient, url, secretJwt }) {
+function delivrerSession(res, { compte, espaceClient, url, secretJwt, extra = null }) {
   const jeton = secretJwt
     ? signerJeton({
       secret: secretJwt, refProjet: refDepuisUrl(url),
@@ -275,6 +281,7 @@ function delivrerSession(res, { compte, espaceClient, url, secretJwt }) {
     utilisateur: compteSansSecrets(compte),
     // Dit à l'application si la base acceptera ce jeton, ou s'il faut rester sur la clé publique.
     jetonSigne: !!secretJwt,
+    ...(extra || {}),
   });
 }
 
@@ -323,7 +330,20 @@ async function secondFacteur(req, res, corps, { url, cleService, secretJwt }) {
   }
 
   const verdict = verifierCode(compte.totpSecret, corps.code);
+
+  /*
+   * LE CODE DE SECOURS — quand le téléphone n'est plus là.
+   *
+   * On ne le tente qu'après le code du téléphone : c'est le chemin ordinaire, et il ne doit pas
+   * consommer une réserve limitée à cause d'une faute de frappe. La distinction se fait toute
+   * seule — six chiffres d'un côté, dix lettres et chiffres de l'autre.
+   */
+  let secoursUtilise = -1;
   if (!verdict.valide) {
+    secoursUtilise = verifierSecours(compte.totpSecours, corps.code);
+  }
+
+  if (!verdict.valide && secoursUtilise < 0) {
     journaliserAcces({
       compte, identifiantSaisi: compte.identifiant, resultat: "refusee", req, espaceClient, donnees,
     });
@@ -334,26 +354,82 @@ async function secondFacteur(req, res, corps, { url, cleService, secretJwt }) {
   }
 
   /*
-   * UN CODE NE SERT QU'UNE FOIS.
+   * UN CODE NE SERT QU'UNE FOIS — les deux sortes.
    *
    * Six chiffres affichés trente secondes se lisent par-dessus une épaule, et se retrouvent dans
-   * l'historique d'un appareil partagé. Le compteur partagé sert ici de marque d'usage : la
-   * première présentation passe, la seconde est refusée jusqu'à ce que la fenêtre soit périmée.
+   * l'historique d'un appareil partagé. Un code de secours, lui, vit sur une feuille de papier que
+   * l'on photographie parfois. Le compteur partagé sert ici de marque d'usage : la première
+   * présentation passe, la seconde est refusée.
    */
-  const rejoue = await passage({
-    nature: "totp-utilise", cle: `${charge.sub}|${verdict.fenetre}`, max: 1, fenetreMs: 120000,
-  });
+  const marque = secoursUtilise >= 0
+    ? { cle: `${charge.sub}|s${secoursUtilise}`, fenetreMs: 24 * 3600 * 1000 }
+    : { cle: `${charge.sub}|${verdict.fenetre}`, fenetreMs: 120000 };
+  const rejoue = await passage({ nature: "totp-utilise", cle: marque.cle, max: 1, fenetreMs: marque.fenetreMs });
   if (rejoue.bloque) {
     return res.status(401).json({
-      error: "Ce code a déjà servi. Attendez celui qui suit.",
+      error: "Ce code a déjà servi. Prenez le suivant.",
       besoinCode: true,
     });
   }
 
+  /*
+   * Le code de secours est rayé de la liste AVANT que la session ne soit délivrée.
+   *
+   * Le marquage en base est ce qui compte : le compteur ci-dessus vit dans une fenêtre de temps et
+   * finirait par oublier. Si l'écriture échoue, on refuse plutôt que d'ouvrir une session sur un
+   * code qui resterait utilisable — c'est le seul endroit du fichier où l'on préfère le refus.
+   */
+  let restants = null;
+  if (secoursUtilise >= 0) {
+    const raye = await marquerSecoursUtilise(charge.sub, espaceClient, secoursUtilise)
+      .catch((e) => { console.error("Code de secours non marqué", e?.message || e); return null; });
+    if (raye === null) {
+      return res.status(503).json({
+        error: "Impossible d’enregistrer l’usage de ce code pour le moment. Réessayez dans un instant.",
+        besoinCode: true,
+      });
+    }
+    restants = raye;
+  }
+
   journaliserAcces({
-    compte, identifiantSaisi: compte.identifiant, resultat: "reussie", req, espaceClient, donnees,
+    compte, identifiantSaisi: compte.identifiant,
+    resultat: "reussie", req, espaceClient, donnees,
   });
-  return delivrerSession(res, { compte, espaceClient, url, secretJwt });
+  /*
+   * Quand c'est un code de secours qui a servi, on dit combien il en reste — et l'écran le montre.
+   * Sans cela, on découvre la réserve vide le jour où l'on n'a plus que ça pour entrer.
+   */
+  return delivrerSession(res, {
+    compte, espaceClient, url, secretJwt,
+    extra: secoursUtilise >= 0 ? { secoursUtilise: true, secoursRestants: restants } : null,
+  });
+}
+
+/**
+ * Raye un code de secours, et rend combien il en reste.
+ *
+ * Passe par modifierDocument, qui relit juste avant d'écrire : deux connexions simultanées avec
+ * deux codes différents ne s'effacent donc pas l'une l'autre. Rend null si le compte ou le code
+ * a disparu entre-temps — l'appelant refuse alors la connexion plutôt que de laisser un code servir
+ * deux fois.
+ */
+async function marquerSecoursUtilise(userId, espaceClient, rang) {
+  const cleListe = espaceClient ? "clientAccounts" : "users";
+  return modifierDocument((document) => {
+    const liste = Array.isArray(document[cleListe]) ? document[cleListe] : [];
+    let restants = null;
+    const sortie = liste.map((c) => {
+      if (!c || c.id !== userId) return c;
+      const gardes = Array.isArray(c.totpSecours) ? c.totpSecours : [];
+      if (!gardes[rang] || gardes[rang].le) return c;      // déjà rayé : on ne réécrit rien
+      const neufs = gardes.map((g, i) => (i === rang ? { ...g, le: new Date().toISOString() } : g));
+      restants = neufs.filter((g) => g && g.h && !g.le).length;
+      return { ...c, totpSecours: neufs };
+    });
+    if (restants === null) return null;
+    return { document: { ...document, [cleListe]: sortie }, retour: restants };
+  });
 }
 
 /**
@@ -427,12 +503,50 @@ async function gererTotp(req, res, corps, { url, cleService }) {
         error: "Code incorrect. Vérifiez que l’heure de votre téléphone est réglée automatiquement, puis réessayez.",
       });
     }
+    /*
+     * LES CODES DE SECOURS SONT TIRÉS ICI, ET MONTRÉS UNE SEULE FOIS.
+     *
+     * Sans eux, un téléphone perdu ferme le compte définitivement : le secret est réimposé depuis
+     * la base à chaque enregistrement — c'est ce qui empêche une page de l'effacer — et personne,
+     * pas même un administrateur, ne peut le retirer depuis l'application. Pour le seul compte
+     * administrateur de l'entreprise, cela reviendrait à confier les clés de la maison à un
+     * appareil qui se casse.
+     */
+    const codes = genererCodesSecours();
     await ecrire((c) => {
       const propre = { ...c };
       CHAMPS_TOTP_SECRETS.forEach((champ) => { delete propre[champ]; });
-      return { ...propre, totpSecret: secret, totpActiveLe: new Date().toISOString(), twoFA: true };
+      return {
+        ...propre,
+        totpSecret: secret,
+        totpSecours: empreintesDesCodes(codes),
+        totpActiveLe: new Date().toISOString(),
+        twoFA: true,
+      };
     });
-    return res.status(200).json({ ok: true, actif: true });
+    return res.status(200).json({ ok: true, actif: true, codesSecours: codes });
+  }
+
+  if (corps.action === "totp-secours") {
+    /*
+     * REFAIRE LA LISTE — après en avoir usé, ou quand la feuille a été perdue.
+     *
+     * Le mot de passe est exigé, comme pour le retrait : ces codes contournent le second facteur,
+     * et une session volée qui pourrait s'en fabriquer une série neuve viderait la protection de
+     * son sens.
+     *
+     * Les anciens sont remplacés, jamais complétés : une feuille égarée doit cesser de valoir au
+     * moment où l'on en imprime une autre.
+     */
+    if (!compte.totpSecret) {
+      return res.status(409).json({ error: "La double authentification n’est pas en place sur ce compte." });
+    }
+    if (!motDePasseCorrect(compte, corps.motdepasse)) {
+      return res.status(401).json({ error: "Mot de passe incorrect." });
+    }
+    const codes = genererCodesSecours();
+    await ecrire((c) => ({ ...c, totpSecours: empreintesDesCodes(codes) }));
+    return res.status(200).json({ ok: true, codesSecours: codes });
   }
 
   if (corps.action === "totp-retirer") {

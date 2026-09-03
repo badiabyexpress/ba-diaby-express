@@ -35,7 +35,7 @@
  */
 
 import { effectivePermission } from "./_permissions.js";
-import { CHAMPS_TOTP_SECRETS } from "./_totp.js";
+import { CHAMPS_TOTP_SECRETS, codesSecoursRestants } from "./_totp.js";
 
 /*
  * Ce que tout le monde peut voir.
@@ -169,8 +169,15 @@ function compteSansSecretTotp(compte) {
   if (!compte || typeof compte !== "object") return compte;
   const actif = !!compte.totpSecret;
   const enPreparation = !!compte.totpEnAttente;
-  if (!actif && !enPreparation && compte.totpActif === undefined) return compte;
-  return { ...sans(compte, CHAMPS_TOTP_SECRETS), totpActif: actif, totpEnPreparation: enPreparation };
+  const restants = codesSecoursRestants(compte.totpSecours);
+  if (!actif && !enPreparation && !restants && compte.totpActif === undefined) return compte;
+  return {
+    ...sans(compte, CHAMPS_TOTP_SECRETS),
+    totpActif: actif,
+    totpEnPreparation: enPreparation,
+    /* Le nombre, jamais les empreintes : c'est tout ce dont l'écran a besoin pour prévenir. */
+    totpSecoursRestants: restants,
+  };
 }
 
 export function sansSecretsTotp(document) {
@@ -793,6 +800,7 @@ export function preserverIdentifiants(comptesBase, comptesSortie) {
     /* Marques de lecture, pas des données : elles sont recalculées à chaque lecture. */
     delete repris.totpActif;
     delete repris.totpEnPreparation;
+    delete repris.totpSecoursRestants;
     if (ancien.totpActiveLe !== undefined) repris.totpActiveLe = ancien.totpActiveLe;
     else delete repris.totpActiveLe;
 

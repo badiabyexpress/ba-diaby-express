@@ -119,6 +119,63 @@ export function signatureDisponible() {
 }
 
 /*
+ * LE DÉFI DU SECOND FACTEUR — l'objet qui relie les deux étapes de la connexion
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Quand un compte porte une double authentification, la connexion se fait en deux appels : le mot
+ * de passe d'abord, le code du téléphone ensuite. Entre les deux, il faut se souvenir que le mot
+ * de passe a été vérifié — sinon le second appel accepterait un code juste sans mot de passe du
+ * tout, et le second facteur deviendrait le seul facteur.
+ *
+ * Deux façons de s'en souvenir : garder un état sur le serveur, ou le faire porter par le
+ * navigateur sous une forme qu'il ne peut pas fabriquer. Ici, la seconde — parce qu'une fonction
+ * serverless n'a pas de mémoire commune : l'état écrit par l'instance qui répond au premier appel
+ * n'existerait pas pour celle qui répond au second.
+ *
+ * Le défi est donc un petit jeton signé, valable CINQ MINUTES. Il ne donne accès à rien : il
+ * atteste seulement « le mot de passe de ce compte a été vérifié à l'instant ». Sa signature est
+ * dérivée d'un secret DIFFÉRENT de celui des sessions, pour qu'un défi ne puisse jamais être
+ * présenté à la place d'une session, ni l'inverse.
+ */
+export const DUREE_DEFI_SECONDES = 5 * 60;
+
+function secretDuDefi() {
+  const base = secretDeSignature();
+  if (!base) return null;
+  return crypto.createHmac("sha256", base).update("bde-defi-v1").digest();
+}
+
+export function signerDefi({ userId, espace }) {
+  const secret = secretDuDefi();
+  if (!secret) return null;
+  const maintenant = Math.floor(Date.now() / 1000);
+  const corps = base64url(JSON.stringify({
+    sub: userId, espace: espace || "equipe", iat: maintenant, exp: maintenant + DUREE_DEFI_SECONDES,
+  }));
+  const signature = crypto.createHmac("sha256", secret).update(corps).digest("base64")
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return `${corps}.${signature}`;
+}
+
+/** Rend la charge du défi, ou null : signature fausse, forme inattendue, ou délai dépassé. */
+export function verifierDefi(jeton) {
+  const secret = secretDuDefi();
+  if (!secret || typeof jeton !== "string") return null;
+  const points = jeton.split(".");
+  if (points.length !== 2) return null;
+  const [corps, signature] = points;
+  const attendue = crypto.createHmac("sha256", secret).update(corps).digest("base64")
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const A = Buffer.from(signature, "utf8");
+  const B = Buffer.from(attendue, "utf8");
+  if (A.length !== B.length || !crypto.timingSafeEqual(A, B)) return null;
+  let charge;
+  try { charge = JSON.parse(Buffer.from(corps.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8")); }
+  catch (e) { return null; }
+  if (!charge || !charge.exp || Math.floor(Date.now() / 1000) >= charge.exp) return null;
+  return charge;
+}
+
+/*
  * LE LAISSEZ-PASSER DES APPELS DE SERVEUR À SERVEUR
  *
  * api/motdepasse.js envoie le code de réinitialisation en repassant par api/whatsapp.js — un appel

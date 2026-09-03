@@ -80,7 +80,11 @@ export function jetonEnPlace() {
 
 const TABLE = "bde_data";
 const CACHE_PREFIX = "bde-cache:";
+const META_PREFIX = "bde-meta:";
 const QUEUE_KEY = "bde-outbox";
+function cleMeta(key) { return `${META_PREFIX}${tiroir}${key}`; }
+function lireVersion(key) { try { return localStorage.getItem(cleMeta(key)); } catch (e) { return null; } }
+function memoriserVersion(key, updatedAt) { try { if (updatedAt) localStorage.setItem(cleMeta(key), updatedAt); } catch (e) { /* cache facultatif */ } }
 
 /*
  * UN TIROIR PAR ESPACE, PARCE QU'IL Y A TROIS DOCUMENTS
@@ -229,11 +233,17 @@ export const storage = {
         if (!parServeur.ok) throw new Error(parServeur.corps?.error || "Lecture impossible");
         serveurARepondu = true;
         const valeur = parServeur.corps?.value;
+        memoriserVersion(key, parServeur.corps?.updated_at);
         try { localStorage.setItem(cleCache(key), JSON.stringify(valeur)); } catch (e) { /* pas grave */ }
-        return { key, value: JSON.stringify(valeur), shared: !!shared };
+        return { key, value: JSON.stringify(valeur), updated_at: parServeur.corps?.updated_at || null, shared: !!shared };
       }
 
-      const { data, error } = await client.from(TABLE).select("value").eq("key", key).maybeSingle();
+      if (parServeur.sessionExpiree) {
+        const expiree = new Error("Session expirée — reconnectez-vous avant de charger les données.");
+        expiree.sessionExpiree = true;
+        throw expiree;
+      }
+      const { data, error } = await client.from(TABLE).select("value,updated_at").eq("key", key).maybeSingle();
       if (error) throw error;
       serveurARepondu = true;
       if (!data) {
@@ -241,12 +251,15 @@ export const storage = {
         absente.cleAbsente = true;
         throw absente;
       }
+      memoriserVersion(key, data.updated_at);
       try { localStorage.setItem(cleCache(key), JSON.stringify(data.value)); } catch (e) { /* pas grave */ }
-      return { key, value: JSON.stringify(data.value), shared: !!shared };
+      return { key, value: JSON.stringify(data.value), updated_at: data.updated_at || null, shared: !!shared };
     } catch (e) {
       // Supabase injoignable (hors ligne) : on se rabat sur la dernière version connue localement.
       const cached = localStorage.getItem(cleCache(key));
-      if (cached !== null) return { key, value: cached, shared: !!shared };
+      // Un cache ne peut servir que si aucune réponse fiable n'est revenue du serveur.
+      // Une clé absente ou une erreur HTTP ne doit jamais être transformée en ancienne copie locale.
+      if (!serveurARepondu && cached !== null) return { key, value: cached, shared: !!shared };
       if (!serveurARepondu) e.serveurInjoignable = true;
       throw e;
     }
@@ -254,19 +267,48 @@ export const storage = {
 
   async set(key, value, shared) {
     const parsed = typeof value === "string" ? JSON.parse(value) : value;
-    try { localStorage.setItem(cleCache(key), JSON.stringify(parsed)); } catch (e) { /* pas grave */ }
+    const expected_updated_at = lireVersion(key);
     try {
       const parServeur = await appelServeur(`?cle=${encodeURIComponent(key)}`, {
-        method: "PUT", body: JSON.stringify({ value: parsed }),
+        method: "PUT", body: JSON.stringify({ value: parsed, expected_updated_at }),
       });
       if (!parServeur.indisponible) {
+        if (parServeur.corps?.conflict) {
+          if (parServeur.corps.value !== undefined) {
+            memoriserVersion(key, parServeur.corps.updated_at);
+            try { localStorage.setItem(cleCache(key), JSON.stringify(parServeur.corps.value)); } catch (e) { /* pas grave */ }
+          }
+          return { key, value: JSON.stringify(parServeur.corps.value), conflict: true, latest: parServeur.corps.value, updated_at: parServeur.corps.updated_at || null, shared: !!shared };
+        }
         if (!parServeur.ok) throw new Error(parServeur.corps?.error || "Enregistrement impossible");
-        return { key, value, shared: !!shared };
+        memoriserVersion(key, parServeur.corps?.updated_at);
+        try { localStorage.setItem(cleCache(key), JSON.stringify(parsed)); } catch (e) { /* pas grave */ }
+        return { key, value, updated_at: parServeur.corps?.updated_at || null, shared: !!shared };
       }
-      const { error } = await client.from(TABLE).upsert({ key, value: parsed, updated_at: new Date().toISOString() });
+      if (parServeur.sessionExpiree) {
+        const expiree = new Error("Session expirée — reconnectez-vous avant d’enregistrer.");
+        expiree.sessionExpiree = true;
+        throw expiree;
+      }
+      if (jetonSession) {
+        const attente = new Error("API sécurisée temporairement indisponible");
+        attente.reseau = true;
+        throw attente;
+      }
+      const { data: actuel, error: lectureErreur } = await client.from(TABLE).select("updated_at").eq("key", key).maybeSingle();
+      if (lectureErreur) throw lectureErreur;
+      if (actuel?.updated_at && expected_updated_at && actuel.updated_at !== expected_updated_at) {
+        const conflit = new Error("Conflit de version");
+        conflit.conflit = true;
+        throw conflit;
+      }
+      const { data: ecrit, error } = await client.from(TABLE).upsert({ key, value: parsed, updated_at: new Date().toISOString() }).select("updated_at").single();
       if (error) throw error;
-      return { key, value, shared: !!shared };
+      memoriserVersion(key, ecrit?.updated_at);
+      try { localStorage.setItem(cleCache(key), JSON.stringify(parsed)); } catch (e) { /* pas grave */ }
+      return { key, value, updated_at: ecrit?.updated_at || null, shared: !!shared };
     } catch (e) {
+      if (e?.conflit || e?.conflict) throw e;
       /*
        * L'écriture a échoué : la donnée reste dans le cache local et rejoint la file d'attente,
        * qui sera rejouée automatiquement.
@@ -277,7 +319,7 @@ export const storage = {
        * l'est pas encore, ce qui est exactement le cas dangereux pour un encaissement.
        */
       const q = getQueue();
-      q.push({ key, value: parsed, ts: Date.now() });
+      q.push({ key, value: parsed, expected_updated_at, ts: Date.now() });
       setQueue(q);
       return { key, value, shared: !!shared, queued: true };
     }
@@ -436,6 +478,12 @@ export function fusionnerDocuments(serveur, local) {
   Object.keys(sortie).forEach((cle) => {
     const cotéServeur = serveur[cle];
     const cotéLocal = local[cle];
+    // Une collection serveur non vide ne peut jamais être remplacée par une liste locale vide
+    // lors du rejeu hors ligne. Une suppression globale doit passer par une intention explicite.
+    if (Array.isArray(cotéServeur) && cotéServeur.length > 0 && Array.isArray(cotéLocal) && cotéLocal.length === 0) {
+      sortie[cle] = cotéServeur;
+      return;
+    }
     if (!listeIdentifiable(cotéServeur) || !listeIdentifiable(cotéLocal)) return;
     const parIdentite = new Map();
     cotéServeur.forEach((x) => parIdentite.set(identiteDe(x), x));
@@ -474,10 +522,12 @@ export async function flushOutbox() {
        * ne pousse rien — mieux vaut retenter plus tard que remplacer à l'aveugle.
        */
       let surLeServeur = null;
+      let versionServeur = null;
       const lecture = await appelServeur(`?cle=${encodeURIComponent(item.key)}`);
       if (!lecture.indisponible) {
         if (!lecture.ok && !lecture.corps?.cleAbsente) throw new Error("Relecture impossible");
         surLeServeur = lecture.corps?.value ?? null;
+        versionServeur = lecture.corps?.updated_at || null;
       } else {
         const { data: actuel, error: erreurLecture } = await client.from(TABLE).select("value").eq("key", item.key).maybeSingle();
         if (erreurLecture) throw erreurLecture;
@@ -485,11 +535,12 @@ export async function flushOutbox() {
       }
       const valeur = surLeServeur ? fusionnerDocuments(surLeServeur, item.value) : item.value;
       const ecriture = await appelServeur(`?cle=${encodeURIComponent(item.key)}`, {
-        method: "PUT", body: JSON.stringify({ value: valeur }),
+        method: "PUT", body: JSON.stringify({ value: valeur, expected_updated_at: versionServeur || item.expected_updated_at || null }),
       });
       if (!ecriture.indisponible) {
         if (!ecriture.ok) throw new Error("Enregistrement impossible");
       } else {
+        if (jetonSession) throw new Error("API sécurisée indisponible — rejeu différé");
         const { error } = await client.from(TABLE).upsert({ key: item.key, value: valeur, updated_at: new Date().toISOString() });
         if (error) throw error;
       }

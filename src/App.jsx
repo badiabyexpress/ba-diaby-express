@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, useCallback, useDeferredVa
 import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, ChevronDown, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell, SlidersHorizontal, Copy, MoreHorizontal, Wallet } from "lucide-react";
 import { ROLES, PERMISSIONS_SCHEMA, ROLE_DEFAULT_PERMISSIONS, effectivePermission } from "../api/_permissions.js";
 import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree, relireDuServeur } from "./lib/storage.js";
+import { VILLES_PAR_PAYS } from "./data/villesParPays.js";
 
 /* ---------- design tokens ----------
 Identité : Navy #0A2647 · Rouge de marque #C8102E · Blanc #FFFFFF
@@ -238,6 +239,10 @@ function allowedCountries(session) {
 /** Sites d'opération déclarés pour un pays donné (Guinée par défaut si le site n'a pas de pays). */
 function sitesPourPays(sites, pays) {
   return (sites || []).filter((s) => (s.pays || "GN") === (pays || "GN"));
+}
+/** Toutes les villes géographiques du pays choisi, indépendamment des agences configurées. */
+function villesPourPays(pays) {
+  return VILLES_PAR_PAYS[pays] || [];
 }
 /** Sites d'opération en Guinée — seuls ceux-ci servent à l'enregistrement, à l'agence de retrait
  *  de l'Espace Client et à l'affectation d'un agent : ce sont des points physiques tenus par nos
@@ -4141,6 +4146,14 @@ function App() {
     return saveData(next)
       .then((r) => {
         setPendingSync(pendingSyncCount());
+        if (r && r.conflict && r.latest) {
+          documentCourant.current = r.latest;
+          setData(r.latest);
+          if (r.latest.exchangeRates) LIVE_RATES = { ...CURRENCIES, ...r.latest.exchangeRates };
+          setToast("Conflit détecté : les données les plus récentes ont été rechargées. Reprenez votre opération.");
+          setTimeout(() => setToast(null), 8000);
+          return r;
+        }
         if (r && r.queued) {
           setToast("Enregistrement en attente — vérifiez votre connexion");
           setTimeout(() => setToast(null), 5000);
@@ -4150,6 +4163,11 @@ function App() {
       .catch((e) => {
         console.error("Échec de l'enregistrement", e);
         setPendingSync(pendingSyncCount());
+        if (e?.conflit || e?.conflict) {
+          setToast("Conflit détecté : rechargez les données avant de reprendre votre opération.");
+          setTimeout(() => setToast(null), 8000);
+          return { conflict: true, error: e };
+        }
         setToast("Enregistrement en attente — vérifiez votre connexion");
         setTimeout(() => setToast(null), 5000);
         return { queued: true, error: e };
@@ -30829,8 +30847,8 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
           {(role === "Agent" || role === "Responsable de zone" || role === "Chauffeur") && (
             <Field label={role === "Responsable de zone" ? "Zone opérationnelle assignée" : "Agence / zone assignée"}>
               <select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>
-                <option value="">Toutes les agences (aucune restriction)</option>
-                {sitesPourPays(sites, paysOperation).map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}
+                <option value="">Sélectionner une ville</option>
+                {villesPourPays(paysOperation).map((ville) => <option key={ville} value={ville}>{ville}</option>)}
               </select>
             </Field>
           )}
@@ -30960,6 +30978,7 @@ function UserForm({ onClose, onSave, existing, sites }) {
       setErr(estPartenaire ? "Indiquez le nom de l’entreprise partenaire." : "Merci de renseigner tous les champs."); return;
     }
     if (!email || !telephone || !identifiant || !motdepasse) { setErr("Merci de renseigner tous les champs."); return; }
+    if (["Agent", "Responsable de zone", "Chauffeur"].includes(role) && !agence) { setErr("Sélectionnez une ville de la zone opérationnelle."); return; }
     if (!/^\S+@\S+\.\S+$/.test(email)) { setErr("Adresse email invalide."); return; }
     if (existing.some((u) => u.identifiant === identifiant.trim())) { setErr("Cet identifiant existe déjà."); return; }
     const identifiants = await creerIdentifiantsMotDePasse(motdepasse);
@@ -31028,8 +31047,8 @@ function UserForm({ onClose, onSave, existing, sites }) {
           <div style={{ gridColumn: "1 / -1" }}>
             <Field label={role === "Responsable de zone" ? "Zone opérationnelle assignée" : "Agence / zone assignée"}>
               <select value={agence} onChange={(e) => setAgence(e.target.value)} style={inputStyle}>
-                <option value="">Toutes les agences (aucune restriction)</option>
-                {sitesPourPays(sites, paysOperation).map((s) => <option key={s.id || s.nom} value={s.nom}>{s.nom}</option>)}
+                <option value="">Sélectionner une ville</option>
+                {villesPourPays(paysOperation).map((ville) => <option key={ville} value={ville}>{ville}</option>)}
               </select>
             </Field>
             <div style={{ fontSize: 11, color: "var(--muted)", marginTop: -8, marginBottom: 10 }}>Si une agence est choisie, cet utilisateur ne verra que les colis, statistiques et bordereaux de cette agence.</div>

@@ -823,7 +823,10 @@ export function collectionsQuiFondent(base, envoye) {
      * Deux conditions, et les deux ensemble : on perd plus d'une entrée d'un coup, ET il en reste
      * moins de la moitié. Retirer un colis sur seize passe ; en perdre neuf, non.
      */
-    if (perdus > PERTE_TOLEREE && compte < Math.ceil(avant.length * PART_CONSERVEE)) {
+    // Une collection non vide ne peut jamais devenir vide par une écriture ordinaire.
+    // Les remplacements volontaires (restauration/import/réinitialisation) passent explicitement
+    // par CHAMP_INTENTION et sont traités séparément par fusionnerEcritureEquipe().
+    if (compte === 0 || (perdus > PERTE_TOLEREE && compte < Math.ceil(avant.length * PART_CONSERVEE))) {
       perdues.push({ cle, avant: avant.length, apres: compte });
     }
   }

@@ -42,18 +42,29 @@ export async function lireCle(clef) {
   return { valeur: ligne ? ligne.value : null, updated_at: ligne ? ligne.updated_at || null : null };
 }
 
-/** Écrit une clé, en écrasant ce qui s'y trouvait. */
-export async function ecrireCle(clef, valeur) {
+/** Écrit une clé ; `bde-data` exige la version lue pour éviter un écrasement concurrent. */
+export async function ecrireCle(clef, valeur, versionAttendue = null) {
   const { url, cle } = configurationBase();
-  const reponse = await fetch(`${url}/rest/v1/${TABLE}?on_conflict=key`, {
-    method: "POST",
-    headers: { ...entetes(cle), Prefer: "resolution=merge-duplicates,return=minimal" },
-    body: JSON.stringify({ key: clef, value: valeur, updated_at: new Date().toISOString() }),
+  const nouvelleVersion = new Date().toISOString();
+  const estDocumentVivant = clef === "bde-data";
+  if (estDocumentVivant && !versionAttendue) throw new Error("conflit_version_absente");
+  const cible = estDocumentVivant
+    ? `${url}/rest/v1/${TABLE}?key=eq.${encodeURIComponent(clef)}&updated_at=eq.${encodeURIComponent(versionAttendue)}`
+    : `${url}/rest/v1/${TABLE}?on_conflict=key`;
+  const reponse = await fetch(cible, {
+    method: estDocumentVivant ? "PATCH" : "POST",
+    headers: { ...entetes(cle), Prefer: estDocumentVivant ? "return=representation" : "resolution=merge-duplicates,return=minimal" },
+    body: JSON.stringify({ key: clef, value: valeur, updated_at: nouvelleVersion }),
   });
   if (!reponse.ok) {
     const detail = await reponse.text().catch(() => "");
     throw new Error(`ecriture_${reponse.status}:${detail.slice(0, 200)}`);
   }
+  if (estDocumentVivant) {
+    const lignes = await reponse.json().catch(() => []);
+    if (!Array.isArray(lignes) || lignes.length === 0) throw new Error("conflit_version");
+  }
+  return nouvelleVersion;
 }
 
 /**
@@ -65,11 +76,11 @@ export async function ecrireCle(clef, valeur) {
  * sur une écriture via l'API REST. Mais entre relire et ne pas relire, il n'y a pas à hésiter.
  */
 export async function modifierDocument(transformer) {
-  const { valeur } = await lireCle("bde-data");
+  const { valeur, updated_at } = await lireCle("bde-data");
   if (!valeur || typeof valeur !== "object") throw new Error("document_absent");
   const resultat = transformer(valeur);
   // Un transformateur peut renoncer : il retourne alors null, et rien n'est écrit.
   if (!resultat) return null;
-  await ecrireCle("bde-data", resultat.document);
+  await ecrireCle("bde-data", resultat.document, updated_at);
   return resultat.retour ?? null;
 }

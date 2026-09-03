@@ -226,6 +226,7 @@ export default async function handler(req, res) {
     if (req.method === "PUT" || req.method === "POST") {
       const corps = req.body || {};
       const valeur = typeof corps.value === "string" ? JSON.parse(corps.value) : corps.value;
+      const versionAttendue = corps.expected_updated_at ? String(corps.expected_updated_at) : null;
       /*
        * Une écriture sans contenu effacerait tout. Le cas n'a aucun usage légitime, et c'est
        * exactement la forme que prend l'accident : un état vide envoyé au démarrage par une
@@ -254,6 +255,7 @@ export default async function handler(req, res) {
        * rotation automatique : la passer dans ce tamis n'aurait aucun sens.
        */
       let aEcrire = valeur;
+      let versionActuelle = null;
       /*
        * L'alerte à envoyer, s'il y en a une. Elle est repérée ici mais expédiée APRÈS l'écriture :
        * prévenir d'un refus avant d'avoir remis les données en place laisserait une fenêtre où le
@@ -262,12 +264,17 @@ export default async function handler(req, res) {
       let alerteAEnvoyer = null;
       if (!cloisonne && clef === "bde-data") {
         const lecture = await fetch(
-          `${url}/rest/v1/${TABLE}?key=eq.${encodeURIComponent(clef)}&select=value`,
+          `${url}/rest/v1/${TABLE}?key=eq.${encodeURIComponent(clef)}&select=value,updated_at`,
           { headers: entetes },
         );
         if (!lecture.ok) return res.status(502).json({ error: "Base de données injoignable" });
         const lignesActuelles = await lecture.json();
-        const actuel = Array.isArray(lignesActuelles) ? lignesActuelles[0]?.value : null;
+        const ligneActuelle = Array.isArray(lignesActuelles) ? lignesActuelles[0] : null;
+        const actuel = ligneActuelle?.value ?? null;
+        versionActuelle = ligneActuelle?.updated_at || null;
+        if (versionActuelle && versionAttendue !== versionActuelle) {
+          return res.status(409).json({ conflict: true, error: "Page périmée : les données ont changé. Elles ont été rechargées.", value: actuel, updated_at: versionActuelle });
+        }
         // Première écriture d'une base neuve : il n'y a pas encore de règles à faire respecter.
         if (actuel) {
           /*
@@ -295,12 +302,20 @@ export default async function handler(req, res) {
       }
       if (cloisonne) {
         const lecture = await fetch(
-          `${url}/rest/v1/${TABLE}?key=eq.${encodeURIComponent(clef)}&select=value`,
+          `${url}/rest/v1/${TABLE}?key=eq.${encodeURIComponent(clef)}&select=value,updated_at`,
           { headers: entetes },
         );
         if (!lecture.ok) return res.status(502).json({ error: "Base de données injoignable" });
         const lignesActuelles = await lecture.json();
-        const actuel = Array.isArray(lignesActuelles) ? lignesActuelles[0]?.value : null;
+        const ligneActuelle = Array.isArray(lignesActuelles) ? lignesActuelles[0] : null;
+        const actuel = ligneActuelle?.value ?? null;
+        versionActuelle = ligneActuelle?.updated_at || null;
+        if (versionActuelle && versionAttendue !== versionActuelle) {
+          const valeurVisible = estClient ? vueClient(actuel, compteId)
+            : estPartenaire ? vuePartenaire(actuel, partenaireDuCompte(actuel, compteId))
+              : vueEquipeZone(actuel, compteId);
+          return res.status(409).json({ conflict: true, error: "Page périmée : les données ont changé. Elles ont été rechargées.", value: valeurVisible, updated_at: versionActuelle });
+        }
         /*
          * Pas de document en base : il n'y a rien sur quoi reposer une modification, et écrire
          * une vue réduite à la place du document de l'entreprise serait le pire des accidents.
@@ -314,18 +329,29 @@ export default async function handler(req, res) {
           : fusionnerEcriturePartenaire(actuel, valeur, partenaireDuCompte(actuel, compteId), compteId);
       }
 
-      const reponse = await fetch(
-        `${url}/rest/v1/${TABLE}?on_conflict=key`,
-        {
-          method: "POST",
-          headers: { ...entetes, Prefer: "resolution=merge-duplicates,return=minimal" },
-          body: JSON.stringify({ key: clef, value: aEcrire, updated_at: new Date().toISOString() }),
-        },
-      );
+      const nouvelleVersion = new Date().toISOString();
+      const estDocumentVivant = clef === "bde-data";
+      const cible = estDocumentVivant && versionActuelle
+        ? `${url}/rest/v1/${TABLE}?key=eq.${encodeURIComponent(clef)}&updated_at=eq.${encodeURIComponent(versionActuelle)}`
+        : `${url}/rest/v1/${TABLE}?on_conflict=key`;
+      const reponse = await fetch(cible, {
+        method: estDocumentVivant && versionActuelle ? "PATCH" : "POST",
+        headers: { ...entetes, Prefer: estDocumentVivant && versionActuelle ? "return=representation" : "resolution=merge-duplicates,return=minimal" },
+        body: JSON.stringify({ key: clef, value: aEcrire, updated_at: nouvelleVersion }),
+      });
       if (!reponse.ok) {
         const detail = await reponse.text().catch(() => "");
         console.error("Écriture impossible", reponse.status, detail);
         return res.status(502).json({ error: "Enregistrement impossible" });
+      }
+      if (estDocumentVivant && versionActuelle) {
+        const lignesEcrites = await reponse.json().catch(() => []);
+        if (!Array.isArray(lignesEcrites) || lignesEcrites.length === 0) {
+          const actuelle = await fetch(`${url}/rest/v1/${TABLE}?key=eq.${encodeURIComponent(clef)}&select=value,updated_at`, { headers: entetes });
+          const lignes = await actuelle.json().catch(() => []);
+          const ligne = Array.isArray(lignes) ? lignes[0] : null;
+          return res.status(409).json({ conflict: true, error: "Page périmée : les données ont changé. Elles ont été rechargées.", value: ligne?.value ?? null, updated_at: ligne?.updated_at || null });
+        }
       }
       /*
        * Les données sont en place : on peut maintenant prévenir. L'envoi est attendu — quelques
@@ -337,7 +363,7 @@ export default async function handler(req, res) {
         const envoi = await envoyerAlerteEcrasement(aEcrire, alerteAEnvoyer);
         if (!envoi.envoye) console.error("Alerte d'écrasement non envoyée :", envoi.raison, envoi.detail || "");
       }
-      return res.status(200).json({ ok: true });
+      return res.status(200).json({ ok: true, updated_at: nouvelleVersion });
     }
 
     return res.status(405).json({ error: "Méthode non autorisée" });

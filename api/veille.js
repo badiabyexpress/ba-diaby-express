@@ -34,9 +34,30 @@ import { purgerDocumentsDevinables } from "./_documents.js";
 import crypto from "node:crypto";
 
 const PREFIXE = "bde-backup-";
-/* La même fenêtre que la sauvegarde du navigateur : deux règles différentes se contrediraient. */
-const JOURS_CONSERVES = 14;
+/*
+ * TRENTE JOURS, ET NON QUATORZE.
+ *
+ * Ce n'est pas un chiffre de confort. Trois factures partenaire ont disparu entre le 26 et le
+ * 31 août ; personne ne s'en est aperçu avant le 3 septembre — huit jours. La seule copie qui
+ * contenait encore les colis facturés datait du 24 août, et la fenêtre de quatorze jours allait
+ * l'effacer la nuit suivante. À deux jours près, ces données étaient perdues pour de bon.
+ *
+ * Une perte silencieuse ne se découvre pas le lendemain : elle se découvre quand quelqu'un
+ * cherche une pièce précise, souvent des semaines plus tard. La fenêtre doit donc couvrir le
+ * délai de DÉCOUVERTE, pas le délai de l'incident.
+ */
+const JOURS_CONSERVES = 30;
 const TABLE = "bde_data";
+
+/*
+ * Une sauvegarde quotidienne porte exactement « bde-backup-AAAA-MM-JJ ». Les copies prises à la
+ * main avant une opération délicate portent un suffixe : « …-avant-restauration-cat ».
+ *
+ * La distinction n'est pas cosmétique. La purge gardait les N dernières clés, toutes confondues :
+ * chaque copie de précaution occupait donc un emplacement et raccourcissait d'un jour l'historique
+ * récupérable. Prendre une précaution réduisait la protection — exactement l'inverse du but.
+ */
+const QUOTIDIENNE = /^bde-backup-\d{4}-\d{2}-\d{2}$/;
 
 /** La clé du jour, en heure de Conakry — qui est l'heure universelle, sans décalage ni été. */
 export function cleDuJour(maintenant = new Date()) {
@@ -66,8 +87,61 @@ export function documentPlausible(valeur) {
  * que ce qui dépasse — jamais la liste entière, même si elle paraît absurde.
  */
 export function clesAPurger(cles, aGarder = JOURS_CONSERVES) {
-  const propres = (Array.isArray(cles) ? cles : []).filter((k) => typeof k === "string" && k.startsWith(PREFIXE)).sort();
-  return propres.slice(0, Math.max(0, propres.length - aGarder));
+  const quotidiennes = (Array.isArray(cles) ? cles : [])
+    .filter((k) => typeof k === "string" && QUOTIDIENNE.test(k))
+    .sort();
+  /*
+   * Les copies prises à la main ne sont jamais rendues : ce n'est pas un oubli.
+   *
+   * On les prend avant une opération risquée, précisément parce qu'on n'est pas sûr de soi. Les
+   * effacer au bout de trente jours parce que le calendrier a tourné reviendrait à retirer le
+   * filet une fois le funambule engagé. Elles sont peu nombreuses, elles portent un nom qui dit
+   * pourquoi elles existent, et c'est à une personne de décider qu'on n'en a plus besoin.
+   */
+  return quotidiennes.slice(0, Math.max(0, quotidiennes.length - aGarder));
+}
+
+/**
+ * Combien de lignes porte chaque registre du document.
+ *
+ * On compte tout ce qui est une liste, sans en nommer aucune : une collection ajoutée l'an
+ * prochain sera surveillée le soir même, sans que personne ait à y penser. Une liste qui n'existe
+ * pas encore n'est pas comptée à zéro — elle est simplement absente, et une absence ne se compare
+ * pas à une chute.
+ */
+export function effectifsDuDocument(document) {
+  const compte = {};
+  Object.entries(document || {}).forEach(([cle, valeur]) => {
+    if (Array.isArray(valeur)) compte[cle] = valeur.length;
+  });
+  return compte;
+}
+
+/*
+ * CE QUI A FONDU DEPUIS HIER SOIR.
+ *
+ * Le seuil n'est pas un pourcentage unique, et c'est délibéré. Sur une liste de dix lignes,
+ * perdre le quart n'est souvent qu'un ménage ; sur une liste de trois cents, c'est un accident.
+ * On retient donc ce qui perd À LA FOIS plus de deux lignes et plus du dixième de sa hauteur :
+ * les suppressions ordinaires d'une journée de travail passent, une collection qui s'effondre
+ * ne passe pas.
+ *
+ * Ce n'est pas un verrou — la sauvegarde est déjà écrite quand on arrive ici, et c'est très bien
+ * ainsi : refuser de sauvegarder parce qu'un chiffre a baissé priverait de copie le jour où l'on
+ * en a le plus besoin. C'est un signal, et il n'a qu'un seul destinataire : quelqu'un qui pourra
+ * regarder pendant que la copie de la veille existe encore.
+ */
+export function chutesDepuis(avant, apres) {
+  if (!avant || typeof avant !== "object") return [];
+  return Object.entries(apres || {})
+    .map(([cle, maintenant]) => {
+      const hier = avant[cle];
+      if (typeof hier !== "number") return null;   // collection nouvelle : rien à comparer
+      const perdus = hier - maintenant;
+      if (perdus <= 2 || perdus < hier / 10) return null;
+      return { cle, hier, maintenant, perdus };
+    })
+    .filter(Boolean);
 }
 
 /** Les sauvegardes existantes, par leur nom seul — jamais leur contenu. */
@@ -258,6 +332,13 @@ export default async function handler(req, res) {
       copieHorsBase = { envoye: false, raison: "exception", detail: String(e?.message || e).slice(0, 160) };
     }
 
+    /*
+     * Le relevé de la nuit d'avant, lu AVANT d'écrire celui de cette nuit — sans quoi on
+     * comparerait les effectifs à eux-mêmes et aucune chute ne se verrait jamais.
+     */
+    const veillePrecedente = vivant.valeur?.veille || null;
+    const effectifs = effectifsDuDocument(vivant.valeur);
+
     let bilan = null;
     try {
       const chiffres = chiffresDuJour(vivant.valeur);
@@ -274,10 +355,42 @@ export default async function handler(req, res) {
       colis: Array.isArray(vivant.valeur.colis) ? vivant.valeur.colis.length : 0,
       comptes: vivant.valeur.users.length,
       purgees: purgees.length,
-      /* Une copie hors site dont on ne sait pas si elle est partie ne protège de rien. */
+      /*
+       * Une copie hors site dont on ne sait pas si elle est partie ne protège de rien — et une
+       * dont on sait qu'elle échoue sans savoir POURQUOI ne se répare pas.
+       *
+       * Le refus de Resend porte son motif dans le corps de la réponse ; envoyerCopieHorsBase le
+       * récupère fidèlement dans `detail`, et ce relevé le jetait. Résultat : « refus-resend-422 »
+       * toutes les nuits depuis le 31 août, sans que rien ne dise que le domaine d'envoi n'est
+       * pas vérifié, que le destinataire est refusé, ou autre chose encore. On garde donc le
+       * motif, et la date du dernier succès — c'est elle qui dit depuis combien de temps
+       * l'entreprise n'a plus aucune copie ailleurs que chez son hébergeur.
+       */
       horsBase: copieHorsBase?.envoye
-        ? { envoyee: true, octets: copieHorsBase.octets }
-        : { envoyee: false, raison: copieHorsBase?.raison || "inconnue" },
+        ? { envoyee: true, octets: copieHorsBase.octets, le: new Date().toISOString() }
+        : {
+          envoyee: false,
+          raison: copieHorsBase?.raison || "inconnue",
+          detail: copieHorsBase?.detail || null,
+          /* Conservée d'une nuit sur l'autre : sans elle, on ne saurait pas depuis quand. */
+          dernierSucces: veillePrecedente?.horsBase?.envoyee
+            ? veillePrecedente.horsBase.le || veillePrecedente.le || null
+            : veillePrecedente?.horsBase?.dernierSucces || null,
+        },
+      /*
+       * LES EFFECTIFS DE LA NUIT, ET CE QU'ILS ONT PERDU DEPUIS LA VEILLE.
+       *
+       * Les deux pertes de cet été — cinquante-huit catégories devenues quarante-deux, trois
+       * factures partenaire devenues zéro — n'ont déclenché aucune alerte. Elles ont été
+       * découvertes parce qu'un humain a cherché une pièce précise, huit jours plus tard.
+       *
+       * Compter chaque collection prend une milliseconde et se compare à la nuit d'avant. Ce
+       * n'est pas un garde-fou — il est trop tard pour empêcher quoi que ce soit — c'est un
+       * détecteur : il transforme « on s'en apercevra peut-être un jour » en « on le sait demain
+       * matin », pendant que la sauvegarde de la veille existe encore.
+       */
+      effectifs,
+      chutes: chutesDepuis(veillePrecedente?.effectifs, effectifs),
       /* Un ménage dont on ne sait pas s'il a eu lieu ne referme rien : on croit la fuite fermée. */
       documents: documents?.fait
         ? { effaces: documents.effaces }

@@ -3866,10 +3866,33 @@ function BoutonInstallation({ compact }) {
               se fait aussi à la main, par son menu.
             </p>
             <ol style={{ paddingInlineStart: 20, margin: "14px 0" }}>
+              <li style={{ marginBottom: 8 }}>Ouvrez cette page dans <strong>Chrome</strong> — voir l’encadré ci-dessous.</li>
               <li style={{ marginBottom: 8 }}>Touchez les <strong>trois points ⋮</strong> en haut à droite du navigateur.</li>
               <li style={{ marginBottom: 8 }}>Touchez <strong>« Installer l’application »</strong> — ou, selon le téléphone, <strong>« Ajouter à l’écran d’accueil »</strong>.</li>
               <li>Confirmez avec <strong>« Installer »</strong>.</li>
             </ol>
+            {/*
+              CE QUI ARRIVE AVEC SAMSUNG INTERNET, ET QU'ON NE PEUT PAS CORRIGER D'ICI.
+              Sur Android, installer une application web fabrique un vrai paquet Android. Chrome
+              délègue cette fabrication aux serveurs de Google, qui produisent un paquet à jour et
+              signé par eux. Les autres navigateurs le fabriquent sur le téléphone, avec une cible
+              Android ancienne — et Play Protect le bloque. Rien dans notre manifeste ne décide de
+              cela ; seul le choix du navigateur le décide. D'où cet encadré, écrit là où l'agent
+              rencontre le blocage, avec la consigne de NE PAS passer outre.
+            */}
+            <div style={{ borderInlineStart: "3px solid #E0A63A", background: "var(--card-2, rgba(224,166,58,0.08))", padding: "10px 14px", borderRadius: 6, marginBottom: 14 }}>
+              <strong>Si Android affiche « Appli non sécurisée bloquée » (Play Protect) :</strong> vous
+              n’êtes pas dans Chrome. Touchez <strong>OK</strong>, et surtout <strong>pas
+              « Installer quand même »</strong>. Fermez, ouvrez <strong>badiabyexpress.com</strong> dans
+              <strong> Chrome</strong>, et recommencez : le blocage disparaît. Les autres navigateurs
+              fabriquent l’application sur le téléphone avec une version d’Android trop ancienne ;
+              Chrome la fait fabriquer par Google, à jour et signée.
+            </div>
+            <p style={{ color: "var(--muted)", marginBottom: 14 }}>
+              Vous pouvez aussi rester sur votre navigateur et choisir simplement
+              <strong> « Ajouter à l’écran d’accueil »</strong> : le raccourci s’installe sans
+              avertissement, mais l’application ne s’ouvrira pas hors réseau.
+            </p>
             {/*
               Le cas le plus fréquent, et celui qu'on ne devinerait pas : le navigateur n'a pas
               encore reconnu l'application, parce que c'est la première visite depuis une mise à

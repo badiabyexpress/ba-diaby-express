@@ -7,6 +7,27 @@
     <meta name="description" content="Ba-Diaby Express transporte vos colis entre la Guinée, la France et plusieurs destinations internationales. Suivez votre colis en ligne et consultez les prochains départs." />
     <meta name="keywords" content="transport colis Guinée, Conakry, livraison internationale, suivi colis, Ba-Diaby Express" />
     <meta name="theme-color" content="#0A0F1C" />
+
+    <!--
+      CE QUI REND L'APPLICATION INSTALLABLE.
+
+      Sans ces trois lignes, « Ajouter à l'écran d'accueil » ne crée qu'un marque-page : l'adresse
+      du navigateur reste, l'icône est une capture de la page, et rien ne s'ouvre sans réseau. Avec
+      elles, Android et iPhone la posent comme une application — et c'est aussi le préalable à un
+      vrai fichier APK, qui ne fait qu'emballer une application web installable.
+    -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icone-192.png" />
+    <!--
+      iPhone ignore le manifeste pour l'icône et le plein écran : il lui faut ses propres balises.
+      Sans elles, l'application s'ouvrirait dans Safari avec sa barre d'adresse, ce qui vole un
+      cinquième de l'écran à un agent qui saisit un colis debout dans un dépôt.
+    -->
+    <link rel="apple-touch-icon" href="/icone-192.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Ba-Diaby" />
+    <meta name="mobile-web-app-capable" content="yes" />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Ba-Diaby Express" />
     <meta property="og:title" content="Ba-Diaby Express — Transport de colis entre la Guinée et le monde" />

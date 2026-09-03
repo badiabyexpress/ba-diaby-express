@@ -39,6 +39,7 @@
 import { baseConfiguree, lireCle, ecrireCle, modifierDocument } from "./_base.js";
 import { hashPBKDF2, egaliteSure, genererCode, genererSel } from "./_motdepasse.js";
 import { sessionDeLaRequete, jetonInterne, ENTETE_INTERNE } from "./_session.js";
+import { passage, refuser } from "./_verrou.js";
 
 export const CLE_VERIF = "bde-verif-numero";
 
@@ -112,21 +113,17 @@ async function envoyerCode(req, telephone, code) {
 }
 
 /*
- * Un ralentisseur par compte. Chaque demande fait partir un message facturé par Meta ; sans
- * compteur, une boucle de quelques lignes viderait le quota de l'entreprise et ferait sonner le
- * téléphone de quelqu'un toute la nuit.
+ * Un ralentisseur par compte — dans la base, et non en mémoire.
+ *
+ * Chaque demande fait partir un message facturé par Meta ; sans compteur, une boucle de quelques
+ * lignes viderait le quota de l'entreprise et ferait sonner le téléphone de quelqu'un toute la
+ * nuit. Le compteur existait, mais il vivait dans la mémoire d'une instance serverless : il s'en
+ * allume autant qu'il en faut, chacune avec la sienne, vide. Appeler vite en faisait naître
+ * d'autres, chacune offrant dix messages neufs — et le plafond ne tenait que devant un client
+ * maladroit. Le verrou de `_verrou.js` compte dans la base, pour toutes les instances à la fois.
  */
-const demandesParCompte = new Map();
-function tropDeDemandes(id) {
-  const maintenant = Date.now();
-  const e = demandesParCompte.get(id);
-  if (!e || maintenant - e.debut > 60 * 60 * 1000) {
-    demandesParCompte.set(id, { debut: maintenant, n: 1 });
-    return false;
-  }
-  e.n += 1;
-  return e.n > 10;
-}
+const DEMANDES_PAR_COMPTE = 10;
+const FENETRE_DEMANDES_MS = 60 * 60 * 1000;
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Méthode non autorisée" });
@@ -159,8 +156,11 @@ export default async function handler(req, res) {
    * demandes, réessayez dans une heure » — un refus qui parle d'autre chose que ce qu'il vient de
    * faire, et qui l'enfermerait dehors pour une faute de frappe.
    */
-  if (etape === "demande" && tropDeDemandes(compteId)) {
-    return res.status(429).json({ error: "Trop de demandes de code. Réessayez dans une heure." });
+  const limite = etape === "demande"
+    ? await passage({ nature: "numero-demande", cle: String(compteId), max: DEMANDES_PAR_COMPTE, fenetreMs: FENETRE_DEMANDES_MS })
+    : { bloque: false };
+  if (limite.bloque) {
+    return refuser(res, limite.dansSecondes, "Trop de demandes de code. Réessayez dans une heure.");
   }
   const numero = chiffres(telephone);
   if (numero.length < 8) {

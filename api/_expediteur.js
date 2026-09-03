@@ -89,3 +89,53 @@ export function analyserExpediteur(valeur) {
 export function expediteurCourriel() {
   return analyserExpediteur(process.env.EMAIL_FROM).normalise;
 }
+
+/*
+ * L'ADRESSE PUBLIQUE DU SITE, VUE DEPUIS LE SERVEUR
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Un courriel ne peut pas porter d'image `data:` — Gmail les retire, et l'on obtiendrait un carré
+ * vide en tête de chaque message. Il lui faut une adresse ordinaire, et donc savoir où le site
+ * habite.
+ *
+ * `SITE_URL` si elle existe ; sinon le domaine de l'adresse d'expédition, qui est justement celui
+ * que Resend a vérifié — c'est la même entreprise, et cela évite une variable de plus à créer,
+ * donc une variable de plus à oublier. `VERCEL_URL` n'est volontairement pas employée : elle
+ * change à chaque déploiement, et les courriels d'hier pointeraient vers un déploiement effacé.
+ */
+export function adresseDuSite() {
+  const explicite = String(process.env.SITE_URL || "").trim().replace(/\/+$/, "");
+  if (explicite) return /^https?:\/\//i.test(explicite) ? explicite : `https://${explicite}`;
+  const domaine = analyserExpediteur(process.env.EMAIL_FROM).domaine;
+  return domaine ? `https://${domaine}` : null;
+}
+
+/**
+ * L'adresse du logo pour un courriel, ou null s'il n'y en a pas.
+ *
+ * Null se traite en n'affichant rien : une icône cassée en tête d'un message automatique fait
+ * douter du message entier.
+ */
+export function logoDuSite(document) {
+  const site = adresseDuSite();
+  if (!site) return null;
+  const brut = String(document?.branding?.logo || "");
+  return /^data:image\//i.test(brut) ? `${site}/api/public?logo=1` : (/^https?:\/\//i.test(brut) ? brut : null);
+}
+
+/**
+ * L'en-tête commun des courriels automatiques : le logo s'il existe, le nom sinon.
+ *
+ * Le nom est écrit dans tous les cas, à côté de l'image. Une messagerie qui bloque les images
+ * distantes — c'est le réglage par défaut de plusieurs d'entre elles — ne doit pas rendre un
+ * message anonyme.
+ */
+export function enteteCourriel(document) {
+  const nom = document?.branding?.nom || document?.siteVitrine?.nomPublic || "Ba-Diaby Express";
+  const logo = logoDuSite(document);
+  const echappe = String(nom).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  return `
+    <div style="display:flex;align-items:center;gap:10px;padding-bottom:14px;margin-bottom:18px;border-bottom:1px solid #e6e8ee">
+      ${logo ? `<img src="${logo}" alt="" width="38" height="38" style="width:38px;height:38px;border-radius:9px;object-fit:cover;display:block">` : ""}
+      <span style="font-size:16px;font-weight:700;color:#0A2647">${echappe}</span>
+    </div>`;
+}

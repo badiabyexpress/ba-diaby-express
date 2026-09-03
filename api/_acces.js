@@ -26,7 +26,7 @@
 
 import crypto from "node:crypto";
 import { destinataireAlerte } from "./_alerte.js";
-import { expediteurCourriel } from "./_expediteur.js";
+import { expediteurCourriel, enteteCourriel } from "./_expediteur.js";
 
 const RESEND = "https://api.resend.com/emails";
 
@@ -155,6 +155,7 @@ export function corpsAlerteConnexion(entree, document) {
     sujet: `${nom} — connexion depuis un appareil inhabituel (${entree.identifiant})`,
     html: `
       <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;font-size:15px;color:#0A2647;line-height:1.6">
+        ${enteteCourriel(document)}
         <p><strong>Une connexion vient d’être faite depuis un appareil et une adresse jamais vus pour ce compte.</strong></p>
         <table style="border-collapse:collapse;margin:16px 0">
           <tr><td style="padding:4px 14px 4px 0;color:#666">Compte</td><td><strong>${echapper(entree.identifiant)}</strong>${entree.qui ? ` — ${echapper(entree.qui)}` : ""}</td></tr>

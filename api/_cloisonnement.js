@@ -35,6 +35,7 @@
  */
 
 import { effectivePermission } from "./_permissions.js";
+import { CHAMPS_TOTP_SECRETS } from "./_totp.js";
 
 /*
  * Ce que tout le monde peut voir.
@@ -144,6 +145,41 @@ function sans(objet, champs) {
   if (!objet || typeof objet !== "object") return objet;
   const sortie = { ...objet };
   champs.forEach((c) => { delete sortie[c]; });
+  return sortie;
+}
+
+/*
+ * LE SECRET DU SECOND FACTEUR NE DESCEND JAMAIS AU NAVIGATEUR — À PERSONNE, PAS MÊME À L'ÉQUIPE.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Les empreintes de mots de passe sont retirées des espaces cloisonnés, mais l'équipe, elle,
+ * reçoit le document entier : c'est son travail de le réécrire. Une empreinte PBKDF2 n'y est pas
+ * un cadeau — il faut 150 000 tours par essai pour en tirer quelque chose.
+ *
+ * Un secret TOTP, lui, N'EST PAS UNE EMPREINTE : c'est la clé elle-même. Qui la lit calcule les
+ * codes aussi bien que le téléphone de la personne, pour toujours, sans rien casser. La laisser
+ * circuler reviendrait à afficher le second facteur de chaque collègue dans les données que
+ * n'importe quel poste de l'agence télécharge à chaque chargement de page.
+ *
+ * On la retire donc de TOUTES les lectures, et l'on met à la place un booléen : de quoi afficher
+ * « en place » ou « pas en place » dans les écrans, sans rien livrer de ce qui sert à entrer.
+ * L'écriture, elle, la remet en place (voir preserverIdentifiants) — un navigateur ne peut donc
+ * ni la lire ni l'effacer.
+ */
+function compteSansSecretTotp(compte) {
+  if (!compte || typeof compte !== "object") return compte;
+  const actif = !!compte.totpSecret;
+  const enPreparation = !!compte.totpEnAttente;
+  if (!actif && !enPreparation && compte.totpActif === undefined) return compte;
+  return { ...sans(compte, CHAMPS_TOTP_SECRETS), totpActif: actif, totpEnPreparation: enPreparation };
+}
+
+export function sansSecretsTotp(document) {
+  if (!document || typeof document !== "object" || Array.isArray(document)) return document;
+  const sortie = { ...document };
+  ["users", "clientAccounts"].forEach((cle) => {
+    if (!Array.isArray(sortie[cle])) return;
+    sortie[cle] = sortie[cle].map(compteSansSecretTotp);
+  });
   return sortie;
 }
 
@@ -733,6 +769,32 @@ export function preserverIdentifiants(comptesBase, comptesSortie) {
     const dateBase = Date.parse(ancien.sessionsRevoqueesLe || "") || 0;
     const dateEnvoyee = Date.parse(compte.sessionsRevoqueesLe || "") || 0;
     if (dateBase > dateEnvoyee) repris.sessionsRevoqueesLe = ancien.sessionsRevoqueesLe;
+
+    /*
+     * LE SECOND FACTEUR NE SE POSE NI NE SE RETIRE DEPUIS UN NAVIGATEUR.
+     *
+     * Le secret est retiré de toutes les lectures (voir sansSecretsTotp) : aucune page ne le
+     * connaît, donc aucune page ne peut le renvoyer. Sans cette ligne, le premier enregistrement
+     * venu l'effacerait par simple omission — exactement la mécanique qui avait vidé les mots de
+     * passe de deux comptes clients en août — et la double authentification tomberait toute seule,
+     * sans un mot, sur le compte le mieux protégé de l'entreprise.
+     *
+     * La règle est donc absolue et vaut dans les deux sens : ce qui est en base reste en base, ce
+     * qui n'y est pas ne s'y met pas. Poser ou retirer le second facteur passe par api/login.js,
+     * qui exige le code du téléphone dans un sens et le mot de passe dans l'autre.
+     *
+     * Elle est placée AVANT le raccourci du changement de mot de passe : changer son mot de passe
+     * ne doit pas emporter son second facteur avec lui.
+     */
+    CHAMPS_TOTP_SECRETS.forEach((champ) => {
+      if (ancien[champ] !== undefined) repris[champ] = ancien[champ];
+      else delete repris[champ];
+    });
+    /* Marques de lecture, pas des données : elles sont recalculées à chaque lecture. */
+    delete repris.totpActif;
+    delete repris.totpEnPreparation;
+    if (ancien.totpActiveLe !== undefined) repris.totpActiveLe = ancien.totpActiveLe;
+    else delete repris.totpActiveLe;
 
     if (compte.motdepasseSecure || compte.motdepasse) return repris; // changement voulu : il gagne
     CHAMPS_IDENTIFIANTS.forEach((champ) => {

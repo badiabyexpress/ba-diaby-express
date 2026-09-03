@@ -3788,7 +3788,59 @@ async function connexionServeur(identifiant, motdepasse, espace) {
   if (reponse.status !== 401 && reponse.status !== 429 && !reponse.ok) return null;
   const corps = await reponse.json().catch(() => ({}));
   if (!reponse.ok) return { refus: corps.error || "Identifiant ou mot de passe incorrect." };
-  return corps; // { token, expireA, userId }
+  /* { token, expireA, userId, utilisateur } — ou { besoinCode, defi } si le compte a un second facteur. */
+  return corps;
+}
+
+/*
+ * LA DEUXIÈME ÉTAPE DE LA CONNEXION — le code à six chiffres.
+ *
+ * Le mot de passe a été vérifié par le serveur, qui a rendu un « défi » signé valable cinq
+ * minutes. Il ne donne accès à rien : il atteste seulement que le mot de passe vient d'être
+ * accepté. C'est le code du téléphone qui, joint à lui, ouvre la session.
+ *
+ * Rien n'est calculé ici, et c'est tout le changement : l'ancienne double authentification tirait
+ * le code par Math.random() DANS le navigateur et le comparait sur place — une porte qu'il
+ * suffisait de contourner en appelant /api/login directement.
+ */
+async function secondFacteurServeur(defi, code) {
+  let reponse;
+  try {
+    reponse = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ defi, code }),
+    });
+  } catch (e) {
+    return { refus: "Connexion impossible pour le moment. Vérifiez votre réseau et réessayez." };
+  }
+  const corps = await reponse.json().catch(() => ({}));
+  if (!reponse.ok) return { refus: corps.error || "Code incorrect." };
+  return corps;
+}
+
+/**
+ * Les trois gestes de la double authentification, depuis un compte déjà connecté.
+ *
+ * `preparer` tire un secret et le montre une seule fois ; `activer` demande un code pour prouver
+ * que le téléphone le lit vraiment — sans cette preuve, un QR code mal scanné enfermerait la
+ * personne dehors à sa connexion suivante ; `retirer` exige le mot de passe, sans quoi une session
+ * volée suffirait à désarmer la protection qu'elle est justement censée franchir.
+ */
+async function appelDoubleAuthentification(action, extra = {}) {
+  let reponse;
+  try {
+    reponse = await appelServeurQuiDepense("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, ...extra }),
+    });
+  } catch (e) {
+    return { erreur: "Serveur injoignable. Réessayez quand le réseau sera revenu." };
+  }
+  const corps = await reponse.json().catch(() => ({}));
+  if (!reponse.ok) return { erreur: corps.error || "Opération impossible pour le moment." };
+  return corps;
 }
 
 function lireJetonEnregistre() {
@@ -4091,6 +4143,14 @@ function App() {
   const [adminResetKey, setAdminResetKey] = useState(0);
   const isMobile = useIsMobile();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  /*
+   * La sécurité du compte, ouverte depuis le pied du menu.
+   *
+   * Elle est là et pas dans les réglages parce qu'elle concerne CHACUN : un chauffeur n'ouvre
+   * jamais la gestion des utilisateurs, et son compte a pourtant besoin d'être protégé comme les
+   * autres. Le pied du menu est le seul endroit que tout le monde voit.
+   */
+  const [securiteOuverte, setSecuriteOuverte] = useState(false);
   /*
    * La section ouverte dans l'espace partenaire.
    *
@@ -4765,11 +4825,28 @@ function App() {
                 <div style={{ fontSize: 11.5, color: "var(--nav-muted)", marginBottom: 10 }}>{session.role}</div>
               </>
             )}
+            {/*
+              La sécurité de SON compte, à portée de tout le monde.
+              Elle ne peut pas vivre dans les réglages : un chauffeur n'y entre jamais, et son
+              compte donne pourtant à voir les colis et les adresses des clients.
+            */}
+            <button onClick={() => setSecuriteOuverte(true)} title={(collapsed && !isMobile) ? "Sécurité de mon compte" : undefined}
+              style={{ display: "flex", alignItems: "center", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", gap: 8, width: "100%", fontSize: 13, color: "#fff", background: "none", border: "none", cursor: "pointer", marginBottom: 8, padding: 0 }}>
+              <ShieldCheck size={15} /> {!(collapsed && !isMobile) && "Sécurité de mon compte"}
+            </button>
             <button onClick={() => { ecrireSessionEnregistree(null); ecrireJeton(null); ecrireJetonSession(null); setVersionAcces((n) => n + 1); setSession(null); setView("dashboard"); setOngletPartenaire("accueil"); setShowLogin(false); const url = new URL(window.location.href); url.searchParams.delete("connexion"); window.history.replaceState({}, "", url); }} title={(collapsed && !isMobile) ? t.logout : undefined} style={{ display: "flex", alignItems: "center", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", gap: 8, width: "100%", fontSize: 13, color: "var(--brand-on-dark)", background: "none", border: "none", cursor: "pointer" }}>
               <LogOut size={15} /> {!(collapsed && !isMobile) && t.logout}
             </button>
           </div>
         </aside>
+        {securiteOuverte && (
+          <Modal onClose={() => setSecuriteOuverte(false)} title="Sécurité de mon compte">
+            <DoubleAuthentification
+              compte={(data?.users || []).find((u) => u.id === session.id) || session}
+              nu
+            />
+          </Modal>
+        )}
         <div className="bde-app-workspace" style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
           {isMobile && (
             <div className="bde-mobile-topbar" style={{ position: "sticky", top: 0, zIndex: 20, display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", background: "#0A2647", color: "#fff" }}>
@@ -6860,8 +6937,14 @@ function ClientProfilModal({ compte, onSave, onClose }) {
      * les comptes chargés depuis la base quand le serveur n'est pas disponible.
      */
     const parLeServeur = await connexionServeur(compte.identifiant, ancien, "client");
+    /*
+     * `besoinCode` compte comme une bonne réponse : le serveur ne réclame le code du téléphone
+     * QU'APRÈS avoir vérifié le mot de passe. Sans cette moitié-là, activer la double
+     * authentification aurait rendu impossible de changer son propre mot de passe — l'écran aurait
+     * répondu « mot de passe actuel incorrect » à un mot de passe parfaitement juste.
+     */
     const bon = parLeServeur
-      ? !!parLeServeur.utilisateur
+      ? !!(parLeServeur.utilisateur || parLeServeur.besoinCode)
       : (await verifyPassword(ancien, compte)).ok;
     if (!bon) { setErrMdp(tcx("Mot de passe actuel incorrect.")); return; }
     if (!nouveau || nouveau.length < 8) { setErrMdp(tcx("Choisissez un mot de passe d’au moins 8 caractères.")); return; }
@@ -6992,6 +7075,18 @@ function ClientProfilModal({ compte, onSave, onClose }) {
             </div>
           </>
         )}
+      </div>
+
+      {/*
+        La double authentification du client.
+
+        Elle n'a rien d'un luxe ici : le portail donne à voir ce qu'il expédie, à qui, et ce qu'il
+        doit encore. Un mot de passe réutilisé ailleurs suffisait jusqu'à présent à ouvrir tout
+        cela. L'application d'authentification est gratuite et rien ne s'envoie — donc rien ne
+        dépend du réseau ni du crédit téléphonique du client.
+      */}
+      <div style={{ borderTop: "1px solid var(--border)", marginTop: 18, paddingTop: 14 }}>
+        <DoubleAuthentification compte={compte} nu />
       </div>
     </Modal>
   );
@@ -7504,6 +7599,12 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
   const [mode, setMode] = useState("login"); // login | inscription | reset
   const [identifiant, setIdentifiant] = useState("");
   const [motdepasse, setMotdepasse] = useState("");
+  /*
+   * Le défi rendu par le serveur quand le compte porte une double authentification. Il atteste que
+   * le mot de passe vient d'être vérifié, vaut cinq minutes, et n'ouvre rien par lui-même.
+   */
+  const [defiClient, setDefiClient] = useState("");
+  const [codeSaisi, setCodeSaisi] = useState("");
   const [showPw, setShowPw] = useState(false);
   const [err, setErr] = useState("");
   const [compte, setCompte] = useState(null);
@@ -7634,6 +7735,12 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
      */
     const serveur = await connexionServeur(identifiant.trim(), motdepasse, "client");
     if (serveur?.refus) { setErr(serveur.refus); return; }
+    /*
+     * Le compte porte une double authentification : le mot de passe est bon, mais rien n'est
+     * encore ouvert. Le serveur rend un défi signé de cinq minutes, qu'on lui représentera avec
+     * le code du téléphone.
+     */
+    if (serveur?.besoinCode) { setDefiClient(serveur.defi); setCodeSaisi(""); return; }
     if (serveur?.session) ecrireJetonSession(serveur.session, serveur.sessionExpireA);
 
     let acc = serveur?.utilisateur || null;
@@ -7650,9 +7757,38 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
       // et la vérification retomberait sur l'ancien schéma, rendant la connexion impossible.
       const local = await verifyPassword(motdepasse, acc);
       if (!local.ok) { setErr("Identifiant ou mot de passe incorrect."); return; }
+      /*
+       * Hors ligne, un compte à double authentification ne s'ouvre pas : le secret qui produit les
+       * codes ne descend dans aucun navigateur, cet appareil ne peut donc rien vérifier seul. Le
+       * dire franchement vaut mieux que de laisser croire que couper le réseau suffit à passer.
+       */
+      if (acc.totpActif) {
+        setErr("Ce compte demande le code de votre application d’authentification, et cette vérification se fait sur le serveur. Réessayez une fois le réseau revenu.");
+        return;
+      }
       migratedUser = local.migratedUser;
     }
 
+    installerCompte(acc, migratedUser);
+  }
+
+  /*
+   * La deuxième étape, quand le compte porte un second facteur : le code à six chiffres, vérifié
+   * par le serveur — jamais ici. C'est lui qui rend alors la session et la fiche du client.
+   */
+  async function validerCode(e) {
+    e.preventDefault();
+    setErr("");
+    const reponse = await secondFacteurServeur(defiClient, codeSaisi.trim());
+    if (reponse?.refus) { setErr(reponse.refus); return; }
+    if (!reponse?.utilisateur) { setErr("Code incorrect."); return; }
+    if (reponse.session) ecrireJetonSession(reponse.session, reponse.sessionExpireA);
+    onBesoinBase?.();
+    setDefiClient("");
+    installerCompte(reponse.utilisateur, null);
+  }
+
+  function installerCompte(acc, migratedUser) {
     if (data) setNotifications(calculerNotificationsClient(acc, data));
 
     // Un SEUL enregistrement combinant la date de visite et, le cas échéant, la mise à niveau du
@@ -7773,7 +7909,32 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
             identifiant est libre et qui écrit. Si le serveur ne peut pas — clé pas encore
             posée — preparerRepli() a demandé les données, et l'attente est couverte plus haut
             par l'écran de chargement du portail. */}
-        {mode === "inscription" ? (
+        {defiClient ? (
+          /*
+           * La deuxième étape. Elle remplace l'écran de connexion plutôt que de s'ajouter à côté :
+           * il ne doit rester qu'une seule chose à faire, et le mot de passe déjà saisi n'a plus
+           * à être visible.
+           */
+          <form onSubmit={validerCode} style={{ width: "100%", maxWidth: 380, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16, padding: 26, boxShadow: "0 4px 20px rgba(10,38,71,0.08)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 8 }}>
+              <ShieldCheck size={19} color="var(--ok-fg)" />
+              <div style={{ fontWeight: 700, fontSize: 15, color: "var(--text)" }}>{T("Double authentification")}</div>
+            </div>
+            <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>
+              {T("Recopiez le code à six chiffres affiché par votre application d’authentification. Il change toutes les trente secondes.")}
+            </div>
+            <input value={codeSaisi} onChange={(e) => setCodeSaisi(e.target.value)}
+              inputMode="numeric" autoComplete="one-time-code" maxLength={6} autoFocus
+              placeholder="000000" aria-label={T("Code à six chiffres")}
+              style={{ ...inputStyle, textAlign: "center", fontSize: 23, letterSpacing: 8, padding: "12px 14px", marginBottom: 12 }} />
+            {err && <div style={{ color: "var(--danger-fg)", fontSize: 13, marginBottom: 10, lineHeight: 1.5 }}>{err}</div>}
+            <button type="submit" style={{ width: "100%", background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "13px 0", fontSize: 15, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}>{T("Vérifier")}</button>
+            <button type="button" onClick={() => { setDefiClient(""); setCodeSaisi(""); setErr(""); }}
+              style={{ width: "100%", marginTop: 12, background: "none", border: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>
+              {T("Revenir à l’écran de connexion")}
+            </button>
+          </form>
+        ) : mode === "inscription" ? (
           <ClientRegisterForm data={data} persist={persist} onRegistered={(acc) => { ecrireSessionClient(acc.id); setCompte(acc); onBesoinBase?.(); }} onCancel={() => setMode("login")} />
         ) : mode === "reset" ? (
           <ClientResetPasswordForm data={data} persist={persist} onDone={() => { setMode("login"); setErr(""); }} onCancel={() => setMode("login")} />
@@ -8302,7 +8463,11 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
   const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
   const [pending, setPending] = useState(null);
-  const [otp, setOtp] = useState("");
+  /*
+   * Le défi rendu par le serveur après vérification du mot de passe. Il vaut cinq minutes et
+   * n'ouvre rien par lui-même : il atteste seulement que la première étape est franchie.
+   */
+  const [defi, setDefi] = useState("");
   const [otpInput, setOtpInput] = useState("");
   const [showPw, setShowPw] = useState(false);
   /*
@@ -8335,6 +8500,13 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
        * vérifier quoi que ce soit — elle arrivait avec toute la base, livrée à quiconque ouvrait
        * le site. Le sel et l'empreinte ne quittent plus le serveur.
        */
+      /*
+       * Le compte porte une double authentification : le mot de passe est bon, mais le serveur ne
+       * délivre encore aucune session. Il rend un défi signé, valable cinq minutes, qu'on lui
+       * représentera avec le code affiché par le téléphone.
+       */
+      if (serveur?.besoinCode) { setDefi(serveur.defi); setOtpInput(""); setPending({ code: true }); return; }
+
       if (serveur?.utilisateur) {
         if (serveur.token) { ecrireJeton(serveur.token, serveur.expireA); onJeton?.(); }
         /*
@@ -8343,9 +8515,7 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
          * sans lui — et refusé, une fois la base fermée.
          */
         if (serveur.session) { ecrireJetonSession(serveur.session, serveur.sessionExpireA); onJeton?.(); }
-        const compte = serveur.utilisateur;
-        if (compte.twoFA) { const code = genOtp(); setOtp(code); setPending(compte); }
-        else onLogin(compte);
+        onLogin(serveur.utilisateur);
         return;
       }
 
@@ -8386,17 +8556,37 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
         migratedUser = local.migratedUser;
       }
       const finalUser = migratedUser || u;
-      if (finalUser.twoFA) { const code = genOtp(); setOtp(code); setPending(finalUser); }
-      else onLogin(finalUser);
+      /*
+       * HORS LIGNE, UN COMPTE À DOUBLE AUTHENTIFICATION NE S'OUVRE PAS — ET C'EST VOULU.
+       *
+       * Le secret qui produit les codes ne descend plus dans aucun navigateur : cet appareil est
+       * donc incapable de vérifier quoi que ce soit tout seul. La version d'avant s'en tirait en
+       * tirant elle-même un code au hasard et en l'affichant à l'écran ; couper le réseau était
+       * alors le moyen le plus simple de contourner la protection, avec le seul mot de passe.
+       *
+       * On le dit franchement plutôt que de faire semblant. Ce compte se connecte quand le réseau
+       * revient ; celui qui n'a pas activé le second facteur, lui, travaille hors ligne comme avant.
+       */
+      if (finalUser.totpActif) {
+        setErr("Ce compte demande le code de votre application d’authentification, et cette vérification se fait sur le serveur. Reconnectez-vous une fois le réseau revenu.");
+        return;
+      }
+      onLogin(finalUser);
     } catch (ex) {
       console.error(ex);
       setErr("Erreur technique : " + ex.message);
     }
   }
-  function verifyOtp(e) {
+
+  async function verifyOtp(e) {
     e.preventDefault();
-    if (otpInput === otp) onLogin(pending);
-    else setErr("Code de vérification incorrect.");
+    setErr("");
+    const reponse = await secondFacteurServeur(defi, otpInput.trim());
+    if (reponse?.refus) { setErr(reponse.refus); return; }
+    if (!reponse?.utilisateur) { setErr("Code incorrect."); return; }
+    if (reponse.token) { ecrireJeton(reponse.token, reponse.expireA); onJeton?.(); }
+    if (reponse.session) { ecrireJetonSession(reponse.session, reponse.sessionExpireA); onJeton?.(); }
+    onLogin(reponse.utilisateur);
   }
 
   if (oubli) {
@@ -8418,12 +8608,21 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
       <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "linear-gradient(135deg,#0A2647 0%,#0A2647 55%,#C8102E 250%)" }}>
         <div style={{ width: "min(92vw, 400px)", background: "var(--surface)", borderRadius: 18, padding: "38px 34px", boxShadow: "0 28px 70px rgba(10,38,71,0.4)" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 8 }}><ShieldCheck size={20} color="var(--brand-on-dark)" /><div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 16, color: "var(--text)" }}>Double authentification</div></div>
-          <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>Démo : aucune passerelle SMS n’étant connectée, votre code de vérification est affiché ci-dessous.</div>
-          <div style={{ background: "var(--surface2)", borderRadius: 13, padding: "14px 16px", textAlign: "center", fontFamily: "'Space Grotesk',sans-serif", fontSize: 27, letterSpacing: 5, color: "var(--text)", marginBottom: 16 }}>{otp}</div>
+          <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>
+            Ouvrez votre application d’authentification et recopiez le code à six chiffres affiché en face de
+            <strong style={{ color: "var(--text)" }}> Ba-Diaby Express</strong>. Il change toutes les trente secondes.
+          </div>
           <div>
-            <input value={otpInput} onChange={(e) => setOtpInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && verifyOtp(e)} placeholder="Entrez le code à 6 chiffres" style={{ ...inputStyle, marginBottom: 12, textAlign: "center", fontSize: 15, padding: "12px 14px" }} />
-            {err && <div style={{ color: "var(--danger-fg)", fontSize: 13, marginBottom: 10 }}>{err}</div>}
+            <input value={otpInput} onChange={(e) => setOtpInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && verifyOtp(e)}
+              inputMode="numeric" autoComplete="one-time-code" maxLength={6} autoFocus
+              placeholder="000000" aria-label="Code à six chiffres"
+              style={{ ...inputStyle, marginBottom: 12, textAlign: "center", fontSize: 23, letterSpacing: 8, padding: "12px 14px" }} />
+            {err && <div style={{ color: "var(--danger-fg)", fontSize: 13, marginBottom: 10, lineHeight: 1.5 }}>{err}</div>}
             <button type="button" onClick={verifyOtp} style={{ width: "100%", background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "13px 0", fontWeight: 700, fontSize: 15, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}>Vérifier</button>
+            <button type="button" onClick={() => { setPending(null); setDefi(""); setOtpInput(""); setErr(""); }}
+              style={{ width: "100%", marginTop: 10, background: "none", border: "none", color: "var(--muted)", fontSize: 12.5, cursor: "pointer" }}>
+              Revenir à l’écran de connexion
+            </button>
           </div>
         </div>
       </div>
@@ -9547,7 +9746,10 @@ function PartnerDashboard({ data, session, persist, verifier, notify, onglet }) 
      */
     const parLeServeur = await connexionServeur(monCompte.identifiant, ancien);
     if (parLeServeur?.refus) return { erreur: parLeServeur.refus };
-    const bon = parLeServeur ? !!parLeServeur.utilisateur : (await verifyPassword(ancien, monCompte)).ok;
+    /* `besoinCode` vaut « mot de passe accepté » : le code n'est réclamé qu'après cette vérification. */
+    const bon = parLeServeur
+      ? !!(parLeServeur.utilisateur || parLeServeur.besoinCode)
+      : (await verifyPassword(ancien, monCompte)).ok;
     if (!bon) return { erreur: "Mot de passe actuel incorrect." };
 
     const identifiants = await creerIdentifiantsMotDePasse(nouveau);
@@ -10164,6 +10366,7 @@ function PartnerDashboard({ data, session, persist, verifier, notify, onglet }) 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(300px,1fr))", gap: 16, marginBottom: 20, alignItems: "start" }}>
           {!estEmploye && <IdentitePartenaire key={moi.id} partenaire={moi} session={session} onSave={enregistrerIdentite} />}
           <MonMotDePasse compte={monCompte} onChanger={changerMonMotDePasse} />
+          <DoubleAuthentification compte={monCompte} />
           {!estEmploye && (
             <AccesEmployes
               employes={mesEmployes} onCreer={creerAcces} onSupprimer={supprimerAcces}
@@ -10291,6 +10494,169 @@ function nombreArticles(colis) {
  * sans cette exigence il suffirait de l'attraper posé sur un comptoir pour en verrouiller
  * l'accès. Le nouveau n'est jamais conservé en clair — seule son empreinte l'est.
  */
+/**
+ * LA DOUBLE AUTHENTIFICATION — la mettre en place, la retirer.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Il n'y a RIEN À SOUSCRIRE et rien à payer : Google Authenticator est une application gratuite,
+ * et le procédé qu'elle applique est une norme publique (RFC 6238). Aucun compte à créer chez qui
+ * que ce soit, aucun message envoyé, aucun abonnement. Microsoft Authenticator, Authy et FreeOTP
+ * font exactement la même chose et se valent ici.
+ *
+ * TROIS ÉTAPES, ET LA TROISIÈME EST LA PLUS IMPORTANTE
+ *
+ *   1. Le serveur tire un secret et l'affiche une seule fois, sous forme de QR code.
+ *   2. La personne le scanne : son téléphone se met à afficher un code qui change toutes les
+ *      trente secondes.
+ *   3. ELLE RECOPIE CE CODE ICI. Tant qu'elle ne l'a pas fait, rien n'est activé — un QR code mal
+ *      scanné ou une application refermée trop tôt l'enfermerait dehors à sa prochaine connexion,
+ *      sans recours et sans qu'elle comprenne pourquoi.
+ *
+ * Le secret ne redescend jamais ensuite : les lectures le retirent pour tout le monde, équipe
+ * comprise (voir api/_cloisonnement.js). Le retirer exige le mot de passe — sans quoi un téléphone
+ * déverrouillé attrapé sur un comptoir suffirait à désarmer la protection posée pour ce cas précis.
+ */
+function DoubleAuthentification({ compte, onChange, nu = false }) {
+  const [actif, setActif] = useState(!!compte?.totpActif);
+  const [etape, setEtape] = useState("repos");   // repos | inscription | retrait
+  const [secret, setSecret] = useState("");
+  const [qr, setQr] = useState("");
+  const [code, setCode] = useState("");
+  const [motdepasse, setMotdepasse] = useState("");
+  const [err, setErr] = useState("");
+  const [occupe, setOccupe] = useState(false);
+
+  /* La fiche peut arriver après le premier rendu : l'état affiché suit celui de la base. */
+  useEffect(() => { setActif(!!compte?.totpActif); }, [compte?.totpActif]);
+
+  function fermer() {
+    setEtape("repos"); setSecret(""); setQr(""); setCode(""); setMotdepasse(""); setErr("");
+  }
+
+  async function commencer() {
+    setErr(""); setOccupe(true);
+    const r = await appelDoubleAuthentification("totp-preparer");
+    setOccupe(false);
+    if (r?.erreur) { setErr(r.erreur); return; }
+    setSecret(r.secret || "");
+    setEtape("inscription");
+    /*
+     * Le QR code est un confort, pas la voie unique : la bibliothèque vient d'un service extérieur
+     * et peut ne pas se charger. Le secret reste alors lisible juste en dessous, et toutes les
+     * applications acceptent qu'on le tape à la main.
+     */
+    try { setQr(await generateQRDataUrl(r.uri, 220)); } catch (e) { setQr(""); }
+  }
+
+  async function activer(e) {
+    e.preventDefault();
+    setErr(""); setOccupe(true);
+    const r = await appelDoubleAuthentification("totp-activer", { code: code.trim() });
+    setOccupe(false);
+    if (r?.erreur) { setErr(r.erreur); return; }
+    setActif(true);
+    fermer();
+    onChange?.();
+  }
+
+  async function retirer(e) {
+    e.preventDefault();
+    setErr(""); setOccupe(true);
+    const r = await appelDoubleAuthentification("totp-retirer", { motdepasse });
+    setOccupe(false);
+    if (r?.erreur) { setErr(r.erreur); return; }
+    setActif(false);
+    fermer();
+    onChange?.();
+  }
+
+  /* `nu` : posé dans une modale qui a déjà son fond, le cadre ferait une carte dans une carte. */
+  const carte = nu
+    ? {}
+    : { background: "var(--surface)", borderRadius: 14, padding: 22, border: "1px solid var(--border)" };
+  const boutonPlein = { background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 13, fontWeight: 700, cursor: occupe ? "wait" : "pointer" };
+  const boutonSobre = { background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 9, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" };
+
+  return (
+    <div style={carte}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+        <ShieldCheck size={16} color={actif ? "var(--ok-fg)" : "var(--muted)"} />
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14 }}>Double authentification</div>
+        {actif && <span style={{ background: "var(--ok-bg-soft)", color: "var(--ok-fg)", borderRadius: 20, padding: "2px 9px", fontSize: 11, fontWeight: 700 }}>en place</span>}
+      </div>
+      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16, lineHeight: 1.55 }}>
+        {actif
+          ? "À chaque connexion, votre mot de passe est suivi d’un code à six chiffres lu sur votre téléphone. Quelqu’un qui apprendrait votre mot de passe n’entrerait pas pour autant."
+          : "Un code à six chiffres, lu sur votre téléphone, s’ajoute à votre mot de passe. L’application est gratuite — Google Authenticator, Microsoft Authenticator ou Authy — et il n’y a aucun abonnement à prendre : rien n’est envoyé, rien n’est facturé."}
+      </div>
+
+      {err && etape === "repos" && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10, lineHeight: 1.5 }}>{err}</div>}
+
+      {etape === "repos" && (actif ? (
+        <button onClick={() => { setErr(""); setEtape("retrait"); }} style={boutonSobre}>Retirer la double authentification</button>
+      ) : (
+        <button onClick={commencer} disabled={occupe} style={boutonPlein}>
+          {occupe ? "Préparation…" : "Activer la double authentification"}
+        </button>
+      ))}
+
+      {etape === "inscription" && (
+        <form onSubmit={activer}>
+          <ol style={{ margin: "0 0 14px", paddingInlineStart: 18, fontSize: 12.5, color: "var(--muted)", lineHeight: 1.7 }}>
+            <li>Installez <strong style={{ color: "var(--text)" }}>Google Authenticator</strong> depuis le Play Store ou l’App Store — c’est gratuit.</li>
+            <li>Ouvrez-la, touchez <strong style={{ color: "var(--text)" }}>+</strong> puis « Scanner un code QR ».</li>
+            <li>Visez l’image ci-dessous, puis recopiez ici le code qui s’affiche.</li>
+          </ol>
+          {qr
+            ? <div style={{ display: "grid", placeItems: "center", marginBottom: 12 }}>
+              <img src={qr} alt="Code QR d’inscription à la double authentification" style={{ width: 200, height: 200, borderRadius: 10, background: "#fff", padding: 8 }} />
+            </div>
+            : <div style={{ background: "var(--warn-bg)", color: "var(--warn-fg)", borderRadius: 10, padding: "10px 12px", fontSize: 12, marginBottom: 12, lineHeight: 1.5 }}>
+              L’image du code n’a pas pu être générée. Saisissez la clé ci-dessous à la main dans votre application (« Saisir une clé de configuration »).
+            </div>}
+          {/*
+            La clé en toutes lettres, sous le QR code : les téléphones anciens n'ont pas toujours
+            d'appareil photo utilisable, et une application refuse parfois de scanner un écran.
+          */}
+          <div style={{ background: "var(--surface2)", borderRadius: 10, padding: "10px 12px", marginBottom: 12 }}>
+            <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>Ou saisissez cette clé à la main :</div>
+            <div style={{ fontFamily: "monospace", fontSize: 12.5, color: "var(--text)", wordBreak: "break-all", letterSpacing: 1 }}>{secret}</div>
+          </div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>Code affiché par votre application :</div>
+          <input value={code} onChange={(e) => setCode(e.target.value)} inputMode="numeric" maxLength={6}
+            placeholder="000000" aria-label="Code à six chiffres"
+            style={{ ...inputStyle, textAlign: "center", fontSize: 20, letterSpacing: 7, marginBottom: 10 }} />
+          {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10, lineHeight: 1.5 }}>{err}</div>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="submit" disabled={occupe} style={{ ...boutonPlein, flex: 1 }}>
+              {occupe ? "Vérification…" : "Vérifier et activer"}
+            </button>
+            <button type="button" onClick={fermer} style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 9, padding: "11px 16px", fontSize: 13, cursor: "pointer" }}>Annuler</button>
+          </div>
+        </form>
+      )}
+
+      {etape === "retrait" && (
+        <form onSubmit={retirer}>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10, lineHeight: 1.55 }}>
+            Votre mot de passe est demandé ici, et nulle part ailleurs : sans lui, un téléphone
+            resté ouvert sur un comptoir suffirait à retirer la protection.
+          </div>
+          <input type="password" value={motdepasse} onChange={(e) => setMotdepasse(e.target.value)}
+            autoComplete="current-password" placeholder="Votre mot de passe"
+            style={{ ...inputStyle, marginBottom: 10 }} />
+          {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10, lineHeight: 1.5 }}>{err}</div>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="submit" disabled={occupe} style={{ ...boutonSobre, flex: 1, color: "var(--danger-fg)" }}>
+              {occupe ? "…" : "Retirer"}
+            </button>
+            <button type="button" onClick={fermer} style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 9, padding: "10px 16px", fontSize: 13, cursor: "pointer" }}>Annuler</button>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}
+
 function MonMotDePasse({ compte, onChanger }) {
   const [ouvert, setOuvert] = useState(false);
   const [ancien, setAncien] = useState("");
@@ -32289,7 +32655,15 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
                   {u.role !== "Administrateur" && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>{FLAGS[u.paysOperation || "GN"] || ""} basé {(COUNTRIES.find((c) => c.code === (u.paysOperation || "GN"))?.name) || "Guinée"}</div>}
                 </td>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{u.role === "Administrateur" ? "Tous les pays" : (u.paysAutorises?.length ? u.paysAutorises.map((c) => FLAGS[c]).join(" ") : "Tous les pays")}</td>
-                <td style={{ padding: "12px 16px", fontSize: 13, whiteSpace: "nowrap" }}>{u.twoFA ? <ShieldCheck size={15} color="var(--ok-fg)" /> : "—"}</td>
+                {/*
+                  L'état réel, et non plus la case cochée à la création : celle-ci ne voulait rien
+                  dire — le code était tiré dans le navigateur. La colonne dit maintenant si un
+                  téléphone est bien inscrit, ce qui est la seule chose qui protège quelque chose.
+                */}
+                <td style={{ padding: "12px 16px", fontSize: 13, whiteSpace: "nowrap" }}
+                  title={u.totpActif ? "Un téléphone est inscrit : le mot de passe seul ne suffit pas à entrer." : "Aucun second facteur. La personne l’active elle-même depuis « Sécurité de mon compte »."}>
+                  {u.totpActif ? <ShieldCheck size={15} color="var(--ok-fg)" /> : "—"}
+                </td>
                 <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>{effectivePermission(session, "users.gerer") && <button onClick={() => deconnecterPartout(u)} title={`Déconnecter ${u.prenom} de tous ses appareils`} aria-label="Déconnecter de tous les appareils" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><LogOut size={15} /></button>}{effectivePermission(session, "users.gerer") && <button onClick={() => setUtilisateurAReinit(u)} title="Réinitialiser le mot de passe" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><Key size={15} /></button>}{effectivePermission(session, "users.gerer") && (() => {
                   const raison = raisonDeNePasSupprimer(u);
                   return (
@@ -32808,9 +33182,17 @@ function UserForm({ onClose, onSave, existing, sites }) {
             </div>
           </div>
         )}
-        <label style={{ gridColumn: "1 / -1", display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--text)", margin: "-6px 0 8px", cursor: "pointer" }}>
-          <input type="checkbox" checked={twoFA} onChange={(e) => setTwoFA(e.target.checked)} /> Activer la double authentification (démo)
-        </label>
+        {/*
+          LA CASE « DOUBLE AUTHENTIFICATION (DÉMO) » A DISPARU, ET C'EST VOULU.
+          Elle ne pouvait pas tenir sa promesse : personne ne peut inscrire le téléphone de
+          quelqu'un d'autre — c'est la personne qui scanne le code, sur SON appareil. Cocher une
+          case ici ne protégeait donc rien ; elle affichait seulement un cadenas.
+        */}
+        <div style={{ gridColumn: "1 / -1", background: "var(--surface2)", borderRadius: 9, padding: "10px 12px", fontSize: 12, color: "var(--muted)", lineHeight: 1.55, margin: "-6px 0 8px" }}>
+          <strong style={{ color: "var(--text)" }}>Double authentification :</strong> elle s’active depuis
+          le compte lui-même, dans « Sécurité de mon compte ». C’est la personne qui scanne le code avec
+          son propre téléphone — personne ne peut le faire à sa place.
+        </div>
         {err && <div style={{ gridColumn: "1 / -1", color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 4 }}>{err}</div>}
         <div style={{ gridColumn: "1 / -1", display: "flex", justifyContent: "flex-end", gap: 10 }}>
           <button type="button" onClick={onClose} style={{ padding: "10px 18px", borderRadius: 8, border: "1.5px solid var(--border)", background: "var(--surface)", color: "var(--muted)", fontSize: 13.5, cursor: "pointer" }}>Annuler</button>

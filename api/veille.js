@@ -30,6 +30,8 @@ import { configurationBase, baseConfiguree, lireCle, ecrireCle, modifierDocument
 import { ENTETE_INTERNE, jetonInterne, refusSaufEquipe } from "./_session.js";
 import { chiffresDuJour, envoyerBilanEmail, envoyerBilanWhatsApp } from "./_bilan.js";
 import { envoyerCopieHorsBase } from "./_copie.js";
+import { releveDeFraude, signauxDeFraude, corpsAlerteFraude } from "./_fraude.js";
+import { destinataireAlerte } from "./_alerte.js";
 import { purgerDocumentsDevinables } from "./_documents.js";
 import crypto from "node:crypto";
 
@@ -199,6 +201,45 @@ function estAppelInterne(req) {
   const recu = req.headers?.[ENTETE_INTERNE];
   if (!attendu || typeof recu !== "string" || recu.length !== attendu.length) return false;
   return crypto.timingSafeEqual(Buffer.from(recu, "utf8"), Buffer.from(attendu, "utf8"));
+}
+
+/**
+ * LE COURRIEL DE FRAUDE — envoyé seulement quand il y a quelque chose de grave à dire.
+ *
+ * Le seuil est volontairement haut : seuls les signaux « graves » déclenchent un envoi. Une rafale
+ * d'essais arrêtée par le plafond mérite d'apparaître dans la cloche le matin ; elle ne mérite pas
+ * de réveiller quelqu'un. Ce qui le mérite, c'est une réussite au bout d'une rafale, ou un
+ * balayage en cours — les deux cas où attendre le lendemain coûte quelque chose.
+ *
+ * Comme toutes les alertes du site, elle part par courriel et non par WhatsApp : hors de la
+ * fenêtre de vingt-quatre heures, Meta n'autorise que ses modèles approuvés, et une intrusion est
+ * par nature imprévisible. Promettre un WhatsApp reviendrait à promettre une alerte qui
+ * n'arriverait jamais.
+ */
+const RESEND_URL = "https://api.resend.com/emails";
+
+async function envoyerAlerteFraude(document, signaux) {
+  const cle = process.env.RESEND_API_KEY;
+  const expediteur = process.env.EMAIL_FROM;
+  if (!cle || !expediteur) return { envoye: false, raison: "courriel-non-configure" };
+  const destinataire = destinataireAlerte(document);
+  if (!destinataire) return { envoye: false, raison: "aucun-destinataire" };
+
+  const { sujet, html } = corpsAlerteFraude(signaux, document);
+  try {
+    const reponse = await fetch(RESEND_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${cle}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ from: expediteur, to: [destinataire], subject: sujet, html }),
+    });
+    if (!reponse.ok) {
+      const detail = await reponse.text().catch(() => "");
+      return { envoye: false, raison: `refus-resend-${reponse.status}`, detail: detail.slice(0, 200) };
+    }
+    return { envoye: true, destinataire };
+  } catch (e) {
+    return { envoye: false, raison: "reseau", detail: String(e?.message || e).slice(0, 200) };
+  }
 }
 
 /**
@@ -395,6 +436,30 @@ export default async function handler(req, res) {
     const veillePrecedente = vivant.valeur?.veille || null;
     const effectifs = effectifsDuDocument(vivant.valeur);
 
+    /*
+     * CE QUI RESSEMBLE À UNE ATTAQUE, RELEVÉ EN MÊME TEMPS QUE LE RESTE.
+     *
+     * Le site savait déjà se défendre — les essais sont plafonnés, les mots de passe coûtent
+     * 150 000 tours à vérifier — mais rien ne RACONTAIT ce qui avait été tenté. Un automate arrêté
+     * par le plafond revenait le lendemain avec une liste plus longue, et le jour où il trouvait,
+     * la connexion réussie ressemblait à toutes les autres.
+     *
+     * Le relevé est écrit dans tous les cas : c'est lui que la cloche lit le matin. Le courriel,
+     * lui, ne part que pour les signaux graves — une réussite au bout d'une rafale, un balayage en
+     * cours. Une alerte qui crie tous les jours n'est plus lue le jour où elle a raison.
+     */
+    let fraude = null;
+    try {
+      fraude = releveDeFraude(vivant.valeur);
+      const graves = signauxDeFraude(vivant.valeur).filter((s) => s.gravite === "grave");
+      if (graves.length > 0) {
+        const envoi = await envoyerAlerteFraude(vivant.valeur, graves);
+        fraude = { ...fraude, alerte: envoi.envoye ? { envoyee: true } : { envoyee: false, raison: envoi.raison } };
+      }
+    } catch (e) {
+      fraude = { erreur: String(e?.message || e).slice(0, 160) };
+    }
+
     let bilan = null;
     try {
       const chiffres = chiffresDuJour(vivant.valeur);
@@ -447,6 +512,8 @@ export default async function handler(req, res) {
        */
       effectifs,
       chutes: chutesDepuis(veillePrecedente?.effectifs, effectifs),
+      /* Ce que le journal des accès raconte de la nuit — voir api/_fraude.js. */
+      fraude,
       /* Un ménage dont on ne sait pas s'il a eu lieu ne referme rien : on croit la fuite fermée. */
       documents: documents?.fait
         ? { effaces: documents.effaces }

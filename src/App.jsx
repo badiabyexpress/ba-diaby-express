@@ -1,6 +1,13 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue, memo, createContext, useContext } from "react";
 import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, ChevronDown, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell, SlidersHorizontal, Copy, MoreHorizontal, Wallet, Banknote, Send, ArrowRightLeft, HandCoins, Coins, ArrowUpRight, ArrowDownLeft, ScrollText, Ban } from "lucide-react";
 import { ROLES, PERMISSIONS_SCHEMA, ROLE_DEFAULT_PERMISSIONS, effectivePermission } from "../api/_permissions.js";
+/*
+ * Les règles de détection viennent du serveur, et c'est volontaire — comme les permissions
+ * au-dessus. Le fichier est pur : il prend un document, il rend une liste, il n'ouvre ni base ni
+ * variable d'environnement. Deux copies d'une règle de fraude, ce serait une qui cesse un jour de
+ * correspondre à l'autre, et le propre d'une alerte qui ne part plus est de ne rien dire.
+ */
+import { signauxDeFraude } from "../api/_fraude.js";
 import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree, relireDuServeur } from "./lib/storage.js";
 
 /* ---------- design tokens ----------
@@ -8888,6 +8895,39 @@ export function alertesDuCompte(data, session, maintenant = Date.now()) {
       detail: depuis
         ? `La dernière est partie il y a ${jours} jour${jours > 1 ? "s" : ""}. Vos sauvegardes et vos données sont au même endroit.`
         : "Aucune n’est jamais partie. Vos sauvegardes et vos données sont au même endroit.",
+    });
+
+    /*
+     * CE QUI RESSEMBLE À UNE ATTAQUE EN COURS — calculé ici, en direct, pas la nuit dernière.
+     *
+     * Les autres alertes de ce bloc viennent du relevé de nuit : une sauvegarde ratée ou une liste
+     * qui a fondu se constatent le lendemain, et c'est assez tôt. Une rafale de mots de passe, non.
+     * Elle dure quelques minutes, et un relevé quotidien la raconterait le lendemain matin — au
+     * mieux quatorze heures trop tard, quand la personne est déjà entrée ou repartie.
+     *
+     * Le journal des accès est déjà dans le document que cette page a en main : le calcul ne coûte
+     * rien de plus qu'un parcours de quelques centaines de lignes, et il se refait à chaque
+     * chargement. La tâche de nuit applique EXACTEMENT les mêmes règles pour envoyer le courriel
+     * (voir api/_fraude.js) — un seul jeu de seuils, pas deux qui divergent.
+     */
+    const signaux = signauxDeFraude(data, maintenant);
+    const gravesFraude = signaux.filter((s) => s.gravite === "grave");
+    ajouter({
+      cle: "fraude-grave", gravite: "grave", vue: "admin", icone: Ban,
+      compte: gravesFraude.length,
+      titre: (n) => (n === 1 ? gravesFraude[0].quoi : `${n} tentatives d’intrusion`),
+      detail: gravesFraude.length === 1
+        ? gravesFraude[0].detail
+        : gravesFraude.map((s) => s.quoi).join(" · "),
+    });
+    const autresFraude = signaux.filter((s) => s.gravite !== "grave");
+    ajouter({
+      cle: "fraude-surveiller", gravite: "alerte", vue: "admin", icone: Shield,
+      compte: autresFraude.length,
+      titre: (n) => (n === 1 ? autresFraude[0].quoi : `${n} activités inhabituelles`),
+      detail: autresFraude.length === 1
+        ? autresFraude[0].detail
+        : autresFraude.map((s) => s.quoi).join(" · "),
     });
 
     /*

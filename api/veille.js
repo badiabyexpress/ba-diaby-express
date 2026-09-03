@@ -295,8 +295,45 @@ export default async function handler(req, res) {
      */
     const dejaLa = await lireCle(clef);
     if (dejaLa.valeur !== null && dejaLa.valeur !== undefined) {
-      await noterVeille({ etat: "deja-faite", clef });
-      return res.status(200).json({ ok: true, etat: "deja-faite", clef, ecrite: false, documents });
+      /*
+       * LA SAUVEGARDE EST FAITE, MAIS LA COPIE HORS SITE PEUT ENCORE MANQUER.
+       *
+       * On s'arrêtait ici, et c'était un défaut : une copie qui rate à deux heures du matin
+       * n'avait plus aucune seconde chance de la journée. Elle échouait alors chaque nuit, et
+       * l'écran de Configuration montrait un motif vieux de vingt-quatre heures — personne ne
+       * pouvait vérifier une correction avant le lendemain.
+       *
+       * On ne refait pas la sauvegarde : la première copie de la journée précède les fausses
+       * manœuvres de la journée, et la réécrire reviendrait à sauvegarder l'accident. Mais on
+       * réessaie ce qui a échoué, et lui seul.
+       */
+      const veillePrecedente = (await lireCle("bde-data")).valeur?.veille || null;
+      if (veillePrecedente?.horsBase?.envoyee === true) {
+        await noterVeille({ etat: "deja-faite", clef });
+        return res.status(200).json({ ok: true, etat: "deja-faite", clef, ecrite: false, documents });
+      }
+
+      let reprise = null;
+      try {
+        reprise = await envoyerCopieHorsBase(dejaLa.valeur, clef.replace(PREFIXE, ""));
+      } catch (e) {
+        reprise = { envoye: false, raison: "exception", detail: String(e?.message || e).slice(0, 160) };
+      }
+      await noterVeille({
+        etat: "deja-faite",
+        clef,
+        horsBase: reprise?.envoye
+          ? { envoyee: true, octets: reprise.octets, le: new Date().toISOString() }
+          : {
+            envoyee: false,
+            raison: reprise?.raison || "inconnue",
+            detail: reprise?.detail || null,
+            dernierSucces: veillePrecedente?.horsBase?.dernierSucces || null,
+          },
+      });
+      return res.status(200).json({
+        ok: true, etat: "deja-faite", clef, ecrite: false, documents, copieHorsBase: reprise,
+      });
     }
 
     const vivant = await lireCle("bde-data");

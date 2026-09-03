@@ -301,7 +301,14 @@ const echapper = (texte) => String(texte == null ? "" : texte)
  * le geste qui le referme laisse son lecteur inquiet et sans prise — et, la fois d'après, il ne
  * l'ouvre plus.
  */
-export function corpsAlerteFraude(signaux, document) {
+/*
+ * `entete` est PASSÉ PAR L'APPELANT, et non fabriqué ici — ce fichier doit rester pur.
+ *
+ * Le navigateur l'importe pour calculer la cloche en direct (voir l'en-tête). Lui faire lire une
+ * variable d'environnement le ferait tomber à l'ouverture de la page : `process` n'existe pas dans
+ * un navigateur. La règle vaut pour tout ce qui sera ajouté ici.
+ */
+export function corpsAlerteFraude(signaux, document, entete = "") {
   const nom = document?.branding?.nom || "Ba-Diaby Express";
   const graves = signaux.filter((s) => s.gravite === "grave").length;
   const lignes = signaux.map((s) => `
@@ -315,6 +322,7 @@ export function corpsAlerteFraude(signaux, document) {
     sujet: `${nom} — ${graves > 0 ? "tentatives d’intrusion détectées" : "activité inhabituelle sur les connexions"}`,
     html: `
       <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;font-size:15px;color:#0A2647;line-height:1.6">
+        ${entete}
         <p><strong>Le relevé de cette nuit a repéré ${signaux.length} chose${signaux.length > 1 ? "s" : ""} inhabituelle${signaux.length > 1 ? "s" : ""} sur les connexions.</strong></p>
         <table style="border-collapse:collapse;margin:14px 0;width:100%">${lignes}</table>
         <p style="font-size:13.5px">

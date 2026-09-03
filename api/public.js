@@ -153,7 +153,42 @@ const INTROUVABLES_PAR_FENETRE = 10;
 export default async function handler(req, res) {
   if (req.method !== "GET") return res.status(405).json({ error: "Méthode non autorisée" });
 
-  const { suivi, vitrine, cgu } = req.query || {};
+  const { suivi, vitrine, cgu, logo } = req.query || {};
+
+  /*
+   * LE LOGO, À UNE VRAIE ADRESSE.
+   *
+   * Il est enregistré dans les données sous forme de `data:image/...;base64,…`, et c'est
+   * délibéré : les PDF le dessinent à l'impression, et jsPDF ne sait pas aller chercher une image
+   * distante. Mais AUCUN CLIENT DE MESSAGERIE N'AFFICHE UNE IMAGE `data:` — Gmail les retire, et
+   * l'on obtiendrait un carré vide en tête de chaque bilan.
+   *
+   * On le sert donc ici, décodé, sous une adresse ordinaire que n'importe quel client sait
+   * charger. C'est déjà ce que la vitrine publie de l'entreprise : rien de nouveau n'est exposé.
+   *
+   * Sans logo enregistré, on répond 404 plutôt qu'une image vide : l'appelant sait alors ne rien
+   * afficher, au lieu de montrer une icône cassée.
+   */
+  if (logo !== undefined) {
+    try {
+      const { donnees } = await lireBase();
+      const brut = String(donnees?.branding?.logo || "");
+      const m = /^data:(image\/[a-z+.-]+);base64,([A-Za-z0-9+/=]+)$/i.exec(brut);
+      if (!m) return res.status(404).end();
+      const octets = Buffer.from(m[2], "base64");
+      res.setHeader("Content-Type", m[1]);
+      res.setHeader("Content-Length", String(octets.length));
+      /*
+       * Une heure de cache, et pas davantage : un logo change rarement, mais le jour où il change
+       * on ne veut pas que les courriels de la semaine gardent l'ancien. Les relais de messagerie
+       * recopient l'image de leur côté, ce délai leur suffit largement.
+       */
+      res.setHeader("Cache-Control", "public, max-age=3600");
+      return res.status(200).send(octets);
+    } catch (e) {
+      return res.status(404).end();
+    }
+  }
 
   /*
    * Le verrou est posé AVANT la lecture de la base : un refus doit coûter moins cher qu'une

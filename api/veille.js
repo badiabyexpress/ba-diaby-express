@@ -35,7 +35,7 @@ import { releveDeFraude, signauxDeFraude, corpsAlerteFraude } from "./_fraude.js
 import { destinataireAlerte } from "./_alerte.js";
 import { purgerDocumentsDevinables } from "./_documents.js";
 import crypto from "node:crypto";
-import { expediteurCourriel } from "./_expediteur.js";
+import { expediteurCourriel, enteteCourriel } from "./_expediteur.js";
 
 const PREFIXE = "bde-backup-";
 /*
@@ -229,7 +229,7 @@ async function envoyerAlerteFraude(document, signaux) {
   const destinataire = destinataireAlerte(document);
   if (!destinataire) return { envoye: false, raison: "aucun-destinataire" };
 
-  const { sujet, html } = corpsAlerteFraude(signaux, document);
+  const { sujet, html } = corpsAlerteFraude(signaux, document, enteteCourriel(document));
   try {
     const reponse = await fetch(RESEND_URL, {
       method: "POST",

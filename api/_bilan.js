@@ -21,7 +21,7 @@
  * un bilan qu'on croit recevoir et qui n'arrive pas est pire que pas de bilan du tout.
  */
 
-import { expediteurCourriel } from "./_expediteur.js";
+import { expediteurCourriel, enteteCourriel } from "./_expediteur.js";
 
 const RESEND = "https://api.resend.com/emails";
 const VERSION_GRAPH = "v21.0";
@@ -152,6 +152,7 @@ export function corpsBilan(chiffres, document) {
     sujet: `${nom} — bilan du ${jourLisible}`,
     html: `
       <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;font-size:15px;color:#0A2647;line-height:1.6">
+        ${enteteCourriel(document)}
         <p style="margin:0 0 4px;font-size:13px;color:#666">Bilan de la journée</p>
         <p style="margin:0 0 18px;font-size:19px;font-weight:700">${echapper(jourLisible)}</p>
         <table style="border-collapse:collapse">

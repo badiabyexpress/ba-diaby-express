@@ -175,7 +175,7 @@ async function lire(req, res, { compte, document, config, perm }) {
      * et s'arrête au dixième.
      */
     if (!t) {
-      const v = passage({ nature: "transfert-code", cle: `${compte.id}|${adresseDe(req)}`, max: 10, fenetreMs: 10 * 60000 });
+      const v = await passage({ nature: "transfert-code", cle: `${compte.id}|${adresseDe(req)}`, max: 10, fenetreMs: 10 * 60000 });
       if (v.bloque) return refuser(res, v.dansSecondes, "Trop de codes essayés sans succès. Réessayez dans quelques minutes.");
       return res.status(404).json({ error: "Aucun transfert ne porte ce code." });
     }
@@ -493,7 +493,7 @@ async function payer(req, res, { compte, perm, contexteActeur, ip }) {
   };
   const raison = resultat?.raison || "introuvable";
   if (raison === "introuvable") {
-    const v = passage({ nature: "transfert-code", cle: `${compte.id}|${ip}`, max: 10, fenetreMs: 10 * 60000 });
+    const v = await passage({ nature: "transfert-code", cle: `${compte.id}|${ip}`, max: 10, fenetreMs: 10 * 60000 });
     if (v.bloque) return refuser(res, v.dansSecondes, "Trop de codes essayés sans succès. Réessayez dans quelques minutes.");
   }
   return res.status(raison === "introuvable" ? 404 : 409).json({

@@ -9,16 +9,26 @@
  * en un ramasse, colis après colis, le nom de l'expéditeur et celui du destinataire de toute
  * l'entreprise. Aucune de ces requêtes n'est illégitime prise seule ; c'est leur nombre qui l'est.
  *
- * CE QUE CE FICHIER NE FAIT PAS, ET IL FAUT LE DIRE
+ * OÙ LE COMPTE EST TENU, ET POURQUOI CELA A CHANGÉ
  * ------------------------------------------------
- * Le compte est tenu en mémoire, dans l'instance qui répond. Vercel en lance plusieurs, et les
- * éteint : un automate patient, ou réparti sur plusieurs adresses, passera au travers. Ce n'est pas
- * une barrière — c'est un plafond, qui rend l'aspiration lente et voyante là où elle était
- * instantanée et muette. Une vraie barrière demanderait un compteur partagé (base ou service
- * dédié) ; c'est le pas d'après, et il se paie.
+ * Il l'était en mémoire, dans l'instance qui répond. Vercel en lance plusieurs et les recycle :
+ * deux requêtes tombaient souvent sur deux instances, chacune repartant de zéro. Le plafond de
+ * quarante connexions par dix minutes en valait donc, en pratique, bien davantage. Ce fichier le
+ * disait honnêtement — « ce n'est pas une barrière, c'est un plafond » — et c'était vrai.
  *
- * On garde donc ce qui est vrai : ces verrous arrêtent les automates ordinaires, ceux qui tapent
- * vite depuis une adresse. Ils n'arrêtent pas quelqu'un de déterminé.
+ * Le compte est désormais tenu en base, dans `bde_verrous`, donc commun à toutes les instances.
+ * Une seule instruction SQL fait l'insertion ou l'incrément : deux requêtes simultanées ne
+ * peuvent pas lire « zéro » toutes les deux avant d'écrire « un ».
+ *
+ * Le compte en mémoire n'a pas disparu : il est devenu le filet. Si la base ne répond pas, on
+ * retombe dessus plutôt que d'ouvrir toutes les portes au moment précis où plus personne ne
+ * regarde.
+ *
+ * CE QUI RESTE VRAI, ET QU'IL FAUT DIRE
+ * ------------------------------------
+ * Un plafond par adresse n'arrête pas une attaque répartie sur des centaines d'adresses. Cela se
+ * met devant le site — pare-feu de l'hébergeur, ou service en frontal — pas dans ce fichier. Ces
+ * verrous arrêtent l'automate qui tape vite ; ils rendent lent et voyant celui qui tape lentement.
  */
 
 /*
@@ -26,6 +36,8 @@
  * des colis et se connecter dans la même minute : mélanger les deux comptes ferait fermer une
  * porte pour un abus commis à l'autre.
  */
+import { configurationBase } from "./_base.js";
+
 const compteurs = new Map();
 
 /* Au-delà, on oublie : la carte ne doit pas grandir tant que l'instance vit. */
@@ -40,14 +52,18 @@ function purger(carte, maintenant) {
   if (carte.size > MAX_CLES) carte.clear();
 }
 
-/**
- * Compte un passage et dit s'il est en trop.
+/*
+ * LE COMPTE EN MÉMOIRE — devenu le filet, plus la barrière.
  *
- * Rend `{ bloque, restant, dansSecondes }` — `dansSecondes` sert à répondre honnêtement « réessayez
- * dans une minute » plutôt qu'un refus sans horizon, qui donne surtout envie de réessayer tout de
- * suite.
+ * Il ne vaut que dans l'instance qui répond, et Vercel en lance plusieurs. On le garde parce
+ * qu'il est le seul à fonctionner quand la base est injoignable : un site dont la base est
+ * tombée ne doit pas, en plus, ouvrir ses portes en grand.
+ *
+ * Rend `{ bloque, restant, dansSecondes }` — `dansSecondes` sert à répondre honnêtement
+ * « réessayez dans une minute » plutôt qu'un refus sans horizon, qui donne surtout envie de
+ * réessayer tout de suite.
  */
-export function passage({ nature, cle, max, fenetreMs, maintenant = Date.now() }) {
+function passageEnMemoire({ nature, cle, max, fenetreMs, maintenant = Date.now() }) {
   if (!compteurs.has(nature)) compteurs.set(nature, new Map());
   const carte = compteurs.get(nature);
   purger(carte, maintenant);
@@ -60,6 +76,50 @@ export function passage({ nature, cle, max, fenetreMs, maintenant = Date.now() }
   e.n += 1;
   const dansSecondes = Math.max(1, Math.ceil((e.expire - maintenant) / 1000));
   return { bloque: e.n > max, restant: Math.max(0, max - e.n), dansSecondes };
+}
+
+/*
+ * LE COMPTE PARTAGÉ — celui qui compte vraiment.
+ *
+ * Le compteur en mémoire ne valait que dans l'instance qui répond, et Vercel en lance plusieurs :
+ * deux requêtes tombaient souvent sur deux instances, chacune repartant de zéro. Le plafond de
+ * quarante connexions par dix minutes en valait donc bien davantage.
+ *
+ * Une seule instruction SQL fait l'insertion ou l'incrément (voir compter_passage) : deux
+ * requêtes simultanées ne peuvent pas lire « zéro » toutes les deux avant d'écrire « un ».
+ *
+ * SI LA BASE NE RÉPOND PAS, ON NE LAISSE PAS PASSER POUR AUTANT.
+ *
+ * On retombe sur le compte en mémoire. Il est faible, mais il existe — et l'inverse serait pire :
+ * une panne de base ouvrirait toutes les portes du site au moment précis où plus personne ne
+ * regarde. On ne bloque pas non plus tout le monde : la base est déjà indispensable au reste, un
+ * refus général n'ajouterait rien qu'une panne de plus.
+ */
+export async function passage({ nature, cle, max, fenetreMs, maintenant = Date.now() }) {
+  const { url, cle: cleService } = configurationBase();
+  if (url && cleService) {
+    try {
+      const reponse = await fetch(`${url}/rest/v1/rpc/compter_passage`, {
+        method: "POST",
+        headers: { apikey: cleService, Authorization: `Bearer ${cleService}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ p_cle: `${nature}|${cle}`, p_max: max, p_fenetre_ms: fenetreMs }),
+      });
+      if (reponse.ok) {
+        const r = await reponse.json();
+        if (r && typeof r.bloque === "boolean") {
+          /*
+           * Le compte en mémoire est tenu à jour en parallèle : le jour où la base tombera en
+           * pleine attaque, le repli ne repartira pas d'une page blanche.
+           */
+          passageEnMemoire({ nature, cle, max, fenetreMs, maintenant });
+          return { bloque: r.bloque, restant: Math.max(0, max - (Number(r.compte) || 0)), dansSecondes: Number(r.dansSecondes) || 60 };
+        }
+      }
+    } catch (e) {
+      /* Base injoignable : on descend au filet, sans bruit — ce n'est pas le moment d'échouer. */
+    }
+  }
+  return passageEnMemoire({ nature, cle, max, fenetreMs, maintenant });
 }
 
 /**

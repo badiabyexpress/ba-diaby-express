@@ -211,7 +211,7 @@ export default async function handler(req, res) {
     if (tropDEssais(cleEssais)) {
       return res.status(429).json({ error: "Trop de tentatives. Réessayez dans quelques minutes." });
     }
-    const parConnexion = passage({
+    const parConnexion = await passage({
       nature: "connexion", cle: adresseDe(req),
       max: ESSAIS_PAR_CONNEXION, fenetreMs: FENETRE_CONNEXION_MS,
     });

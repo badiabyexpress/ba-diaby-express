@@ -192,7 +192,22 @@ export async function envoyerBilanEmail(document, chiffres) {
  */
 export async function envoyerBilanWhatsApp(chiffres) {
   const jeton = process.env.WHATSAPP_TOKEN;
-  const numeroId = process.env.WHATSAPP_PHONE_NUMBER_ID;
+  /*
+   * LE NOM DE LA VARIABLE, ET LA PANNE QU'IL A CAUSÉE.
+   *
+   * Ce fichier lisait `WHATSAPP_PHONE_NUMBER_ID`. Tout le reste de l'application — api/whatsapp.js,
+   * qui envoie réellement les messages aux clients depuis des mois — lit `WHATSAPP_PHONE_ID`. La
+   * variable au nom long n'a jamais existé nulle part.
+   *
+   * Conséquence : le bilan WhatsApp répondait « whatsapp-non-configure » quoi qu'on fasse. On
+   * pouvait poser BILAN_WHATSAPP, faire approuver le modèle chez Meta, redéployer — rien n'y
+   * changeait, et le message accusait une configuration manquante qui, elle, était en place.
+   *
+   * On lit donc le nom réellement utilisé, et l'on accepte l'ancien en second : si quelqu'un a posé
+   * la variable au nom long entre-temps en suivant l'ancien message, elle continue de servir plutôt
+   * que d'être ignorée en silence.
+   */
+  const numeroId = process.env.WHATSAPP_PHONE_ID || process.env.WHATSAPP_PHONE_NUMBER_ID;
   const destinataire = String(process.env.BILAN_WHATSAPP || "").replace(/\D/g, "");
   if (!jeton || !numeroId) return { envoye: false, raison: "whatsapp-non-configure" };
   if (!destinataire) return { envoye: false, raison: "aucun-numero-de-bilan", modele: MODELE_BILAN };
@@ -209,7 +224,13 @@ export async function envoyerBilanWhatsApp(chiffres) {
           type: "template",
           template: {
             name: MODELE_BILAN,
-            language: { code: process.env.WHATSAPP_LANG || "fr" },
+            /*
+             * Même faute que pour le numéro : `WHATSAPP_LANG` n'existe nulle part, la variable
+             * s'appelle `WHATSAPP_TEMPLATE_LANG` partout ailleurs. Une langue qui ne correspond pas
+             * à celle du modèle déposé fait répondre à Meta « le modèle n'existe pas dans cette
+             * traduction » — un refus qu'on aurait mis sur le compte du modèle, et non de la langue.
+             */
+            language: { code: process.env.WHATSAPP_TEMPLATE_LANG || process.env.WHATSAPP_LANG || "fr" },
             components: [{
               type: "body",
               parameters: variablesBilan(chiffres).map((v) => ({ type: "text", text: String(v) })),

@@ -29,6 +29,7 @@
 import { configurationBase, baseConfiguree, lireCle, ecrireCle, modifierDocument } from "./_base.js";
 import { ENTETE_INTERNE, jetonInterne, refusSaufEquipe } from "./_session.js";
 import { chiffresDuJour, envoyerBilanEmail, envoyerBilanWhatsApp } from "./_bilan.js";
+/* `noterVeille` est déclarée plus bas : une fonction nommée est hissée, l'ordre de lecture prime. */
 import { envoyerCopieHorsBase } from "./_copie.js";
 import { releveDeFraude, signauxDeFraude, corpsAlerteFraude } from "./_fraude.js";
 import { destinataireAlerte } from "./_alerte.js";
@@ -323,6 +324,43 @@ export default async function handler(req, res) {
    * ce qu'elle fait gagner en protection.
    */
   try { await rpcServeur("purger_verrous"); } catch (e) { /* réessayée demain */ }
+
+  /*
+   * ENVOYER LE BILAN TOUT DE SUITE, POUR VOIR SI ÇA MARCHE.
+   *
+   * Sans cette porte, régler le bilan WhatsApp demandait une nuit d'attente par essai : on pose une
+   * variable, on attend le lendemain matin, on découvre qu'il manquait autre chose, on recommence.
+   * Trois erreurs de saisie — un indicatif oublié, un modèle pas encore validé, un numéro qui n'est
+   * pas sur WhatsApp — et l'on y passe la semaine.
+   *
+   * Elle ne touche NI la sauvegarde NI la purge : elle calcule les chiffres et tente les deux
+   * envois, rien d'autre. Elle est réservée à l'équipe par le garde du dessus, et elle n'écrit dans
+   * le relevé que ce qui concerne le bilan — sans quoi un essai de midi ferait croire que la tâche
+   * de nuit a tourné.
+   */
+  const veutTesterLeBilan = req.query?.bilan !== undefined || req.body?.action === "bilan";
+  if (veutTesterLeBilan) {
+    const vivant = await lireCle("bde-data").catch(() => ({ valeur: null }));
+    if (!documentPlausible(vivant.valeur)) {
+      return res.status(409).json({ ok: false, error: "Document introuvable ou incomplet — bilan non calculé." });
+    }
+    const chiffres = chiffresDuJour(vivant.valeur);
+    const parEmail = await envoyerBilanEmail(vivant.valeur, chiffres);
+    const parWhatsApp = await envoyerBilanWhatsApp(chiffres);
+    const etatBilan = {
+      jour: chiffres.jour,
+      email: !!parEmail.envoye,
+      raisonEmail: parEmail.envoye ? null : parEmail.raison || null,
+      whatsapp: !!parWhatsApp.envoye,
+      raisonWhatsApp: parWhatsApp.envoye ? null : parWhatsApp.raison || null,
+      detailWhatsApp: parWhatsApp.envoye ? null : parWhatsApp.detail || null,
+      modele: parWhatsApp.modele || null,
+      /* Un essai à la main se distingue d'un envoi de nuit : sinon on croirait la tâche passée. */
+      essai: new Date().toISOString(),
+    };
+    await noterVeille({ bilan: etatBilan });
+    return res.status(200).json({ ok: true, essai: true, bilan: etatBilan, chiffres });
+  }
 
   const clef = cleDuJour();
 

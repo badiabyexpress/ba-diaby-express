@@ -29618,13 +29618,42 @@ function EtatVeille({ data, notify }) {
    * ne se répare pas ; « déposez le modèle dans WhatsApp Manager » se répare.
    */
   const QUOI_FAIRE_WHATSAPP = {
-    "whatsapp-non-configure": "Le jeton WhatsApp n’est pas posé sur le serveur. Ajoutez WHATSAPP_TOKEN et WHATSAPP_PHONE_NUMBER_ID dans les variables d’environnement de Vercel.",
+    "whatsapp-non-configure": "Le jeton WhatsApp n’est pas posé sur le serveur. Ajoutez WHATSAPP_TOKEN et WHATSAPP_PHONE_ID dans les variables d’environnement de Vercel — ce sont les mêmes que celles qui servent déjà aux messages clients.",
     "aucun-numero-de-bilan": "Il manque le numéro qui doit recevoir le bilan. Ajoutez BILAN_WHATSAPP dans les variables d’environnement de Vercel — le numéro complet avec l’indicatif, sans espaces ni signe plus.",
     "modele-absent-ou-non-approuve": "Meta n’autorise, hors des vingt-quatre heures suivant un message du destinataire, que des modèles approuvés. Déposez le modèle nommé ci-dessous dans WhatsApp Manager → Modèles de message, avec quatre variables dans le corps, puis attendez sa validation.",
     reseau: "Le serveur n’a pas pu joindre Meta cette nuit. Si cela se répète, vérifiez que le jeton n’a pas expiré.",
   };
   const gesteWhatsApp = QUOI_FAIRE_WHATSAPP[bilanNuit?.raisonWhatsApp]
     || (bilanNuit?.raisonWhatsApp ? "Refus de Meta. Le motif exact est indiqué ci-dessous." : null);
+
+  /*
+   * ESSAYER L'ENVOI MAINTENANT, PLUTÔT QU'ATTENDRE DEMAIN.
+   *
+   * Régler le bilan WhatsApp demandait une nuit d'attente par essai : on pose une variable, on
+   * attend le lendemain matin, on découvre qu'il manquait autre chose, on recommence. Un indicatif
+   * oublié, un modèle pas encore validé, un numéro qui n'est pas sur WhatsApp — et l'on y passe la
+   * semaine, sans jamais savoir laquelle des trois choses cloche.
+   *
+   * Ce bouton n'écrit aucune sauvegarde et n'efface rien : il calcule les chiffres et tente les
+   * deux envois. Le message qui revient est celui du serveur, mot pour mot.
+   */
+  const [essaiBilan, setEssaiBilan] = useState(false);
+  async function testerLeBilan() {
+    setEssaiBilan(true);
+    try {
+      const reponse = await appelServeurQuiDepense("/api/veille?bilan=1", { method: "POST" });
+      const corps = await reponse.json().catch(() => ({}));
+      if (!reponse.ok) { notify?.(corps.error || "Envoi impossible pour le moment."); return; }
+      const b = corps.bilan || {};
+      notify?.(b.whatsapp
+        ? "Bilan envoyé sur WhatsApp. Vérifiez le téléphone."
+        : `WhatsApp refusé : ${b.raisonWhatsApp || "motif inconnu"}${b.detailWhatsApp ? ` — ${String(b.detailWhatsApp).slice(0, 120)}` : ""}`);
+    } catch (e) {
+      notify?.("Serveur injoignable — essai impossible.");
+    } finally {
+      setEssaiBilan(false);
+    }
+  }
 
   return (
     <>
@@ -29663,25 +29692,33 @@ function EtatVeille({ data, notify }) {
         </div>
       )}
 
-      {bilanNuit && (
+      {/*
+        Affiché dès qu'une nuit a eu lieu, même si le bilan n'a jamais été tenté : c'est justement
+        l'état où l'on a le plus besoin du bouton d'essai.
+      */}
+      {veille && (
         <div style={{ background: `var(--${teinteBilan}-bg)`, border: `1px solid var(--${teinteBilan}-border)`, borderRadius: 10, padding: "11px 13px", marginBottom: 14, display: "flex", gap: 10, alignItems: "flex-start" }}>
           {bilanComplet ? <CheckCircle2 size={15} color={`var(--${teinteBilan}-fg)`} style={{ flexShrink: 0, marginTop: 2 }} />
             : <AlertTriangle size={15} color={`var(--${teinteBilan}-fg)`} style={{ flexShrink: 0, marginTop: 2 }} />}
           <div style={{ fontSize: 12.5, color: `var(--${teinteBilan}-fg)`, lineHeight: 1.55, flex: 1, minWidth: 200 }}>
             {bilanComplet ? (
-              <>Bilan de la journée envoyé cette nuit, par courriel et sur WhatsApp.</>
+              <>
+                Bilan de la journée envoyé{bilanNuit.essai ? " à l’essai" : " cette nuit"}, par courriel et sur WhatsApp.
+              </>
             ) : (
               <>
                 <strong>
-                  {bilanEmailOk
-                    ? "Le bilan quotidien part par courriel, mais pas sur WhatsApp."
-                    : "Le bilan quotidien n’est envoyé nulle part."}
+                  {!bilanNuit
+                    ? "Le bilan quotidien n’a encore jamais été tenté."
+                    : bilanEmailOk
+                      ? "Le bilan quotidien part par courriel, mais pas sur WhatsApp."
+                      : "Le bilan quotidien n’est envoyé nulle part."}
                 </strong>
                 {/*
                   Le courriel d'abord : c'est lui qui porte le détail complet, et il ne dépend
                   d'aucun modèle à faire approuver. Sans lui, il n'y a pas de bilan du tout.
                 */}
-                {!bilanEmailOk && (
+                {bilanNuit && !bilanEmailOk && (
                   <div style={{ marginTop: 6 }}>
                     <strong>Courriel :</strong>{" "}
                     {bilanNuit.raisonEmail === "courriel-non-configure"
@@ -29691,7 +29728,7 @@ function EtatVeille({ data, notify }) {
                         : <>refusé — <code>{bilanNuit.raisonEmail || "motif inconnu"}</code></>}
                   </div>
                 )}
-                {!bilanWhatsAppOk && (
+                {bilanNuit && !bilanWhatsAppOk && (
                   <div style={{ marginTop: 6 }}>
                     <strong>WhatsApp :</strong> {gesteWhatsApp || "non tenté."}
                     {bilanNuit.modele && (
@@ -29709,8 +29746,26 @@ function EtatVeille({ data, notify }) {
                     </div>
                   </div>
                 )}
+                {/*
+                  UNE VARIABLE D'ENVIRONNEMENT N'EST LUE QU'AU DÉPLOIEMENT SUIVANT.
+                  C'est le piège qui fait perdre le plus de temps : la variable est bien posée, on
+                  la voit dans Vercel, et le serveur qui tourne ne la connaît pas encore.
+                */}
+                <div style={{ marginTop: 8, fontSize: 11.5, opacity: 0.85 }}>
+                  Si vous venez d’ajouter une variable dans Vercel, redéployez d’abord :
+                  une variable n’est lue qu’au déploiement suivant.
+                </div>
               </>
             )}
+            {/*
+              Sans ce bouton, chaque essai coûtait une nuit d'attente : on pose une variable, on
+              attend le lendemain matin, on découvre qu'il manquait autre chose. Trois erreurs de
+              saisie et l'on y passe la semaine.
+            */}
+            <button onClick={testerLeBilan} disabled={essaiBilan}
+              style={{ marginTop: 10, background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: essaiBilan ? "default" : "pointer", opacity: essaiBilan ? 0.6 : 1 }}>
+              {essaiBilan ? "Envoi…" : "Envoyer le bilan maintenant"}
+            </button>
           </div>
         </div>
       )}
@@ -29855,17 +29910,42 @@ function ParametresSystemePage({ data, persist, notify, onBack, offline }) {
 
         <div style={{ background: "var(--surface)", borderRadius: 14, padding: 20, border: "1px solid var(--border)" }}>
           <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Sauvegardes automatiques</div>
-          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>Une copie complète est enregistrée chaque nuit par le serveur, conservée 14 jours — que quelqu’un ouvre l’application ou non.</div>
+          {/*
+            Trente jours, et non quatorze : la fenêtre a été allongée après la perte de trois
+            factures partenaire découverte huit jours plus tard, alors que la seule copie qui les
+            contenait encore allait être effacée la nuit suivante. Cette phrase, elle, était restée
+            à quatorze — une promesse fausse dans le sens rassurant, ce qui est le pire des deux.
+          */}
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>Une copie complète est enregistrée chaque nuit par le serveur, conservée 30 jours — que quelqu’un ouvre l’application ou non. Les copies prises à la main avant une opération délicate ne sont jamais effacées automatiquement.</div>
           <EtatVeille data={data} notify={notify} />
           {backups === null && <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Chargement…</div>}
           {backups !== null && backups.length === 0 && <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Aucune sauvegarde pour le moment — la prochaine passera cette nuit.</div>}
           {backups && backups.length > 0 && (
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {backups.map((key) => {
-                const dateStr = key.replace(BACKUP_PREFIX, "");
+                /*
+                  « Invalid Date », trois fois dans la liste.
+                  Une copie prise à la main porte un suffixe — « 2026-09-03-avant-restauration-cat »
+                  — et la chaîne entière était donnée à new Date(). Résultat : les copies les plus
+                  précieuses, celles qu'on prend justement avant une opération risquée, étaient les
+                  seules qu'on ne pouvait pas dater dans la liste où l'on va les chercher.
+                  On lit donc la date au début, et l'on dit à quoi sert le reste.
+                */
+                const brut = key.replace(BACKUP_PREFIX, "");
+                const jour = brut.slice(0, 10);
+                const suffixe = brut.slice(11).replace(/-/g, " ").trim();
+                const quand = new Date(`${jour}T12:00:00Z`);
+                const lisible = Number.isNaN(quand.getTime())
+                  ? brut
+                  : quand.toLocaleDateString("fr-FR", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
                 return (
-                  <div key={key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--surface2)", borderRadius: 8, padding: "8px 12px" }}>
-                    <span style={{ fontSize: 12.5, color: "var(--text)" }}>{new Date(dateStr).toLocaleDateString("fr-FR", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}</span>
+                  <div key={key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: "var(--surface2)", borderRadius: 8, padding: "8px 12px" }}>
+                    <span style={{ fontSize: 12.5, color: "var(--text)", minWidth: 0 }}>
+                      {lisible}
+                      {suffixe && (
+                        <span style={{ color: "var(--muted)", fontSize: 11.5 }}> · copie manuelle ({suffixe})</span>
+                      )}
+                    </span>
                     {confirmRestore === key ? (
                       <div style={{ display: "flex", gap: 8 }}>
                         <button onClick={() => setConfirmRestore(null)} style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 11.5, cursor: "pointer" }}>Annuler</button>

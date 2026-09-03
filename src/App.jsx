@@ -939,6 +939,36 @@ function estColisPartenaire(colis) {
   return !!colis?.partenaireId;
 }
 
+/**
+ * CE QU'UNE LIGNE DE LA LISTE DOIT AFFICHER SOUS « FRAIS D'EXPÉDITION » — ET DE QUI C'EST DÛ.
+ *
+ * Sur un colis partenaire, `prix` vaut zéro par construction, et c'est voulu : ce n'est pas le
+ * client du partenaire que l'entreprise facture. Ce que ce client paie au partenaire ne se trouve
+ * nulle part dans cette application, et ne doit pas s'y trouver — c'est l'affaire du partenaire,
+ * pas la nôtre.
+ *
+ * Ce qui EST dû, en revanche, c'est ce que le partenaire doit à l'entreprise, au tarif de son
+ * contrat. Ce montant existe : il vit dans `prixPartenaire`, dans la devise du contrat. La liste
+ * lisait pourtant `prix` sans regarder : ces colis s'affichaient « 0 GNF », comme s'ils ne
+ * valaient rien, alors qu'ils sont bel et bien facturés — ailleurs, et à quelqu'un d'autre. Sur
+ * une page de soixante-seize colis, cela fausse la lecture de toute la colonne.
+ *
+ * LA MENTION N'EST PAS DÉCORATIVE.
+ *
+ * Sans elle, un agent lit ce nombre comme ce que le destinataire doit régler au comptoir, et le
+ * lui réclame — alors que ce colis est déjà payé d'avance par le partenaire. Le montant seul
+ * serait plus trompeur que le zéro qu'il remplace.
+ */
+function fraisAffichesColis(colis) {
+  const tauxGNF = LIVE_RATES.GNF || CURRENCIES.GNF;
+  if (!estColisPartenaire(colis)) {
+    return { montant: fmtGNF((Number(colis?.prix) || 0) * tauxGNF), du: null };
+  }
+  /* `prixPartenaire` est dans la devise du contrat ; la colonne, elle, est en francs. */
+  const duEnEuros = versEUR(Number(colis?.prixPartenaire) || 0, colis?.devisePartenaire);
+  return { montant: fmtGNF(duEnEuros * tauxGNF), du: "Facturé au partenaire" };
+}
+
 /*
  * Le nom sous lequel un partenaire s'affiche partout.
  *
@@ -16019,7 +16049,15 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
                     {colonnes.route && <td style={{ padding: "10px 14px", color: "var(--muted)", fontSize: 12.5, whiteSpace: "nowrap" }}>{routeLabel(c.pays, c.direction)}</td>}
                     {colonnes.poids && <td style={{ padding: "10px 14px", color: "var(--text)", fontSize: 12.5, whiteSpace: "nowrap" }}>{c.poids} kg</td>}
                     {colonnes.type && <td style={{ padding: "10px 14px", color: "var(--muted)", fontSize: 12.5, whiteSpace: "nowrap" }}>{c.mode === "air" ? "Aérien" : "Maritime"}</td>}
-                    {colonnes.frais && <td style={{ padding: "10px 14px", color: "var(--text)", fontWeight: 600, fontSize: 12.5, whiteSpace: "nowrap" }}>{fmtGNF(c.prix * (LIVE_RATES.GNF || CURRENCIES.GNF))}</td>}
+                    {colonnes.frais && (() => {
+                      const frais = fraisAffichesColis(c);
+                      return (
+                        <td style={{ padding: "10px 14px", color: "var(--text)", fontWeight: 600, fontSize: 12.5, whiteSpace: "nowrap" }}>
+                          {frais.montant}
+                          {frais.du && <div style={{ fontSize: 10.5, fontWeight: 600, color: "var(--muted)", marginTop: 2 }}>{frais.du}</div>}
+                        </td>
+                      );
+                    })()}
                     <td style={{ padding: "10px 14px" }}>
                       <span style={{ display: "inline-flex", alignItems: "center", gap: 5, background: st.bg, color: st.fg, padding: "4px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}><Icon size={12} /> {c.status}</span>
                     </td>

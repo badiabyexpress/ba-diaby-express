@@ -1744,6 +1744,41 @@ function statutFacturePartenaire(facture) {
   if (regle <= 0.005) return "Impayée";
   return regle >= (Number(facture?.total) || 0) - 0.005 ? "Réglée" : "Partielle";
 }
+/*
+ * CE QU'UN COLIS PARTENAIRE DOIT ENCORE À LA CAISSE.
+ *
+ * Les documents de transport écrivaient « Sur facture » à la place du règlement. C'était exact
+ * mais inutilisable : celui qui arrête les comptes veut un chiffre, pas un renvoi. La question
+ * qu'il se pose est la même que pour un client — combien a été payé, combien reste-t-il dû.
+ *
+ * Trois situations, et une seule réponse chiffrée pour chacune :
+ *
+ *   — Le colis n'est encore sur aucune facture : rien n'a été payé, tout est dû.
+ *   — Sa facture est réglée : tout est payé, rien n'est dû.
+ *   — Sa facture est partiellement réglée : on répartit le versement au prorata du poids de ce
+ *     colis dans la facture. Attribuer un versement à tel colis plutôt qu'à tel autre serait une
+ *     invention ; le prorata, lui, est une convention comptable ordinaire, et surtout il fait
+ *     tomber les totaux juste — la somme des parts vaut exactement le versement reçu.
+ *
+ * Les montants sont dans la devise du CONTRAT, comme prixPartenaire et comme facture.total :
+ * c'est l'appelant qui convertit pour son document.
+ */
+function reglementColisPartenaire(colis, facturesPartenaire) {
+  const du = Number(colis?.prixPartenaire) || 0;
+  const facture = (facturesPartenaire || []).find((f) => f.id === colis?.facturePartenaireId);
+  if (!facture) return { paye: 0, reste: du, facture: null, etat: "À facturer" };
+  const total = Number(facture.total) || 0;
+  const regle = totalRegleFacture(facture);
+  // Une facture à zéro ne se répartit pas : on évite la division et on la dit réglée.
+  const paye = total <= 0.005 ? du : Math.min(du, +(du * (regle / total)).toFixed(2));
+  return {
+    paye,
+    reste: +Math.max(0, du - paye).toFixed(2),
+    facture,
+    etat: statutFacturePartenaire(facture),
+  };
+}
+
 const STATUT_FACTURE_STYLE = {
   "Impayée": { bg: "var(--danger-bg)", fg: "var(--danger-fg)" },
   "Partielle": { bg: "var(--warn-bg)", fg: "var(--warn-fg)" },
@@ -15585,7 +15620,7 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
     setGenPdf(true);
     try {
       const depensesLiees = (data.depenses || []).filter((d) => d.bordereauId === bordereau.id || d.bordereauNumero === bordereau.numero || String(d.nom || "").endsWith(`(${bordereau.numero})`));
-      await downloadRouteManifest(colisInclus, country, bordereau.direction, bordereau, devise, depensesLiees);
+      await downloadRouteManifest(colisInclus, country, bordereau.direction, bordereau, devise, depensesLiees, data.facturesPartenaire);
     }
     catch (e) { console.error(e); notify?.("Échec de génération du PDF"); }
     setGenPdf(false);
@@ -16996,42 +17031,45 @@ async function downloadReceptionBordereau(compte, colisSelectionnes, tarifs) {
   openPdf(doc, `bordereau-reception-${compte.nom}-${numero}.pdf`);
 }
 
-async function downloadRouteManifest(colisRoute, country, direction, bordereau, deviseAffichage, depensesLiees = []) {
+async function downloadRouteManifest(colisRoute, country, direction, bordereau, deviseAffichage, depensesLiees = [], facturesPartenaire = []) {
   const cur = deviseAffichage || country.currency;
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF());
   const label = direction === "import" ? `${country.city} → Conakry` : `Conakry → ${country.city}`;
   const poidsTotal = colisRoute.reduce((s, c) => s + c.poids, 0);
   /*
-   * UN COLIS PARTENAIRE NE COMPTE PAS DANS L'ARGENT DU BORDEREAU.
+   * TOUS LES MONTANTS S'AFFICHENT — Y COMPRIS CEUX DES COLIS PARTENAIRES.
    *
-   * La fiche de voyage le dit depuis toujours : là où il y aurait un prix, elle écrit « — », et
-   * dans la colonne du reste, « Partenaire ». Le bordereau, lui, imprimait « 0 GNF » et
-   * « Non payé » — les deux mentions qui, sur un document remis au transporteur puis rangé dans
-   * un classeur, se lisent exactement comme un client qui doit de l'argent. Pire : ces zéros
-   * entraient dans « MONTANT TOTAL » et dans « Reste à percevoir », si bien qu'un bordereau
-   * chargé de colis partenaire annonçait une créance que personne ne devait.
+   * Le bordereau a d'abord imprimé « 0 GNF » et « Non payé » pour ces colis, ce qui les faisait
+   * lire comme des clients endettés et gonflait « Reste à percevoir » d'une créance que personne
+   * ne devait. On les a alors tus — « — » puis « Sur facture ». Exact, mais inutilisable pour
+   * arrêter des comptes : celui qui totalise veut un chiffre, pas un renvoi vers un autre
+   * document.
    *
-   * Ces colis appartiennent au partenaire, qui les facture à ses propres clients selon un tarif
-   * dont nous n'avons pas connaissance et que nous n'avons pas à faire figurer. Ils sont donc
-   * comptés en colis et en kilos — c'est ce qu'on charge dans l'avion — mais jamais en francs.
+   * Ils portent donc leurs trois montants comme n'importe quelle ligne : facturé, payé, reste dû.
+   * Ce qui est affiché est ce que LE PARTENAIRE doit à l'entreprise, au tarif du contrat qui nous
+   * lie à lui. Ce qu'il facture ensuite à ses propres clients n'est enregistré nulle part et ne
+   * figure sur aucun document.
+   *
+   * Une seule distinction subsiste, et elle n'est pas cosmétique : cette créance ne se recouvre
+   * pas au comptoir ni auprès du transporteur, mais sur la facture mensuelle du partenaire. Les
+   * totaux la comptent donc à part de l'argent du guichet.
    */
   const colisFactures = colisRoute.filter((c) => !estColisPartenaire(c));
   const nbPartenaires = colisRoute.length - colisFactures.length;
-  /*
-   * CE QUE LES PARTENAIRES DOIVENT À L'ENTREPRISE — comme sur la fiche de voyage.
-   *
-   * Le bordereau taisait ces montants. C'était le choix d'origine, et il se défendait : ce papier
-   * est remis au transporteur. Mais il sert aussi à faire le compte d'une remise, et sur une
-   * route où la moitié des colis viennent de partenaires, un « MONTANT TOTAL » calculé sur
-   * l'autre moitié n'aide personne.
-   *
-   * C'est le prix DU CONTRAT entre nous et le partenaire, stocké dans la devise de ce contrat
-   * (voir detailPrixPartenaire) — d'où le passage par versEUR avant fmt. Ce que le partenaire
-   * facture ensuite à son propre client n'est enregistré nulle part et ne figure pas ici.
-   */
-  const prixPartenaireBase = (c) => versEUR(Number(c.prixPartenaire) || 0, c.devisePartenaire);
-  const totalPartenaires = colisRoute.filter(estColisPartenaire).reduce((s, c) => s + prixPartenaireBase(c), 0);
+  // prixPartenaire et facture.total vivent dans la devise du contrat : d'où versEUR avant fmt.
+  const duPartenaire = (c) => {
+    const r = reglementColisPartenaire(c, facturesPartenaire);
+    return {
+      facture: versEUR(Number(c.prixPartenaire) || 0, c.devisePartenaire),
+      paye: versEUR(r.paye, c.devisePartenaire),
+      reste: versEUR(r.reste, c.devisePartenaire),
+    };
+  };
+  const lignesPartenaires = colisRoute.filter(estColisPartenaire);
+  const totalPartenaires = lignesPartenaires.reduce((s, c) => s + duPartenaire(c).facture, 0);
+  const reglePartenaires = lignesPartenaires.reduce((s, c) => s + duPartenaire(c).paye, 0);
+  const duParPartenaires = lignesPartenaires.reduce((s, c) => s + duPartenaire(c).reste, 0);
 
   // Bandeau d’en-tête — filet rouge au pied de la bande navy, comme sur l'étiquette et le ticket
   // d'envoi : même identité de marque bicolore sur tous les documents imprimés.
@@ -17092,12 +17130,17 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
    */
   const reglementDuColis = (c) => {
     /*
-     * « Sur facture », comme sur la fiche de voyage. La colonne répond à une seule question, posée
-     * à chaque remise : faut-il encaisser quelque chose pour ce colis ? Pour un colis partenaire
-     * la réponse est non — l'argent arrive sur la facture mensuelle. Un « Non payé » enverrait le
-     * transporteur réclamer une somme qui n'est pas due par la personne en face.
+     * Pour un colis partenaire, la colonne dit le montant encore dû — pas « Sur facture », qui ne
+     * se totalise pas. La teinte bleue reste : elle distingue d'un coup d'œil une créance sur un
+     * partenaire, qui se recouvre sur sa facture mensuelle, d'un impayé de guichet qu'on réclame
+     * à la personne en face.
      */
-    if (estColisPartenaire(c)) return { libelle: "Sur facture", teinte: [91, 141, 239] };
+    if (estColisPartenaire(c)) {
+      const d = duPartenaire(c);
+      return d.reste > 0.005
+        ? { libelle: `Dû partenaire\n${fmt(d.reste, cur)}`, teinte: [91, 141, 239] }
+        : { libelle: "Réglé", teinte: [40, 140, 90] };
+    }
     const paye = Number(c.paye) || 0;
     if (paye <= 0.005) return { libelle: "Non payé", teinte: [200, 45, 60] };
     if ((Number(c.reste) || 0) <= 0.005) return { libelle: "Payé", teinte: [40, 140, 90] };
@@ -17107,7 +17150,7 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   const body = colisRoute.map((c) => [
     c.tracking, c.destinataire, c.telephone, String(nombreArticles(c)),
     `${c.poids} kg`, c.status,
-    estColisPartenaire(c) ? fmt(prixPartenaireBase(c), cur) : fmt(c.prix, cur),
+    estColisPartenaire(c) ? fmt(duPartenaire(c).facture, cur) : fmt(c.prix, cur),
     reglementDuColis(c).libelle,
   ]);
 
@@ -17236,13 +17279,16 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
     if (finalY > 258) { doc.addPage(); finalY = 20; }
     const s = nbPartenaires > 1 ? "s" : "";
     doc.setFont(undefined, "bold"); doc.setFontSize(8.5); doc.setTextColor(10, 38, 71);
-    doc.text(`Facturé aux partenaires (${nbPartenaires} colis) : ${fmt(totalPartenaires, cur)}`, 14, finalY);
+    doc.text(`Facturé aux partenaires (${nbPartenaires} colis) : ${fmt(totalPartenaires, cur)}`
+      + `${reglePartenaires > 0.005 ? `  ·  déjà réglé ${fmt(reglePartenaires, cur)}` : ""}`
+      + `  ·  reste dû ${fmt(duParPartenaires, cur)}`, 14, finalY);
     finalY += 5;
     doc.setFont(undefined, "normal"); doc.setFontSize(8); doc.setTextColor(120, 130, 150);
     const mention = doc.splitTextToSize(
       `Ce${s === "s" ? "s" : ""} ${nbPartenaires} colis partenaire${s} ${s === "s" ? "sont facturés" : "est facturé"} au partenaire,`
-      + ` au tarif de son contrat, et compté${s} dans le montant total. Rien n'est à encaisser pour`
-      + ` ${s === "s" ? "eux" : "lui"} à la remise : le règlement se fait sur la facture mensuelle du partenaire.`,
+      + ` au tarif de son contrat, et compté${s} dans le montant total. Cette créance se recouvre sur`
+      + ` la facture mensuelle du partenaire : rien n'est à encaisser pour`
+      + ` ${s === "s" ? "eux" : "lui"} à la remise, et elle n'entre pas dans le « reste à percevoir » ci-dessus.`,
       182,
     );
     doc.text(mention, 14, finalY);
@@ -23671,7 +23717,7 @@ function versEUR(montant, devise) {
 }
 
 /** Totaux d'un voyage : ce que les colis rapportent, ce qu'ils coûtent, ce qu'il en reste. */
-function totauxVoyage(colisInclus, depenses, users, remises) {
+function totauxVoyage(colisInclus, depenses, users, remises, facturesPartenaire) {
   const facture = colisInclus.reduce((s, c) => s + (Number(c.prix) || 0), 0);
   const encaisse = colisInclus.reduce((s, c) => s + (Number(c.paye) || 0), 0);
   const depensesEUR = (depenses || []).reduce((s, d) => s + versEUR(d.montant, d.devise), 0);
@@ -23703,6 +23749,14 @@ function totauxVoyage(colisInclus, depenses, users, remises) {
   const facturePartenaires = colisInclus
     .filter(estColisPartenaire)
     .reduce((s, c) => s + versEUR(Number(c.prixPartenaire) || 0, c.devisePartenaire), 0);
+  /*
+   * Ce que les partenaires ont déjà réglé, et ce qu'ils doivent encore. Un colis part sur une
+   * facture mensuelle : tant qu'elle n'est pas honorée, l'argent n'est pas dans le tiroir, et il
+   * doit se lire comme une créance — pas comme un renvoi vers un autre document.
+   */
+  const regleParPartenaires = colisInclus.filter(estColisPartenaire)
+    .reduce((s, c) => s + versEUR(reglementColisPartenaire(c, facturesPartenaire).paye, c.devisePartenaire), 0);
+  const duParPartenaires = Math.max(0, facturePartenaires - regleParPartenaires);
   // Tout ce que la rotation a produit, d'où qu'il vienne : c'est le chiffre du responsable.
   const factureTotal = facture + facturePartenaires;
   const payes = facturables.filter((c) => (Number(c.reste) || 0) <= 0.005);
@@ -23712,7 +23766,7 @@ function totauxVoyage(colisInclus, depenses, users, remises) {
     poids: colisInclus.reduce((s, c) => s + (Number(c.poids) || 0), 0),
     facture, encaisse,
     resteAEncaisser: Math.max(+(facture - encaisse).toFixed(2), 0),
-    nbPartenaires, facturePartenaires, factureTotal,
+    nbPartenaires, facturePartenaires, factureTotal, regleParPartenaires, duParPartenaires,
     nbPayes: payes.length,
     nbImpayes: impayes.length,
     nbPartiels: facturables.length - payes.length - impayes.length,
@@ -23769,7 +23823,19 @@ function statutPaiementColis(c) {
  */
 function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data, devise = "GNF") {
   const INK = [26, 30, 38], MUTED = [122, 130, 142], RED = [214, 39, 63], NAVY = [10, 38, 71];
-  const t = totauxVoyage(colisInclus, voyage.depenses, data?.users, data?.remisesCaisse);
+  const t = totauxVoyage(colisInclus, voyage.depenses, data?.users, data?.remisesCaisse, data?.facturesPartenaire);
+  /*
+   * Les trois montants d'un colis partenaire, ramenés à la devise de la fiche : ce qui lui est
+   * facturé, ce qu'il a déjà réglé, ce qu'il doit encore à la caisse.
+   */
+  const duPartenaire = (c) => {
+    const r = reglementColisPartenaire(c, data?.facturesPartenaire);
+    return {
+      facture: versEUR(Number(c.prixPartenaire) || 0, c.devisePartenaire),
+      paye: versEUR(r.paye, c.devisePartenaire),
+      reste: versEUR(r.reste, c.devisePartenaire),
+    };
+  };
   let y = 20;
   doc.addImage(DEFAULT_LOGO, "PNG", 14, y - 6, 16, 16);
   doc.setFont(undefined, "bold"); doc.setFontSize(16); doc.setTextColor(...INK);
@@ -23811,15 +23877,15 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data, devis
      * Le montant est celui du contrat qui nous lie au partenaire. Ce qu'il facture ensuite à son
      * propre client n'est pas enregistré et n'a rien à faire ici.
      *
-     * La colonne « Payé » dit « Sur facture » plutôt qu'un zéro : cet argent ne rentre pas au
-     * comptoir avec le colis, il arrive sur la facture mensuelle du partenaire. Un zéro se
-     * lirait comme un impayé et enverrait quelqu'un réclamer une somme qui n'est pas due.
+     * Les trois colonnes d'argent disent maintenant la même chose pour tout le monde : facturé,
+     * payé, reste dû. « Sur facture » était exact mais ne se totalisait pas — celui qui arrête
+     * les comptes veut savoir COMBIEN le partenaire doit encore à la caisse, pas où le chercher.
      */
+    estColisPartenaire(c) ? fmt(duPartenaire(c).facture, devise) : fmt(c.prix, devise),
+    estColisPartenaire(c) ? fmt(duPartenaire(c).paye, devise) : fmt(c.paye, devise),
     estColisPartenaire(c)
-      ? fmt(versEUR(Number(c.prixPartenaire) || 0, c.devisePartenaire), devise)
-      : fmt(c.prix, devise),
-    estColisPartenaire(c) ? "Sur facture" : fmt(c.paye, devise),
-    estColisPartenaire(c) ? "Partenaire" : ((Number(c.reste) || 0) > 0 ? fmt(c.reste, devise) : "Payé"),
+      ? (duPartenaire(c).reste > 0.005 ? fmt(duPartenaire(c).reste, devise) : "Réglé")
+      : ((Number(c.reste) || 0) > 0 ? fmt(c.reste, devise) : "Payé"),
   ]);
   if (hasAutoTable && doc.autoTable && body.length > 0) {
     doc.autoTable({
@@ -23903,9 +23969,16 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data, devis
    */
   if (t.facturePartenaires > 0.005) {
     sauterSiBesoin();
-    doc.text(`À facturer aux partenaires (${t.nbPartenaires} colis)`, 16, y);
-    doc.text(fmt(t.facturePartenaires, devise), 196, y, { align: "right" });
+    doc.text(`Reste à encaisser auprès des partenaires (${t.nbPartenaires} colis)`, 16, y);
+    doc.text(fmt(t.duParPartenaires, devise), 196, y, { align: "right" });
     y += 5.5;
+    // Ce qui est déjà rentré ne se répète que s'il y a quelque chose à dire.
+    if (t.regleParPartenaires > 0.005) {
+      sauterSiBesoin();
+      doc.text("   dont déjà réglé par facture", 16, y);
+      doc.text(fmt(t.regleParPartenaires, devise), 196, y, { align: "right" });
+      y += 5.5;
+    }
   }
   y += 3;
 
@@ -23984,10 +24057,15 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data, devis
     + (devise === "EUR" ? "" : ` Tous les montants sont en ${devise} (1 EUR = ${tauxFiche.toLocaleString("fr-FR")} ${devise}).`), 14, y);
   y += 5;
   if (avecPartenaires) {
-    // Sans cette phrase, on chercherait le facturé partenaire dans le bilan final et on croirait
-    // à une erreur de calcul.
-    doc.text(`Le facturé aux partenaires (${fmt(t.facturePartenaires, devise)}) n’entre pas dans le bilan final :`
-      + " il est réglé sur la facture mensuelle du partenaire, pas au comptoir.", 14, y);
+    /*
+     * Sans cette phrase, on chercherait le facturé partenaire dans le bilan final et on croirait
+     * à une erreur de calcul. Le bilan final ne compte que ce qui est entré au comptoir sur cette
+     * rotation ; un règlement de facture partenaire entre par la Caisse, et l'y ajouter ici le
+     * compterait deux fois.
+     */
+    doc.text(`Les partenaires doivent encore ${fmt(t.duParPartenaires, devise)} à la caisse sur ce voyage.`
+      + " Ces montants n’entrent pas dans le bilan final : ils sont réglés sur la facture mensuelle"
+      + " du partenaire et suivis dans Caisse, pas au comptoir.", 14, y);
     y += 5;
   }
   y += 6;
@@ -24080,7 +24158,7 @@ function VoyagesPage({ data, persist, session, notify }) {
     const set = new Set(trackings);
     return data.colis.filter((c) => set.has(c.tracking));
   }, [data.colis, trackings]);
-  const totaux = useMemo(() => totauxVoyage(colisInclus, depenses, data.users, data.remisesCaisse), [colisInclus, depenses, data.users, data.remisesCaisse]);
+  const totaux = useMemo(() => totauxVoyage(colisInclus, depenses, data.users, data.remisesCaisse, data.facturesPartenaire), [colisInclus, depenses, data.users, data.remisesCaisse, data.facturesPartenaire]);
   const colisPartenaires = useMemo(() => colisInclus.filter(estColisPartenaire), [colisInclus]);
   /** Le récapitulatif partenaires bloque la validation tant qu'il n'a pas été confirmé. */
   const controlePartenairesRequis = colisPartenaires.length > 0 && !partenairesVerifies;
@@ -24091,7 +24169,7 @@ function VoyagesPage({ data, persist, session, notify }) {
     return ["export", "import"].map((sens) => ({
       sens,
       libelle: libelleVoyage(pays, sens),
-      ...totauxVoyage(colisInclus.filter((c) => (c.direction || "export") === sens), [], data.users, data.remisesCaisse),
+      ...totauxVoyage(colisInclus.filter((c) => (c.direction || "export") === sens), [], data.users, data.remisesCaisse, data.facturesPartenaire),
     }));
   }, [direction, colisInclus, pays, data.users, data.remisesCaisse]);
 
@@ -24248,7 +24326,7 @@ function VoyagesPage({ data, persist, session, notify }) {
           </div>
         ) : voyages.map((v) => {
           const set = new Set(v.trackings || []);
-          const t = totauxVoyage(data.colis.filter((c) => set.has(c.tracking)), v.depenses, data.users, data.remisesCaisse);
+          const t = totauxVoyage(data.colis.filter((c) => set.has(c.tracking)), v.depenses, data.users, data.remisesCaisse, data.facturesPartenaire);
           const valide = v.statut === "Validé";
           return (
             <div key={v.id} style={{ ...carte, marginBottom: 12, padding: "14px 16px" }}>
@@ -24599,7 +24677,7 @@ function VoyagesPage({ data, persist, session, notify }) {
           </div>
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", minWidth: 600, borderCollapse: "collapse" }}>
-              <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Partenaire", "Client", "Articles", "Poids", "Facturé au partenaire"].map((h) => <th key={h} style={{ padding: "9px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
+              <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Partenaire", "Client", "Articles", "Poids", "Facturé au partenaire", "Reste dû"].map((h) => <th key={h} style={{ padding: "9px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
               <tbody>
                 {colisPartenaires.map((c) => {
                   const p = (data.users || []).find((u) => u.id === c.partenaireId);
@@ -24625,6 +24703,16 @@ function VoyagesPage({ data, persist, session, notify }) {
                       <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 700, whiteSpace: "nowrap" }}>
                         {fmt(versEUR(Number(c.prixPartenaire) || 0, c.devisePartenaire), c.devisePartenaire || "GNF")}
                       </td>
+                      {/* Ce qui reste dû à la caisse : zéro dès que la facture qui le porte est réglée. */}
+                      {(() => {
+                        const r = reglementColisPartenaire(c, data.facturesPartenaire);
+                        const du = r.reste > 0.005;
+                        return (
+                          <td style={{ padding: "9px 14px", fontSize: 12.5, fontWeight: 700, whiteSpace: "nowrap", color: du ? "var(--danger-fg)" : "var(--ok-fg)" }}>
+                            {du ? fmt(versEUR(r.reste, c.devisePartenaire), c.devisePartenaire || "GNF") : "Réglé"}
+                          </td>
+                        );
+                      })()}
                     </tr>
                   );
                 })}
@@ -24633,7 +24721,7 @@ function VoyagesPage({ data, persist, session, notify }) {
           </div>
           <div style={{ padding: "12px 16px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
             <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
-              Total partenaires : <strong style={{ color: "var(--text)" }}>{colisPartenaires.reduce((s, c) => s + nombreArticles(c), 0)} articles</strong> · <strong style={{ color: "var(--text)" }}>{colisPartenaires.reduce((s, c) => s + (Number(c.poids) || 0), 0).toFixed(1)} kg</strong> · à facturer <strong style={{ color: "var(--text)" }}>{fmt(colisPartenaires.reduce((s, c) => s + versEUR(Number(c.prixPartenaire) || 0, c.devisePartenaire), 0), "EUR")}</strong>
+              Total partenaires : <strong style={{ color: "var(--text)" }}>{colisPartenaires.reduce((s, c) => s + nombreArticles(c), 0)} articles</strong> · <strong style={{ color: "var(--text)" }}>{colisPartenaires.reduce((s, c) => s + (Number(c.poids) || 0), 0).toFixed(1)} kg</strong> · facturé <strong style={{ color: "var(--text)" }}>{fmt(totaux.facturePartenaires, "EUR")}</strong> · reste dû <strong style={{ color: totaux.duParPartenaires > 0.005 ? "var(--danger-fg)" : "var(--ok-fg)" }}>{fmt(totaux.duParPartenaires, "EUR")}</strong>
             </div>
             {enLecture ? (
               <div style={{ fontSize: 12.5, color: "var(--ok-fg)", fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>

@@ -23650,6 +23650,27 @@ function totauxVoyage(colisInclus, depenses, users, remises) {
    */
   const facturables = colisInclus.filter((c) => !estColisPartenaire(c));
   const nbPartenaires = colisInclus.length - facturables.length;
+  /*
+   * CE QUE LES PARTENAIRES DOIVENT À L'ENTREPRISE.
+   *
+   * Il manquait à la fiche, et sans lui le compte d'une rotation était faux : sur ce voyage, sept
+   * colis sur seize sont des colis partenaires. Ils ne rapportaient rien au document, alors qu'ils
+   * ont voyagé dans le même avion et qu'ils sont bel et bien facturés — au tarif du contrat, à
+   * l'entreprise partenaire, pas au client du comptoir.
+   *
+   * C'est `prixPartenaire` : le prix DU CONTRAT entre nous et le partenaire. Ce que le partenaire
+   * facture à son propre client ne nous regarde pas, n'est enregistré nulle part, et n'a donc
+   * aucune raison de figurer ici.
+   *
+   * Il reste compté à part de `facture`, et c'est essentiel : cet argent n'entre pas au comptoir
+   * avec le colis, il arrive sur la facture mensuelle du partenaire. Le mélanger au facturé client
+   * ferait dire à « reste à encaisser auprès des clients » une somme qu'aucun client ne doit.
+   */
+  const facturePartenaires = colisInclus
+    .filter(estColisPartenaire)
+    .reduce((s, c) => s + versEUR(Number(c.prixPartenaire) || 0, c.devisePartenaire), 0);
+  // Tout ce que la rotation a produit, d'où qu'il vienne : c'est le chiffre du responsable.
+  const factureTotal = facture + facturePartenaires;
   const payes = facturables.filter((c) => (Number(c.reste) || 0) <= 0.005);
   const impayes = facturables.filter((c) => (Number(c.reste) || 0) > 0.005 && (Number(c.paye) || 0) <= 0.005);
   return {
@@ -23657,16 +23678,29 @@ function totauxVoyage(colisInclus, depenses, users, remises) {
     poids: colisInclus.reduce((s, c) => s + (Number(c.poids) || 0), 0),
     facture, encaisse,
     resteAEncaisser: Math.max(+(facture - encaisse).toFixed(2), 0),
-    nbPartenaires,
+    nbPartenaires, facturePartenaires, factureTotal,
     nbPayes: payes.length,
     nbImpayes: impayes.length,
     nbPartiels: facturables.length - payes.length - impayes.length,
     encaissements: encaissementsParAgent(colisInclus, users, remises),
     depensesEUR,
-    resultat: +(facture - depensesEUR).toFixed(2),
+    /*
+     * PAS D'ARRONDI ICI — LE TOTAL DOIT VALOIR LA SOMME DE SES PARTIES.
+     *
+     * Ces trois montants étaient arrondis au centime d'euro, la monnaie de base. C'est invisible
+     * sur une fiche en euros ; sur une fiche en francs guinéens, un demi-centime vaut près de
+     * cinquante francs. Le panneau annonçait « 6 221 360 + 2 680 000 = 8 901 405 » — un total qui
+     * ne tombe pas juste sous les yeux du responsable qui l'additionne à la main, sur le document
+     * même qui sert à arrêter les comptes.
+     *
+     * L'arrondi appartient à l'affichage, et fmt() s'en charge déjà, à la bonne décimale pour
+     * chaque devise. Le calcul, lui, garde sa précision — c'est la règle partout ailleurs dans la
+     * fiche, où ni `facture` ni `encaisse` ne sont arrondis.
+     */
+    resultat: factureTotal - depensesEUR,
     // Ce qui est réellement dans les caisses une fois le voyage payé, par opposition au résultat
     // calculé sur le facturé : c'est le chiffre qui dit si la rotation a rapporté de l'argent frais.
-    tresorerie: +(encaisse - depensesEUR).toFixed(2),
+    tresorerie: encaisse - depensesEUR,
   };
 }
 
@@ -23736,10 +23770,21 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data, devis
     c.tracking, c.destinataire || "—",
     (c.direction || "export") === "export" ? "Aller" : "Retour",
     `${(Number(c.poids) || 0).toFixed(1)} kg`,
-    // Un colis partenaire n'a ni prix ni règlement chez nous : la fiche le dit, plutôt que
-    // d'afficher des zéros qui se liraient comme un colis soldé.
-    estColisPartenaire(c) ? "—" : fmt(c.prix, devise),
-    estColisPartenaire(c) ? "—" : fmt(c.paye, devise),
+    /*
+     * Un colis partenaire EST facturé — au partenaire, pas au client du comptoir. La fiche
+     * l'affichait « — », et sept colis sur seize disparaissaient du compte de la rotation.
+     *
+     * Le montant est celui du contrat qui nous lie au partenaire. Ce qu'il facture ensuite à son
+     * propre client n'est pas enregistré et n'a rien à faire ici.
+     *
+     * La colonne « Payé » dit « Sur facture » plutôt qu'un zéro : cet argent ne rentre pas au
+     * comptoir avec le colis, il arrive sur la facture mensuelle du partenaire. Un zéro se
+     * lirait comme un impayé et enverrait quelqu'un réclamer une somme qui n'est pas due.
+     */
+    estColisPartenaire(c)
+      ? fmt(versEUR(Number(c.prixPartenaire) || 0, c.devisePartenaire), devise)
+      : fmt(c.prix, devise),
+    estColisPartenaire(c) ? "Sur facture" : fmt(c.paye, devise),
     estColisPartenaire(c) ? "Partenaire" : ((Number(c.reste) || 0) > 0 ? fmt(c.reste, devise) : "Payé"),
   ]);
   if (hasAutoTable && doc.autoTable && body.length > 0) {
@@ -23817,7 +23862,18 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data, devis
   sauterSiBesoin();
   doc.text("Reste à encaisser auprès des clients", 16, y);
   doc.text(fmt(t.resteAEncaisser, devise), 196, y, { align: "right" });
-  y += 8;
+  y += 5.5;
+  /*
+   * Cet argent-là ne se réclame pas au comptoir : il part sur la facture mensuelle du partenaire.
+   * Le dire ici évite qu'on aille le chercher deux fois — ou qu'on l'oublie.
+   */
+  if (t.facturePartenaires > 0.005) {
+    sauterSiBesoin();
+    doc.text(`À facturer aux partenaires (${t.nbPartenaires} colis)`, 16, y);
+    doc.text(fmt(t.facturePartenaires, devise), 196, y, { align: "right" });
+    y += 5.5;
+  }
+  y += 3;
 
   if ((voyage.depenses || []).length > 0) {
     if (y > 235) { doc.addPage(); y = 20; }
@@ -23845,29 +23901,62 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data, devis
    * 62 mm, pied de page compris. Au-delà de 224 mm, ils ne tiennent plus : c'est le seul endroit
    * où l'on accepte une seconde page, et une rotation ordinaire n'y arrive pas.
    */
-  if (y > 224) { doc.addPage(); y = 20; }
-  doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, 32, "F");
+  /*
+   * LE PANNEAU DE RÉSULTAT — DEUX SOURCES DE RECETTE, JAMAIS CONFONDUES.
+   *
+   * Les colis clients se règlent au comptoir ; les colis partenaires se règlent sur une facture
+   * mensuelle. Les additionner en une seule ligne aurait donné un chiffre d'affaires juste et un
+   * « reste à encaisser » faux. On les montre donc l'un sous l'autre, puis leur total.
+   *
+   * Le bilan final, lui, ne bouge pas : il dit l'argent RÉELLEMENT rentré. Le facturé partenaire
+   * n'y entrera que le jour où sa facture sera réglée.
+   */
+  const avecPartenaires = t.facturePartenaires > 0.005;
+  const hauteurPanneau = avecPartenaires ? 46 : 32;
+  if (y > 262 - hauteurPanneau) { doc.addPage(); y = 20; }
+  doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, hauteurPanneau, "F");
   doc.setFontSize(10); doc.setTextColor(...NAVY); doc.setFont(undefined, "bold");
-  doc.text("Recettes (chiffre d’affaires)", 18, y + 7.5);
-  doc.text(fmt(t.facture, devise), 192, y + 7.5, { align: "right" });
+  let yp = y + 7.5;
+  doc.text(avecPartenaires ? "Facturé aux clients" : "Recettes (chiffre d’affaires)", 18, yp);
+  doc.text(fmt(t.facture, devise), 192, yp, { align: "right" });
+  if (avecPartenaires) {
+    yp += 6.5;
+    doc.text(`Facturé aux partenaires (${t.nbPartenaires} colis)`, 18, yp);
+    doc.text(fmt(t.facturePartenaires, devise), 192, yp, { align: "right" });
+    yp += 7;
+    doc.setDrawColor(205, 212, 224); doc.setLineWidth(0.3); doc.line(18, yp - 3.5, 192, yp - 3.5);
+    doc.text("Recettes (chiffre d’affaires)", 18, yp);
+    doc.text(fmt(t.factureTotal, devise), 192, yp, { align: "right" });
+  }
+  yp += 6.5;
   doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
-  doc.text("Dépenses du voyage", 18, y + 14);
-  doc.text(`- ${fmt(t.depensesEUR, devise)}`, 192, y + 14, { align: "right" });
+  doc.text("Dépenses du voyage", 18, yp);
+  doc.text(`- ${fmt(t.depensesEUR, devise)}`, 192, yp, { align: "right" });
+  yp += 7.5;
   doc.setFont(undefined, "bold"); doc.setFontSize(10.5);
   doc.setTextColor(...(t.resultat >= 0 ? [22, 161, 99] : [214, 39, 63]));
-  doc.text("Résultat sur le facturé", 18, y + 21.5);
-  doc.text(fmt(t.resultat, devise), 192, y + 21.5, { align: "right" });
+  doc.text("Résultat sur le facturé", 18, yp);
+  doc.text(fmt(t.resultat, devise), 192, yp, { align: "right" });
+  yp += 8;
   doc.setFontSize(12);
   doc.setTextColor(...(t.tresorerie >= 0 ? [22, 161, 99] : [214, 39, 63]));
-  doc.text("Bilan final (argent rentré)", 18, y + 29.5);
-  doc.text(fmt(t.tresorerie, devise), 192, y + 29.5, { align: "right" });
-  y += 37;
+  doc.text("Bilan final (argent rentré)", 18, yp);
+  doc.text(fmt(t.tresorerie, devise), 192, yp, { align: "right" });
+  y += hauteurPanneau + 5;
 
   const tauxFiche = LIVE_RATES[devise] || CURRENCIES[devise] || 1;
   doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
   doc.text(`Bilan final = encaissé ${fmt(t.encaisse, devise)} - dépenses ${fmt(t.depensesEUR, devise)}.`
     + (devise === "EUR" ? "" : ` Tous les montants sont en ${devise} (1 EUR = ${tauxFiche.toLocaleString("fr-FR")} ${devise}).`), 14, y);
-  y += 11;
+  y += 5;
+  if (avecPartenaires) {
+    // Sans cette phrase, on chercherait le facturé partenaire dans le bilan final et on croirait
+    // à une erreur de calcul.
+    doc.text(`Le facturé aux partenaires (${fmt(t.facturePartenaires, devise)}) n’entre pas dans le bilan final :`
+      + " il est réglé sur la facture mensuelle du partenaire, pas au comptoir.", 14, y);
+    y += 5;
+  }
+  y += 6;
   // Le pied de page est à 288 mm : la ligne de signature doit rester au-dessus.
   if (y > 262) { doc.addPage(); y = 20; }
   doc.setFontSize(9); doc.setTextColor(90, 100, 120);
@@ -24233,7 +24322,16 @@ function VoyagesPage({ data, persist, session, notify }) {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12, marginBottom: 18 }}>
         {[
           { label: "Colis embarqués", valeur: String(totaux.nbColis), sous: `${totaux.poids.toFixed(1)} kg au total`, icon: Package, tint: "#5B8DEF" },
-          { label: "Recettes (chiffre d’affaires)", valeur: fmt(totaux.facture, "EUR"), sous: `encaissé ${fmt(totaux.encaisse, "EUR")} · reste ${fmt(totaux.resteAEncaisser, "EUR")}`, icon: DollarSign, tint: "#0A2647" },
+          /*
+           * L'écran dit désormais la même chose que la fiche imprimée : le facturé partenaire
+           * fait partie des recettes, mais il se règle sur la facture mensuelle du partenaire —
+           * pas au comptoir. La carte le montre donc dans son total et le nomme en dessous.
+           */
+          { label: "Recettes (chiffre d’affaires)", valeur: fmt(totaux.factureTotal, "EUR"),
+            sous: totaux.facturePartenaires > 0.005
+              ? `clients ${fmt(totaux.facture, "EUR")} · partenaires ${fmt(totaux.facturePartenaires, "EUR")}`
+              : `encaissé ${fmt(totaux.encaisse, "EUR")} · reste ${fmt(totaux.resteAEncaisser, "EUR")}`,
+            icon: DollarSign, tint: "#0A2647" },
           { label: "Dépenses du voyage", valeur: fmt(totaux.depensesEUR, "EUR"), sous: `${depenses.length} ligne${depenses.length > 1 ? "s" : ""}`, icon: Receipt, tint: "#B8801C" },
           { label: "Résultat du voyage", valeur: fmt(totaux.resultat, "EUR"), sous: fmtGNF(totaux.resultat * (LIVE_RATES.GNF || CURRENCIES.GNF)), icon: Plane, tint: totaux.resultat >= 0 ? "#16A163" : "#E23F52" },
         ].map((k) => (
@@ -24453,14 +24551,21 @@ function VoyagesPage({ data, persist, session, notify }) {
             <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>
               Contrôle avant départ — {colisPartenaires.length} colis partenaire{colisPartenaires.length > 1 ? "s" : ""}
             </div>
+            {/*
+              * Cette phrase disait « ni tarif ni facture chez nous ». C'était vrai du client du
+              * partenaire, pas du partenaire lui-même : il nous doit le tarif de son contrat, et
+              * la fiche le compte désormais dans les recettes. La laisser telle quelle ferait dire
+              * au même écran deux choses contraires.
+              */}
             <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 }}>
-              Ces colis n’ont ni tarif ni facture chez nous : ce récapitulatif est le seul contrôle de ce
-              qu’ils contiennent. Vérifiez client, articles et poids avant de sceller le voyage.
+              Ces colis ne sont pas encaissés au comptoir : ils sont facturés au partenaire, au tarif
+              de son contrat. Ce récapitulatif est le seul contrôle de ce qu’ils contiennent —
+              vérifiez client, articles et poids avant de sceller le voyage.
             </div>
           </div>
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", minWidth: 600, borderCollapse: "collapse" }}>
-              <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Partenaire", "Client", "Articles", "Poids"].map((h) => <th key={h} style={{ padding: "9px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
+              <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Partenaire", "Client", "Articles", "Poids", "Facturé au partenaire"].map((h) => <th key={h} style={{ padding: "9px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
               <tbody>
                 {colisPartenaires.map((c) => {
                   const p = (data.users || []).find((u) => u.id === c.partenaireId);
@@ -24475,6 +24580,17 @@ function VoyagesPage({ data, persist, session, notify }) {
                         ))}
                       </td>
                       <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.poids} kg</td>
+                      {/*
+                        * Le tarif du contrat — jamais ce que le partenaire facture à son client.
+                        *
+                        * `prixPartenaire` est stocké DANS la devise du contrat (voir
+                        * detailPrixPartenaire : poids × tarif.parKg), pas dans la base euro. Il
+                        * passe donc par versEUR avant fmt, sans quoi un montant en francs serait
+                        * multiplié une seconde fois par le taux.
+                        */}
+                      <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 700, whiteSpace: "nowrap" }}>
+                        {fmt(versEUR(Number(c.prixPartenaire) || 0, c.devisePartenaire), c.devisePartenaire || "GNF")}
+                      </td>
                     </tr>
                   );
                 })}
@@ -24483,7 +24599,7 @@ function VoyagesPage({ data, persist, session, notify }) {
           </div>
           <div style={{ padding: "12px 16px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
             <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
-              Total partenaires : <strong style={{ color: "var(--text)" }}>{colisPartenaires.reduce((s, c) => s + nombreArticles(c), 0)} articles</strong> · <strong style={{ color: "var(--text)" }}>{colisPartenaires.reduce((s, c) => s + (Number(c.poids) || 0), 0).toFixed(1)} kg</strong>
+              Total partenaires : <strong style={{ color: "var(--text)" }}>{colisPartenaires.reduce((s, c) => s + nombreArticles(c), 0)} articles</strong> · <strong style={{ color: "var(--text)" }}>{colisPartenaires.reduce((s, c) => s + (Number(c.poids) || 0), 0).toFixed(1)} kg</strong> · à facturer <strong style={{ color: "var(--text)" }}>{fmt(colisPartenaires.reduce((s, c) => s + versEUR(Number(c.prixPartenaire) || 0, c.devisePartenaire), 0), "EUR")}</strong>
             </div>
             {enLecture ? (
               <div style={{ fontSize: 12.5, color: "var(--ok-fg)", fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>

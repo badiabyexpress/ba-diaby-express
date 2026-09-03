@@ -2,6 +2,36 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App.jsx";
 
+/*
+ * LA PROPOSITION D'INSTALLATION SE RATTRAPE ICI, ET NULLE PART AILLEURS.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Chrome n'envoie « beforeinstallprompt » qu'UNE FOIS, au chargement de la page — donc avant que
+ * l'agent se connecte. Le bouton « Installer l'application », lui, vit dans le menu, qui n'existe
+ * qu'APRÈS la connexion. Quand il se mettait à écouter, la proposition était passée depuis
+ * longtemps et perdue : le bouton ne s'affichait jamais, sur aucun téléphone.
+ *
+ * C'est pourquoi l'écoute est posée ici, dans le tout premier fichier exécuté, avant même que React
+ * ne s'installe. On retient la proposition dans `window`, et le menu vient la chercher au moment où
+ * il apparaît.
+ *
+ * Elle ne peut pas être posée plus tôt encore — dans une balise <script> de la page — parce que la
+ * politique de sécurité du site interdit le code écrit à même le HTML.
+ */
+window.__bdeInvitationInstallation = null;
+window.addEventListener("beforeinstallprompt", (e) => {
+  /*
+   * Retenir la barre de Chrome plutôt que la laisser s'ouvrir d'elle-même, souvent au milieu d'une
+   * saisie de colis avec le client en face.
+   */
+  e.preventDefault();
+  window.__bdeInvitationInstallation = e;
+  window.dispatchEvent(new Event("bde-installable"));
+});
+window.addEventListener("appinstalled", () => {
+  window.__bdeInvitationInstallation = null;
+  window.dispatchEvent(new Event("bde-installee"));
+});
+
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
     <App />

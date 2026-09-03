@@ -3757,21 +3757,35 @@ function estAppareilApple() {
   return /iPad|iPhone|iPod/.test(ua) || (/Macintosh/.test(ua) && (navigator.maxTouchPoints || 0) > 1);
 }
 
+function estAndroid() {
+  if (typeof navigator === "undefined") return false;
+  return /Android/.test(navigator.userAgent || "");
+}
+
 function useInstallation() {
-  const [invite, setInvite] = useState(null);
+  /*
+   * LA PROPOSITION EST DÉJÀ ARRIVÉE, ET ELLE A ÉTÉ RETENUE POUR NOUS.
+   *
+   * Chrome ne l'envoie qu'une fois, au chargement de la page — donc avant la connexion, alors que
+   * ce menu n'existe pas encore. Se contenter d'écouter ici, c'était écouter après le passage du
+   * train : le bouton ne s'affichait jamais, sur aucun téléphone. src/main.jsx la retient dès le
+   * premier instant ; on la récupère.
+   */
+  const [invite, setInvite] = useState(() => (typeof window === "undefined" ? null : window.__bdeInvitationInstallation));
   const [installee, setInstallee] = useState(dejaInstallee);
 
   useEffect(() => {
-    /*
-     * Chrome veut afficher sa propre barre d'installation, souvent au pire moment — au milieu
-     * d'une saisie de colis, avec le client en face. On la retient pour la déclencher depuis notre
-     * bouton, quand l'agent le décide.
-     */
+    /* Au cas où elle arriverait plus tard : on écoute les deux, la nôtre et celle du navigateur. */
+    const relayee = () => setInvite(window.__bdeInvitationInstallation);
     const capter = (e) => { e.preventDefault(); setInvite(e); };
     const posee = () => { setInvite(null); setInstallee(true); };
+    window.addEventListener("bde-installable", relayee);
+    window.addEventListener("bde-installee", posee);
     window.addEventListener("beforeinstallprompt", capter);
     window.addEventListener("appinstalled", posee);
     return () => {
+      window.removeEventListener("bde-installable", relayee);
+      window.removeEventListener("bde-installee", posee);
       window.removeEventListener("beforeinstallprompt", capter);
       window.removeEventListener("appinstalled", posee);
     };
@@ -3782,22 +3796,44 @@ function useInstallation() {
     invite.prompt();
     try { await invite.userChoice; } catch { /* refus ou fenêtre fermée : rien à rattraper */ }
     /* L'invitation ne sert qu'une fois. La garder laisserait un bouton qui ne fait plus rien. */
+    window.__bdeInvitationInstallation = null;
     setInvite(null);
   }
 
-  return { installee, invite, apple: estAppareilApple(), installer };
+  return { installee, invite, apple: estAppareilApple(), android: estAndroid(), installer };
 }
 
 /**
- * Le bouton, tel qu'il apparaît en bas du menu. Il ne s'affiche jamais pour rien : ni si
- * l'application est déjà posée sur l'écran d'accueil, ni sur un navigateur qui ne sait pas
- * l'installer — un bouton qui ne fait rien apprend à ne plus lire les boutons.
+ * Le bouton, tel qu'il apparaît en bas du menu.
+ *
+ * Il ne s'affiche pas si l'application est déjà posée sur l'écran d'accueil, ni sur un ordinateur
+ * dont le navigateur n'a rien proposé — là, il n'y aurait rien à dire.
+ *
+ * MAIS SUR UN TÉLÉPHONE, IL S'AFFICHE TOUJOURS.
+ *
+ * Y compris quand le navigateur n'a envoyé aucune proposition : il ouvre alors le mode d'emploi.
+ * La première version se cachait dans ce cas, et le résultat a été exactement ce qu'on voulait
+ * éviter — un agent sans réponse, à qui il ne reste qu'un fichier reçu par message. Un bouton qui
+ * explique n'est pas un bouton mort.
  */
 function BoutonInstallation({ compact }) {
-  const { installee, invite, apple, installer } = useInstallation();
+  const { installee, invite, apple, android, installer } = useInstallation();
   const [expliquer, setExpliquer] = useState(false);
   if (installee) return null;
-  if (!invite && !apple) return null;
+  if (!invite && !apple && !android) return null;
+
+  const encadreDuFaux = (
+    /*
+     * L'avertissement est ici parce que c'est ici qu'il sera lu : au moment précis où quelqu'un
+     * cherche comment installer l'application — c'est-à-dire au moment où on lui proposerait un
+     * fichier.
+     */
+    <div style={{ borderInlineStart: "3px solid #E0A63A", background: "var(--card-2, rgba(224,166,58,0.08))", padding: "10px 14px", borderRadius: 6 }}>
+      <strong>N’installez jamais un fichier reçu par message.</strong> Ba-Diaby Express ne se
+      distribue pas en fichier, et ne le fera jamais : un fichier qui prétendrait être une
+      mise à jour de cette application est un faux, quel que soit son expéditeur.
+    </div>
+  );
 
   return (
     <>
@@ -3806,7 +3842,7 @@ function BoutonInstallation({ compact }) {
         style={{ display: "flex", alignItems: "center", justifyContent: compact ? "center" : "flex-start", gap: 8, width: "100%", fontSize: 13, color: "#fff", background: "none", border: "none", cursor: "pointer", marginBottom: 8, padding: 0 }}>
         <Download size={15} /> {!compact && "Installer l’application"}
       </button>
-      {expliquer && (
+      {expliquer && apple && (
         <Modal onClose={() => setExpliquer(false)} title="Installer sur l’iPhone">
           <div style={{ fontSize: 14, lineHeight: 1.65 }}>
             <p style={{ marginTop: 0, color: "var(--muted)" }}>
@@ -3818,15 +3854,33 @@ function BoutonInstallation({ compact }) {
               <li style={{ marginBottom: 8 }}>Faites défiler la liste, puis touchez <strong>« Sur l’écran d’accueil »</strong>.</li>
               <li>Touchez <strong>« Ajouter »</strong>, en haut à droite.</li>
             </ol>
+            {encadreDuFaux}
+          </div>
+        </Modal>
+      )}
+      {expliquer && !apple && (
+        <Modal onClose={() => setExpliquer(false)} title="Installer sur Android">
+          <div style={{ fontSize: 14, lineHeight: 1.65 }}>
+            <p style={{ marginTop: 0, color: "var(--muted)" }}>
+              Votre navigateur n’a rien proposé pour l’instant. Ce n’est pas grave : l’installation
+              se fait aussi à la main, par son menu.
+            </p>
+            <ol style={{ paddingInlineStart: 20, margin: "14px 0" }}>
+              <li style={{ marginBottom: 8 }}>Touchez les <strong>trois points ⋮</strong> en haut à droite du navigateur.</li>
+              <li style={{ marginBottom: 8 }}>Touchez <strong>« Installer l’application »</strong> — ou, selon le téléphone, <strong>« Ajouter à l’écran d’accueil »</strong>.</li>
+              <li>Confirmez avec <strong>« Installer »</strong>.</li>
+            </ol>
             {/*
-              L'avertissement est ici parce que c'est ici qu'il sera lu : au moment précis où
-              quelqu'un cherche comment installer l'application.
+              Le cas le plus fréquent, et celui qu'on ne devinerait pas : le navigateur n'a pas
+              encore reconnu l'application, parce que c'est la première visite depuis une mise à
+              jour. Un rechargement suffit, et il faut le dire avant que l'agent renonce.
             */}
-            <div style={{ borderInlineStart: "3px solid #E0A63A", background: "var(--card-2, rgba(224,166,58,0.08))", padding: "10px 14px", borderRadius: 6 }}>
-              <strong>N’installez jamais un fichier reçu par message.</strong> Ba-Diaby Express ne se
-              distribue pas en fichier, et ne le fera jamais : un fichier qui prétendrait être une
-              mise à jour de cette application est un faux, quel que soit son expéditeur.
-            </div>
+            <p style={{ color: "var(--muted)", marginBottom: 14 }}>
+              Si l’entrée n’apparaît pas dans le menu, fermez complètement le navigateur, rouvrez
+              <strong> badiabyexpress.com</strong> et réessayez : à la première visite après une mise
+              à jour, il lui faut un passage pour reconnaître l’application.
+            </p>
+            {encadreDuFaux}
           </div>
         </Modal>
       )}

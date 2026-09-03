@@ -4787,10 +4787,17 @@ function App() {
             </button>
             {/*
               * La cloche vit ici, sur la première ligne du menu : c'est le seul endroit visible
-              * sans faire défiler et sans replier quoi que ce soit. Sur téléphone, elle est
-              * doublée dans la barre du haut — là, le menu est fermé la plupart du temps.
+              * sans faire défiler et sans replier quoi que ce soit.
+              *
+              * SUR TÉLÉPHONE, ELLE N'Y EST PAS — la barre du haut en porte déjà une, et le menu se
+              * dépose PAR-DESSUS elle quand on l'ouvre. On voyait donc deux cloches, même compte,
+              * même panneau, l'une devant l'autre. Deux fois le même chiffre fait douter du chiffre.
+              *
+              * Sur ordinateur il n'y a pas de barre du haut : celle-ci est la seule, et elle reste.
               */}
-            <ClocheNotifications data={data} session={session} onAller={allerDepuisLaCloche} surFondSombre />
+            {!isMobile && (
+              <ClocheNotifications data={data} session={session} onAller={allerDepuisLaCloche} surFondSombre />
+            )}
           </div>
           <nav style={{ padding: 12, display: "flex", flexDirection: "column", gap: 3, flex: 1, overflowY: "auto" }}>
             {nav.map((n) => (
@@ -31623,6 +31630,60 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
   }
 
   /*
+   * SUPPRIMER UNE FACTURE PARTENAIRE — RÉSERVÉ À L'ADMINISTRATEUR.
+   * ─────────────────────────────────────────────────────────────────────────────
+   * Ce qu'il faut savoir avant de lire la suite : « Rouvrir » supprimait DÉJÀ la facture, et tous
+   * les rôles — agent compris — en ont le droit. Une facture pouvait donc disparaître de la main
+   * de n'importe qui, sous un mot qui annonçait une modification. Ces trois factures perdues entre
+   * le 26 et le 31 août, retrouvées huit jours plus tard dans une sauvegarde qui allait être
+   * effacée, disent assez ce que coûte une pièce comptable qui s'en va sans bruit.
+   *
+   * Deux gestes distincts, donc, et une règle commune :
+   *
+   *   — ROUVRIR reste le geste de correction : la facture est reprise, ses colis redeviennent
+   *     modifiables et repartiront sur une facture neuve. C'est ce qu'on fait quand un montant
+   *     est faux.
+   *   — SUPPRIMER est le geste de renoncement : la facture n'aurait pas dû exister — un doublon,
+   *     un mauvais partenaire. Elle s'en va, et ses colis retournent à facturer, parce qu'ils
+   *     restent dus : les laisser rattachés à une facture disparue les ferait sortir des comptes
+   *     sans que personne ne s'en aperçoive.
+   *
+   * Les deux exigent désormais un administrateur, parce que les deux font le même dégât. Restreindre
+   * l'un en laissant l'autre ouvert aurait donné une protection de façade.
+   */
+  const peutSupprimerFacture = session?.role === "Administrateur";
+
+  function supprimerFacturePartenaire(facture) {
+    if (!peutSupprimerFacture) {
+      notify?.("Seul un administrateur peut supprimer une facture partenaire.");
+      return;
+    }
+    /*
+     * Un versement reçu interdit la suppression, comme il interdit la réouverture — et pour la
+     * même raison : l'argent serait encore là, sans facture à laquelle le rattacher. Il faut
+     * d'abord annuler les versements, un par un, ce qui laisse une trace de chacun.
+     */
+    if (reglementsFacture(facture).length > 0) {
+      notify?.(`Facture ${facture.numero} déjà réglée — annulez d’abord ses versements`);
+      return;
+    }
+    const inclus = new Set(facture.trackings || []);
+    persist({
+      ...data,
+      facturesPartenaire: facturesPartenaire.filter((f) => f.id !== facture.id),
+      colis: (data.colis || []).map((c) => (inclus.has(c.tracking) ? { ...c, facturePartenaireId: null } : c)),
+      /*
+       * Le journal garde le numéro, le montant et le nombre de colis. Une facture supprimée ne
+       * laisse aucune autre trace : c'est la seule ligne qui permettra, dans six mois, de dire
+       * pourquoi FP-2026-0002 n'existe pas entre la 0001 et la 0003.
+       */
+      activityLog: pushActivity(data, session, "Facture partenaire supprimée",
+        `${facture.numero} — ${fmt(Number(facture.total) || 0, facture.devise)}, ${inclus.size} colis rendus à la facturation`),
+    });
+    notify?.(`Facture ${facture.numero} supprimée — ses ${inclus.size} colis reviennent à facturer`);
+  }
+
+  /*
    * Versement d'un partenaire sur l'une de ses factures.
    *
    * C'est le seul endroit de l'application où l'entreprise constate de l'argent reçu d'un
@@ -31908,7 +31969,14 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
           colis={data.colis || []} onImprimer={imprimerFacture} onReleve={imprimerReleve}
           onCreerFacture={effectivePermission(session, "factures.creer") ? creerFacture : null}
           onCorriger={effectivePermission(session, "factures.modifier") ? corrigerMontant : null}
-          onRouvrir={effectivePermission(session, "factures.modifier") ? rouvrirFacture : null}
+          /*
+           * Rouvrir supprime la facture — c'est écrit dans sa propre confirmation. Le geste rejoint
+           * donc la suppression derrière la même règle : seul un administrateur. Le laisser ouvert
+           * à tous aurait fait de la suppression réservée une protection de façade, puisque le
+           * même effet s'obtenait à côté sous un autre mot.
+           */
+          onRouvrir={peutSupprimerFacture ? rouvrirFacture : null}
+          onSupprimer={peutSupprimerFacture ? supprimerFacturePartenaire : null}
           onEncaisser={effectivePermission(session, "factures.modifier") ? encaisserFacture : null}
           onAnnulerReglement={effectivePermission(session, "factures.modifier") ? annulerReglement : null}
           onRelancer={effectivePermission(session, "factures.modifier") ? marquerRelance : null}
@@ -32622,7 +32690,7 @@ function DepotsAnnoncesPartenaire({ annonces, onAnnuler }) {
 }
 
 /** Regroupement des colis vérifiés en une facture unique, et historique des factures émises. */
-function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreerFacture, onImprimer, onCorriger, onRouvrir, onEncaisser, onAnnulerReglement, onRelancer, onReleve }) {
+function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreerFacture, onImprimer, onCorriger, onRouvrir, onSupprimer, onEncaisser, onAnnulerReglement, onRelancer, onReleve }) {
   const reglagesDuPartenaire = reglagesPartenaire(partenaire);
   const devise = reglagesDuPartenaire.tarif.devise;
   const delaiReglement = reglagesDuPartenaire.delaiReglementJours;
@@ -32650,6 +32718,8 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
   const totalTout = aFacturer.reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0);
   const [confirmation, setConfirmation] = useState(false);
   const [aRouvrir, setARouvrir] = useState(null);
+  /* La facture qu'on s'apprête à supprimer pour de bon — réservé à l'administrateur. */
+  const [aSupprimer, setASupprimer] = useState(null);
   const [enCorrection, setEnCorrection] = useState(null);
   const [montant, setMontant] = useState("");
   const [aEncaisser, setAEncaisser] = useState(null);
@@ -32857,6 +32927,16 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
                   {onRouvrir && <button onClick={() => setARouvrir(f)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "1.5px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
                     <RefreshCw size={14} /> Rouvrir
                   </button>}
+                  {/*
+                    Supprimer se distingue de rouvrir par l'intention, pas par l'effet : rouvrir
+                    reprend une facture pour la refaire, supprimer renonce à une facture qui
+                    n'aurait pas dû exister. Le bouton est donc là, en rouge et en dernier — on ne
+                    le rencontre pas en cherchant autre chose.
+                  */}
+                  {onSupprimer && <button onClick={() => setASupprimer(f)}
+                    style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "1.5px solid var(--danger-border)", color: "var(--danger-fg)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                    <Trash2 size={14} /> Supprimer
+                  </button>}
                 </div>
               </div>
               {versements.length > 0 && (
@@ -32939,6 +33019,31 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
           libelleAction="Rouvrir"
           onConfirmer={() => { const f = aRouvrir; setARouvrir(null); onRouvrir(f); }}
           onAnnuler={() => setARouvrir(null)}
+        />
+      ))}
+
+      {/*
+        La suppression dit ce qu'elle laisse derrière elle, et pas seulement ce qu'elle emporte.
+        Un numéro manquant dans une suite de factures se remarque des mois plus tard, quand plus
+        personne ne se souvient : autant l'annoncer au moment où on le crée.
+      */}
+      {aSupprimer && (reglementsFacture(aSupprimer).length > 0 ? (
+        <ConfirmerAction
+          titre="Facture déjà réglée"
+          message={`${aSupprimer.numero} porte ${reglementsFacture(aSupprimer).length} versement${reglementsFacture(aSupprimer).length > 1 ? "s" : ""}, pour ${fmt(totalRegleFacture(aSupprimer), aSupprimer.devise)}.`}
+          consequence="La supprimer laisserait cet argent sans facture à laquelle le rattacher. Annulez d’abord ses versements, un par un — chacun laisse une trace — puis revenez."
+          libelleAction="J’ai compris"
+          onConfirmer={() => setASupprimer(null)}
+          onAnnuler={() => setASupprimer(null)}
+        />
+      ) : (
+        <ConfirmerAction
+          titre="Supprimer cette facture ?"
+          message={`${aSupprimer.numero} — ${(aSupprimer.trackings || []).length} colis, ${fmt(Number(aSupprimer.total) || 0, aSupprimer.devise)}.`}
+          consequence={`La facture disparaît définitivement et son numéro laissera un trou dans la suite : ${aSupprimer.numero} n’existera plus. Ses colis retournent dans la liste à facturer — ils restent dus, et les laisser rattachés à une facture supprimée les ferait sortir des comptes sans bruit. Le journal d’activité gardera le numéro, le montant et la date. Si le partenaire a déjà reçu ce document, prévenez-le.`}
+          libelleAction="Supprimer définitivement"
+          onConfirmer={() => { const f = aSupprimer; setASupprimer(null); onSupprimer(f); }}
+          onAnnuler={() => setASupprimer(null)}
         />
       ))}
 

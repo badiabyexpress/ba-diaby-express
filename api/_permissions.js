@@ -36,6 +36,20 @@ export const PERMISSIONS_SCHEMA = [
      * d'un colis à l'unité. Non accordées à l'Agent par défaut : c'est à l'administrateur de
      * désigner nommément les agences/agents autorisés, comme pour l'Espace Client.
      */
+    /*
+     * UN COLIS D'ACHAT EN LIGNE SE CORRIGE LÀ OÙ IL A ÉTÉ PESÉ.
+     *
+     * Ces colis-là naissent au site de départ — Paris : c'est là qu'arrivent les commandes, là
+     * qu'on les pèse, et le poids EST le prix. L'équipe de Conakry les voit, les cherche au
+     * comptoir, les remet et les encaisse : c'est son métier. Mais corriger un poids depuis
+     * Conakry, c'est refaire le prix d'un colis qu'on n'a jamais eu sur la balance — et le refaire
+     * après que le client a reçu sa facture.
+     *
+     * L'équipe du site de départ n'a pas besoin de ce droit : il lui vient de son site. Celui-ci
+     * sert à l'administrateur pour désigner nommément quelqu'un d'ailleurs — un responsable à
+     * Conakry qui doit pouvoir rattraper une saisie sans attendre Paris.
+     */
+    { key: "colis.enligne_modifier", label: "Modifier un colis d’achat en ligne depuis un autre site que celui de départ" },
     { key: "colis.importer_excel", label: "Importer des colis depuis Excel" },
     { key: "colis.bordereau_reception", label: "Générer un bordereau de réception" },
     { key: "colis.reglement_groupe", label: "Encaisser plusieurs colis en une fois (règlement groupé)" },
@@ -109,6 +123,31 @@ export const PERMISSIONS_SCHEMA = [
     { key: "users.gerer", label: "Créer / modifier / supprimer un utilisateur" },
     { key: "users.permissions", label: "Gérer les permissions des autres comptes" },
   ]},
+  /*
+   * LE TRANSFERT D'ARGENT — le module où une permission de trop coûte de l'argent liquide.
+   *
+   * Aucune de ces clés n'est accordée à l'Agent par défaut, et c'est délibéré. Créer un transfert,
+   * c'est encaisser ; en payer un, c'est sortir des billets d'un tiroir sur présentation d'un
+   * code. Ce sont les deux gestes les plus sensibles de toute l'application, et ils ne doivent pas
+   * arriver à quelqu'un parce qu'on lui a créé un compte : c'est à l'administrateur de désigner
+   * nommément qui envoie et qui paie — les deux ne sont d'ailleurs pas forcément la même personne,
+   * ni la même agence.
+   *
+   * « Revoir le code » existe parce qu'un client perd son reçu. Le code n'est pas conservé en clair
+   * dans la base ; le redonner est possible, mais c'est un geste tracé, séparé du reste.
+   */
+  { group: "TRANSFERT D’ARGENT", permissions: [
+    { key: "transfert.creer", label: "Créer un transfert et encaisser l’expéditeur" },
+    { key: "transfert.payer", label: "Payer un transfert au bénéficiaire" },
+    { key: "transfert.voir_propres", label: "Voir ses propres transferts" },
+    { key: "transfert.voir_zone", label: "Voir les transferts de son agence / sa zone" },
+    { key: "transfert.voir_tous", label: "Voir tous les transferts (toutes agences)" },
+    { key: "transfert.annuler", label: "Annuler un transfert non payé" },
+    { key: "transfert.revoir_code", label: "Réafficher le code d’un transfert (geste tracé)" },
+    { key: "transfert.caisse", label: "Consulter la caisse des transferts" },
+    { key: "transfert.journal", label: "Consulter le journal des transferts" },
+    { key: "transfert.config", label: "Régler les frais, les taux, les limites et les commissions" },
+  ]},
   { group: "ASSISTANT IA", permissions: [
     { key: "ia.utiliser", label: "Utiliser l’assistant IA" },
   ]},
@@ -116,9 +155,44 @@ export const PERMISSIONS_SCHEMA = [
 
 export const ROLE_DEFAULT_PERMISSIONS = {
   "Administrateur": PERMISSIONS_SCHEMA.flatMap((g) => g.permissions.map((p) => p.key)),
-  "Responsable de zone": ["colis.voir_propres", "colis.voir_tous", "colis.creer", "colis.modifier", "colis.changer_statut", "colis.enregistrer_paiement", "colis.importer_excel", "colis.bordereau_reception", "colis.reglement_groupe", "bordereaux.consulter", "bordereaux.creer", "bordereaux.modifier", "bordereaux.valider", "factures.consulter", "factures.creer", "factures.modifier", "paiements.voir_propres", "clients.consulter", "espaceclient.gerer", "stats.personnelles", "equipe.pointage", "users.gerer", "ia.utiliser"],
+  /*
+   * LE RESPONSABLE DE ZONE VOIT SA ZONE — c'est le sens même du rôle.
+   *
+   * Il portait « Voir tous les colis » par défaut. Or c'est cette permission qui commande le
+   * cloisonnement : la lui donner d'office revenait à créer un rôle « responsable de zone » qui
+   * n'était responsable d'aucune zone en particulier, et le filtrage ne s'appliquait à personne.
+   * L'administrateur peut toujours la lui accorder nommément s'il veut qu'il voie tout.
+   *
+   * « Consulter les utilisateurs » lui manquait, alors qu'il a le droit d'en créer et d'en
+   * modifier : l'écran qui sert à cela ne s'ouvrait donc pas pour lui. Un droit accordé qu'aucune
+   * porte n'honore est un droit qui n'existe pas.
+   */
+  "Responsable de zone": ["colis.voir_propres", "colis.creer", "colis.modifier", "colis.changer_statut", "colis.enregistrer_paiement", "colis.importer_excel", "colis.bordereau_reception", "colis.reglement_groupe", "bordereaux.consulter", "bordereaux.creer", "bordereaux.modifier", "bordereaux.valider", "factures.consulter", "factures.creer", "factures.modifier", "paiements.voir_propres", "clients.consulter", "espaceclient.gerer", "stats.personnelles", "equipe.pointage", "users.consulter", "users.gerer", "ia.utiliser",
+    /*
+     */
+    /*
+     * LE TRANSFERT D'ARGENT NE SUIT AUCUN RÔLE — il se donne nom par nom.
+     *
+     * Le responsable de zone le portait par défaut, au motif qu'il opère sa zone. C'était une
+     * erreur de raisonnement : envoyer et payer de l'argent n'est pas une extension du travail
+     * sur les colis, c'est un autre métier, et le décider par le rôle revient à l'accorder à
+     * quelqu'un parce qu'on l'a nommé responsable — pas parce qu'on a voulu qu'il touche à
+     * l'argent. Un rôle créé demain le recevrait en silence.
+     *
+     * Personne ne l'a donc par défaut, quel que soit le rôle. L'administrateur désigne, compte
+     * par compte, qui envoie et qui paie — et retire aussi facilement.
+     *
+     * Restent les droits de LECTURE : voir sa zone, et voir ce qu'on a soi-même fait. Lire n'est
+     * pas faire — et sans « voir ses propres transferts », un responsable dont l'agence n'est pas
+     * encore renseignée n'aurait plus aucune portée du tout, donc un écran vide sans explication.
+     */
+    "transfert.voir_propres", "transfert.voir_zone"],
   "Agent": ["colis.voir_propres", "colis.voir_tous", "colis.creer", "colis.modifier", "colis.changer_statut", "colis.enregistrer_paiement", "bordereaux.consulter", "bordereaux.creer", "bordereaux.modifier", "bordereaux.valider", "factures.consulter", "factures.creer", "factures.modifier", "paiements.voir_propres", "clients.consulter", "stats.personnelles", "ia.utiliser"],
-  "Comptable": ["colis.voir_tous", "factures.consulter", "factures.creer", "factures.modifier", "clients.consulter", "bordereaux.consulter", "compta.consulter", "compta.gerer_depenses", "compta.charges_fixes", "compta.marges", "stats.globales", "stats.exporter"],
+  /*
+   * Le comptable LIT les transferts — il en a besoin pour arrêter les comptes — et n'en opère
+   * aucun. Voir tout et ne rien pouvoir déplacer, c'est exactement son rôle.
+   */
+  "Comptable": ["colis.voir_tous", "factures.consulter", "factures.creer", "factures.modifier", "clients.consulter", "bordereaux.consulter", "compta.consulter", "compta.gerer_depenses", "compta.charges_fixes", "compta.marges", "stats.globales", "stats.exporter", "transfert.voir_tous", "transfert.caisse", "transfert.journal"],
   "Chauffeur": ["colis.voir_propres", "colis.changer_statut", "stats.personnelles"],
   "Partenaire": ["stats.personnelles"],
 };

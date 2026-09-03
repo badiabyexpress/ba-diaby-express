@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue, memo, createContext, useContext } from "react";
-import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, ChevronDown, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell, SlidersHorizontal, Copy, MoreHorizontal, Wallet } from "lucide-react";
+import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, ChevronDown, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell, SlidersHorizontal, Copy, MoreHorizontal, Wallet, Banknote, Send, ArrowRightLeft, HandCoins, Coins, ArrowUpRight, ArrowDownLeft, ScrollText, Ban } from "lucide-react";
 import { ROLES, PERMISSIONS_SCHEMA, ROLE_DEFAULT_PERMISSIONS, effectivePermission } from "../api/_permissions.js";
 import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree, relireDuServeur } from "./lib/storage.js";
 import { VILLES_PAR_PAYS } from "./data/villesParPays.js";
@@ -337,6 +337,25 @@ function colisDeLAgence(colis, agence) {
   return site.toLowerCase() === sienne.toLowerCase();
 }
 
+/**
+ * QUELS COLIS CETTE PERSONNE VOIT — la permission d'abord, l'agence ensuite.
+ *
+ * La liste des colis se filtrait par agence, et par agence seulement. « Voir tous les colis »
+ * existait, s'affichait dans l'écran des droits, était accordée à l'Agent par défaut — et cette
+ * liste-ci ne l'a jamais lue. Deux agents de deux agences ne voyaient donc chacun que la leur,
+ * quoi qu'on coche sur leur fiche : la permission ne pouvait rien changer parce que rien ne
+ * l'interrogeait.
+ *
+ * L'ordre compte. Le droit passe avant l'agence : c'est lui qui dit ce que la personne a le droit
+ * de voir, l'agence ne dit que d'où elle travaille. Pour restreindre quelqu'un à son agence, on
+ * lui retire « Voir tous les colis » — un seul interrupteur, le même qui commande déjà ce que le
+ * serveur lui envoie.
+ */
+function colisVisiblePour(session, colis) {
+  if (effectivePermission(session, "colis.voir_tous")) return true;
+  return colisDeLAgence(colis, session?.zoneOperation || session?.agence);
+}
+
 function telephonePourPays(data, pays) {
   return numerosPourPays(data, pays)[0] || "";
 }
@@ -618,6 +637,28 @@ export function autorisationModifierBordereau(session, bordereau) {
   return { autorise: true, motif: null };
 }
 
+/**
+ * UNE FICHE DE VOYAGE VALIDÉE NE SE ROUVRE QUE PAR L'ADMINISTRATEUR.
+ *
+ * La validation d'un voyage n'est pas un enregistrement de plus : elle arrête les comptes d'une
+ * rotation. Elle fige les recettes, les dépenses et le bilan, elle sort ses colis de tous les
+ * voyages suivants, et la fiche part signée. Rouvrir cette fiche, c'est défaire une pièce
+ * comptable déjà imprimée et remise — et supprimer le voyage, c'est la faire disparaître avec
+ * ses dépenses.
+ *
+ * Ces deux gestes étaient ouverts à quiconque pouvait consulter la comptabilité. Ils rejoignent
+ * la règle qui vaut déjà pour un bordereau parti : tant que c'est un brouillon, celui qui le tient
+ * en dispose ; une fois validé, il faut l'administrateur.
+ *
+ * Comme pour le bordereau, on rend le motif plutôt qu'un simple refus : un bouton qui disparaît
+ * sans explication se lit comme une panne, un bouton éteint avec sa raison se comprend.
+ */
+export function autorisationModifierVoyage(session, voyage) {
+  if (voyage?.statut !== "Validé") return { autorise: true, motif: null };
+  if (session?.role === "Administrateur") return { autorise: true, motif: null };
+  return { autorise: false, motif: "valide" };
+}
+
 const T = {
   fr: { dashboard: "Tableau de bord", colis: "Colis", tarif: "Tarification", clients: "Clients", admin: "Configuration", ia: "Assistant IA", logout: "Déconnexion", newColis: "Nouveau colis", search: "Rechercher", createAccount: "Créer un compte", bordereaux: "Bordereaux", paiements: "Paiements & Factures" },
   en: { dashboard: "Dashboard", colis: "Parcels", tarif: "Pricing", clients: "Clients", admin: "Settings", ia: "AI Assistant", logout: "Log out", newColis: "New parcel", search: "Search", createAccount: "Create account", bordereaux: "Waybills", paiements: "Payments & Invoices" },
@@ -824,6 +865,22 @@ function fmtGNF(n) {
  * virgule décimale et le sigle de la devise. On rend null — et non zéro — quand il n'y a rien de
  * lisible : c'est à l'appelant de refuser la saisie plutôt que d'inventer un montant.
  */
+/**
+ * CE QUE L'AGENT TAPE, TEL QUE LE RESTE DU CODE SAIT LE LIRE.
+ *
+ * En français, trois kilos trois se tapent « 3,30 ». Un champ `type="number"` REFUSE la virgule :
+ * le navigateur affiche bien ce qui est saisi, le cadre passe au rouge, et `value` reste VIDE.
+ * L'agent voyait donc son poids à l'écran, appuyait sur « Confirmer », et rien ne se passait —
+ * sans qu'aucun message n'explique pourquoi. Sur un téléphone guinéen, le clavier propose la
+ * virgule ; c'est donc le cas ordinaire, pas le cas rare.
+ *
+ * Les champs de poids sont désormais des champs de texte à clavier décimal, et la virgule devient
+ * un point à la frappe : tout ce qui lit ces valeurs avec `Number()` continue de fonctionner.
+ */
+function nombreTape(valeur) {
+  return String(valeur ?? "").replace(",", ".");
+}
+
 function montantSaisi(valeur) {
   if (typeof valeur === "number") return Number.isFinite(valeur) ? valeur : null;
   if (typeof valeur !== "string") return null;
@@ -1774,10 +1831,88 @@ function sitesOperationEtranger(data) {
 }
 function peutCreerColisEnLigne(session, data) {
   if (!session) return false;
+  /*
+   * Un partenaire est une entreprise tierce : il dépose des colis, il n'en enregistre pas pour le
+   * compte de l'entreprise. Le rôle passe avant l'agence — sans quoi un partenaire à qui l'on
+   * aurait mis « PARIS » dans sa fiche ouvrirait le comptoir de l'entreprise.
+   */
+  if (session.role === "Partenaire") return false;
   if (session.role === "Administrateur") return true;
   const sienne = String(session.agence || "").trim().toLowerCase();
   if (!sienne) return false;
   return sitesOperationEtranger(data).some((s) => String(s.nom || "").trim().toLowerCase() === sienne);
+}
+
+/**
+ * LES DROITS QUI OUVRENT LA CONFIGURATION — un seul suffit.
+ *
+ * L'entrée du menu ne lisait que « Accéder à la configuration ». Or la Configuration n'est pas un
+ * écran : c'est une salle de dix-sept portes, et chacune a sa propre clé. Un responsable à qui
+ * l'on avait donné le droit de gérer les utilisateurs — la seule porte qui l'intéressait — ne
+ * voyait tout simplement pas la salle. Son droit était accordé, affiché dans le tableau, et sans
+ * effet : il n'y avait aucun chemin pour s'en servir.
+ *
+ * La liste ci-dessous doit rester celle des permissions employées par ces écrans. Un banc le
+ * vérifie : ajouter une porte sans sa clé ici la rendrait invisible à qui la possède.
+ */
+export const PERMISSIONS_CONFIGURATION = [
+  "config.acceder", "config.tarifs", "config.categories",
+  "users.consulter", "stats.globales", "stats.exporter",
+];
+export function peutOuvrirConfiguration(session) {
+  return PERMISSIONS_CONFIGURATION.some((cle) => effectivePermission(session, cle));
+}
+
+/** Un colis d’achat en ligne — reconnu partout de la même façon. */
+export function estColisEnLigne(colis) {
+  return !!colis?.achatEnLigne || colis?.expediteur === "Commande en ligne";
+}
+
+/**
+ * QUI CORRIGE UN COLIS D'ACHAT EN LIGNE.
+ *
+ * VOIR ET ENCAISSER NE SONT PAS MODIFIER. L'équipe de Conakry voit ces colis, lit leurs
+ * références, les cherche au comptoir, les remet et les encaisse : c'est son métier, et rien
+ * ici ne l'en empêche. Corriger un poids, en revanche, c'est refaire le prix — d'un colis qu'on
+ * n'a jamais eu sur la balance, et après que le client a reçu sa facture. Ce geste reste donc à
+ * l'équipe du site de départ, celle qui a pesé.
+ *
+ * Trois façons d'y avoir droit, et une seule est un réglage :
+ *   — l'administrateur, qui doit pouvoir corriger de n'importe où ;
+ *   — l'équipe du site de départ, à qui le droit vient de son site, sans rien à cocher ;
+ *   — quiconque l'administrateur désigne nommément, par « colis.enligne_modifier ».
+ *
+ * `colis.modifier` reste exigé par-dessus : ce droit-ci ouvre une porte, il n'en perce pas une.
+ */
+export function autorisationModifierColisEnLigne(session, data) {
+  if (!effectivePermission(session, "colis.modifier")) return { autorise: false, motif: "permission" };
+  if (peutCreerColisEnLigne(session, data)) return { autorise: true, motif: null };
+  if (effectivePermission(session, "colis.enligne_modifier")) return { autorise: true, motif: "derogation" };
+  return { autorise: false, motif: "site" };
+}
+
+/**
+ * QUI OUVRE LE COMPTOIR DE RÉCEPTION CLIENT.
+ *
+ * L'écran demandait une permission, et une seule — accordée compte par compte. C'est juste pour
+ * Conakry, où l'on remet les colis : tout le monde n'a pas à générer des bordereaux. Mais à
+ * PARIS, ce comptoir n'est pas une commodité, c'est le poste de travail : les commandes y
+ * arrivent, on les y pèse, et c'est le seul endroit d'où un colis d'achat en ligne peut naître.
+ * Un agent affecté au site de départ s'y voyait pourtant refuser l'entrée tant que
+ * l'administrateur ne l'avait pas nommé — et il n'avait aucun autre moyen d'enregistrer les colis
+ * qu'il avait sous la main.
+ *
+ * Le droit lui vient donc de son site, comme la correction d'un colis en ligne. Ailleurs, il
+ * reste une permission à accorder.
+ */
+export function peutOuvrirComptoirReception(session, data) {
+  if (effectivePermission(session, "colis.bordereau_reception")) return true;
+  return peutCreerColisEnLigne(session, data);
+}
+
+/** Le nom des sites d’où partent les commandes — pour dire à qui revient la correction. */
+export function nomsSitesDepartEnLigne(data) {
+  return sitesOperationEtranger(data).map((s) => String(s.nom || "").trim()).filter(Boolean);
 }
 
 function tarifAchatEnLigne(poidsTotal, tarifs) {
@@ -3373,13 +3508,21 @@ function defaultSeed() {
 async function loadData() {
   try {
     const r = await storage.get("bde-data", true);
-    return JSON.parse(r.value);
+    /*
+     * `ducache` : le serveur n'a pas répondu et c'est la dernière copie locale qui revient.
+     *
+     * Elle était rendue comme une lecture ordinaire. L'application refermait alors son mode
+     * hors-ligne, affichait ce document comme la vérité du jour — et le réenregistrait au premier
+     * geste, par-dessus le vrai. Un document qu'on n'a pas relu au serveur ne fait donc plus
+     * autorité : on travaille avec, on ne l'impose pas.
+     */
+    return { document: JSON.parse(r.value), ducache: !!r.ducache };
   } catch (e) {
     if (e && e.serveurInjoignable) throw e;
     const seed = defaultSeed();
     try { await storage.set("bde-data", JSON.stringify(seed), true); }
     catch (e2) { console.error("Stockage indisponible, poursuite en mode local sans sauvegarde.", e2); }
-    return seed;
+    return { document: seed, ducache: false };
   }
 }
 /**
@@ -3424,6 +3567,20 @@ async function autoBackupIfNeeded(data) {
   try {
     const today = new Date().toISOString().slice(0, 10);
     const key = `${BACKUP_PREFIX}${today}`;
+    /*
+     * ON LAISSE LE SERVEUR PASSER LE PREMIER.
+     *
+     * La tâche planifiée sauvegarde à 2 h UTC, depuis la base elle-même — la copie la plus sûre
+     * qui soit. Cette sauvegarde-ci, elle, part de ce qu'une page a en mémoire. Or le premier
+     * agent qui ouvrait l'application après minuit la posait à 00 h 03, et la tâche trouvait
+     * ensuite « déjà faite » : c'est la copie du navigateur qui devenait la sauvegarde du jour,
+     * tous les jours. Celle du 2 septembre en portait la marque — 6 colis là où la base en avait
+     * 46.
+     *
+     * On attend donc 4 h UTC. Passé cette heure, si le serveur n'a rien écrit, c'est que la tâche
+     * ne tourne pas : le filet reprend son rôle, et l'application sauvegarde elle-même.
+     */
+    if (new Date().getUTCHours() < 4) return;
     try { await storage.get(key, true); return; } catch (e) { /* pas encore de sauvegarde aujourd’hui, on continue */ }
     await storage.set(key, JSON.stringify(data), true);
     const list = await storage.list(BACKUP_PREFIX, true);
@@ -3903,18 +4060,42 @@ function App() {
     let essais = 0;
     let minuteur = null;
 
-    function reussite(d) {
+    function reussite({ document: d, ducache }) {
+      /*
+       * On a bien un document — le délai de secours n'a plus lieu de se déclencher. Il servait à
+       * ne pas laisser l'agent devant un écran vide ; ce n'est plus le cas.
+       */
       abouti = true;
       if (!vivant) return;
       setData(d);
       setLang(d.lang || "fr");
       setTheme(d.theme || "dark");
       if (d.exchangeRates) LIVE_RATES = { ...CURRENCIES, ...d.exchangeRates };
+      setLoading(false);
+      setPendingSync(pendingSyncCount());
+      /*
+       * UN DOCUMENT VENU DU CACHE N'EST PAS UN CHARGEMENT RÉUSSI.
+       *
+       * L'agent peut travailler avec — c'est tout l'intérêt du mode hors-ligne — mais l'écran doit
+       * le dire, et l'on continue de retenter le serveur. Sans cela, une page ouverte pendant une
+       * coupure passagère s'installait pour la journée sur une copie ancienne et la réécrivait à
+       * chaque geste : c'est le mécanisme exact qui a fait proposer un répertoire vide onze fois
+       * de suite le 1er septembre.
+       */
+      if (ducache) {
+        /*
+         * On travaille, on n'impose pas : les enregistrements partent par la file d'attente, qui
+         * les fusionne au retour avec ce que les collègues ont écrit pendant la coupure. Ce qu'on
+         * ne fait plus, c'est prétendre que cette copie est la version du jour.
+         */
+        setOffline(true);
+        essais += 1;
+        minuteur = setTimeout(tenter, Math.min(30000, 4000 * essais));
+        return;
+      }
       setOffline(false);
       setModeSecours(false);
-      setLoading(false);
       autoBackupIfNeeded(d);
-      setPendingSync(pendingSyncCount());
     }
 
     function echec(e) {
@@ -4350,6 +4531,17 @@ function App() {
     { key: "compte", label: "Compte", icon: User },
   ].map((n) => ({ ...n, show: true, actif: ongletPartenaire === n.key, onSelect: () => setOngletPartenaire(n.key) }));
 
+  /*
+   * Où mène une ligne de la cloche. Un partenaire navigue entre ses onglets, l'équipe entre les
+   * vues du menu : la cloche donne une destination, c'est ici qu'on sait comment s'y rendre.
+   */
+  const allerDepuisLaCloche = (cible) => {
+    setMobileNavOpen(false);
+    if (session.role === "Partenaire") { setOngletPartenaire(cible); return; }
+    setView(cible);
+    if (cible === "admin") setAdminResetKey((k) => k + 1);
+  };
+
   const nav = session.role === "Partenaire" ? navPartenaire : [
     { key: "dashboard", label: t.dashboard, icon: LayoutDashboard, show: true },
     { key: "colis", label: t.colis, icon: Package, show: perm("colis.voir_propres") || perm("colis.voir_tous") },
@@ -4375,6 +4567,16 @@ function App() {
     { key: "bordereaux", label: t.bordereaux, icon: FileStack, show: perm("bordereaux.consulter") },
     { key: "paiements", label: t.paiements, icon: Receipt, show: perm("factures.consulter"), badge: declarationsEnAttente },
     { key: "caisse", label: "Caisse", icon: Wallet, show: perm("paiements.voir_propres") || perm("factures.consulter") || perm("compta.consulter") },
+    /*
+     * Le transfert d'argent est un métier à part : il a sa caisse, ses agents, son journal. Il
+     * n'apparaît que pour qui a au moins un droit dessus — sinon l'entrée mènerait à une page
+     * qui explique qu'on n'y a pas accès, ce qui est une façon compliquée de ne rien dire.
+     */
+    {
+      key: "transferts", label: "Transfert d’argent", icon: Banknote,
+      show: perm("transfert.creer") || perm("transfert.payer") || perm("transfert.voir_propres")
+        || perm("transfert.voir_zone") || perm("transfert.voir_tous"),
+    },
     { key: "voyages", label: "Voyages", icon: Plane, show: perm("compta.consulter") },
     { key: "comptabilite", label: "Comptabilité", icon: DollarSign, show: perm("compta.consulter") },
     { key: "ia", label: t.ia, icon: Sparkles, show: perm("ia.utiliser") },
@@ -4387,7 +4589,7 @@ function App() {
      * dans le menu, à côté de son travail.
      */
     { key: "mapointage", label: "Ma fiche", icon: Clock, show: !perm("equipe.pointage") },
-    { key: "admin", label: t.admin, icon: Settings, show: perm("config.acceder") },
+    { key: "admin", label: t.admin, icon: Settings, show: peutOuvrirConfiguration(session) },
   ].filter((n) => n.show);
 
   return (
@@ -4424,7 +4626,7 @@ function App() {
               <>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
                   <LogoIdentite taille={26} />
-                  <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 18, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                  <div className="bde-brand-name" style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 18, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
                     {identite.nom ? identite.nom : <>BA-DIABY <span style={{ color: "var(--brand-on-dark)" }}>EXPRESS</span></>}
                   </div>
                 </div>
@@ -4432,10 +4634,16 @@ function App() {
               </>
             )}
           </div>
-          <div style={{ padding: "0 12px 8px" }}>
-            <button onClick={() => setShowGlobalSearch(true)} style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", background: "rgba(255,255,255,0.06)", border: "none", borderRadius: 8, padding: (collapsed && !isMobile) ? "9px 0" : "9px 12px", color: "rgba(255,255,255,0.7)", fontSize: 13, cursor: "pointer" }}>
+          <div style={{ padding: "0 12px 8px", display: "flex", flexDirection: (collapsed && !isMobile) ? "column" : "row", alignItems: "center", gap: 8 }}>
+            <button onClick={() => setShowGlobalSearch(true)} style={{ display: "flex", alignItems: "center", gap: 8, flex: 1, minWidth: 0, width: (collapsed && !isMobile) ? "100%" : undefined, justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", background: "rgba(255,255,255,0.06)", border: "none", borderRadius: 8, padding: (collapsed && !isMobile) ? "9px 0" : "9px 12px", color: "rgba(255,255,255,0.7)", fontSize: 13, cursor: "pointer" }}>
               <Search size={15} /> {!(collapsed && !isMobile) && "Recherche globale"}
             </button>
+            {/*
+              * La cloche vit ici, sur la première ligne du menu : c'est le seul endroit visible
+              * sans faire défiler et sans replier quoi que ce soit. Sur téléphone, elle est
+              * doublée dans la barre du haut — là, le menu est fermé la plupart du temps.
+              */}
+            <ClocheNotifications data={data} session={session} onAller={allerDepuisLaCloche} surFondSombre />
           </div>
           <nav style={{ padding: 12, display: "flex", flexDirection: "column", gap: 3, flex: 1, overflowY: "auto" }}>
             {nav.map((n) => (
@@ -4491,6 +4699,7 @@ function App() {
               <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 15, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1 }}>
                 {nav.find((n) => n.actif ?? (n.key === view))?.label || identite.nom || "BA-DIABY EXPRESS"}
               </div>
+              <ClocheNotifications data={data} session={session} onAller={allerDepuisLaCloche} surFondSombre />
               <button onClick={() => setShowGlobalSearch(true)} style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 8, width: 34, height: 34, display: "grid", placeItems: "center", color: "#fff", cursor: "pointer", flexShrink: 0 }}>
                 <Search size={16} />
               </button>
@@ -4510,6 +4719,7 @@ function App() {
             {view === "bordereaux" && <BordereauxPage data={data} persist={persist} session={session} notify={notify} />}
             {view === "paiements" && <PaiementsPage data={data} notify={notify} />}
             {view === "caisse" && <CaissePage data={data} persist={persist} session={session} notify={notify} />}
+            {view === "transferts" && <TransfertsPage data={data} session={session} notify={notify} persist={persist} />}
             {view === "voyages" && perm("compta.consulter") && <VoyagesPage data={data} persist={persist} session={session} notify={notify} />}
             {view === "comptabilite" && <ComptabilitePage data={data} persist={persist} session={session} notify={notify} />}
             {view === "ia" && <AiAssistant data={data} />}
@@ -4557,7 +4767,7 @@ function App() {
             : syncing ? "Enregistrement…" : `${pendingSync} en attente d’enregistrement`}
         </div>
       )}
-      {toast && <div style={{ position: "fixed", bottom: 24, insetInlineEnd: 24, insetInlineStart: isMobile ? 24 : "auto", background: "#0A2647", color: "#fff", padding: "12px 18px", borderRadius: 12, fontSize: 13.5, boxShadow: "0 8px 24px rgba(10,38,71,0.3)", textAlign: "center" }}>{toast}</div>}
+      {toast && <div className="bde-toast" style={{ position: "fixed", bottom: 24, insetInlineEnd: 24, insetInlineStart: isMobile ? 24 : "auto", zIndex: 300, background: "rgba(10,38,71,0.94)", color: "#fff", padding: "13px 20px", borderRadius: 14, fontSize: 13.5, fontWeight: 500, boxShadow: "0 18px 44px -14px rgba(3,10,24,0.72)", textAlign: "center" }}>{toast}</div>}
     </Shell>
     </ContexteOuvrirColis.Provider>
   );
@@ -4824,8 +5034,31 @@ function Shell({ children, rtl, theme }) {
         /* Les polices sont déclarées dans index.html : chargées ici par @import, elles n'étaient
            demandées qu'après l'exécution du JavaScript, soit plusieurs secondes de retard en 4G. */
         * { box-sizing: border-box; }
+        /*
+         * LA PROFONDEUR ÉTAIT À L'ENVERS.
+         *
+         * En thème sombre, le sol de l'application (--surface2) était PLUS CLAIR que les cartes
+         * posées dessus (--surface) : #1B2438 contre #131A2B. Une carte plus foncée que son fond
+         * ne se lit pas comme un objet posé, elle se lit comme un trou — d'où l'impression de
+         * page plate et terne, quelle que soit la qualité du contenu. Tous les logiciels du genre
+         * font l'inverse : le fond est le point le plus sombre, les cartes s'en détachent vers le
+         * clair, et les champs de saisie s'y creusent vers le sombre.
+         *
+         * Les valeurs ci-dessous rétablissent cet ordre — sol < carte, et champ = sol. Comme
+         * l'ensemble de l'application passe par ces variables et n'écrit jamais une couleur en
+         * dur, la hiérarchie se met en place partout d'un coup, sans toucher un seul écran.
+         */
         :root, [data-theme="dark"] {
-          --bg: #0A0F1C; --surface: #131A2B; --surface2: #1B2438; --border: #242E47; --text: #F1F4FA; --muted: #8A97B5;
+          --bg: #080C17; --surface: #182138; --surface2: #0D1322; --border: #26324F; --text: #F1F4FA; --muted: #8A97B5;
+          /* Élévation : deux ombres superposées — un contact net, une diffusion large. C'est ce
+             qui distingue une carte « posée » d'une carte simplement bordée. */
+          --shadow-card: 0 1px 2px rgba(3, 7, 18, 0.40), 0 10px 28px -14px rgba(3, 7, 18, 0.75);
+          --shadow-lift: 0 2px 6px rgba(3, 7, 18, 0.45), 0 22px 48px -20px rgba(3, 7, 18, 0.85);
+          --shadow-modal: 0 40px 90px -24px rgba(0, 0, 0, 0.78), 0 2px 8px rgba(0, 0, 0, 0.45);
+          --ring: color-mix(in srgb, var(--brand-solid) 30%, transparent);
+          /* Filet clair sur l'arête haute des surfaces : une carte accroche la lumière par le
+             haut. Invisible consciemment, mais c'est ce qui fait « fini » plutôt que « plat ». */
+          --sheen: rgba(255, 255, 255, 0.055);
           /* Couleurs sémantiques : fonds, bordures et textes des blocs d’état (succès, alerte,
              erreur, information). Déclinées par thème afin qu’un encart ne reste jamais sombre
              sur une page claire — c’était la principale incohérence visuelle du site. */
@@ -4836,7 +5069,12 @@ function Shell({ children, rtl, theme }) {
           --neutral-fg: #AEB9D6; --bronze-bg: #1B140F; --placeholder: #6B77A0;
         }
         [data-theme="light"] {
-          --bg: #F3F5FA; --surface: #FFFFFF; --surface2: #EEF1F8; --border: #DCE2F0; --text: #101828; --muted: #5B6B82;
+          --bg: #F4F6FB; --surface: #FFFFFF; --surface2: #EDF1F8; --border: #E1E7F2; --text: #101828; --muted: #5B6B82;
+          --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.05), 0 10px 26px -16px rgba(16, 24, 40, 0.26);
+          --shadow-lift: 0 2px 5px rgba(16, 24, 40, 0.07), 0 22px 44px -22px rgba(16, 24, 40, 0.34);
+          --shadow-modal: 0 40px 90px -26px rgba(16, 24, 40, 0.32), 0 2px 8px rgba(16, 24, 40, 0.10);
+          --ring: color-mix(in srgb, var(--brand-solid) 22%, transparent);
+          --sheen: rgba(255, 255, 255, 0.9);
           --danger-bg: #FEF1F3; --danger-border: #F6CBD2; --danger-fg: #B3243A; --danger-fg-soft: #8E1A2A;
           --warn-bg: #FFF8E7; --warn-border: #EFD9A2; --warn-fg: #8A6008; --warn-fg-soft: #6F4D06;
           --ok-bg: #EAF9F0; --ok-bg-soft: #F1FBF5; --ok-border: #BCE5CC; --ok-fg: #107442; --ok-fg-alt: #0F6A43;
@@ -4903,15 +5141,14 @@ function Shell({ children, rtl, theme }) {
           .bde-client-actions button { min-height: 42px; padding: 9px 10px !important; font-size: 12px !important; }
           .bde-client-actions button:first-child, .bde-client-actions button:nth-child(2) { grid-column: span 2; }
         }
-        .bde-app-shell { background-image: radial-gradient(circle at 85% 0%, rgba(200,16,46,0.05), transparent 28%); }
+        .bde-app-shell { background: var(--surface2); }
         .bde-app-sidebar { box-shadow: 12px 0 36px rgba(3, 14, 32, 0.14); }
         .bde-app-sidebar nav button { transition: background 180ms ease, color 180ms ease, transform 160ms ease; }
         .bde-app-sidebar nav button:hover { background: rgba(255,255,255,0.10) !important; transform: translateX(2px); }
         .bde-app-sidebar nav button[style*="var(--brand-solid)"] { box-shadow: 0 8px 20px rgba(200,16,46,0.18); }
-        .bde-app-main { background: linear-gradient(135deg, color-mix(in srgb, var(--surface2) 94%, transparent), color-mix(in srgb, var(--surface) 28%, transparent)); }
         .bde-app-main input, .bde-app-main select, .bde-app-main textarea { transition: border-color 180ms ease, box-shadow 180ms ease, background 180ms ease; }
-        .bde-app-main input:focus, .bde-app-main select:focus, .bde-app-main textarea:focus { border-color: color-mix(in srgb, var(--brand-solid) 58%, var(--border)) !important; box-shadow: 0 0 0 4px color-mix(in srgb, var(--brand-solid) 12%, transparent) !important; outline: none; }
-        .bde-app-main button { transition: transform 160ms ease, box-shadow 180ms ease, border-color 180ms ease; }
+        .bde-app-main input:focus, .bde-app-main select:focus, .bde-app-main textarea:focus { border-color: color-mix(in srgb, var(--brand-solid) 58%, var(--border)) !important; box-shadow: 0 0 0 4px var(--ring) !important; outline: none; }
+        .bde-app-main button { transition: transform 160ms ease, box-shadow 180ms ease, border-color 180ms ease, filter 180ms ease; }
         .bde-app-main button:active { transform: scale(0.98); }
         .bde-mobile-topbar { box-shadow: 0 8px 24px rgba(3, 14, 32, 0.18); }
         @media (max-width: 768px) {
@@ -4921,6 +5158,160 @@ function Shell({ children, rtl, theme }) {
         }
         @media (prefers-reduced-motion: reduce) {
           .bde-app-sidebar nav button, .bde-app-main button, .bde-app-main input, .bde-app-main select, .bde-app-main textarea { transition: none !important; }
+        }
+
+        /* ==========================================================================
+           SYSTÈME VISUEL DE L'ESPACE DE TRAVAIL
+           --------------------------------------------------------------------------
+           Toutes les règles qui suivent ne touchent QUE l'apparence. Elles s'appuient
+           sur le fait que l'application n'écrit jamais une couleur en dur : une carte
+           est reconnaissable à son fond var(--surface), un champ au sien,
+           var(--surface2). On peut donc leur donner une identité commune — ombre,
+           arête, arrondi, transition — sans rouvrir un seul écran.
+           ========================================================================== */
+
+        /* Le sol : une teinte unie, avec une seule lueur de marque très diluée en haut
+           à droite. L'ancien dégradé en diagonale mélangeait deux surfaces et donnait
+           une page « sale » dont la couleur changeait selon l'endroit où l'on regardait. */
+        .bde-app-main {
+          background:
+            radial-gradient(1100px 460px at 88% -12%, color-mix(in srgb, var(--brand-solid) 7%, transparent), transparent 68%),
+            var(--surface2);
+        }
+
+        /* --- Cartes ------------------------------------------------------------ */
+        /* Une carte se pose : ombre de contact + diffusion, et un filet clair sur son
+           arête haute. Le drapeau important sur l'ombre remplace les ombres écrites au cas
+           par cas dans les écrans, qui n'étaient visibles ni en clair ni en sombre. */
+        .bde-app-main div[style*="var(--surface)"][style*="border-radius"] {
+          box-shadow: var(--shadow-card) !important;
+          border-color: var(--border);
+          background-image: linear-gradient(var(--sheen), transparent 42%);
+        }
+        /* Une carte cliquable réagit : elle monte d'un cheveu et son ombre s'étale. */
+        .bde-app-main button[style*="var(--surface2)"][style*="border-radius"]:hover:not(:disabled) {
+          transform: translateY(-1px);
+          box-shadow: var(--shadow-card);
+          border-color: color-mix(in srgb, var(--brand-solid) 32%, var(--border)) !important;
+        }
+
+        /* --- Chiffres ---------------------------------------------------------- */
+        /* Chiffres à chasse fixe partout où l'on compare des colonnes de montants :
+           sans cela, « 1 398 384 » et « 1 642 464 » n'ont pas la même largeur et l'œil
+           ne peut plus aligner les ordres de grandeur. C'est le détail qui sépare un
+           tableau de gestion d'un tableau de site vitrine. */
+        .bde-app-main table, .bde-stat, .bde-app-main input[inputmode="decimal"], .bde-app-main input[type="number"] {
+          font-variant-numeric: tabular-nums;
+          font-feature-settings: "tnum" 1;
+        }
+
+        /* --- Tableaux ---------------------------------------------------------- */
+        .bde-app-main table { box-shadow: var(--shadow-card); }
+        .bde-app-main table thead th { padding-top: 11px !important; padding-bottom: 11px !important; }
+        .bde-app-main table tbody td { border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent); }
+        .bde-app-main table tbody tr:first-child td { border-top: none; }
+        /* La zone défilante d'un tableau large annonce qu'elle défile : un voile se
+           forme sur le bord droit tant qu'il reste des colonnes à découvrir. */
+        .bde-app-main div:has(> table) {
+          background:
+            linear-gradient(to left, color-mix(in srgb, var(--surface2) 92%, transparent), transparent 34px) right center / 34px 100% no-repeat;
+          border-radius: 12px;
+        }
+
+        /* --- Champs ------------------------------------------------------------ */
+        /* La flèche native d'un menu déroulant est dessinée par le système : grise,
+           carrée, différente sur chaque machine, et franchement laide sur fond sombre.
+           On la remplace par un chevron cohérent avec le reste des icônes. */
+        .bde-app-main select, .bde-modal-card select {
+          -webkit-appearance: none; appearance: none;
+          background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238A97B5' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") !important;
+          background-repeat: no-repeat !important;
+          background-position: right 11px center !important;
+          padding-inline-end: 34px !important;
+        }
+        [dir="rtl"] .bde-app-main select, [dir="rtl"] .bde-modal-card select { background-position: left 11px center !important; }
+        [data-theme="light"] .bde-app-main select, [data-theme="light"] .bde-modal-card select {
+          background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%235B6B82' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") !important;
+        }
+        /* Un champ désactivé doit se voir désactivé, sinon on tape dedans sans comprendre. */
+        .bde-app-main input:disabled, .bde-app-main select:disabled, .bde-app-main textarea:disabled { opacity: 0.55; cursor: not-allowed; }
+        .bde-app-main button:disabled { opacity: 0.55; cursor: not-allowed; }
+
+        /* --- Fenêtres ---------------------------------------------------------- */
+        .bde-modal-card { box-shadow: var(--shadow-modal) !important; border-radius: 18px !important; }
+        .bde-modal-backdrop { background: color-mix(in srgb, var(--bg) 74%, transparent) !important; }
+
+        /* --- Message flottant --------------------------------------------------- */
+        .bde-toast {
+          border: 1px solid rgba(255,255,255,0.14);
+          backdrop-filter: blur(10px);
+          animation: bde-toast-in 220ms cubic-bezier(0.23, 1, 0.32, 1);
+        }
+        @keyframes bde-toast-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+        /* --- Barre latérale ----------------------------------------------------- */
+        /* Le nom de l'entreprise était coupé (« BA-DIABY EXPR… ») parce qu'il était
+           dimensionné pour un menu plus large que celui-ci. Il tient maintenant. */
+        .bde-brand-name { font-size: 16.5px !important; letter-spacing: -0.02em; }
+        .bde-app-sidebar nav button { letter-spacing: -0.005em; }
+        /* L'élément actif : le plein rouge reste, mais adouci par une arête claire en
+           haut et une ombre portée — il se détache du menu au lieu d'y être collé. */
+        .bde-app-sidebar nav button[style*="var(--brand-solid)"] {
+          background-image: linear-gradient(rgba(255,255,255,0.16), transparent 55%);
+          box-shadow: 0 6px 18px -4px rgba(206, 27, 51, 0.55);
+        }
+
+        /* --- Cartes de statistiques (KPI) --------------------------------------- */
+        .bde-stat { transition: transform 180ms ease, box-shadow 200ms ease, border-color 200ms ease; }
+        .bde-stat:hover { transform: translateY(-2px); box-shadow: var(--shadow-lift) !important; }
+
+        /* --- Titres ------------------------------------------------------------- */
+        /* Les titres serrent leur interlettrage : c'est ce qui donne son assurance à une
+           typographie de tableau de bord, là où l'espacement par défaut fait « brouillon ». */
+        .bde-app-main h1, .bde-app-main h2, .bde-app-main h3 { letter-spacing: -0.025em; text-wrap: balance; }
+
+        /* --- Pastilles d'état ---------------------------------------------------- */
+        /* Les badges de statut sont reconnaissables à leur forme : coin très arrondi et texte
+           court. On leur donne une arête assortie à leur teinte, pour qu'ils se détachent du fond
+           de la ligne au lieu d'y flotter. */
+        .bde-app-main span[style*="border-radius: 20px"], .bde-app-main span[style*="border-radius: 999px"] {
+          border: 1px solid color-mix(in srgb, currentColor 24%, transparent);
+          line-height: 1.35;
+        }
+
+        /* --- Accessibilité clavier ---------------------------------------------- */
+        /* Un anneau visible pour qui navigue au clavier, jamais pour qui clique à la souris. */
+        .bde-app-main :focus-visible, .bde-modal-card :focus-visible, .bde-app-sidebar :focus-visible {
+          outline: 2px solid var(--brand-solid); outline-offset: 2px; border-radius: 6px;
+        }
+
+        /* ==========================================================================
+           TÉLÉPHONE ET TABLETTE
+           Sur un écran de 390 px, chaque carte de statistique occupait la hauteur d'un
+           écran entier : quatre indicateurs, quatre pages à faire défiler avant de voir
+           quoi que ce soit d'autre. Elles passent à deux par ligne, resserrées.
+           ========================================================================== */
+        @media (max-width: 900px) {
+          .bde-stat { flex: 1 1 calc(50% - 14px) !important; min-width: 150px !important; }
+        }
+        @media (max-width: 640px) {
+          div:has(> .bde-stat) { gap: 10px !important; }
+          .bde-stat {
+            flex: 1 1 calc(50% - 5px) !important; min-width: 0 !important;
+            padding: 13px 14px !important; border-radius: 14px !important;
+          }
+          .bde-stat > div:first-child > div:first-child { font-size: 11.5px !important; line-height: 1.25; }
+          .bde-stat > div:first-child > div:last-child { width: 28px !important; height: 28px !important; border-radius: 9px !important; }
+          .bde-stat > div:first-child > div:last-child svg { width: 15px; height: 15px; }
+          .bde-stat > div:nth-child(2) { font-size: 21px !important; margin-top: 8px !important; }
+          /* La précision passe souvent sur deux lignes dans une demi-largeur : la puce doit
+             rester en tête de la première ligne, pas se centrer verticalement sur le bloc. */
+          .bde-stat > div:nth-child(3) { font-size: 11px !important; margin-top: 5px !important; align-items: flex-start !important; line-height: 1.35; }
+          .bde-stat > div:nth-child(3) > span:first-child { margin-top: 4px; }
+          /* Les cartes et les fenêtres respirent moins large, mais restent lisibles. */
+          .bde-app-main div[style*="var(--surface)"][style*="border-radius"] { padding-left: 14px !important; padding-right: 14px !important; }
+          .bde-modal-card { padding: 16px !important; border-radius: 16px !important; }
+          .bde-toast { inset-inline: 12px !important; bottom: 14px !important; }
         }
         .bde-home-hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, 0.82fr); gap: clamp(28px, 6vw, 72px); align-items: center; }
         .bde-hero-copy { padding: 8px 0; }
@@ -5453,7 +5844,13 @@ function PublicTrackingPage() {
   }, []);
 
   const colis = data && searched ? (data.colis || [])[0] : null;
-  const notFound = searched && !loading && !panne && data && !colis;
+  /*
+   * Le même champ sert pour un colis et pour un transfert d'argent : le client ne sait pas qu'il
+   * y a deux systèmes derrière, il tape ce qu'on lui a donné. Le serveur reconnaît la forme et
+   * répond avec l'un ou l'autre.
+   */
+  const transfert = data && searched ? data.transfert || null : null;
+  const notFound = searched && !loading && !panne && data && !colis && !transfert;
   /*
    * Un colis partenaire se suit sous la marque du partenaire, jamais sous la nôtre.
    *
@@ -5538,6 +5935,45 @@ function PublicTrackingPage() {
         <div role="alert" style={{ background: "rgba(255,255,255,0.96)", border: "1px solid rgba(214,39,63,0.35)", borderRadius: 14, padding: 20, width: "100%", maxWidth: 420, textAlign: "center", boxShadow: "0 24px 60px rgba(10,38,71,0.35)" }}>
           <div style={{ fontSize: 13.5, color: "#9F1D32", fontWeight: 700 }}>{T("Service de suivi temporairement indisponible")}</div>
           <div style={{ fontSize: 12, color: "#5B6472", marginTop: 5 }}>{T("Réessayez dans un instant ou contactez l’agence.")}</div>
+        </div>
+      )}
+
+      {transfert && (
+        <div style={{ background: "var(--surface)", borderRadius: 16, overflow: "hidden", width: "100%", maxWidth: 460, boxShadow: "0 28px 70px rgba(10,38,71,0.4)" }}>
+          <div style={{ height: 4, background: "var(--brand-solid)" }} />
+          <div style={{ padding: "20px 22px 22px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+              <span style={{ fontSize: 12, color: "var(--muted)", fontWeight: 600 }}>{transfert.reference}</span>
+              <BadgeStatutTransfert statut={transfert.statut} />
+            </div>
+            <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 4 }}>
+              Montant à recevoir
+            </div>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 30, fontWeight: 700, color: "var(--text)", letterSpacing: "-0.02em", marginBottom: 16 }}>
+              {montantTransfert(transfert.montantARecevoir, transfert.deviseReception)}
+            </div>
+            <div style={{ display: "grid", gap: 8 }}>
+              {[["Expéditeur", transfert.expediteur],
+                ["Bénéficiaire", transfert.beneficiaire],
+                ["Destination", transfert.destination || "—"],
+                ["Envoyé le", new Date(transfert.creeLe).toLocaleDateString("fr-FR")],
+                transfert.statut === "Payé"
+                  ? ["Retiré le", `${new Date(transfert.payeLe).toLocaleDateString("fr-FR")}${transfert.agencePaiement ? ` — ${transfert.agencePaiement}` : ""}`]
+                  : ["Valable jusqu’au", new Date(transfert.expireLe).toLocaleDateString("fr-FR")],
+              ].map(([k, v]) => (
+                <div key={k} style={{ display: "flex", justifyContent: "space-between", gap: 12, borderTop: "1px solid var(--surface2)", paddingTop: 8 }}>
+                  <span style={{ fontSize: 12.5, color: "var(--muted)" }}>{k}</span>
+                  <span style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600, textAlign: "end" }}>{v}</span>
+                </div>
+              ))}
+            </div>
+            {transfert.statut === "Disponible au retrait" && (
+              <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 10, padding: "11px 13px", marginTop: 16, fontSize: 12, color: "var(--text)", lineHeight: 1.55 }}>
+                Le bénéficiaire doit se présenter dans une agence avec le <strong>code de retrait</strong> et
+                une pièce d’identité au nom indiqué. Le code ne figure pas sur cette page.
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -6649,7 +7085,7 @@ function ReservationAerienneModal({ reservations, onSubmit, onClose }) {
             </select>
           </label>
           <label style={{ fontSize: 12, color: "var(--muted)" }}>Poids réel (kg)
-            <input type="number" min="0.1" step="0.1" value={poids} onChange={(e) => setPoids(e.target.value)} required placeholder="Ex. 5" style={{ ...inputStyle, width: "100%", marginTop: 5 }} />
+            <input type="text" inputMode="decimal" value={poids} onChange={(e) => setPoids(nombreTape(e.target.value))} required placeholder="Ex. 5" style={{ ...inputStyle, width: "100%", marginTop: 5 }} />
           </label>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 9, marginBottom: 9 }}>
@@ -7803,8 +8239,14 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
        */
       let comptes = list;
       if (comptes.length === 0) {
+        /*
+         * `loadData` rend maintenant `{ document, ducache }` : ici on ne veut que les comptes, et
+         * peu importe qu'ils viennent du cache — c'est même tout l'objet de ce repli, ouvrir sa
+         * session sans réseau. Lire `base.users` sur l'enveloppe rendait la liste vide, et
+         * l'agent hors ligne se voyait refuser son propre mot de passe.
+         */
         const base = await loadData().catch(() => null);
-        comptes = base?.users || [];
+        comptes = base?.document?.users || [];
       }
       /*
        * Hors ligne, la recherche suit les mêmes trois clés qu'au serveur : sans cela, un agent
@@ -7953,15 +8395,315 @@ function soldesCaisseParAgent(data) {
     .sort((a, b) => b.totalEUR - a.totalEUR);
 }
 
-const StatCard = memo(function StatCard({ label, value, icon: Icon, tint, trend, trendColor, outline }) {
+/*
+ * UNE LIGNE DE RÉPARTITION.
+ *
+ * Le même dessin servait à trois endroits, recopié à chaque fois : une barre de 8 px à angles
+ * vifs, remplie d'un aplat, et un compte gris collé à droite. Trois défauts : la barre vide
+ * n'était pas distinguable du fond de la carte, la barre pleine s'arrêtait net, et le compte
+ * n'avait pas de chasse fixe — deux nombres de largeur différente sous la même colonne.
+ *
+ * Ici : un sillon marqué, une barre arrondie qui garde une largeur minimale tant qu'elle n'est
+ * pas à zéro (sinon un colis sur quatre cents devient invisible), la part en pourcentage, et le
+ * compte en chiffres à chasse fixe pour que la colonne s'aligne.
+ */
+function BarreRepartition({ libelle, valeur, total, teinte }) {
+  const part = total ? (valeur / total) * 100 : 0;
+  const vide = valeur === 0;
   return (
-    <div style={{ background: SURFACE, borderRadius: 16, padding: "20px 22px", flex: 1, minWidth: 190, border: `1.5px solid ${outline || BORDER}`, boxShadow: "0 2px 12px rgba(10,38,71,0.06)" }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div style={{ fontSize: 13, color: MUTED, fontWeight: 600 }}>{label}</div>
-        <div style={{ width: 38, height: 38, borderRadius: 10, background: tint, display: "grid", placeItems: "center" }}><Icon size={18} color="#fff" /></div>
+    <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 9 }}>
+      <div style={{ width: 130, flexShrink: 0, fontSize: 12.5, color: vide ? "var(--muted)" : "var(--text)", fontWeight: vide ? 400 : 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{libelle}</div>
+      <div style={{ flex: 1, minWidth: 0, height: 7, background: "color-mix(in srgb, var(--surface2) 80%, var(--border))", borderRadius: 999, overflow: "hidden" }}>
+        <div style={{
+          width: vide ? 0 : `max(3px, ${part}%)`, height: "100%", borderRadius: 999,
+          background: `linear-gradient(90deg, color-mix(in srgb, ${teinte} 72%, transparent), ${teinte})`,
+          transition: "width 420ms cubic-bezier(0.23, 1, 0.32, 1)",
+        }} />
       </div>
-      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 29, fontWeight: 700, color: TEXT, marginTop: 12 }}>{value}</div>
-      {trend && <div style={{ fontSize: 12, color: trendColor || "var(--ok-fg)", marginTop: 7, fontWeight: 600 }}>{trend}</div>}
+      <div style={{ width: 40, flexShrink: 0, textAlign: "right", fontSize: 10.5, color: "var(--muted)", fontVariantNumeric: "tabular-nums" }}>
+        {vide ? "" : `${Math.round(part)} %`}
+      </div>
+      <div style={{ width: 26, flexShrink: 0, textAlign: "right", fontSize: 13, fontWeight: vide ? 400 : 700, color: vide ? "var(--muted)" : "var(--text)", fontVariantNumeric: "tabular-nums" }}>{valeur}</div>
+    </div>
+  );
+}
+
+/*
+ * CARTE D'INDICATEUR.
+ *
+ * Trois défauts la rendaient plus lourde qu'informative. La pastille d'icône était un aplat
+ * saturé avec un pictogramme blanc dedans : quatre carrés de couleur vive alignés en haut de
+ * page, qui tiraient l'œil bien plus fort que les chiffres eux-mêmes — or c'est le chiffre qu'on
+ * vient lire. Le libellé et la valeur avaient presque le même poids visuel. Et la précision sous
+ * le chiffre flottait, sans rien qui la rattache à la valeur.
+ *
+ * La pastille garde sa couleur, mais en fond très dilué avec le pictogramme teinté : elle
+ * identifie sans crier. Le libellé passe en petites capitales espacées — un rôle d'étiquette,
+ * pas de titre. Et la précision devient une puce discrète, posée sous le chiffre.
+ */
+/*
+ * TOUT CE QUI ATTEND UN GESTE, EN UN SEUL ENDROIT.
+ *
+ * Les pastilles existaient déjà, mais éparpillées sur sept entrées de menu : pour savoir s'il y
+ * avait quelque chose à faire, il fallait parcourir le menu du regard, entrée par entrée — et sur
+ * téléphone, ouvrir le menu d'abord. Un message client passait donc inaperçu jusqu'au moment où
+ * quelqu'un pensait à aller voir.
+ *
+ * Cette fonction rassemble les mêmes comptes, et RIEN DE PLUS : elle ne va chercher aucune donnée
+ * qu'un compte ne verrait pas ailleurs. Chaque source est conditionnée par la permission qui ouvre
+ * l'écran correspondant — sans quoi la cloche deviendrait une fuite : « 3 factures partenaires en
+ * retard » en apprend déjà beaucoup à qui n'a pas accès aux partenaires.
+ *
+ * Elle est exportée et pure : elle se vérifie sans ouvrir de navigateur.
+ */
+export function alertesDuCompte(data, session, maintenant = Date.now()) {
+  if (!data || !session) return [];
+  const perm = (cle) => effectivePermission(session, cle);
+  const alertes = [];
+  const ajouter = (a) => { if (a.compte > 0) alertes.push(a); };
+
+  // Un partenaire n'a que ses propres flux ; le reste ne le concerne pas et ne doit pas l'atteindre.
+  if (session.role === "Partenaire") {
+    const id = partenaireDeLaSession(session);
+    const moi = (data.users || []).find((u) => u.id === id);
+    ajouter({
+      cle: "partenaire-messages", gravite: "info", vue: "messages", icone: MessageCircle,
+      compte: messagesNonLusPour(moi, "partenaire"),
+      titre: (n) => `${n} message${n > 1 ? "s" : ""} de Ba-Diaby Express`,
+      detail: "Réponses à vos demandes.",
+    });
+    if (voitLesMontants(session)) {
+      ajouter({
+        cle: "partenaire-factures", gravite: "alerte", vue: "factures", icone: Receipt,
+        compte: (data.facturesPartenaire || []).filter((f) => f.partenaireId === id && statutFacturePartenaire(f) !== "Réglée").length,
+        titre: (n) => `${n} facture${n > 1 ? "s" : ""} à régler`,
+        detail: "Montants encore dus à Ba-Diaby Express.",
+      });
+    }
+    ajouter({
+      cle: "partenaire-prets", gravite: "info", vue: "accueil", icone: Package,
+      compte: (data.colis || []).filter((c) => c.partenaireId === id && estColisExpediable(c)).length,
+      titre: (n) => `${n} colis prêt${n > 1 ? "s" : ""} à partir`,
+      detail: "Vérifiés et en attente d’embarquement.",
+    });
+    return alertes;
+  }
+
+  /*
+   * Le refus d'un enregistrement passe devant tout le reste : il signale un appareil qui essaie
+   * d'effacer des données à chaque geste, et tant qu'il n'est pas fermé il recommencera.
+   */
+  ajouter({
+    cle: "ecrasement", gravite: "grave", vue: "dashboard", icone: AlertTriangle,
+    compte: (data.alertesEcrasement || []).filter((a) => a && !a.vue).length,
+    titre: (n) => `${n} enregistrement${n > 1 ? "s" : ""} refusé${n > 1 ? "s" : ""} — page périmée`,
+    detail: "Vos données sont intactes. Il reste un onglet à fermer quelque part.",
+  });
+
+  if (perm("espaceclient.gerer")) {
+    const messages = (data.clientAccounts || []).filter((c) => (c.messages || []).some((m) => m.expediteur === "client" && !m.lu)).length;
+    const preAlertes = (data.preAlertes || []).filter((p) => p.statut === "En attente").length;
+    const regroupements = (data.demandesRegroupement || []).filter((r) => r.statut === "En attente").length;
+    const signalements = (data.colis || []).reduce((s, c) => s + (c.signalements || []).filter((sig) => sig.statut === "Ouvert").length, 0);
+    const express = (data.colis || []).filter((c) => c.demandeExpress && c.demandeExpress.statut === "En attente").length;
+    ajouter({ cle: "messages-clients", gravite: "info", vue: "centreclients", icone: MessageCircle, compte: messages,
+      titre: (n) => `${n} message${n > 1 ? "s" : ""} client non lu${n > 1 ? "s" : ""}`, detail: "Depuis l’Espace Client." });
+    ajouter({ cle: "prealertes", gravite: "info", vue: "centreclients", icone: Package, compte: preAlertes,
+      titre: (n) => `${n} pré-alerte${n > 1 ? "s" : ""} à rapprocher`, detail: "Commandes annoncées, colis pas encore reçu." });
+    ajouter({ cle: "regroupements", gravite: "info", vue: "centreclients", icone: FileStack, compte: regroupements,
+      titre: (n) => `${n} demande${n > 1 ? "s" : ""} de regroupement`, detail: "Un client veut réunir plusieurs colis." });
+    ajouter({ cle: "signalements", gravite: "alerte", vue: "centreclients", icone: AlertTriangle, compte: signalements,
+      titre: (n) => `${n} problème${n > 1 ? "s" : ""} signalé${n > 1 ? "s" : ""}`, detail: "Un client déclare un souci sur son colis." });
+    ajouter({ cle: "express", gravite: "alerte", vue: "centreclients", icone: Plane, compte: express,
+      titre: (n) => `${n} demande${n > 1 ? "s" : ""} express`, detail: "Un client demande un acheminement accéléré." });
+  }
+
+  if (perm("factures.consulter")) {
+    ajouter({
+      cle: "declarations", gravite: "alerte", vue: "paiements", icone: Receipt,
+      compte: (data.colis || []).reduce((s, c) => s + (c.declarationsPaiement || []).filter((d) => d.statut === "En attente").length, 0),
+      titre: (n) => `${n} paiement${n > 1 ? "s" : ""} déclaré${n > 1 ? "s" : ""} à vérifier`,
+      detail: "Un client dit avoir payé — à confirmer avant d’encaisser.",
+    });
+  }
+
+  if (perm("config.acceder")) {
+    ajouter({
+      cle: "partenaires-verif", gravite: "alerte", vue: "partenaires", icone: Truck,
+      compte: (data.colis || []).filter((c) => estColisPartenaire(c) && statutValidationPartenaire(c) === "En attente" && c.status !== "Annulé").length,
+      titre: (n) => `${n} colis partenaire à vérifier`,
+      detail: "À contrôler avant de les embarquer.",
+    });
+    ajouter({ cle: "partenaires-messages", gravite: "info", vue: "partenaires", icone: MessageCircle,
+      compte: partenairesEnAttenteDeReponse(data.users).length,
+      titre: (n) => `${n} partenaire${n > 1 ? "s" : ""} attend${n > 1 ? "ent" : ""} une réponse`, detail: "Messages sans réponse de notre côté." });
+    ajouter({ cle: "partenaires-factures", gravite: "alerte", vue: "partenaires", icone: Receipt,
+      compte: toutesFacturesEnRetard(data).length,
+      titre: (n) => `${n} facture${n > 1 ? "s" : ""} partenaire en retard`, detail: "Au-delà du délai de règlement convenu." });
+    ajouter({ cle: "partenaires-depots", gravite: "info", vue: "partenaires", icone: Package,
+      compte: depotsAnnonces(data).length,
+      titre: (n) => `${n} dépôt${n > 1 ? "s" : ""} annoncé${n > 1 ? "s" : ""}`, detail: "Annoncés par un partenaire, pas encore reçus." });
+  }
+
+  /*
+   * Les colis oubliés et les espèces non versées ne portent aucune pastille dans le menu : on ne
+   * les découvrait qu'en descendant le tableau de bord. Ce sont pourtant les deux choses qui
+   * coûtent vraiment de l'argent quand on les oublie.
+   */
+  if (perm("colis.voir_propres") || perm("colis.voir_tous")) {
+    ajouter({
+      cle: "oublies", gravite: "alerte", vue: "colis", icone: Clock,
+      compte: (data.colis || []).filter((c) => colisVisiblePour(session, c) && c.status === "Enregistré"
+        && (maintenant - new Date(c.createdAt).getTime()) / 86400000 > 3).length,
+      titre: (n) => `${n} colis oublié${n > 1 ? "s" : ""}`,
+      detail: "Toujours « Enregistré » depuis plus de trois jours.",
+    });
+  }
+
+  if (perm("paiements.voir_propres") || perm("compta.consulter")) {
+    const monNom = `${session.prenom || ""} ${session.nom || ""}`.trim();
+    const toutesLesCaisses = perm("compta.consulter");
+    ajouter({
+      cle: "caisse", gravite: "alerte", vue: "caisse", icone: Wallet,
+      compte: soldesCaisseParAgent(data).filter((g) => (toutesLesCaisses || g.agent === monNom) && g.jours >= 3).length,
+      titre: (n) => (toutesLesCaisses ? `${n} caisse${n > 1 ? "s" : ""} en retard de versement` : "Espèces à remettre en caisse"),
+      detail: "Encaissé en espèces depuis plus de trois jours, pas encore versé.",
+    });
+  }
+
+  return alertes;
+}
+
+const GRAVITE_ALERTE = {
+  grave:  { fond: "var(--danger-bg)", bord: "var(--danger-border)", teinte: "var(--danger-fg)" },
+  alerte: { fond: "var(--warn-bg)",   bord: "var(--warn-border)",   teinte: "var(--warn-fg)" },
+  info:   { fond: "var(--info-bg)",   bord: "var(--info-border)",   teinte: "var(--info-fg)" },
+};
+
+/**
+ * La cloche — un seul endroit où regarder.
+ *
+ * Elle ne remplace pas les pastilles du menu : elle évite d'avoir à les chercher. Le compte
+ * qu'elle porte est la somme de ce qui attend un geste, et chaque ligne mène à l'écran qui permet
+ * de le faire.
+ */
+function ClocheNotifications({ data, session, onAller, surFondSombre = false }) {
+  const [ouvert, setOuvert] = useState(false);
+  const alertes = useMemo(() => alertesDuCompte(data, session), [data, session]);
+  const total = alertes.reduce((n, a) => n + a.compte, 0);
+  const plusGrave = alertes.some((a) => a.gravite === "grave") ? "grave"
+    : alertes.some((a) => a.gravite === "alerte") ? "alerte" : "info";
+
+  useEffect(() => {
+    if (!ouvert) return undefined;
+    const surTouche = (e) => { if (e.key === "Escape") setOuvert(false); };
+    window.addEventListener("keydown", surTouche);
+    return () => window.removeEventListener("keydown", surTouche);
+  }, [ouvert]);
+
+  const couleurPastille = plusGrave === "grave" ? "var(--danger-fg)" : plusGrave === "alerte" ? "#E0A63A" : "var(--info-fg)";
+
+  return (
+    <>
+      <button
+        onClick={() => setOuvert((o) => !o)}
+        aria-label={total > 0 ? `Notifications — ${total} en attente` : "Notifications — rien en attente"}
+        title={total > 0 ? `${total} chose${total > 1 ? "s" : ""} en attente` : "Rien en attente"}
+        style={{
+          position: "relative", width: 34, height: 34, borderRadius: 10, flexShrink: 0, cursor: "pointer",
+          display: "grid", placeItems: "center",
+          background: surFondSombre ? "rgba(255,255,255,0.10)" : "var(--surface2)",
+          border: surFondSombre ? "none" : "1px solid var(--border)",
+          color: surFondSombre ? "#fff" : "var(--text)",
+        }}>
+        <Bell size={16} />
+        {total > 0 && (
+          <span style={{
+            position: "absolute", top: -4, insetInlineEnd: -4, minWidth: 17, height: 17, padding: "0 4px",
+            borderRadius: 999, background: couleurPastille, color: plusGrave === "alerte" ? "#0A2647" : "#fff",
+            fontSize: 10, fontWeight: 800, display: "grid", placeItems: "center", lineHeight: 1,
+            border: "2px solid " + (surFondSombre ? "#0A2647" : "var(--surface)"),
+          }}>{total > 99 ? "99+" : total}</span>
+        )}
+      </button>
+
+      {ouvert && (
+        <>
+          <div onClick={() => setOuvert(false)} style={{ position: "fixed", inset: 0, zIndex: 90 }} />
+          <div className="bde-cloche-panneau" role="dialog" aria-label="Notifications" style={{
+            position: "fixed", top: 62, insetInlineEnd: 16, zIndex: 91,
+            width: "min(380px, calc(100vw - 24px))", maxHeight: "min(70vh, 560px)", overflowY: "auto",
+            background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16,
+            boxShadow: "var(--shadow-modal)", padding: 12,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "2px 4px 10px" }}>
+              <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 14.5, color: "var(--text)" }}>Notifications</div>
+              <button onClick={() => setOuvert(false)} aria-label="Fermer" style={{ background: "var(--surface2)", border: "none", borderRadius: 8, width: 26, height: 26, cursor: "pointer", display: "grid", placeItems: "center" }}>
+                <X size={13} color="var(--muted)" />
+              </button>
+            </div>
+
+            {alertes.length === 0 ? (
+              <div style={{ padding: "26px 16px", textAlign: "center" }}>
+                <div style={{ width: 44, height: 44, margin: "0 auto 10px", borderRadius: 14, display: "grid", placeItems: "center", background: "color-mix(in srgb, var(--ok-fg) 13%, transparent)", border: "1px solid color-mix(in srgb, var(--ok-fg) 24%, transparent)" }}>
+                  <CheckCircle2 size={20} color="var(--ok-fg)" />
+                </div>
+                <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>Rien n’attend</div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 }}>
+                  Tout ce qui demande un geste apparaîtra ici.
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                {alertes.map((a) => {
+                  const style = GRAVITE_ALERTE[a.gravite] || GRAVITE_ALERTE.info;
+                  const Icone = a.icone;
+                  return (
+                    <button key={a.cle} onClick={() => { setOuvert(false); onAller?.(a.vue); }}
+                      style={{
+                        display: "flex", alignItems: "flex-start", gap: 11, width: "100%", textAlign: "start", cursor: "pointer",
+                        background: style.fond, border: `1px solid ${style.bord}`, borderRadius: 12, padding: "11px 12px",
+                      }}>
+                      <div style={{ width: 30, height: 30, borderRadius: 9, flexShrink: 0, display: "grid", placeItems: "center", background: `color-mix(in srgb, ${style.teinte} 18%, transparent)` }}>
+                        <Icone size={15} color={style.teinte} />
+                      </div>
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: style.teinte, lineHeight: 1.35 }}>{a.titre(a.compte)}</div>
+                        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2, lineHeight: 1.45 }}>{a.detail}</div>
+                      </div>
+                      <ChevronRight size={15} color="var(--muted)" style={{ flexShrink: 0, marginTop: 6 }} />
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+const StatCard = memo(function StatCard({ label, value, icon: Icon, tint, trend, trendColor, outline }) {
+  const teinte = tint || "var(--info-fg)";
+  const couleurTendance = trendColor || "var(--ok-fg)";
+  return (
+    <div className="bde-stat" style={{ background: SURFACE, borderRadius: 16, padding: "18px 20px", flex: 1, minWidth: 190, border: `1px solid ${outline || BORDER}`, boxShadow: "0 2px 12px rgba(10,38,71,0.06)" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+        <div style={{ fontSize: 11, color: MUTED, fontWeight: 700, letterSpacing: "0.07em", textTransform: "uppercase" }}>{label}</div>
+        <div style={{
+          width: 36, height: 36, borderRadius: 11, display: "grid", placeItems: "center", flexShrink: 0,
+          background: `color-mix(in srgb, ${teinte} 16%, transparent)`,
+          border: `1px solid color-mix(in srgb, ${teinte} 26%, transparent)`,
+        }}><Icon size={17} color={teinte} /></div>
+      </div>
+      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 30, fontWeight: 700, color: TEXT, marginTop: 14, letterSpacing: "-0.02em", lineHeight: 1.05 }}>{value}</div>
+      {trend && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 9, fontSize: 12, color: couleurTendance, fontWeight: 600 }}>
+          <span style={{ width: 5, height: 5, borderRadius: "50%", background: couleurTendance, flexShrink: 0 }} />
+          {trend}
+        </div>
+      )}
     </div>
   );
 });
@@ -8024,7 +8766,7 @@ function BandeauEcrasement({ data, persist, session }) {
 
 function Dashboard({ data, session, onNavigate, onNouveauColis }) {
   const stats = useMemo(() => {
-    const colis = data.colis.filter((c) => colisDeLAgence(c, session.agence));
+    const colis = data.colis.filter((c) => colisVisiblePour(session, c));
     const total = colis.length;
     const now = new Date();
     const thisMonth = colis.filter((c) => { const d = new Date(c.createdAt); return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear(); }).length;
@@ -8159,7 +8901,7 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
       {(effectivePermission(session, "stats.globales") || effectivePermission(session, "stats.personnelles")) && (
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 20 }}>
         <StatCard label="Volume total" value={total} icon={Package} tint="#3D63FF" trend={`+${thisMonth} ce mois`} trendColor="var(--ok-fg)" />
-        <StatCard label="Revenus" value={fmt(ca, "EUR")} icon={DollarSign} tint="#16A163" trend={`${fmt(encaisse, "EUR")} encaissés`} trendColor="var(--ok-fg)" outline="#1E4430" />
+        <StatCard label="Revenus" value={fmt(ca, "EUR")} icon={DollarSign} tint="#16A163" trend={`${fmt(encaisse, "EUR")} encaissés`} trendColor="var(--ok-fg)" outline="color-mix(in srgb, var(--ok-fg) 36%, var(--border))" />
         <StatCard label="En transit" value={enTransit} icon={Plane} tint="#5B8DEF" trend="Actuellement en cours" trendColor="var(--muted)" />
         <StatCard label="À expédier" value={aExpedier} icon={AlertTriangle} tint="var(--danger-fg)" trend={aExpedier > 0 ? "Nécessite action" : "Rien en attente"} trendColor={aExpedier > 0 ? "var(--danger-fg)" : "var(--muted)"} />
       </div>
@@ -8250,15 +8992,15 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
       </div>
 
       <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 20, marginBottom: 20 }}>
-        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14.5, marginBottom: 12 }}>Répartition par destination</div>
-        {parPays.map((p) => (
-          <div key={p.code} style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
-            <div style={{ width: 130, fontSize: 13, color: "var(--text)" }}>{FLAGS[p.code]} {p.name}</div>
-            <div style={{ flex: 1, height: 8, background: "var(--surface2)", borderRadius: 6, overflow: "hidden" }}>
-              <div style={{ width: `${total ? (p.count / total) * 100 : 0}%`, height: "100%", background: "var(--brand-solid)" }} />
-            </div>
-            <div style={{ width: 24, textAlign: "right", fontSize: 13, color: "var(--muted)" }}>{p.count}</div>
-          </div>
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14.5, marginBottom: 14 }}>Répartition par destination</div>
+        {/*
+          * Les pays étaient listés dans l'ordre du catalogue, si bien que la page ouvrait sur dix
+          * barres vides avant celle qui portait tout le trafic. On classe du plus chargé au moins
+          * chargé — la même information, mais celle qui compte se lit en premier. Les destinations
+          * sans colis restent affichées : savoir qu'une route est à zéro est aussi un renseignement.
+          */}
+        {[...parPays].sort((a, b) => b.count - a.count).map((p) => (
+          <BarreRepartition key={p.code} libelle={<>{FLAGS[p.code]} {p.name}</>} valeur={p.count} total={total} teinte="var(--brand-solid)" />
         ))}
         {total === 0 && <div style={{ color: "var(--muted)", fontSize: 13 }}>Aucun colis enregistré pour le moment.</div>}
       </div>
@@ -8266,14 +9008,8 @@ function Dashboard({ data, session, onNavigate, onNouveauColis }) {
       {parProvenance.length > 0 && (
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 20, marginBottom: 20 }}>
           <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14.5, marginBottom: 12 }}>Répartition par site d’achat</div>
-          {parProvenance.sort((a, b) => b.count - a.count).map((p) => (
-            <div key={p.nom} style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
-              <div style={{ width: 130, fontSize: 13, color: "var(--text)" }}>{p.nom}</div>
-              <div style={{ flex: 1, height: 8, background: "var(--surface2)", borderRadius: 6, overflow: "hidden" }}>
-                <div style={{ width: `${total ? (p.count / total) * 100 : 0}%`, height: "100%", background: "#5B8DEF" }} />
-              </div>
-              <div style={{ width: 24, textAlign: "right", fontSize: 13, color: "var(--muted)" }}>{p.count}</div>
-            </div>
+          {[...parProvenance].sort((a, b) => b.count - a.count).map((p) => (
+            <BarreRepartition key={p.nom} libelle={p.nom} valeur={p.count} total={total} teinte="var(--info-fg)" />
           ))}
         </div>
       )}
@@ -8614,7 +9350,7 @@ function PartnerDashboard({ data, session, persist, verifier, notify, onglet }) 
     const inclus = (data.colis || []).filter((c) => (facture.trackings || []).includes(c.tracking));
     setPdfEnCours(facture.id);
     try {
-      const doc = await construireFacturePartenaireDoc(facture, moi, inclus);
+      const doc = await construireFacturePartenaireDoc(facture, moi, inclus, data?.entreprise);
       openPdf(doc, `${facture.numero}.pdf`);
     } catch (e) {
       console.error(e);
@@ -10719,7 +11455,7 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
                       </Field>
                     )}
                     <Field label="Quantité"><input type="number" min="1" value={a.quantite} onChange={(e) => majArticle(a.id, { quantite: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
-                    <Field label="Poids (kg) *"><input type="number" step="0.01" min="0" value={a.poids} onChange={(e) => majArticle(a.id, { poids: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="0" /></Field>
+                    <Field label="Poids (kg) *"><input type="text" inputMode="decimal" value={a.poids} onChange={(e) => majArticle(a.id, { poids: nombreTape(e.target.value) })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="0" /></Field>
                   </div>
                   {tarifDefini && (
                     <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 8 }}>
@@ -11136,6 +11872,25 @@ function AgencesConfigPage({ data, persist, notify, onBack, sansEntete }) {
         <Field label="Deuxième ligne (facultatif)"><input value={entreprise.telephone2 || ""} onChange={(e) => setEntreprise({ ...entreprise, telephone2: e.target.value })} style={inputStyle} placeholder="Laissez vide s’il n’y en a qu’une" /></Field>
         <Field label="E-mail"><input value={entreprise.email} onChange={(e) => setEntreprise({ ...entreprise, email: e.target.value })} style={inputStyle} /></Field>
         <Field label="Site web"><input value={entreprise.siteWeb} onChange={(e) => setEntreprise({ ...entreprise, siteWeb: e.target.value })} style={inputStyle} /></Field>
+        {/*
+          * LE NUMÉRO DU REGISTRE DU COMMERCE, SUR LES FACTURES.
+          *
+          * Une facture sans immatriculation est une facture qu'on peut contester : rien n'y dit
+          * que l'entreprise existe légalement. Le numéro d'entreprise du RCCM le dit en une ligne,
+          * vérifiable au Tribunal de commerce — c'est ce que cherche un client qui doit justifier
+          * une dépense, et ce que demande une administration.
+          *
+          * Il se règle ici plutôt que de vivre dans le code : une immatriculation change (forme
+          * juridique, transfert de siège), et cela ne doit pas demander une mise en ligne.
+          */}
+        <Field label="N° RCCM (registre du commerce)">
+          <input value={entreprise.rccm || ""} onChange={(e) => setEntreprise({ ...entreprise, rccm: e.target.value })} style={inputStyle} placeholder="ex : GN.TCC.2024.A.02328" />
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -8, lineHeight: 1.5 }}>
+            Le <strong>numéro d’entreprise</strong> de votre attestation, pas le numéro de formalité.
+            Il s’imprimera sur toutes vos factures — c’est lui qui montre que l’entreprise est
+            régulièrement constituée.
+          </div>
+        </Field>
       </div>
 
       <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, maxWidth: 620, border: "1px solid var(--border)", marginBottom: 20 }}>
@@ -11418,7 +12173,7 @@ function GestionDevisesPage({ data, persist, session, notify, onBack }) {
     setRapatriement(true);
     setTauxMsg(null);
     try {
-      const reponse = await appelServeurQuiDepense("/api/taux");
+      const reponse = await appelServeurQuiDepense("/api/services?service=taux");
       const corps = await reponse.json().catch(() => ({}));
       if (reponse.status === 501) {
         setTauxMsg({ ok: false, texte: "Les taux automatiques ne sont pas encore configurés sur le serveur. Vos taux saisis à la main restent en place." });
@@ -11818,7 +12573,7 @@ function CategoriesProduitsPage({ data, persist, session, notify, onBack }) {
   );
 }
 
-const inputStyle = { width: "100%", border: `1.5px solid ${BORDER}`, borderRadius: 8, padding: "9px 11px", fontSize: 13.5, outline: "none", color: TEXT, background: SURFACE2 };
+const inputStyle = { width: "100%", border: `1px solid ${BORDER}`, borderRadius: 10, padding: "10px 12px", fontSize: 13.5, outline: "none", color: TEXT, background: SURFACE2 };
 const toggleBtn = { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, border: `1.5px solid ${BORDER}`, background: SURFACE2, borderRadius: 8, padding: "9px 0", fontSize: 13, cursor: "pointer", color: MUTED };
 const toggleActive = { background: BLUE, color: "#fff", borderColor: BLUE };
 
@@ -12180,7 +12935,7 @@ function TraiterPreAlerteModal({ preAlerte, client, tarifs, onValider, onClose }
 
       <div style={{ fontSize: 11.5, color: "var(--muted)", fontWeight: 700, margin: "18px 0 8px" }}>PESÉE ET TARIFICATION</div>
       <div style={{ display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
-        <input type="number" step="0.1" min="0" value={poids} onChange={(e) => { setPoids(e.target.value); setErreur(""); }} placeholder="Poids réel (kg)" autoFocus style={{ ...inputStyle, width: 150, marginBottom: 0 }} />
+        <input type="text" inputMode="decimal" value={poids} onChange={(e) => { setPoids(nombreTape(e.target.value)); setErreur(""); }} placeholder="Poids réel (kg)" autoFocus style={{ ...inputStyle, width: 150, marginBottom: 0 }} />
         <div style={{ flex: 1, minWidth: 220, background: calcul ? "var(--ok-bg)" : "var(--surface2)", border: "1px solid " + (calcul ? "var(--ok-border)" : "var(--border)"), borderRadius: 12, padding: "10px 14px" }}>
           {calcul ? (
             <>
@@ -13284,17 +14039,25 @@ const TAILLES_PAGE_COLIS = [20, 50, 100, "tout"];
  * (Arrivé : le colis est là mais pas encore marqué disponible au retrait) ou le filtre actif.
  */
 const ColisStatCard = memo(function ColisStatCard({ label, value, icon: Icon, tint, active, highlight, onFiltrer }) {
+  // Même langage que les cartes du tableau de bord : pastille teintée plutôt qu'aplat saturé,
+  // libellé en petites capitales, chiffre à chasse fixe. Six pastilles vives alignées sur une
+  // ligne se disputaient l'attention et laissaient croire à six alertes.
+  const teinte = highlight ? "var(--warn-fg)" : tint;
   return (
-    <div style={{
+    <div className="bde-stat" style={{
       background: highlight ? "var(--warn-bg)" : "var(--surface)",
-      border: "1.5px solid " + (highlight ? "var(--warn-border)" : active ? tint : "var(--border)"),
-      borderRadius: 14, padding: "16px 18px", minWidth: 0,
+      border: "1px solid " + (highlight ? "var(--warn-border)" : active ? tint : "var(--border)"),
+      borderRadius: 14, padding: "15px 17px", minWidth: 0,
     }}>
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <span style={{ fontSize: 12, color: highlight ? "var(--warn-fg)" : "var(--muted)", fontWeight: 600 }}>{label}</span>
-        <div style={{ width: 32, height: 32, borderRadius: 9, background: tint, flexShrink: 0, display: "grid", placeItems: "center" }}><Icon size={15} color="#fff" /></div>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <span style={{ fontSize: 10.5, color: highlight ? "var(--warn-fg)" : "var(--muted)", fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", lineHeight: 1.3 }}>{label}</span>
+        <div style={{
+          width: 30, height: 30, borderRadius: 9, flexShrink: 0, display: "grid", placeItems: "center",
+          background: `color-mix(in srgb, ${teinte} 16%, transparent)`,
+          border: `1px solid color-mix(in srgb, ${teinte} 26%, transparent)`,
+        }}><Icon size={15} color={teinte} /></div>
       </div>
-      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 26, fontWeight: 700, color: highlight ? "var(--warn-fg)" : "var(--text)", marginTop: 10 }}>{value}</div>
+      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 26, fontWeight: 700, color: highlight ? "var(--warn-fg)" : "var(--text)", marginTop: 11, letterSpacing: "-0.02em", lineHeight: 1.05 }}>{value}</div>
       {onFiltrer && (
         <button onClick={onFiltrer} style={{ display: "flex", alignItems: "center", gap: 2, background: "none", border: "none", color: highlight ? "var(--warn-fg)" : "var(--info-fg)", fontSize: 11.5, fontWeight: 700, padding: 0, marginTop: 8, cursor: "pointer" }}>
           Filtrer <ChevronRight size={13} />
@@ -13303,6 +14066,177 @@ const ColisStatCard = memo(function ColisStatCard({ label, value, icon: Icon, ti
     </div>
   );
 });
+
+/*
+ * LES FILTRES DE LA LISTE DES COLIS.
+ *
+ * La recherche libre suffit quand on cherche UN colis dont on connaît le numéro. Elle ne répond
+ * pas aux questions qu'on se pose vraiment devant la liste : « qu'est-ce qui part de France et
+ * n'est pas encore payé ? », « qu'est-ce que Bambeto a enregistré cette semaine ? ». Il fallait
+ * jusqu'ici faire défiler cinq cents lignes et compter de tête.
+ *
+ * Trois principes tiennent cet écran :
+ *   — LES CHOIX VIENNENT DES DONNÉES. Les pays proposés sont ceux d'où des colis partent
+ *     réellement, avec leur nombre à côté. Un filtre qui ne rend rien ne se propose pas ;
+ *   — CE QUI EST FILTRÉ SE VOIT. Chaque filtre actif devient une pastille qu'on retire d'un
+ *     doigt : refermer le panneau ne laisse jamais une liste tronquée sans qu'on sache pourquoi ;
+ *   — LE COMPTE EST TOUJOURS LÀ. « 27 colis sur 505 » se lit d'un coup d'œil.
+ */
+const FILTRES_COLIS_VIDES = { depart: "", arrivee: "", site: "", reglement: "", periode: "" };
+const PERIODES_COLIS = [
+  { cle: "7", label: "7 derniers jours", jours: 7 },
+  { cle: "30", label: "30 derniers jours", jours: 30 },
+  { cle: "90", label: "3 derniers mois", jours: 90 },
+];
+const REGLEMENTS_COLIS = [
+  { cle: "impaye", label: "Rien encaissé" },
+  { cle: "partiel", label: "Partiellement réglé" },
+  { cle: "paye", label: "Intégralement réglé" },
+];
+
+/** Le colis passe-t-il les filtres ? Une seule fonction, pour l’écran comme pour les bancs. */
+export function colisPasseLesFiltres(colis, filtres, maintenant = Date.now()) {
+  const f = { ...FILTRES_COLIS_VIDES, ...(filtres || {}) };
+  if (f.depart && String(colis?.expediteurPays || "GN") !== f.depart) return false;
+  if (f.arrivee && String(colis?.destinatairePays || colis?.pays || "") !== f.arrivee) return false;
+  if (f.site && String(colis?.site || "").trim().toLowerCase() !== f.site.trim().toLowerCase()) return false;
+  if (f.reglement) {
+    const paye = Number(colis?.paye) || 0;
+    const reste = Number(colis?.reste) || 0;
+    if (f.reglement === "impaye" && paye > 0.005) return false;
+    if (f.reglement === "paye" && reste > 0.005) return false;
+    if (f.reglement === "partiel" && !(paye > 0.005 && reste > 0.005)) return false;
+  }
+  if (f.periode) {
+    const jours = PERIODES_COLIS.find((x) => x.cle === f.periode)?.jours;
+    const quand = Date.parse(colis?.createdAt || "");
+    if (jours && (!Number.isFinite(quand) || maintenant - quand > jours * 86400000)) return false;
+  }
+  return true;
+}
+
+/** Ce que la recherche libre regarde — tout ce par quoi on désigne un colis à voix haute. */
+export function colisCorrespondALaRecherche(colis, q) {
+  if (!q) return true;
+  return [
+    colis?.tracking, colis?.destinataire, colis?.expediteur, colis?.telephone,
+    colis?.expediteurTelephone, colis?.referenceCommande, colis?.emplacement, colis?.repere,
+    colis?.destinataireEmail, ...(colis?.produits || []).map((p) => p?.reference),
+  ].some((champ) => pourRecherche(champ).includes(q));
+}
+
+function FiltresColis({ filtres, onChange, base, resultats, session }) {
+  const [ouvert, setOuvert] = useState(false);
+  const actifs = Object.entries(filtres).filter(([, v]) => v);
+  /* Les choix viennent des colis eux-mêmes : proposer un pays sans colis n'aide personne. */
+  const compter = (lire) => {
+    const par = new Map();
+    base.forEach((c) => {
+      const v = lire(c);
+      if (!v) return;
+      par.set(v, (par.get(v) || 0) + 1);
+    });
+    return [...par.entries()].sort((a, b) => b[1] - a[1]);
+  };
+  const departs = compter((c) => String(c.expediteurPays || "GN"));
+  const arrivees = compter((c) => String(c.destinatairePays || c.pays || ""));
+  const sites = compter((c) => String(c.site || "").trim());
+  const nomPays = (code) => `${FLAGS[code] || ""} ${COUNTRIES.find((x) => x.code === code)?.name || code}`.trim();
+  const libelle = (cle, valeur) => {
+    if (cle === "depart") return `Départ : ${nomPays(valeur)}`;
+    if (cle === "arrivee") return `Arrivée : ${nomPays(valeur)}`;
+    if (cle === "site") return `Agence : ${valeur}`;
+    if (cle === "reglement") return REGLEMENTS_COLIS.find((r) => r.cle === valeur)?.label || valeur;
+    if (cle === "periode") return PERIODES_COLIS.find((r) => r.cle === valeur)?.label || valeur;
+    return valeur;
+  };
+  const champ = (cle, titre, options, formater) => (
+    <Field label={titre}>
+      <select value={filtres[cle]} onChange={(e) => onChange({ ...filtres, [cle]: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }}>
+        <option value="">Tous</option>
+        {options.map(([v, n]) => <option key={v} value={v}>{formater(v)} · {n}</option>)}
+      </select>
+    </Field>
+  );
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
+        <button type="button" onClick={() => setOuvert((o) => !o)} style={{
+          display: "flex", alignItems: "center", gap: 7,
+          background: actifs.length ? "var(--info-bg)" : "var(--surface)",
+          color: actifs.length ? "var(--info-fg)" : "var(--text)",
+          border: `1.5px solid ${actifs.length ? "var(--info-border)" : "var(--border)"}`,
+          borderRadius: 9, padding: "10px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer",
+        }}>
+          {/*
+            * « Filtres » et non « Filtrer » : les cartes de statistiques portent déjà ce mot, et
+            * deux boutons qui se nomment pareil dans le même écran ne se distinguent ni à la voix,
+            * ni au lecteur d'écran, ni au banc d'essai.
+            */}
+          <SlidersHorizontal size={16} /> Filtres
+          {actifs.length > 0 && <span style={{ background: "var(--info-fg)", color: "#fff", borderRadius: 999, padding: "1px 8px", fontSize: 11.5 }}>{actifs.length}</span>}
+          <ChevronDown size={14} style={{ transform: ouvert ? "rotate(180deg)" : "none", transition: "transform 0.15s" }} />
+        </button>
+        {/*
+          * Le compte, toujours visible. C'est lui qui dit si le filtre a mordu — et il évite de
+          * faire défiler la liste pour compter à la main.
+          */}
+        <span style={{ fontSize: 12.5, color: "var(--muted)" }}>
+          {resultats === base.length
+            ? `${base.length} colis`
+            : <><strong style={{ color: "var(--text)" }}>{resultats}</strong> colis sur {base.length}</>}
+        </span>
+      </div>
+
+      {/* Les pastilles restent visibles même panneau refermé : une liste tronquée doit dire pourquoi. */}
+      {actifs.length > 0 && (
+        <div style={{ display: "flex", gap: 7, flexWrap: "wrap", marginTop: 10 }}>
+          {actifs.map(([cle, valeur]) => (
+            <button key={cle} type="button" onClick={() => onChange({ ...filtres, [cle]: "" })} style={{
+              display: "flex", alignItems: "center", gap: 6, background: "var(--info-bg)", color: "var(--info-fg)",
+              border: "1px solid var(--info-border)", borderRadius: 999, padding: "5px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer",
+            }}>
+              {libelle(cle, valeur)} <X size={12} />
+            </button>
+          ))}
+          <button type="button" onClick={() => onChange({ ...FILTRES_COLIS_VIDES })} style={{
+            background: "none", border: "1px solid var(--border)", color: "var(--muted)",
+            borderRadius: 999, padding: "5px 12px", fontSize: 12, cursor: "pointer",
+          }}>Tout effacer</button>
+        </div>
+      )}
+
+      {ouvert && (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: 16, marginTop: 12 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))", gap: 12 }}>
+            {departs.length > 1 && champ("depart", "Pays de départ", departs, nomPays)}
+            {arrivees.length > 1 && champ("arrivee", "Pays d’arrivée", arrivees, nomPays)}
+            {sites.length > 1 && champ("site", "Agence d’enregistrement", sites, (v) => v)}
+            <Field label="Règlement">
+              <select value={filtres.reglement} onChange={(e) => onChange({ ...filtres, reglement: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }}>
+                <option value="">Tous</option>
+                {REGLEMENTS_COLIS.map((r) => <option key={r.cle} value={r.cle}>{r.label}</option>)}
+              </select>
+            </Field>
+            <Field label="Enregistré">
+              <select value={filtres.periode} onChange={(e) => onChange({ ...filtres, periode: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }}>
+                <option value="">Depuis toujours</option>
+                {PERIODES_COLIS.map((r) => <option key={r.cle} value={r.cle}>{r.label}</option>)}
+              </select>
+            </Field>
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 }}>
+            La recherche ci-dessus trouve un colis par son numéro, le nom de l’expéditeur ou du
+            destinataire, un téléphone, une référence de commande ou un emplacement.
+            {!effectivePermission(session, "colis.voir_tous")
+              && " Vous ne voyez que les colis de votre agence : c’est le droit « Voir tous les colis » qui ouvre les autres."}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function ColisView({ data, persist, verifier, session, notify, t, demandeOuverture, onDemandeTraitee, ouvrirFormulaire }) {
   const [showForm, setShowForm] = useState(false);
@@ -13348,15 +14282,18 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
   const baseList = useMemo(() => {
     return data.colis
       .filter((c) => (isChauffeur ? c.status === "Disponible au retrait" : true))
-      .filter((c) => colisDeLAgence(c, session.zoneOperation || session.agence));
+      .filter((c) => colisVisiblePour(session, c));
   }, [data.colis, isChauffeur, session.zoneOperation, session.agence]);
   const [statutFiltre, setStatutFiltre] = useState(null);
+  const [filtres, setFiltres] = useState({ ...FILTRES_COLIS_VIDES });
   const list = useMemo(() => {
     const q = pourRecherche(deferredQuery);
+    const maintenant = Date.now();
     return baseList
       .filter((c) => !statutFiltre || c.status === statutFiltre)
-      .filter((c) => !q || pourRecherche(c.tracking).includes(q) || pourRecherche(c.destinataire).includes(q) || pourRecherche(c.referenceCommande).includes(q) || pourRecherche(c.emplacement).includes(q));
-  }, [baseList, statutFiltre, deferredQuery]);
+      .filter((c) => colisPasseLesFiltres(c, filtres, maintenant))
+      .filter((c) => colisCorrespondALaRecherche(c, q));
+  }, [baseList, statutFiltre, deferredQuery, filtres]);
   /*
    * Un numéro cliqué ailleurs dans l'application ouvre sa fiche ici.
    *
@@ -13467,7 +14404,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
     for (const c of colisSelectionnes) {
       try {
         if (type === "etiquette") await downloadLabel(c, data);
-        else if (type === "ticket") await downloadTicketThermal(c);
+        else if (type === "ticket") await downloadTicketThermal(c, data?.entreprise);
         else await downloadInvoice(c, data);
       } catch (e) { console.error(`Échec impression pour ${c.tracking}`, e); }
       await new Promise((r) => setTimeout(r, 400)); // laisse le navigateur traiter chaque téléchargement avant le suivant
@@ -13911,7 +14848,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
         */}
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", minWidth: 0 }}>
           {effectivePermission(session, "colis.importer_excel") && <button onClick={() => setShowImport(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><Download size={17} color="var(--info-fg)" style={{ transform: "rotate(180deg)" }} /> Importer Excel</button>}
-          {effectivePermission(session, "colis.bordereau_reception") && <button onClick={() => setShowReception(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={17} color="var(--ok-fg)" /> Bordereau de réception</button>}
+          {peutOuvrirComptoirReception(session, data) && <button onClick={() => setShowReception(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><FileStack size={17} color="var(--ok-fg)" /> Bordereau de réception</button>}
           {effectivePermission(session, "colis.reglement_groupe") && <button onClick={() => setShowEncaisseGroupe(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><DollarSign size={17} color="var(--ok-fg)" /> Règlement groupé</button>}
           {peutCreer && <button onClick={() => setShowAi(true)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", color: "var(--text)", border: "1.5px solid var(--border)", borderRadius: 9, padding: "12px 18px", fontSize: 14.5, fontWeight: 700, cursor: "pointer" }}><Sparkles size={17} color="#8B5CF6" /> Créer par IA</button>}
           {/* Colis déposé par un partenaire : formulaire court, sans catégorie ni tarif — le partenaire
@@ -13959,6 +14896,9 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
           <Camera size={16} /> Scanner
         </button>
       </div>
+      {!isChauffeur && (
+        <FiltresColis filtres={filtres} onChange={setFiltres} base={baseList} resultats={list.length} session={session} />
+      )}
       {aRelancer.length > 0 && (
         <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 12, padding: "14px 16px", marginBottom: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
@@ -14099,7 +15039,19 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
             </tbody>
           </table>
         </div>
-        {list.length === 0 && <div style={{ padding: 20, color: "var(--muted)", fontSize: 13.5 }}>Aucun colis à afficher.</div>}
+        {list.length === 0 && (
+          <div style={{ padding: "42px 24px", display: "flex", flexDirection: "column", alignItems: "center", textAlign: "center", gap: 4 }}>
+            <div style={{ width: 52, height: 52, borderRadius: 16, display: "grid", placeItems: "center", marginBottom: 8, background: "color-mix(in srgb, var(--info-fg) 12%, transparent)", border: "1px solid color-mix(in srgb, var(--info-fg) 22%, transparent)" }}>
+              <Package size={23} color="var(--info-fg)" />
+            </div>
+            <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)" }}>Aucun colis à afficher</div>
+            <div style={{ fontSize: 12.5, color: "var(--muted)", maxWidth: 320, lineHeight: 1.55 }}>
+              {(deferredQuery || statutFiltre || Object.values(filtres).some(Boolean))
+                ? "Aucun colis ne correspond à cette recherche ou à ces filtres. Essayez d’élargir la période ou de vider les filtres."
+                : "Les colis enregistrés apparaîtront ici, du plus récent au plus ancien."}
+            </div>
+          </div>
+        )}
         {list.length > 0 && (
           <div style={{ padding: "12px 18px", borderTop: "1px solid var(--border)", fontSize: 12, color: "var(--muted)" }}>
             {listeVisible.length} affiché{listeVisible.length > 1 ? "s" : ""} sur {list.length}
@@ -14357,8 +15309,21 @@ function BordereauCreation({ data, session, onCancel, onCreate }) {
   const [selectedTrackings, setSelectedTrackings] = useState([]);
   const country = COUNTRIES.find((c) => c.code === pays);
 
-  const dejaInclus = new Set((data.bordereaux || []).filter((b) => normalizeBordereauStatut(b.statut) !== "Livré").flatMap((b) => b.colisTrackings));
-  const eligibles = data.colis.filter((c) => c.pays === pays && (c.direction || "export") === direction && c.status !== "Livré" && c.status !== "Annulé" && !dejaInclus.has(c.tracking) && colisDeLAgence(c, session?.zoneOperation || session?.agence));
+  /*
+   * UN COLIS N'EST SUR QU'UN SEUL BORDEREAU, ET POUR TOUJOURS.
+   *
+   * On écartait les bordereaux « Livré » de ce décompte, si bien qu'un colis posé sur un bordereau
+   * déjà remis redevenait sélectionnable pour un autre. Et cela arrive : un bordereau est marqué
+   * livré quand le gros du lot est parti, alors que tel colis attend encore son client. Il
+   * réapparaissait alors dans la liste, on le rechargeait de bonne foi, et le même colis se
+   * retrouvait compté sur deux bordereaux — donc deux fois dans les poids, deux fois dans les
+   * montants, et introuvable au moment de savoir lequel des deux fait foi.
+   *
+   * Le rattachement à un bordereau ne s'annule pas par le temps qui passe : il se défait en
+   * retirant le colis du bordereau, ce que l'écran de modification permet déjà.
+   */
+  const dejaInclus = new Set((data.bordereaux || []).flatMap((b) => b.colisTrackings || []));
+  const eligibles = data.colis.filter((c) => c.pays === pays && (c.direction || "export") === direction && c.status !== "Livré" && c.status !== "Annulé" && !dejaInclus.has(c.tracking) && colisVisiblePour(session, c));
 
   function toggle(tracking) {
     setSelectedTrackings((list) => (list.includes(tracking) ? list.filter((t) => t !== tracking) : [...list, tracking]));
@@ -14393,7 +15358,7 @@ function BordereauCreation({ data, session, onCancel, onCreate }) {
 
       <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", marginBottom: 18 }}>
         {eligibles.length === 0 ? (
-          <div style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucun colis en attente sur cette route (ou déjà inclus dans un autre bordereau en cours).</div>
+          <div style={{ padding: 20, color: "var(--muted)", fontSize: 13 }}>Aucun colis en attente sur cette route. Ceux qui figurent déjà sur un autre bordereau n’apparaissent pas ici : retirez-les de ce bordereau pour pouvoir les replacer.</div>
         ) : eligibles.map((c) => (
           <label key={c.tracking} style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", borderTop: "1px solid var(--border)", cursor: "pointer" }}>
             <input type="checkbox" checked={selectedTrackings.includes(c.tracking)} onChange={() => toggle(c.tracking)} />
@@ -14442,7 +15407,9 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
   const stIdx = BORDEREAU_STATUSES.indexOf(statutActuel);
   const estFinal = stIdx === BORDEREAU_STATUSES.length - 1;
 
-  const dejaInclusAilleurs = new Set((data.bordereaux || []).filter((b) => b.id !== bordereau.id && normalizeBordereauStatut(b.statut) !== "Livré").flatMap((b) => b.colisTrackings));
+  // Même règle qu'à la création : un colis rattaché ailleurs ne s'ajoute pas ici, quel que soit
+  // l'état de l'autre bordereau. Il faut d'abord l'en retirer.
+  const dejaInclusAilleurs = new Set((data.bordereaux || []).filter((b) => b.id !== bordereau.id).flatMap((b) => b.colisTrackings || []));
   const ajoutables = data.colis.filter((c) => c.pays === bordereau.pays && (c.direction || "export") === bordereau.direction && c.status !== "Livré" && c.status !== "Annulé" && !bordereau.colisTrackings.includes(c.tracking) && !dejaInclusAilleurs.has(c.tracking));
 
   /*
@@ -15530,7 +16497,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
                 <Field label="Nom du produit *"><input value={p.nom} onChange={(e) => updateProduit(p.id, { nom: e.target.value })} style={inputStyle} placeholder="Rechercher ou saisir un produit..." /></Field>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 10 }}>
                   <Field label="Quantité *"><input type="number" min="1" step="1" inputMode="numeric" value={p.quantite} onChange={(e) => updateProduit(p.id, { quantite: e.target.value })} style={inputStyle} /></Field>
-                  <Field label="Poids du colis (kg) *"><input type="number" min="0" step="0.1" inputMode="decimal" value={p.poids} onChange={(e) => updateProduit(p.id, { poids: e.target.value })} style={inputStyle} /></Field>
+                  <Field label="Poids du colis (kg) *"><input type="text" inputMode="decimal" value={p.poids} onChange={(e) => updateProduit(p.id, { poids: nombreTape(e.target.value) })} style={inputStyle} /></Field>
                 </div>
                 <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: -8, marginBottom: 12 }}>Le poids est indépendant de la quantité — il représente le poids réel du colis, jamais multiplié.</div>
 
@@ -15989,6 +16956,22 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   const doc = preparerDocPdf(new jspdf.jsPDF());
   const label = direction === "import" ? `${country.city} → Conakry` : `Conakry → ${country.city}`;
   const poidsTotal = colisRoute.reduce((s, c) => s + c.poids, 0);
+  /*
+   * UN COLIS PARTENAIRE NE COMPTE PAS DANS L'ARGENT DU BORDEREAU.
+   *
+   * La fiche de voyage le dit depuis toujours : là où il y aurait un prix, elle écrit « — », et
+   * dans la colonne du reste, « Partenaire ». Le bordereau, lui, imprimait « 0 GNF » et
+   * « Non payé » — les deux mentions qui, sur un document remis au transporteur puis rangé dans
+   * un classeur, se lisent exactement comme un client qui doit de l'argent. Pire : ces zéros
+   * entraient dans « MONTANT TOTAL » et dans « Reste à percevoir », si bien qu'un bordereau
+   * chargé de colis partenaire annonçait une créance que personne ne devait.
+   *
+   * Ces colis appartiennent au partenaire, qui les facture à ses propres clients selon un tarif
+   * dont nous n'avons pas connaissance et que nous n'avons pas à faire figurer. Ils sont donc
+   * comptés en colis et en kilos — c'est ce qu'on charge dans l'avion — mais jamais en francs.
+   */
+  const colisFactures = colisRoute.filter((c) => !estColisPartenaire(c));
+  const nbPartenaires = colisRoute.length - colisFactures.length;
 
   // Bandeau d’en-tête — filet rouge au pied de la bande navy, comme sur l'étiquette et le ticket
   // d'envoi : même identité de marque bicolore sur tous les documents imprimés.
@@ -16036,7 +17019,7 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   };
   stat(14, "COLIS", colisRoute.length);
   stat(76, "POIDS TOTAL", `${poidsTotal.toFixed(1)} kg`);
-  stat(138, "MONTANT TOTAL", fmt(colisRoute.reduce((s, c) => s + c.prix, 0), cur), true);
+  stat(138, "MONTANT TOTAL", fmt(colisFactures.reduce((s, c) => s + c.prix, 0), cur), true);
   y += 26;
 
   /*
@@ -16047,6 +17030,8 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
    * partiellement payé, ou pas payé du tout. C'est la question posée à chaque remise.
    */
   const reglementDuColis = (c) => {
+    // Même mention que sur la fiche de voyage : ni « payé », ni « dû », le colis n'est pas à nous.
+    if (estColisPartenaire(c)) return { libelle: "Partenaire", teinte: [91, 141, 239] };
     const paye = Number(c.paye) || 0;
     if (paye <= 0.005) return { libelle: "Non payé", teinte: [200, 45, 60] };
     if ((Number(c.reste) || 0) <= 0.005) return { libelle: "Payé", teinte: [40, 140, 90] };
@@ -16055,7 +17040,7 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   const head = ["N° de suivi", "Destinataire", "Téléphone", "Articles", "Poids", "Statut", `Montant (${cur})`, "Règlement"];
   const body = colisRoute.map((c) => [
     c.tracking, c.destinataire, c.telephone, String(nombreArticles(c)),
-    `${c.poids} kg`, c.status, fmt(c.prix, cur), reglementDuColis(c).libelle,
+    `${c.poids} kg`, c.status, estColisPartenaire(c) ? "—" : fmt(c.prix, cur), reglementDuColis(c).libelle,
   ]);
 
   const hasAutoTable = await ensureAutoTable();
@@ -16152,9 +17137,9 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
    */
   if (finalY > 234) { doc.addPage(); finalY = 20; }
 
-  const totalFacture = colisRoute.reduce((s, c) => s + c.prix, 0);
-  const totalEncaisse = colisRoute.reduce((s, c) => s + c.paye, 0);
-  const totalRestant = colisRoute.reduce((s, c) => s + c.reste, 0);
+  const totalFacture = colisFactures.reduce((s, c) => s + c.prix, 0);
+  const totalEncaisse = colisFactures.reduce((s, c) => s + c.paye, 0);
+  const totalRestant = colisFactures.reduce((s, c) => s + c.reste, 0);
   const depensesPropres = (depensesLiees || []).filter((d) => Number(d.montant) > 0);
   const totalDepenses = depensesPropres.reduce((s, d) => s + (Number(d.montant) || 0), 0);
   doc.setFillColor(245, 247, 251); doc.rect(14, finalY + 5, 182, 12, "F");
@@ -16168,6 +17153,21 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   doc.text(`Reste à percevoir : ${fmt(totalRestant, cur)}`, 192, finalY + 12.5, { align: "right" });
 
   finalY += 24;
+  /*
+   * Sans cette ligne, un bordereau de vingt colis dont douze sont partenaires afficherait un
+   * total calculé sur huit, et le lecteur croirait à une erreur de saisie. Elle dit d'où vient
+   * l'écart entre le nombre de colis affiché en haut et le nombre de lignes qui portent un prix.
+   */
+  if (nbPartenaires > 0) {
+    if (finalY > 262) { doc.addPage(); finalY = 20; }
+    doc.setFont(undefined, "normal"); doc.setFontSize(8); doc.setTextColor(120, 130, 150);
+    const mention = doc.splitTextToSize(
+      `Dont ${nbPartenaires} colis partenaire${nbPartenaires > 1 ? "s" : ""} — transporté${nbPartenaires > 1 ? "s" : ""} pour un partenaire et non facturé${nbPartenaires > 1 ? "s" : ""} par Ba-Diaby Express : ils comptent dans les colis et les kilos, jamais dans les montants ci-dessus.`,
+      182,
+    );
+    doc.text(mention, 14, finalY);
+    finalY += mention.length * 3.6 + 4;
+  }
   if (depensesPropres.length > 0) {
     if (finalY > 252) { doc.addPage(); finalY = 20; }
     doc.setFillColor(10, 38, 71); doc.roundedRect(14, finalY, 182, 8, 2, 2, "F");
@@ -16908,7 +17908,7 @@ async function testerReseauEpson(ip) {
 }
 
 /** Reçu d’encaissement PDF pour un paiement précis — utile pour la comptabilité et le client. */
-async function downloadRecu(colis, paiement) {
+async function downloadRecu(colis, paiement, entreprise = {}) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a5" }));
   const W = 148, H = 210, M = 10;
@@ -16992,6 +17992,13 @@ async function downloadRecu(colis, paiement) {
   doc.setFontSize(7.3); doc.setTextColor(140, 140, 140);
   doc.text("Ce reçu fait foi d’encaissement pour la comptabilité de Ba-Diaby Express.", M, Z.pied);
   doc.text("badiabyexpress.bde@gmail.com · www.ba-diaby-express.com", M, Z.pied + 4);
+  /*
+   * Un reçu d'encaissement est une pièce comptable : il justifie une sortie d'argent chez celui
+   * qui l'a payé. Sans immatriculation, rien n'y atteste que l'encaisseur est une entreprise
+   * constituée — la mention y a donc autant sa place que sur la facture.
+   */
+  const rccmRecu = String(entreprise?.rccm || "").trim();
+  if (rccmRecu) doc.text(`RCCM ${rccmRecu}`, M, Z.pied + 8);
 
   openPdf(doc, `recu-${colis.tracking}-${paiement.id}.pdf`);
 }
@@ -17327,7 +18334,9 @@ async function downloadFactureEnLigne(colis, data, options = {}) {
     ? `Suivez ce colis et tous les suivants depuis votre espace : ouvrez votre compte sur ${lienEspaceClient()}`
     : "Conservez cette facture jusqu’à la remise du colis. Vous serez prévenu par WhatsApp à chaque étape.", M, PIED - 3);
   const entreprise = data?.entreprise || {};
-  const societe = ["BA-DIABY EXPRESS", entreprise.telephone || telephonePourPays(data, "GN"), entreprise.email || "badiabyexpress.bde@gmail.com"]
+  /* L'immatriculation en pied de facture : elle dit que l'entreprise est régulièrement constituée. */
+  const societe = ["BA-DIABY EXPRESS", entreprise.telephone || telephonePourPays(data, "GN"), entreprise.email || "badiabyexpress.bde@gmail.com",
+    entreprise.rccm ? `RCCM ${entreprise.rccm}` : null]
     .filter(Boolean).join(" · ");
   doc.text(couper(societe, W - 2 * M - 24), M, PIED + 1.5);
 
@@ -17375,7 +18384,7 @@ async function downloadInvoice(colis, data, options = {}) {
    * éditée, et deux tirages du même colis n'annonceraient pas le même prix. On facture donc dans la
    * devise du barème, et l'euro s'affiche à côté — les deux références sont là, une seule fait foi.
    */
-  const enLigne = !!colis.achatEnLigne || colis.expediteur === "Commande en ligne";
+  const enLigne = estColisEnLigne(colis);
   const primaryCur = enLigne ? "GNF" : (COUNTRIES.find((c) => c.code === (colis.expediteurPays || "GN"))?.currency || "GNF");
   const secondaryCur = enLigne
     ? (COUNTRIES.find((c) => c.code === (colis.pays || "FR"))?.currency || "EUR")
@@ -17635,7 +18644,9 @@ async function downloadInvoice(colis, data, options = {}) {
     ? `Suivez ce colis et tous les suivants depuis votre espace : ouvrez votre compte sur ${lienEspaceClient()}`
     : "Conservez ce ticket jusqu'à la remise du colis. Vous serez prévenu par WhatsApp à chaque étape.", M, Z.pied - 3);
   const entreprise = data?.entreprise || {};
-  const ligneSociete = ["BA-DIABY EXPRESS", entreprise.telephone || telephonePourPays(data, "GN"), entreprise.email || "badiabyexpress.bde@gmail.com"]
+  /* L'immatriculation en pied de facture : elle dit que l'entreprise est régulièrement constituée. */
+  const ligneSociete = ["BA-DIABY EXPRESS", entreprise.telephone || telephonePourPays(data, "GN"), entreprise.email || "badiabyexpress.bde@gmail.com",
+    entreprise.rccm ? `RCCM ${entreprise.rccm}` : null]
     .filter(Boolean).join(" · ");
   doc.text(couper(ligneSociete, W - 2 * M - 24), M, Z.pied + 1.5);
   doc.text("Page 1 / 1", W - M, Z.pied + 1.5, { align: "right" });
@@ -17653,7 +18664,7 @@ async function downloadInvoice(colis, data, options = {}) {
  * tickets de caisse). Le QR permet au personnel connecté d’ouvrir le dossier complet du
  * colis dans l’application (suivi, paiements, historique).
  */
-async function downloadTicketThermal(colis) {
+async function downloadTicketThermal(colis, entreprise = {}) {
   const jspdf = await loadJsPDF();
   // colis.pays est le pays de route (l'origine pour un import) ; la devise affichée doit suivre
   // le destinataire réel, toujours la Guinée pour un import.
@@ -17775,7 +18786,13 @@ async function downloadTicketThermal(colis) {
     const merci = doc.splitTextToSize("Merci de votre confiance. Conservez ce ticket jusqu’à la livraison de votre colis.", W - 2 * M);
     doc.text(merci, W / 2, y, { align: "center" }); y += merci.length * 3.6 + 3;
     doc.setFont(undefined, "normal"); doc.setFontSize(6.2); doc.setTextColor(...MUTED);
-    const legal = doc.splitTextToSize("Ba-Diaby Express — Conakry, Guinée · badiabyexpress.bde@gmail.com · Transport soumis aux CGV.", W - 2 * M);
+    // Le ticket est le seul papier que repart avec le client au comptoir : l'immatriculation y
+    // figure au même titre que sur la facture, pour dire de quelle entreprise il vient.
+    const rccmTicket = String(entreprise?.rccm || "").trim();
+    const legal = doc.splitTextToSize(
+      `Ba-Diaby Express — Conakry, Guinée · badiabyexpress.bde@gmail.com${rccmTicket ? ` · RCCM ${rccmTicket}` : ""} · Transport soumis aux CGV.`,
+      W - 2 * M,
+    );
     doc.text(legal, W / 2, y, { align: "center" }); y += legal.length * 3;
 
     return y;
@@ -18182,7 +19199,7 @@ function EncaisserGroupeModal({ data, session, onEncaisser, onClose }) {
   );
 }
 
-function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeConfig, categories, session, partenaire }) {
+function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeConfig, categories, session, partenaire, modificationAutorisee = true, sitesDepartEnLigne = [] }) {
   /*
    * Modifier un colis partenaire n'est pas modifier un colis ordinaire.
    *
@@ -18306,7 +19323,33 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   // ont déjà servi à générer le bordereau et l'étiquette — les modifier après coup créerait un
   // écart avec les documents déjà imprimés/remis. Seules les coordonnées expéditeur/destinataire
   // restent corrigibles à ce stade (numéro erroné, adresse à préciser...).
-  const modifiableComplet = colis.status === "Enregistré";
+  /*
+   * ET L'ADMINISTRATEUR, LUI, CORRIGE À TOUT MOMENT.
+   *
+   * La règle vaut pour l'équipe : après le départ, le poids et le tarif ont servi à faire le
+   * bordereau et l'étiquette, et les rouvrir créerait un écart avec des papiers déjà imprimés.
+   *
+   * Mais les erreurs qu'on découvre sont justement celles de la RÉCEPTION — un poids mal relevé,
+   * un article oublié, un prix faux — et on ne les découvre qu'une fois le colis arrivé, quand le
+   * client est au comptoir. L'administrateur se retrouvait alors devant une fiche verrouillée, sans
+   * autre solution que d'annuler le colis et de le ressaisir : le numéro de suivi changeait, le
+   * client recevait deux messages, et l'historique perdait le fil. Il corrige donc directement, et
+   * l'écran lui rappelle ce que sa correction laisse en arrière.
+   */
+  const modifiableComplet = colis.status === "Enregistré" || estAdmin
+    /*
+     * ET L'ÉQUIPE QUI A PESÉ LE COLIS EN LIGNE, À TOUT MOMENT.
+     *
+     * Un carton de plus arrive pour le même client trois jours après le premier, ou l'agent
+     * s'aperçoit au comptoir qu'un article manque à la liste. Ces erreurs-là ne se découvrent
+     * qu'après coup, et l'écran ne montrait alors plus l'étape « Articles » : il ne restait qu'à
+     * annuler le colis et le ressaisir — nouveau numéro de suivi, deux messages au client,
+     * historique perdu.
+     *
+     * C'est le site de départ qui pèse ces colis et qui répond de leur prix ; c'est donc à lui que
+     * la correction revient, à toute heure. `modificationAutorisee` porte déjà cette règle.
+     */
+    || (estColisEnLigne(colis) && modificationAutorisee);
   const auxPaliers = colis.tarification === "reception";
   /*
    * UN COLIS COMMANDÉ EN LIGNE SE CORRIGE COMME IL A ÉTÉ SAISI.
@@ -18319,7 +19362,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
    * pas choisie sur chaque article — et cette catégorie prenait ensuite la main sur le palier :
    * ouvrir la fiche pour corriger un numéro de téléphone changeait le prix du colis.
    */
-  const enLigne = !!colis.achatEnLigne || colis.expediteur === "Commande en ligne";
+  const enLigne = estColisEnLigne(colis);
   /*
    * LE POIDS D'UNE LIGNE EST CELUI DE LA LIGNE, PAS CELUI D'UNE UNITÉ — comme au comptoir. Sur un
    * colis en ligne, le poids total n'est donc pas un champ à part : c'est la somme des lignes
@@ -18331,6 +19374,23 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
   // L’ancien code recalculait le prix depuis les articles mais conservait le champ poids historique.
   const poidsRetenu = produits.length > 0 ? poidsProduits : (montantSaisi(poids) ?? 0);
   const baremeEnLigne = enLigne ? tarifAchatEnLigne(poidsRetenu, tarifsReception) : null;
+  /* Le scan d’étiquette, comme au comptoir : il propose, l’agent pèse et confirme. */
+  const [scan, setScan] = useState(false);
+  /*
+   * Ce que le scan a à dire — « ajouté », « figure déjà dans la liste ». En gris sous le bouton :
+   * ce n'est pas une erreur de saisie, et le rouge de `err` ferait chercher un champ fautif.
+   */
+  const [noteScan, setNoteScan] = useState("");
+  /*
+   * La fenêtre de vérification se replie sous 560 px — on corrige souvent depuis un téléphone,
+   * devant le carton. On mesure plutôt que de deviner : les styles sont écrits en ligne.
+   */
+  const [etroitEdition, setEtroitEdition] = useState(() => (typeof window !== "undefined" ? window.innerWidth < 560 : false));
+  useEffect(() => {
+    const mesurer = () => setEtroitEdition(window.innerWidth < 560);
+    window.addEventListener("resize", mesurer);
+    return () => window.removeEventListener("resize", mesurer);
+  }, []);
   /* La boutique commune, quand toutes les lignes viennent du même site — comme au comptoir. */
   const boutiqueCommune = produits.length > 0 && produits.every((p) => p.commande && p.commande === produits[0].commande)
     ? produits[0].commande
@@ -18505,6 +19565,14 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
       const rang = etapesEdition.findIndex((et) => et.key === cle);
       if (rang >= 0) setStep(rang);
     };
+    /*
+     * La règle du site de départ se revérifie ici, et pas seulement sur le bouton : un bouton
+     * qu'on n'affiche pas n'est pas un geste qu'on ne peut pas faire.
+     */
+    if (enLigne && !modificationAutorisee) {
+      setErr(`La correction d’un colis d’achat en ligne revient à ${sitesDepartEnLigne.length ? `l’équipe de ${sitesDepartEnLigne.join(" ou ")}` : "l’équipe du site de départ"} — c’est là qu’il a été pesé. Un administrateur peut vous en donner le droit.`);
+      return;
+    }
     if (!enLigne && !expediteur.trim()) { refus("Indiquez l’expéditeur.", "expediteur"); return; }
     if (!destinataire.trim()) { refus("Indiquez le destinataire — la personne qui réceptionne le colis.", "destinataire"); return; }
     if (!telephone.trim() && !estPartenaire) { refus("Indiquez le téléphone du destinataire.", "destinataire"); return; }
@@ -18674,9 +19742,22 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
 
         <StepIndicator step={step} etapes={etapesEdition} onStepClick={(i) => { setErr(""); setStep(i); }} />
 
+        {/*
+          * L'administrateur corrige un colis déjà parti : on ne l'en empêche pas, on lui dit ce que
+          * sa correction laisse en arrière. Le bordereau et l'étiquette sont imprimés, la facture
+          * peut être déjà partie — changer le poids ici ne les change pas.
+          */}
+        {modifiableComplet && colis.status !== "Enregistré" && (
+          <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "var(--warn-fg)", marginBottom: 16, lineHeight: 1.5 }}>
+            Ce colis est déjà <strong>{colis.status}</strong>. Vous pouvez tout corriger — c’est
+            fait pour les erreurs constatées à la réception. Retenez que le bordereau et l’étiquette
+            sont déjà imprimés{Number(colis.paye) > 0 ? ", et qu’un paiement a déjà été encaissé" : ""} :
+            renvoyez la facture au client si le montant change.
+          </div>
+        )}
         {!modifiableComplet && (
           <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 10, padding: "10px 14px", fontSize: 12, color: "var(--warn-fg)", marginBottom: 16, lineHeight: 1.5 }}>
-            Colis déjà expédié ({colis.status}) — le poids, le contenu, la route et le tarif ne sont plus modifiables ici, pour rester cohérents avec le bordereau et l’étiquette déjà émis. Seules les coordonnées expéditeur et destinataire restent corrigibles.
+            Colis déjà expédié ({colis.status}) — le poids, le contenu, la route et le tarif ne sont plus modifiables ici, pour rester cohérents avec le bordereau et l’étiquette déjà émis. Seules les coordonnées expéditeur et destinataire restent corrigibles. Un administrateur peut, lui, tout corriger.
           </div>
         )}
 
@@ -18793,15 +19874,31 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
                         <input type="number" min="1" step="1" inputMode="numeric" value={p.quantite} onChange={(e) => updateProduit(p.id, { quantite: e.target.value })} style={inputStyle} />
                       </Field>
                       <Field label="Poids (kg)">
-                        <input type="number" min="0" step="0.1" inputMode="decimal" value={p.poids} onChange={(e) => updateProduit(p.id, { poids: e.target.value })} style={inputStyle} placeholder="3.5" />
+                        <input type="text" inputMode="decimal" value={p.poids} onChange={(e) => updateProduit(p.id, { poids: nombreTape(e.target.value) })} style={inputStyle} placeholder="3.5" />
                       </Field>
                     </div>
                   </div>
                 ))}
-                <button type="button" onClick={() => setProduits((liste) => [...liste, { ...emptyProduit(), reference: "", commande: boutiqueCommune }])}
-                  style={{ width: "100%", border: "1.5px dashed var(--border)", borderRadius: 12, padding: "12px 0", background: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>
-                  + Ajouter un article
-                </button>
+                {/*
+                  * LE SCAN AUSSI, ICI — c'est même ici qu'il sert le plus.
+                  *
+                  * On rouvre une fiche justement parce qu'un article manque ou qu'une référence
+                  * est fausse. Le scanner n'existait qu'au comptoir de création : l'agent devait
+                  * donc recopier à la main, dans l'écran fait pour réparer une référence, les
+                  * vingt caractères qu'il venait de mal lire.
+                  */}
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <button type="button" onClick={() => setProduits((liste) => [...liste, { ...emptyProduit(), reference: "", commande: boutiqueCommune }])}
+                    style={{ flex: "1 1 180px", border: "1.5px dashed var(--border)", borderRadius: 12, padding: "12px 0", background: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>
+                    + Ajouter un article
+                  </button>
+                  <button type="button" onClick={() => { setNoteScan(""); setScan(true); }}
+                    style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 6, flex: "0 1 auto", background: "var(--surface)", border: "1.5px solid var(--border)", borderRadius: 12, padding: "12px 16px", fontSize: 12.5, fontWeight: 700, color: "var(--text)", cursor: "pointer" }}>
+                    <Camera size={14} /> Scanner une étiquette
+                  </button>
+                </div>
+                <AideScanEtiquette />
+                {noteScan && <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6 }}>{noteScan}</div>}
                 <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: "12px 14px", marginTop: 14 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap", fontSize: 12.5, color: "var(--text)" }}>
                     <span>Poids constaté — somme des lignes pesées</span>
@@ -18829,7 +19926,7 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
                   <Field label="Nom de l’article"><input value={p.nom} onChange={(e) => updateProduit(p.id, { nom: e.target.value })} style={inputStyle} /></Field>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10 }}>
                     <Field label="Quantité"><input type="number" min="1" step="1" inputMode="numeric" value={p.quantite} onChange={(e) => updateProduit(p.id, { quantite: e.target.value })} style={inputStyle} /></Field>
-                    <Field label="Poids (kg)"><input type="number" min="0" step="0.1" inputMode="decimal" value={p.poids} onChange={(e) => updateProduit(p.id, { poids: e.target.value })} style={inputStyle} /></Field>
+                    <Field label="Poids (kg)"><input type="text" inputMode="decimal" value={p.poids} onChange={(e) => updateProduit(p.id, { poids: nombreTape(e.target.value) })} style={inputStyle} /></Field>
                   </div>
                   {estPartenaire ? (
                     <>
@@ -19125,6 +20222,29 @@ function EditColisForm({ colis, onClose, onSave, tarifsReception, remiseVolumeCo
           </div>
         </div>
       </form>
+      {/*
+        * Le scan vit au-dessus du formulaire, pas dedans : c'est une fenêtre, et un formulaire
+        * n'en contient pas. Ce qu'il rapporte entre dans les articles exactement comme au
+        * comptoir — une ligne vide se remplit plutôt qu'une nouvelle ne s'ouvre.
+        */}
+      {scan && (
+        <ScanArticleEnLigne
+          referencesExistantes={produits.map((p) => p.reference)}
+          boutiqueParDefaut={boutiqueCommune}
+          etroit={etroitEdition}
+          notify={setNoteScan}
+          onClose={() => setScan(false)}
+          onAjouter={(ligne) => {
+            setProduits((liste) => {
+              const neuve = { ...emptyProduit(), ...ligne, nom: ligne.commande || ligne.reference || "Article commandé", categorie: "", personnalise: false };
+              const vide = liste.findIndex((p) => !String(p.reference || "").trim() && !Number(p.poids));
+              if (vide >= 0) return liste.map((p, i) => (i === vide ? { ...neuve, id: p.id } : p));
+              return [...liste, neuve];
+            });
+            setErr("");
+          }}
+        />
+      )}
     </Modal>
   );
 }
@@ -19438,12 +20558,12 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
 
   async function handleDownloadTicketThermal() {
     setTicketThermalState("loading");
-    try { await downloadTicketThermal(colis); setTicketThermalState("idle"); }
+    try { await downloadTicketThermal(colis, data?.entreprise); setTicketThermalState("idle"); }
     catch (e) { console.error(e); setTicketThermalState("error"); }
   }
   async function handleDownloadRecu(paiement) {
     setRecuState(paiement.id);
-    try { await downloadRecu(colis, paiement); setRecuState("idle"); }
+    try { await downloadRecu(colis, paiement, data?.entreprise); setRecuState("idle"); }
     catch (e) { console.error(e); setRecuState("error"); }
   }
   function validerEncaissement() {
@@ -19615,7 +20735,34 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
             * qu'il venait lui-même de mal saisir. Un droit affiché et sans effet est pire que pas
             * de droit du tout : personne ne cherche l'erreur là où le réglage dit que c'est bon.
             */}
-          {effectivePermission(session, "colis.modifier") && <button onClick={() => setEditing(true)} style={smallBtn}>Modifier</button>}
+          {/*
+            * UN COLIS D'ACHAT EN LIGNE SE CORRIGE LÀ OÙ IL A ÉTÉ PESÉ.
+            *
+            * Il est visible de toute l'équipe — c'est à Conakry qu'on le remet — et il s'encaisse
+            * ici comme ailleurs : le bouton « Encaisser » ci-dessus n'est pas touché. Mais son
+            * prix ne vient que du poids constaté à Paris. Le rouvrir depuis un autre site, c'est
+            * refaire un montant déjà facturé au client sur la foi d'une balance qu'on n'a pas.
+            *
+            * On ne fait pas disparaître le bouton en silence : on dit à qui la correction revient,
+            * sans quoi l'agente cherche un droit manquant là où il n'y en a pas.
+            */}
+          {(() => {
+            if (!estColisEnLigne(colis)) {
+              return effectivePermission(session, "colis.modifier")
+                ? <button onClick={() => setEditing(true)} style={smallBtn}>Modifier</button>
+                : null;
+            }
+            const droit = autorisationModifierColisEnLigne(session, data);
+            if (droit.autorise) return <button onClick={() => setEditing(true)} style={smallBtn}>Modifier</button>;
+            if (droit.motif !== "site") return null;
+            const depart = nomsSitesDepartEnLigne(data);
+            return (
+              <span style={{ display: "inline-flex", alignItems: "center", background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "9px 12px", fontSize: 11.5, lineHeight: 1.4, maxWidth: 280 }}>
+                Correction réservée à {depart.length ? `l’équipe de ${depart.join(" ou ")}` : "l’équipe du site de départ"} —
+                c’est là que le colis a été pesé. Un administrateur peut vous en donner le droit.
+              </span>
+            );
+          })()}
 
           <div style={{ position: "relative" }}>
             <button ref={docBtnRef} onClick={toggleDocMenu} style={smallBtn}>Ticket d’envoi <ChevronDown size={13} /></button>
@@ -19828,6 +20975,19 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
               <div key={p.id || idx} style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "9px 0", borderTop: idx === 0 ? "none" : "1px solid var(--border)" }}>
                 <div>
                   <div style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600 }}>{p.nom || "—"}</div>
+                  {/*
+                    * LA RÉFÉRENCE DE COMMANDE SE LIT ICI, ET C'EST AU COMPTOIR QU'ELLE SERT.
+                    *
+                    * Sur un achat en ligne, c'est elle qui relie le carton à la commande : le
+                    * client la donne, l'agente la cherche. Elle était enregistrée, imprimée sur la
+                    * facture, et invisible sur la fiche — le seul écran qu'on ouvre devant le
+                    * client.
+                    */}
+                  {p.reference && (
+                    <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2, wordBreak: "break-all" }}>
+                      Réf. {p.reference}{p.commande ? ` · ${p.commande}` : ""}
+                    </div>
+                  )}
                   <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
                     Qté {p.quantite || 1} · {p.poids ? `${p.poids} kg` : "—"}
                   </div>
@@ -20165,7 +21325,11 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
           onAnnuler={() => setConfirmerSuppression(false)}
         />
       )}
-      {editing && <EditColisForm colis={colis} categories={data?.categories} remiseVolumeConfig={data?.remiseVolume} tarifsReception={data?.receptionTarifs} session={session} partenaire={partenaireDuColis(data, colis)} onClose={() => setEditing(false)} onSave={(patch) => { onUpdate(patch); setEditing(false); }} />}
+      {editing && <EditColisForm colis={colis} categories={data?.categories} remiseVolumeConfig={data?.remiseVolume} tarifsReception={data?.receptionTarifs} session={session} partenaire={partenaireDuColis(data, colis)}
+        /* Un bouton qu'on n'affiche pas n'est pas un geste qu'on ne peut pas faire : la règle est revérifiée à l'enregistrement. */
+        modificationAutorisee={!estColisEnLigne(colis) || autorisationModifierColisEnLigne(session, data).autorise}
+        sitesDepartEnLigne={nomsSitesDepartEnLigne(data)}
+        onClose={() => setEditing(false)} onSave={(patch) => { onUpdate(patch); setEditing(false); }} />}
       {showImpressionDirecte && <ImpressionDirecteModal colis={colis} data={data} onClose={() => setShowImpressionDirecte(false)} />}
       {bonSortieOuvert && (
         <Modal onClose={() => setBonSortieOuvert(false)} title="Enregistrer la remise du colis">
@@ -22715,6 +23879,12 @@ function VoyagesPage({ data, persist, session, notify }) {
 
   const voyageCourant = ouvert && ouvert !== "nouveau" ? voyages.find((v) => v.id === ouvert) : null;
   const enLecture = !!voyageCourant && voyageCourant.statut === "Validé";
+  /*
+   * Une fiche validée arrête les comptes d'une rotation : la rouvrir ou la supprimer défait une
+   * pièce comptable déjà imprimée. Ces deux gestes reviennent donc à l'administrateur seul, comme
+   * pour un bordereau déjà parti.
+   */
+  const droitRouvrir = autorisationModifierVoyage(session, voyageCourant);
   const monNom = `${session?.prenom || ""} ${session?.nom || ""}`.trim() || session?.identifiant || "";
 
   /** Colis déjà rattachés à un autre voyage — brouillon compris, sinon on les compterait deux fois. */
@@ -22839,6 +24009,10 @@ function VoyagesPage({ data, persist, session, notify }) {
   }
 
   function rouvrir(v) {
+    if (!autorisationModifierVoyage(session, v).autorise) {
+      notify?.("Fiche validée — seul un administrateur peut la rouvrir.");
+      return;
+    }
     persist({
       ...data,
       voyages: voyages.map((x) => (x.id === v.id ? { ...x, statut: "Brouillon", valideeLe: null, valideePar: null } : x)),
@@ -22848,6 +24022,16 @@ function VoyagesPage({ data, persist, session, notify }) {
   }
 
   function supprimer(v) {
+    /*
+     * Supprimer une fiche validée efface une pièce comptable ET ses dépenses, et rend ses colis à
+     * la liste des voyages suivants. Un brouillon, lui, n'engage rien : celui qui le tient peut
+     * le jeter.
+     */
+    if (!autorisationModifierVoyage(session, v).autorise) {
+      notify?.("Fiche validée — seul un administrateur peut la supprimer.");
+      setVoyageASupprimer(null);
+      return;
+    }
     persist({
       ...data,
       voyages: voyages.filter((x) => x.id !== v.id),
@@ -22922,9 +24106,17 @@ function VoyagesPage({ data, persist, session, notify }) {
                   <button onClick={() => imprimerFiche(v)} style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "6px 11px", color: "var(--text)", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
                     <Printer size={13} /> Fiche
                   </button>
-                  <button onClick={() => setVoyageASupprimer(v)} style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer", padding: 4 }} title="Supprimer ce voyage">
-                    <Trash2 size={14} />
-                  </button>
+                  {(() => {
+                    // La liste dit la même chose que la fiche : le bouton reste, éteint, et dit pourquoi.
+                    const droit = autorisationModifierVoyage(session, v);
+                    return (
+                      <button onClick={() => droit.autorise && setVoyageASupprimer(v)} disabled={!droit.autorise}
+                        style={{ background: "none", border: "none", color: droit.autorise ? "var(--danger-fg)" : "var(--muted)", cursor: droit.autorise ? "pointer" : "not-allowed", padding: 4, opacity: droit.autorise ? 1 : 0.5 }}
+                        title={droit.autorise ? "Supprimer ce voyage" : "Fiche validée — seul un administrateur peut la supprimer."}>
+                        <Trash2 size={14} />
+                      </button>
+                    );
+                  })()}
                 </div>
               </div>
             </div>
@@ -23306,9 +24498,17 @@ function VoyagesPage({ data, persist, session, notify }) {
             <button onClick={() => imprimerFiche(voyageCourant)} style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
               <Printer size={16} /> Rééditer la fiche (PDF)
             </button>
-            <button onClick={() => rouvrir(voyageCourant)} style={{ background: "var(--surface)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+            <button onClick={() => rouvrir(voyageCourant)} disabled={!droitRouvrir.autorise}
+              title={droitRouvrir.autorise ? undefined : "Une fiche validée arrête les comptes du voyage : seul un administrateur peut la rouvrir."}
+              style={{ background: "var(--surface)", border: "1px solid var(--border)", color: droitRouvrir.autorise ? "var(--text)" : "var(--muted)", borderRadius: 9, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: droitRouvrir.autorise ? "pointer" : "not-allowed" }}>
               Rouvrir pour modifier
             </button>
+            {!droitRouvrir.autorise && (
+              <div style={{ alignSelf: "center", fontSize: 12, color: "var(--muted)", maxWidth: 340, lineHeight: 1.5 }}>
+                Cette fiche est validée : elle arrête les comptes du voyage et ses colis sont sortis
+                des voyages suivants. Seul un administrateur peut la rouvrir.
+              </div>
+            )}
           </>
         )}
       </div>
@@ -23922,7 +25122,7 @@ function ComptabilitePage({ data, persist, session, notify }) {
 }
 
 async function callClaude(prompt) {
-  const response = await appelServeurQuiDepense("/api/claude", {
+  const response = await appelServeurQuiDepense("/api/services?service=claude", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1000, messages: [{ role: "user", content: prompt }] }),
   });
@@ -23976,6 +25176,201 @@ function ligneArticleEnLigne() {
   return { id: `a${Date.now()}${Math.random().toString(36).slice(2, 5)}`, reference: "", commande: "", quantite: "1", poids: "" };
 }
 
+/**
+ * SCANNER UNE ÉTIQUETTE POUR AJOUTER UN ARTICLE — LE MÊME GESTE PARTOUT.
+ *
+ * Une référence de commande fait quinze à vingt caractères sans signification : « GSHN0293841X ».
+ * La recopier à la main devant un carton, c'est trente secondes et une chance sérieuse de se
+ * tromper d'un caractère — et une référence fausse ne se rattrape pas, elle ne correspond à rien
+ * nulle part. Le code-barres de l'étiquette la donne exactement.
+ *
+ * Ce geste ne vivait qu'au comptoir de réception. Or c'est à la CORRECTION qu'on en a le plus
+ * besoin : on rouvre une fiche justement parce qu'un article manque ou qu'une référence est
+ * fausse — et l'on se retrouvait à la retaper à la main dans l'écran fait pour la réparer. Il est
+ * donc ici, en un seul endroit, et les deux écrans s'en servent.
+ *
+ * RIEN DE CE QUI EST SCANNÉ N'ENTRE DIRECTEMENT DANS LE FORMULAIRE : tout passe d'abord par un
+ * écran de vérification. Le code-barres est sûr, la lecture du texte ne l'est pas.
+ *
+ * ET LE POIDS N'EST PAS SCANNÉ, CE N'EST PAS UN OUBLI. Celui imprimé sur l'étiquette est celui
+ * déclaré par la boutique. La facture dit « poids constaté à la réception » et c'est là-dessus que
+ * le prix se fonde : le reprendre de l'étiquette reviendrait à facturer sur la parole du vendeur
+ * plutôt que sur la balance de l'agence.
+ */
+function ScanArticleEnLigne({ referencesExistantes = [], boutiqueParDefaut = "", etroit = false, notify, onAjouter, onClose }) {
+  const [verif, setVerif] = useState(null);
+  const [lecture, setLecture] = useState("");
+  /* En quittant l’écran, on rend la mémoire du lecteur : ces écrans se tiennent sur un téléphone. */
+  useEffect(() => () => { libererLecteurTexte(); }, []);
+
+  async function referenceScannee(valeur, image) {
+    const brut = String(valeur || "").trim();
+    if (!brut) { onClose?.(); return; }
+    /*
+     * Nos propres étiquettes portent un QR qui est une adresse de suivi. Scanner l'une d'elles ici
+     * inscrirait « https://badiabyexpress.com/?suivi=1&code=BDE270812 » comme référence de
+     * commande. On n'en garde que le numéro.
+     */
+    let reference = brut;
+    if (/^https?:\/\//i.test(brut)) {
+      try { reference = new URL(brut).searchParams.get("code") || brut; } catch (e) { /* on garde le brut */ }
+    }
+    if (referencesExistantes.some((r) => String(r || "").trim() === reference)) {
+      notify?.(`${reference} figure déjà dans la liste.`);
+      onClose?.();
+      return;
+    }
+
+    /*
+     * On propose la fiche, on ne l'inscrit pas. L'agent voit ce qui a été lu, corrige ce qu'il
+     * faut, et confirme — c'est le seul moment où l'on peut encore rattraper une lecture fausse.
+     */
+    setVerif({ reference, commande: boutiqueParDefaut, quantite: "1", poids: "", poidsEtiquette: null, etat: image ? "lecture" : "pret" });
+
+    if (!image) return;
+    setLecture("Préparation de la lecture…");
+    const resultat = await lireTexteEtiquette(image, (m) => {
+      if (m.status === "loading tesseract core" || m.status === "loading language traineddata") {
+        setLecture(`Premier usage : téléchargement du lecteur (${Math.round((m.progress || 0) * 100)} %)…`);
+      } else if (m.status === "recognizing text") {
+        setLecture(`Lecture de l’étiquette (${Math.round((m.progress || 0) * 100)} %)…`);
+      }
+    });
+    setLecture("");
+    setVerif((v) => (v && v.reference === reference
+      ? {
+        ...v,
+        etat: "pret",
+        poidsEtiquette: resultat.lu ? resultat.poids : null,
+        poids: resultat.lu && resultat.poids ? String(resultat.poids) : "",
+        echecLecture: resultat.lu ? null : (resultat.raison || "lecture"),
+      }
+      : v));
+  }
+
+  /** Ce que l’agent a validé entre dans la liste des articles. */
+  function confirmerVerification() {
+    if (!verif) return;
+    const poids = Number(String(verif.poids).replace(",", "."));
+    if (!Number.isFinite(poids) || poids <= 0) { setVerif({ ...verif, erreur: "Pesez l’article : c’est le poids qui fait le prix." }); return; }
+    onAjouter({
+      reference: verif.reference,
+      commande: verif.commande || boutiqueParDefaut,
+      quantite: String(Math.max(Number(verif.quantite) || 1, 1)),
+      poids: String(poids),
+    });
+    setVerif(null);
+    notify?.(`${verif.reference} ajouté — ${poids} kg.`);
+    onClose?.();
+  }
+
+  if (verif) {
+    return (
+      <Modal onClose={() => { setVerif(null); onClose?.(); }} title="Vérifiez avant d’ajouter">
+        {verif.etat === "lecture" ? (
+          <div style={{ padding: "18px 0", fontSize: 13, color: "var(--muted)", lineHeight: 1.6 }}>
+            <div style={{ color: "var(--text)", fontWeight: 600, marginBottom: 6 }}>{lecture || "Lecture de l’étiquette…"}</div>
+            Le code-barres est lu. On cherche maintenant le poids imprimé sur l’étiquette.
+          </div>
+        ) : (
+          <>
+            <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.55 }}>
+              Voici ce qui a été lu sur l’étiquette. Corrigez ce qu’il faut, puis confirmez.
+            </div>
+
+            <Field label="Référence (lue sur le code-barres)">
+              <input value={verif.reference} onChange={(e) => setVerif({ ...verif, reference: e.target.value, erreur: "" })} style={{ ...inputStyle, marginBottom: 0 }} />
+            </Field>
+
+            <Field label="Commande passée sur">
+              <select value={verif.commande || ""} onChange={(e) => setVerif({ ...verif, commande: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }}>
+                <option value="">Boutique…</option>
+                {VENDEURS_EN_LIGNE.map((v) => <option key={v} value={v}>{v}</option>)}
+              </select>
+            </Field>
+            {/*
+              * La boutique n'est pas sur l'étiquette : celle-ci est imprimée par le transporteur,
+              * pas par le vendeur. C'est à l'agent de la dire — d'où le rappel, pour qu'il ne
+              * cherche pas une lecture qui ne viendra jamais.
+              */}
+            <div style={{ fontSize: 11.5, color: "var(--muted)", margin: "-6px 0 14px" }}>
+              L’étiquette est imprimée par le transporteur : elle ne dit pas chez qui la commande a été passée.
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: etroit ? "1fr" : "1fr 1fr", gap: 12 }}>
+              <Field label="Quantité">
+                <input type="number" min="1" value={verif.quantite} onChange={(e) => setVerif({ ...verif, quantite: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} />
+              </Field>
+              <Field label="Poids pesé (kg) *">
+                <input type="text" inputMode="decimal" value={verif.poids} onChange={(e) => setVerif({ ...verif, poids: nombreTape(e.target.value), erreur: "" })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="ex : 3.758" />
+              </Field>
+            </div>
+
+            {/*
+              * LE POIDS LU EST UNE PROPOSITION, PAS UNE MESURE.
+              *
+              * Celui de l'étiquette est déclaré par la boutique ; la facture dit « poids constaté
+              * à la réception », et c'est la balance de l'agence qui fait foi. Le dire ici, à
+              * l'endroit exact où le chiffre s'affiche, est la seule façon d'éviter qu'on facture
+              * un jour sur la parole du vendeur.
+              */}
+            {verif.poidsEtiquette ? (
+              <div style={{ display: "flex", gap: 9, alignItems: "flex-start", background: "var(--warn-bg)", color: "var(--warn-fg)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 12px", fontSize: 12, marginTop: 4, lineHeight: 1.5 }}>
+                <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
+                <div>
+                  <strong>{verif.poidsEtiquette} kg lus sur l’étiquette.</strong> C’est le poids <em>déclaré par la boutique</em>.
+                  Le prix se calcule sur le poids constaté à la réception : confirmez-le à la balance avant d’ajouter.
+                </div>
+              </div>
+            ) : (
+              <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 4, lineHeight: 1.5 }}>
+                {verif.echecLecture === "moteur-indisponible"
+                  ? "La lecture du texte n’est pas disponible sur cet appareil. Saisissez le poids à la balance."
+                  : "Aucun poids n’a pu être lu sur l’étiquette — froissée, floue, ou absente. Pesez l’article."}
+              </div>
+            )}
+
+            {verif.erreur && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginTop: 10 }}>{verif.erreur}</div>}
+
+            <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 18, flexWrap: "wrap" }}>
+              <button type="button" onClick={() => { setVerif(null); onClose?.(); }} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 12.5, color: "var(--muted)", cursor: "pointer" }}>Annuler</button>
+              <button type="button" onClick={confirmerVerification} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 8, padding: "10px 18px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                Confirmer et ajouter
+              </button>
+            </div>
+          </>
+        )}
+      </Modal>
+    );
+  }
+
+  return (
+    <ScannerModal
+      titre="Scanner une étiquette"
+      aide="Approchez le code-barres de l’étiquette. La référence se remplit toute seule ; le poids reste à peser — c’est lui qui fait le prix, et celui imprimé par la boutique n’est qu’une déclaration."
+      onClose={onClose}
+      onScan={referenceScannee}
+    />
+  );
+}
+
+/**
+ * Le rappel qui accompagne le bouton de scan — le même dans les deux écrans.
+ *
+ * Il vit À CÔTÉ DU BOUTON, et non dans la fenêtre du scanner : sur une étiquette nette, la lecture
+ * prend une demi-seconde, et un message affiché pendant le scan disparaît avant d'avoir été lu. Or
+ * c'est justement celui qu'il ne faut pas manquer — un agent qui croit le poids rempli validera un
+ * colis facturé sur la déclaration de la boutique, pas sur sa balance.
+ */
+function AideScanEtiquette() {
+  return (
+    <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 10, lineHeight: 1.5 }}>
+      Le scan remplit la référence. <strong style={{ color: "var(--text)" }}>Le poids reste à peser</strong> :
+      c’est lui qui fait le prix, et celui imprimé par la boutique n’est qu’une déclaration.
+    </div>
+  );
+}
+
 ComptabilitePage = memo(ComptabilitePage);
 function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
   const [recherche, setRecherche] = useState("");
@@ -23994,13 +25389,6 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
   const [erreurArticles, setErreurArticles] = useState("");
   const [scan, setScan] = useState(false);
   /*
-   * Rien de ce qui est SCANNÉ n'entre directement dans le formulaire : tout passe d'abord par un
-   * écran de vérification. Le code-barres est sûr, la lecture du texte ne l'est pas — et le poids
-   * lu sur l'étiquette est celui DÉCLARÉ par la boutique, jamais celui de notre balance.
-   */
-  const [verif, setVerif] = useState(null);
-  const [lecture, setLecture] = useState("");
-  /*
    * Le comptoir se tient souvent sur un téléphone. On mesure la fenêtre plutôt que de deviner :
    * une media query CSS n'était pas possible ici, les styles étant écrits en ligne.
    */
@@ -24010,8 +25398,6 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
     window.addEventListener("resize", mesurer);
     return () => window.removeEventListener("resize", mesurer);
   }, []);
-  /* En quittant le comptoir, on rend la mémoire du lecteur : le comptoir se tient sur un téléphone. */
-  useEffect(() => () => { libererLecteurTexte(); }, []);
 
   const tarifs = data.receptionTarifs || { paliers: [{ max: 10, tarif: 100000 }, { max: 40, tarif: 95000 }, { max: 100, tarif: 92000 }] };
   /*
@@ -24226,83 +25612,6 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
    * qui rendent ensuite tout comptage impossible. Un bouton la pose sur toutes les lignes d'un
    * coup ; la liste par ligne reste là pour le colis qui mêle deux commandes.
    */
-  /**
-   * LA RÉFÉRENCE VIENT DU CODE-BARRES, PAS DU CLAVIER.
-   *
-   * Une référence de commande fait quinze à vingt caractères sans signification : « GSHN0293841X ».
-   * La recopier à la main devant un carton, c'est trente secondes et une chance sérieuse de se
-   * tromper d'un caractère — et une référence fausse ne se rattrape pas, elle ne correspond à rien
-   * nulle part. Le code-barres de l'étiquette la donne exactement.
-   *
-   * Elle se pose sur la première ligne encore vide, ou en ouvre une nouvelle : on scanne les
-   * étiquettes les unes après les autres, et l'on saisit les poids ensuite, à la balance.
-   *
-   * LE POIDS N'EST PAS SCANNÉ, ET CE N'EST PAS UN OUBLI. Celui imprimé sur l'étiquette est celui
-   * déclaré par la boutique. La facture dit « poids constaté à la réception » et c'est là-dessus
-   * que le prix se fonde : le reprendre de l'étiquette reviendrait à facturer sur la parole du
-   * vendeur plutôt que sur la balance de l'agence.
-   */
-  async function referenceScannee(valeur, image) {
-    const brut = String(valeur || "").trim();
-    setScan(false);
-    if (!brut) return;
-    /*
-     * Nos propres étiquettes portent un QR qui est une adresse de suivi. Scanner l'une d'elles ici
-     * inscrirait « https://badiabyexpress.com/?suivi=1&code=BDE270812 » comme référence de
-     * commande. On n'en garde que le numéro.
-     */
-    let reference = brut;
-    if (/^https?:\/\//i.test(brut)) {
-      try { reference = new URL(brut).searchParams.get("code") || brut; } catch (e) { /* on garde le brut */ }
-    }
-    if (articles.some((a) => a.reference.trim() === reference)) {
-      notify?.(`${reference} figure déjà dans la liste.`);
-      return;
-    }
-
-    /*
-     * On propose la fiche, on ne l'inscrit pas. L'agent voit ce qui a été lu, corrige ce qu'il
-     * faut, et confirme — c'est le seul moment où l'on peut encore rattraper une lecture fausse.
-     */
-    setVerif({ reference, commande: boutiqueCommune, quantite: "1", poids: "", poidsEtiquette: null, etat: image ? "lecture" : "pret" });
-
-    if (!image) return;
-    setLecture("Préparation de la lecture…");
-    const resultat = await lireTexteEtiquette(image, (m) => {
-      if (m.status === "loading tesseract core" || m.status === "loading language traineddata") {
-        setLecture(`Premier usage : téléchargement du lecteur (${Math.round((m.progress || 0) * 100)} %)…`);
-      } else if (m.status === "recognizing text") {
-        setLecture(`Lecture de l’étiquette (${Math.round((m.progress || 0) * 100)} %)…`);
-      }
-    });
-    setLecture("");
-    setVerif((v) => (v && v.reference === reference
-      ? {
-        ...v,
-        etat: "pret",
-        poidsEtiquette: resultat.lu ? resultat.poids : null,
-        poids: resultat.lu && resultat.poids ? String(resultat.poids) : "",
-        echecLecture: resultat.lu ? null : (resultat.raison || "lecture"),
-      }
-      : v));
-  }
-
-  /** Ce que l'agent a validé entre dans la liste des articles. */
-  function confirmerVerification() {
-    if (!verif) return;
-    const poids = Number(String(verif.poids).replace(",", "."));
-    if (!Number.isFinite(poids) || poids <= 0) { setVerif({ ...verif, erreur: "Pesez l’article : c’est le poids qui fait le prix." }); return; }
-    setArticles((liste) => {
-      const ligne = { ...ligneArticleEnLigne(), reference: verif.reference, commande: verif.commande || boutiqueCommune, quantite: String(Math.max(Number(verif.quantite) || 1, 1)), poids: String(poids) };
-      const vide = liste.findIndex((a) => !a.reference.trim() && !Number(a.poids));
-      if (vide >= 0) return liste.map((a, i) => (i === vide ? { ...ligne, id: a.id } : a));
-      return [...liste, ligne];
-    });
-    setErreurArticles("");
-    setVerif(null);
-    notify?.(`${verif.reference} ajouté — ${poids} kg.`);
-  }
-
   function poserCommandePartout(boutique) {
     setArticles((l) => l.map((a) => ({ ...a, commande: boutique })));
     setErreurArticles("");
@@ -24514,7 +25823,7 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
                         </select>
                       </Field>
                       <Field label={etroit || i === 0 ? "Qté" : ""}><input type="number" min="1" value={a.quantite} onChange={(e) => majArticle(a.id, { quantite: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} /></Field>
-                      <Field label={etroit || i === 0 ? "Poids (kg)" : ""}><input type="number" min="0" step="0.1" value={a.poids} onChange={(e) => majArticle(a.id, { poids: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="3.5" /></Field>
+                      <Field label={etroit || i === 0 ? "Poids (kg)" : ""}><input type="text" inputMode="decimal" value={a.poids} onChange={(e) => majArticle(a.id, { poids: nombreTape(e.target.value) })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="3.5" /></Field>
                       <button
                         onClick={() => setArticles((l) => (l.length > 1 ? l.filter((x) => x.id !== a.id) : l))}
                         disabled={articles.length === 1}
@@ -24540,18 +25849,7 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
                       <Camera size={14} /> Scanner une étiquette
                     </button>
                   </div>
-                  {/*
-                    * L'avertissement vit ICI, et non dans la fenêtre du scanner.
-                    *
-                    * Sur une étiquette nette, la lecture prend une demi-seconde : le message
-                    * affiché pendant le scan disparaît avant d'avoir été lu. Or c'est justement
-                    * celui qu'il ne faut pas manquer — un agent qui croit le poids rempli validera
-                    * un colis facturé sur la déclaration de la boutique, pas sur sa balance.
-                    */}
-                  <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 10, lineHeight: 1.5 }}>
-                    Le scan remplit la référence. <strong style={{ color: "var(--text)" }}>Le poids reste à peser</strong> :
-                    c’est lui qui fait le prix, et celui imprimé par la boutique n’est qu’une déclaration.
-                  </div>
+                  <AideScanEtiquette />
                 </div>
               )}
 
@@ -24651,90 +25949,23 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
           )}
         </>
       )}
-      {verif && (
-        <Modal onClose={() => setVerif(null)} title="Vérifiez avant d’ajouter">
-          {verif.etat === "lecture" ? (
-            <div style={{ padding: "18px 0", fontSize: 13, color: "var(--muted)", lineHeight: 1.6 }}>
-              <div style={{ color: "var(--text)", fontWeight: 600, marginBottom: 6 }}>{lecture || "Lecture de l’étiquette…"}</div>
-              Le code-barres est lu. On cherche maintenant le poids imprimé sur l’étiquette.
-            </div>
-          ) : (
-            <>
-              <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.55 }}>
-                Voici ce qui a été lu sur l’étiquette. Corrigez ce qu’il faut, puis confirmez.
-              </div>
-
-              <Field label="Référence (lue sur le code-barres)">
-                <input value={verif.reference} onChange={(e) => setVerif({ ...verif, reference: e.target.value, erreur: "" })} style={{ ...inputStyle, marginBottom: 0 }} />
-              </Field>
-
-              <Field label="Commande passée sur">
-                <select value={verif.commande || ""} onChange={(e) => setVerif({ ...verif, commande: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }}>
-                  <option value="">Boutique…</option>
-                  {VENDEURS_EN_LIGNE.map((v) => <option key={v} value={v}>{v}</option>)}
-                </select>
-              </Field>
-              {/*
-                * La boutique n'est pas sur l'étiquette : celle-ci est imprimée par le
-                * transporteur, pas par le vendeur. C'est à l'agent de la dire — d'où le rappel,
-                * pour qu'il ne cherche pas une lecture qui ne viendra jamais.
-                */}
-              <div style={{ fontSize: 11.5, color: "var(--muted)", margin: "-6px 0 14px" }}>
-                L’étiquette est imprimée par le transporteur : elle ne dit pas chez qui la commande a été passée.
-              </div>
-
-              <div style={{ display: "grid", gridTemplateColumns: etroit ? "1fr" : "1fr 1fr", gap: 12 }}>
-                <Field label="Quantité">
-                  <input type="number" min="1" value={verif.quantite} onChange={(e) => setVerif({ ...verif, quantite: e.target.value })} style={{ ...inputStyle, marginBottom: 0 }} />
-                </Field>
-                <Field label="Poids pesé (kg) *">
-                  <input type="number" min="0" step="0.001" value={verif.poids} onChange={(e) => setVerif({ ...verif, poids: e.target.value, erreur: "" })} style={{ ...inputStyle, marginBottom: 0 }} placeholder="ex : 3.758" />
-                </Field>
-              </div>
-
-              {/*
-                * LE POIDS LU EST UNE PROPOSITION, PAS UNE MESURE.
-                *
-                * Celui de l'étiquette est déclaré par la boutique ; la facture dit « poids
-                * constaté à la réception », et c'est la balance de l'agence qui fait foi. Le dire
-                * ici, à l'endroit exact où le chiffre s'affiche, est la seule façon d'éviter qu'on
-                * facture un jour sur la parole du vendeur.
-                */}
-              {verif.poidsEtiquette ? (
-                <div style={{ display: "flex", gap: 9, alignItems: "flex-start", background: "var(--warn-bg)", color: "var(--warn-fg)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 12px", fontSize: 12, marginTop: 4, lineHeight: 1.5 }}>
-                  <AlertTriangle size={14} style={{ flexShrink: 0, marginTop: 1 }} />
-                  <div>
-                    <strong>{verif.poidsEtiquette} kg lus sur l’étiquette.</strong> C’est le poids <em>déclaré par la boutique</em>.
-                    Le prix se calcule sur le poids constaté à la réception : confirmez-le à la balance avant d’ajouter.
-                  </div>
-                </div>
-              ) : (
-                <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 4, lineHeight: 1.5 }}>
-                  {verif.echecLecture === "moteur-indisponible"
-                    ? "La lecture du texte n’est pas disponible sur cet appareil. Saisissez le poids à la balance."
-                    : "Aucun poids n’a pu être lu sur l’étiquette — froissée, floue, ou absente. Pesez l’article."}
-                </div>
-              )}
-
-              {verif.erreur && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginTop: 10 }}>{verif.erreur}</div>}
-
-              <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 18, flexWrap: "wrap" }}>
-                <button onClick={() => setVerif(null)} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 16px", fontSize: 12.5, color: "var(--muted)", cursor: "pointer" }}>Annuler</button>
-                <button onClick={confirmerVerification} style={{ background: "#3ECB84", color: "#0A2647", border: "none", borderRadius: 8, padding: "10px 18px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
-                  Confirmer et ajouter
-                </button>
-              </div>
-            </>
-          )}
-        </Modal>
-      )}
-
       {scan && (
-        <ScannerModal
-          titre="Scanner une étiquette"
-          aide="Approchez le code-barres de l’étiquette. La référence se remplit toute seule ; le poids reste à peser — c’est lui qui fait le prix, et celui imprimé par la boutique n’est qu’une déclaration."
+        <ScanArticleEnLigne
+          referencesExistantes={articles.map((a) => a.reference)}
+          boutiqueParDefaut={boutiqueCommune}
+          etroit={etroit}
+          notify={notify}
           onClose={() => setScan(false)}
-          onScan={referenceScannee}
+          onAjouter={(ligne) => {
+            setArticles((liste) => {
+              const neuve = { ...ligneArticleEnLigne(), ...ligne };
+              /* Une ligne vide attend déjà : on la remplit plutôt que d’en ouvrir une de plus. */
+              const vide = liste.findIndex((a) => !a.reference.trim() && !Number(a.poids));
+              if (vide >= 0) return liste.map((a, i) => (i === vide ? { ...neuve, id: a.id } : a));
+              return [...liste, neuve];
+            });
+            setErreurArticles("");
+          }}
         />
       )}
     </Modal>
@@ -28467,7 +29698,7 @@ function clientDuColisPartenaire(colis) {
   return String(nom || colis?.destinataire || "—");
 }
 
-async function construireFacturePartenaireDoc(facture, partenaire, colisFactures) {
+async function construireFacturePartenaireDoc(facture, partenaire, colisFactures, entreprise = {}) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF());
   const W = 210, M = 16;
@@ -28645,6 +29876,22 @@ async function construireFacturePartenaireDoc(facture, partenaire, colisFactures
     "Montants calculés au tarif convenu avec le partenaire, sur des colis vérifiés et pesés par nos agents. "
     + "Les prix que le partenaire applique à ses propres clients ne figurent pas sur cette facture.", W - 2 * M), M, y);
 
+  /*
+   * L'IMMATRICULATION, EN PIED DE FACTURE.
+   *
+   * C'est la facture la plus formelle que l'entreprise émette : elle part à une autre entreprise,
+   * qui la porte dans sa comptabilité. Sans numéro de registre du commerce, rien n'y dit que
+   * l'émetteur existe légalement — et c'est la première chose que regarde un comptable, ou une
+   * administration à qui l'on présente la dépense.
+   */
+  const rccm = String(entreprise?.rccm || "").trim();
+  if (rccm) {
+    y += 10;
+    if (y > 280) { doc.addPage(); y = 24; }
+    doc.setFontSize(8); doc.setTextColor(...MUTED);
+    doc.text(`BA-DIABY EXPRESS — RCCM ${rccm}`, M, y);
+  }
+
   return doc;
 }
 
@@ -28669,7 +29916,7 @@ async function construireFacturePartenaireDoc(facture, partenaire, colisFactures
  * Aucun montant n'y figure : ce que le partenaire nous doit ne regarde pas son correspondant, et
  * ce qu'il facture à ses clients ne nous regarde pas.
  */
-async function construireBordereauRemiseDoc(partenaire, lot, agent) {
+async function construireBordereauRemiseDoc(partenaire, lot, agent, entreprise = {}) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF());
   const W = 210, M = 16;
@@ -28754,10 +30001,18 @@ async function construireBordereauRemiseDoc(partenaire, lot, agent) {
   doc.text("Signature du correspondant", M, y + 23);
   doc.text(`Notre agent — ${agent || "—"}`, W / 2 + 4, y + 23);
 
+  // Ce bordereau est signé par une autre entreprise : il dit qui il engage.
+  const rccmRemise = String(entreprise?.rccm || "").trim();
+  if (rccmRemise) {
+    const yPied = Math.min(y + 34, 288);
+    doc.setFontSize(8); doc.setTextColor(...MUTED);
+    doc.text(`BA-DIABY EXPRESS — RCCM ${rccmRemise}`, M, yPied);
+  }
+
   return doc;
 }
 
-async function construireRelevePartenaireDoc(partenaire, mois, factures, colis) {
+async function construireRelevePartenaireDoc(partenaire, mois, factures, colis, entreprise = {}) {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF());
   const W = 210, M = 16;
@@ -28877,6 +30132,18 @@ async function construireRelevePartenaireDoc(partenaire, mois, factures, colis) 
   doc.text(doc.splitTextToSize(
     "Relevé établi au tarif convenu avec le partenaire, sur des colis vérifiés et pesés par nos agents. "
     + "Les prix que le partenaire applique à ses propres clients n'y figurent pas.", W - 2 * M), M, y);
+
+  /*
+   * Le relevé est la pièce que le partenaire remet à son comptable quand un solde est contesté :
+   * il porte donc la même immatriculation que la facture qu'il récapitule.
+   */
+  const rccmReleve = String(entreprise?.rccm || "").trim();
+  if (rccmReleve) {
+    y += 10;
+    if (y > 280) { doc.addPage(); y = 24; }
+    doc.setFontSize(8); doc.setTextColor(...MUTED);
+    doc.text(`BA-DIABY EXPRESS — RCCM ${rccmReleve}`, M, y);
+  }
 
   return doc;
 }
@@ -29173,7 +30440,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
   async function imprimerReleve(mois) {
     const sesColis = (data.colis || []).filter((c) => c.partenaireId === partenaire.id);
     try {
-      const doc = await construireRelevePartenaireDoc(partenaire, mois, sesFactures, sesColis);
+      const doc = await construireRelevePartenaireDoc(partenaire, mois, sesFactures, sesColis, data?.entreprise);
       const etiquette = `${String(mois.mois + 1).padStart(2, "0")}-${mois.annee}`;
       openPdf(doc, `releve-${(reglagesPartenaire(partenaire).nomCommercial || partenaire.nom || "partenaire").replace(/\s+/g, "-").toLowerCase()}-${etiquette}.pdf`);
     } catch (e) {
@@ -29185,7 +30452,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
   async function imprimerFacture(facture) {
     const inclus = (data.colis || []).filter((c) => (facture.trackings || []).includes(c.tracking));
     try {
-      const doc = await construireFacturePartenaireDoc(facture, partenaire, inclus);
+      const doc = await construireFacturePartenaireDoc(facture, partenaire, inclus, data?.entreprise);
       openPdf(doc, `${facture.numero}.pdf`);
     } catch (e) {
       console.error(e);
@@ -29219,7 +30486,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
     const trackings = new Set(lot.colis.map((c) => c.tracking));
     const marque = { le: new Date().toISOString(), par: monNom, correspondant: lot.correspondant?.nom || "" };
     try {
-      const doc = await construireBordereauRemiseDoc(partenaire, lot, monNom);
+      const doc = await construireBordereauRemiseDoc(partenaire, lot, monNom, data?.entreprise);
       openPdf(doc, `remise-${(reglagesPartenaire(partenaire).nomCommercial || partenaire.nom || "partenaire").replace(/\s+/g, "-").toLowerCase()}-${lot.pays}.pdf`);
     } catch (e) {
       console.error(e);
@@ -30897,6 +32164,63 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
               « Gérer les permissions des autres comptes ».
             </div>
           )}
+          {/*
+            * LE TRANSFERT D'ARGENT, EN TÊTE ET EN CLAIR.
+            *
+            * Ces deux droits sont bien dans la liste plus bas, avec les quarante-six autres. Mais
+            * la question « est-ce que celle-ci fait des transferts ? » ne se pose pas comme les
+            * autres : on ne la cherche pas, on l'a en tête en ouvrant la fiche, et la réponse doit
+            * être là. Enterrée au onzième groupe, elle obligeait à faire défiler tout l'écran pour
+            * savoir si quelqu'un peut sortir des billets d'un tiroir — et à recommencer pour
+            * chaque personne.
+            *
+            * Le bloc dit l'état en une phrase, avec le nom de la personne. Les deux interrupteurs
+            * sont les mêmes que ceux d'en bas : ils basculent la même clé, il n'y a pas deux
+            * réglages à tenir d'accord.
+            */}
+          {!isAdmin && role !== "Partenaire" && (() => {
+            const peutCreer = effectivePermission({ role, permissionsOverride }, "transfert.creer");
+            const peutPayer = effectivePermission({ role, permissionsOverride }, "transfert.payer");
+            const nomComplet = `${prenom} ${nom}`.trim() || "Ce compte";
+            const resume = peutCreer && peutPayer
+              ? `${nomComplet} peut envoyer ET payer de l’argent.`
+              : peutCreer ? `${nomComplet} peut envoyer de l’argent, mais pas en payer.`
+              : peutPayer ? `${nomComplet} peut payer de l’argent, mais pas en envoyer.`
+              : `${nomComplet} ne fait aucun transfert d’argent.`;
+            const actif = peutCreer || peutPayer;
+            return (
+              <div style={{
+                border: `1px solid ${actif ? "var(--warn-border)" : "var(--border)"}`, borderRadius: 12, marginBottom: 16, overflow: "hidden",
+                background: actif ? "var(--warn-bg)" : "var(--surface)",
+              }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 9, padding: "12px 16px" }}>
+                  <Banknote size={16} color={actif ? "var(--warn-fg)" : "var(--muted)"} />
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: actif ? "var(--warn-fg)" : "var(--muted)" }}>
+                      Transfert d’argent
+                    </div>
+                    <div style={{ fontSize: 13, color: "var(--text)", fontWeight: 600, marginTop: 3 }}>{resume}</div>
+                  </div>
+                </div>
+                {[["transfert.creer", "Créer un transfert et encaisser l’expéditeur", peutCreer],
+                  ["transfert.payer", "Payer un transfert au bénéficiaire", peutPayer]].map(([cle, libelle, on]) => (
+                  <div key={cle} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "10px 16px", borderTop: "1px solid var(--border)" }}>
+                    <span style={{ fontSize: 13, color: "var(--text)" }}>{libelle}</span>
+                    <button onClick={() => peutReglerLesDroits && togglePermission(cle)} disabled={!peutReglerLesDroits}
+                      aria-pressed={on} aria-label={libelle}
+                      style={{ width: 38, height: 22, borderRadius: 20, border: "none", background: on ? "#3ECB84" : "var(--surface2)", position: "relative", cursor: peutReglerLesDroits ? "pointer" : "default", flexShrink: 0, opacity: peutReglerLesDroits ? 1 : 0.6 }}>
+                      <div style={{ width: 16, height: 16, borderRadius: "50%", background: "#fff", position: "absolute", top: 3, left: on ? 19 : 3, transition: "left 0.15s" }} />
+                    </button>
+                  </div>
+                ))}
+                <div style={{ padding: "9px 16px", borderTop: "1px solid var(--border)", fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 }}>
+                  Aucun rôle ne donne ces droits : ils se donnent nom par nom, et n’oublient pas de
+                  se retirer. Ce que la personne a déjà fait reste au journal.
+                </div>
+              </div>
+            );
+          })()}
+
           {PERMISSIONS_SCHEMA.map((g) => {
             const enabledCount = g.permissions.filter((p) => effectivePermission({ role, permissionsOverride }, p.key)).length;
             return (
@@ -31204,6 +32528,1525 @@ class ErrorBoundary extends React.Component {
     }
     return this.props.children;
   }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * TRANSFERT D'ARGENT — l'écran.
+ *
+ * Cinq pages sous un même toit : envoyer, payer, la liste, la caisse, le journal. Elles ne
+ * partagent aucun état avec le reste de l'application, et pour cause : les transferts ne vivent
+ * pas dans le document JSON mais dans leurs propres tables, derrière api/transferts.js. Ce module
+ * ne fait donc jamais persist() — il appelle le serveur et relit.
+ *
+ * LE CALCUL EST AFFICHÉ, PAS DÉCIDÉ, ICI.
+ * Le devis vient du serveur, à chaque changement de montant. La page ne sait pas calculer des
+ * frais, et c'est voulu : si elle savait, elle aurait deux vérités possibles avec le serveur, et
+ * c'est toujours celle du client qui finit par être crue par le client.
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+/*
+ * Le barème, vu du navigateur, tant que le serveur n'a pas répondu.
+ *
+ * Ce n'est PAS une seconde source de vérité : le serveur recalcule tout, et c'est lui qui décide.
+ * Ces valeurs servent uniquement à dessiner l'écran avant la première réponse — sans quoi les
+ * listes déroulantes de devises seraient vides pendant une seconde.
+ */
+const CONFIG_TRANSFERT_VIDE = {
+  actif: true,
+  validiteJours: 30,
+  devisesEnvoi: ["EUR", "GNF", "USD", "XOF"],
+  devisesReception: ["GNF", "EUR", "USD", "XOF"],
+  taux: {},
+  bareme: {},
+  limites: {},
+  commissions: { agentEnvoi: 0, agentPaiement: 0, agence: 0 },
+};
+
+const STATUTS_TRANSFERT = ["Créé", "En attente de paiement", "Disponible au retrait", "Payé", "Annulé", "Expiré"];
+
+const STYLE_STATUT_TRANSFERT = {
+  "Créé": { bg: "var(--surface2)", fg: "var(--neutral-fg)", icone: Clock },
+  "En attente de paiement": { bg: "var(--warn-bg)", fg: "var(--warn-fg)", icone: Clock },
+  "Disponible au retrait": { bg: "var(--info-bg)", fg: "var(--info-fg)", icone: HandCoins },
+  "Payé": { bg: "var(--ok-bg)", fg: "var(--ok-fg)", icone: CheckCircle2 },
+  "Annulé": { bg: "var(--danger-bg)", fg: "var(--danger-fg)", icone: Ban },
+  "Expiré": { bg: "var(--warn-bg)", fg: "var(--warn-fg-soft)", icone: AlertTriangle },
+};
+
+function BadgeStatutTransfert({ statut }) {
+  const s = STYLE_STATUT_TRANSFERT[statut] || STYLE_STATUT_TRANSFERT["Créé"];
+  const Icone = s.icone;
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 5, background: s.bg, color: s.fg, padding: "4px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>
+      <Icone size={12} /> {statut}
+    </span>
+  );
+}
+
+/** Un appel au module de transfert, jeton de session compris. */
+async function appelTransferts(chemin, options = {}) {
+  const jeton = jetonSessionCourant();
+  const reponse = await fetch(`/api/transferts${chemin}`, {
+    ...options,
+    headers: {
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...(options.headers || {}),
+      ...(jeton ? { Authorization: `Bearer ${jeton}` } : {}),
+    },
+  });
+  const corps = await reponse.json().catch(() => ({}));
+  if (!reponse.ok) {
+    const erreur = new Error(corps?.error || "L’opération n’a pas abouti.");
+    erreur.corps = corps;
+    erreur.statut = reponse.status;
+    throw erreur;
+  }
+  return corps;
+}
+
+/** Un montant de transfert, dans sa devise, en chiffres à chasse fixe. */
+function montantTransfert(valeur, devise) {
+  const n = Number(valeur) || 0;
+  const sansDecimale = ["GNF", "XOF", "XAF"].includes(String(devise).toUpperCase());
+  return `${n.toLocaleString("fr-FR", { minimumFractionDigits: sansDecimale ? 0 : 2, maximumFractionDigits: sansDecimale ? 0 : 2 })} ${devise}`;
+}
+
+/*
+ * LE CODE, TEL QU'ON LE LIT AU TÉLÉPHONE.
+ *
+ * « TRF-48273195 » se dicte mal ; « TRF 4827 3195 » se dicte. C'est un détail d'affichage et il
+ * décide du nombre d'appels au comptoir pour un code mal recopié.
+ */
+/*
+ * « GN » devient « Guinée » : au comptoir, on lit un pays, pas un code ISO.
+ *
+ * Deux versions, et la distinction n'est pas cosmétique : jsPDF ne sait pas dessiner un drapeau
+ * emoji — il l'imprime en carrés vides ou en signes illisibles. Le drapeau reste donc à l'écran,
+ * et les documents imprimés n'ont que le nom.
+ */
+function nomPaysImprime(code) {
+  return COUNTRIES.find((c) => c.code === code)?.name || code || "—";
+}
+
+function paysLisible(code) {
+  const pays = COUNTRIES.find((c) => c.code === code);
+  return pays ? `${FLAGS[pays.code] || ""} ${pays.name}`.trim() : (code || "—");
+}
+
+function codeLisible(code) {
+  const chiffres = String(code || "").replace(/\D/g, "");
+  if (chiffres.length !== 8) return code || "";
+  return `TRF ${chiffres.slice(0, 4)} ${chiffres.slice(4)}`;
+}
+
+/* ── LE REÇU D'ENVOI ───────────────────────────────────────────────────────────
+ * C'est la pièce que l'expéditeur emporte, et sur laquelle il lira le code à sa famille. Le code
+ * y est donc le plus gros élément de la page — plus gros que le montant, plus gros que le nom de
+ * l'entreprise. Tout le reste sert à trancher une contestation ; lui sert à retirer l'argent.
+ */
+async function downloadRecuTransfert(transfert, code, entreprise = {}) {
+  const jspdf = await loadJsPDF();
+  const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a5" }));
+  const W = 148, M = 10;
+  const INK = [20, 22, 26], MUTED = [122, 130, 142], NAVY = [10, 38, 71], RED = [214, 39, 63];
+
+  doc.setDrawColor(20, 20, 20); doc.setLineWidth(0.5); doc.rect(3, 3, W - 6, 210 - 6);
+  doc.setFillColor(...NAVY); doc.rect(3, 3, W - 6, 26, "F");
+  doc.setFillColor(255, 255, 255); doc.roundedRect(8, 6, 20, 20, 2.5, 2.5, "F");
+  doc.addImage(DEFAULT_LOGO, "PNG", 9, 7, 18, 18);
+  doc.setTextColor(255, 255, 255); doc.setFontSize(13); doc.setFont(undefined, "bold");
+  doc.text("BA-DIABY EXPRESS", 31, 13);
+  doc.setFontSize(8.5); doc.setFont(undefined, "normal"); doc.setTextColor(180, 195, 220);
+  doc.text("Reçu de transfert d’argent", 31, 19);
+  doc.setFontSize(7.5); doc.text(transfert.reference, W - M, 19, { align: "right" });
+
+  // ── Le code, en grand, encadré ────────────────────────────────────────────
+  let y = 38;
+  doc.setDrawColor(...RED); doc.setLineWidth(0.8);
+  doc.roundedRect(M, y, W - 2 * M, 26, 2, 2, "S");
+  doc.setFontSize(8); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
+  doc.text("CODE DE RETRAIT — à communiquer au bénéficiaire", W / 2, y + 7, { align: "center" });
+  doc.setFontSize(21); doc.setTextColor(...RED); doc.setFont(undefined, "bold");
+  doc.text(codeLisible(code), W / 2, y + 19, { align: "center" });
+  y += 34;
+
+  const ligne = (libelle, valeur, gras) => {
+    doc.setFontSize(8); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
+    doc.text(libelle, M, y);
+    doc.setFontSize(gras ? 11 : 9.5); doc.setTextColor(...INK); doc.setFont(undefined, gras ? "bold" : "normal");
+    doc.text(String(valeur ?? "—"), W - M, y, { align: "right" });
+    y += gras ? 8 : 6.5;
+  };
+
+  ligne("Expéditeur", transfert.expediteur);
+  ligne("Bénéficiaire", transfert.beneficiaire);
+  ligne("Destination", [transfert.beneficiaireVille, nomPaysImprime(transfert.beneficiairePays)].filter(Boolean).join(", "));
+  doc.setDrawColor(220); doc.line(M, y, W - M, y); y += 7;
+  ligne("Montant envoyé", montantTransfert(transfert.montantEnvoye, transfert.deviseEnvoi));
+  ligne("Frais de transfert", montantTransfert(transfert.frais, transfert.deviseEnvoi));
+  ligne("TOTAL PAYÉ", montantTransfert(Number(transfert.montantEnvoye) + Number(transfert.frais), transfert.deviseEnvoi), true);
+  doc.setDrawColor(220); doc.line(M, y, W - M, y); y += 7;
+  ligne("Taux appliqué", `1 ${transfert.deviseEnvoi} = ${Number(transfert.taux).toLocaleString("fr-FR", { maximumFractionDigits: 4 })} ${transfert.deviseReception}`);
+  ligne("LE BÉNÉFICIAIRE REÇOIT", montantTransfert(transfert.montantARecevoir, transfert.deviseReception), true);
+  doc.setDrawColor(220); doc.line(M, y, W - M, y); y += 7;
+  ligne("Date", new Date(transfert.creeLe).toLocaleString("fr-FR"));
+  ligne("Agent / agence", `${transfert.creePar} — ${transfert.agenceEnvoi}`);
+  ligne("Valable jusqu’au", new Date(transfert.expireLe).toLocaleDateString("fr-FR"));
+
+  y = 178;
+  doc.setDrawColor(200); doc.line(M, y, W - M, y);
+  doc.setFontSize(7.6); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
+  const avis = doc.splitTextToSize(
+    "Ce code vaut paiement : ne le communiquez qu’au bénéficiaire. Toute personne le présentant avec une pièce d’identité au nom indiqué peut retirer les fonds.",
+    W - 2 * M);
+  doc.text(avis, M, y + 6);
+  const rccm = String(entreprise?.rccm || "").trim();
+  doc.setFontSize(7.2);
+  doc.text(`badiabyexpress.bde@gmail.com${rccm ? ` · RCCM ${rccm}` : ""}`, M, 200);
+
+  openPdf(doc, `transfert-${transfert.reference}.pdf`);
+}
+
+/* ── LE REÇU DE PAIEMENT ───────────────────────────────────────────────────────
+ * Ce que le bénéficiaire signe et emporte. Il ne porte PAS le code : celui-ci ne sert plus, et
+ * l'imprimer une seconde fois le ferait circuler après usage.
+ */
+async function downloadRecuPaiementTransfert(transfert, entreprise = {}) {
+  const jspdf = await loadJsPDF();
+  const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a5" }));
+  const W = 148, M = 10;
+  const INK = [20, 22, 26], MUTED = [122, 130, 142], NAVY = [10, 38, 71], VERT = [22, 120, 70];
+
+  doc.setDrawColor(20, 20, 20); doc.setLineWidth(0.5); doc.rect(3, 3, W - 6, 210 - 6);
+  doc.setFillColor(...NAVY); doc.rect(3, 3, W - 6, 26, "F");
+  doc.setFillColor(255, 255, 255); doc.roundedRect(8, 6, 20, 20, 2.5, 2.5, "F");
+  doc.addImage(DEFAULT_LOGO, "PNG", 9, 7, 18, 18);
+  doc.setTextColor(255, 255, 255); doc.setFontSize(13); doc.setFont(undefined, "bold");
+  doc.text("BA-DIABY EXPRESS", 31, 13);
+  doc.setFontSize(8.5); doc.setFont(undefined, "normal"); doc.setTextColor(180, 195, 220);
+  doc.text("Reçu de paiement — transfert d’argent", 31, 19);
+  doc.setFontSize(7.5); doc.text(transfert.reference, W - M, 19, { align: "right" });
+
+  let y = 42;
+  doc.setFontSize(8.5); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
+  doc.text("MONTANT REMIS", M, y);
+  doc.setTextColor(...VERT); doc.setFont(undefined, "bold"); doc.setFontSize(20);
+  doc.text(montantTransfert(transfert.montantRemis ?? transfert.montantARecevoir, transfert.deviseReception), M, y + 10);
+  y += 22;
+  doc.setDrawColor(220); doc.line(M, y, W - M, y); y += 8;
+
+  const ligne = (libelle, valeur) => {
+    doc.setFontSize(8); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
+    doc.text(libelle, M, y);
+    doc.setFontSize(10); doc.setTextColor(...INK); doc.setFont(undefined, "bold");
+    doc.text(String(valeur ?? "—"), M, y + 5);
+    y += 12;
+  };
+  ligne("Bénéficiaire", transfert.beneficiaireNomVerifie || transfert.beneficiaire);
+  ligne("Pièce présentée", [transfert.beneficiairePiece, transfert.beneficiairePieceNumero].filter(Boolean).join(" — "));
+  ligne("Envoyé par", transfert.expediteur);
+  ligne("Payé le", new Date(transfert.payeLe).toLocaleString("fr-FR"));
+  ligne("Agent / agence", `${transfert.payePar} — ${transfert.agencePaiement}`);
+
+  y = 172;
+  doc.setDrawColor(200); doc.line(M, y, W - M, y);
+  doc.setFontSize(8.5); doc.setTextColor(90, 90, 90); doc.setFont(undefined, "normal");
+  doc.text("Signature du bénéficiaire :", M, y + 8);
+  doc.setDrawColor(150); doc.line(M, y + 20, 70, y + 20);
+  const rccm = String(entreprise?.rccm || "").trim();
+  doc.setFontSize(7.2); doc.setTextColor(140, 140, 140);
+  doc.text("Ce reçu atteste de la remise des fonds au bénéficiaire désigné.", M, 198);
+  doc.text(`badiabyexpress.bde@gmail.com${rccm ? ` · RCCM ${rccm}` : ""}`, M, 202);
+
+  openPdf(doc, `paiement-${transfert.reference}.pdf`);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * ENVOYER — le formulaire de départ
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+const PIECES_IDENTITE = ["Carte d’identité", "Passeport", "Permis de conduire", "Carte consulaire", "Carte de séjour", "Autre"];
+
+function NouveauTransfert({ data, session, config, onFait, onFermer, notify }) {
+  const [etape, setEtape] = useState(0);
+  const [envoi, setEnvoi] = useState(false);
+  const [erreur, setErreur] = useState("");
+  const [resultat, setResultat] = useState(null);
+
+  const [exp, setExp] = useState({ nom: "", prenom: "", telephone: "", pieceType: PIECES_IDENTITE[0], pieceNumero: "", adresse: "", pays: session?.paysAutorises?.[0] || "GN" });
+  const [ben, setBen] = useState({ nom: "", prenom: "", telephone: "", pays: "GN", ville: "", agence: "" });
+  const [argent, setArgent] = useState({
+    deviseEnvoi: (config.devisesEnvoi || ["EUR"])[0],
+    deviseReception: (config.devisesReception || ["GNF"])[0],
+    montant: "",
+  });
+  const [devis, setDevis] = useState(null);
+  const [devisEnCours, setDevisEnCours] = useState(false);
+
+  /*
+   * Le devis vient du serveur, jamais d'un calcul local. On attend un court instant après la
+   * dernière frappe : sans cela, taper « 100 000 » lance six appels dont cinq portent sur un
+   * montant que personne n'a voulu.
+   */
+  useEffect(() => {
+    const montant = montantSaisi(argent.montant);
+    if (!(montant > 0)) { setDevis(null); return undefined; }
+    let vivant = true;
+    setDevisEnCours(true);
+    const minuteur = setTimeout(() => {
+      appelTransferts("", {
+        method: "POST",
+        body: JSON.stringify({ action: "devis", deviseEnvoi: argent.deviseEnvoi, deviseReception: argent.deviseReception, montantEnvoye: montant }),
+      })
+        .then((r) => { if (vivant) { setDevis(r.devis); setErreur(""); } })
+        .catch((e) => { if (vivant) { setDevis(null); setErreur(e.message); } })
+        .finally(() => { if (vivant) setDevisEnCours(false); });
+    }, 420);
+    return () => { vivant = false; clearTimeout(minuteur); };
+  }, [argent.montant, argent.deviseEnvoi, argent.deviseReception]);
+
+  const etapes = ["Expéditeur", "Bénéficiaire", "Montant", "Résumé"];
+  const peutAvancer =
+    (etape === 0 && exp.nom.trim() && exp.telephone.trim())
+    || (etape === 1 && ben.nom.trim() && ben.pays)
+    || (etape === 2 && devis && !devisEnCours)
+    || etape === 3;
+
+  async function valider() {
+    if (envoi) return;
+    setEnvoi(true); setErreur("");
+    try {
+      const r = await appelTransferts("", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "creer",
+          expNom: exp.nom, expPrenom: exp.prenom, expTelephone: exp.telephone,
+          expPieceType: exp.pieceType, expPieceNumero: exp.pieceNumero, expAdresse: exp.adresse, expPays: exp.pays,
+          benNom: ben.nom, benPrenom: ben.prenom, benTelephone: ben.telephone,
+          benPays: ben.pays, benVille: ben.ville, benAgence: ben.agence,
+          deviseEnvoi: argent.deviseEnvoi, deviseReception: argent.deviseReception,
+          montantEnvoye: montantSaisi(argent.montant),
+          paysEnvoi: exp.pays,
+        }),
+      });
+      setResultat(r);
+      onFait?.();
+    } catch (e) {
+      setErreur(e.message);
+    } finally {
+      setEnvoi(false);
+    }
+  }
+
+  /* ── L'écran de succès : le code, et rien qui puisse le faire manquer ── */
+  if (resultat) {
+    const t = resultat.transfert;
+    const vue = {
+      reference: t.reference,
+      expediteur: `${t.exp_nom} ${t.exp_prenom}`.trim(),
+      beneficiaire: `${t.ben_nom} ${t.ben_prenom}`.trim(),
+      beneficiaireVille: t.ben_ville, beneficiairePays: t.ben_pays,
+      montantEnvoye: t.montant_envoye, deviseEnvoi: t.devise_envoi,
+      frais: t.frais, taux: t.taux,
+      montantARecevoir: t.montant_a_recevoir, deviseReception: t.devise_reception,
+      creeLe: t.cree_le, creePar: t.cree_par_nom, agenceEnvoi: t.agence_envoi, expireLe: t.expire_le,
+    };
+    return (
+      <Modal title="Transfert enregistré" onClose={onFermer} wide>
+        <div style={{ textAlign: "center", marginBottom: 18 }}>
+          <div style={{ width: 52, height: 52, margin: "0 auto 12px", borderRadius: 16, display: "grid", placeItems: "center", background: "color-mix(in srgb, var(--ok-fg) 14%, transparent)", border: "1px solid color-mix(in srgb, var(--ok-fg) 26%, transparent)" }}>
+            <CheckCircle2 size={24} color="var(--ok-fg)" />
+          </div>
+          <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Référence {vue.reference}</div>
+        </div>
+
+        <div style={{ border: "1.5px solid var(--brand-solid)", borderRadius: 14, padding: "18px 16px", textAlign: "center", marginBottom: 16, background: "color-mix(in srgb, var(--brand-solid) 7%, transparent)" }}>
+          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 8 }}>
+            Code de retrait
+          </div>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 32, fontWeight: 700, color: "var(--brand-solid)", letterSpacing: "0.04em", fontVariantNumeric: "tabular-nums" }}>
+            {codeLisible(resultat.code)}
+          </div>
+          <button onClick={() => { navigator.clipboard?.writeText(resultat.code); notify?.("Code copié"); }}
+            style={{ marginTop: 10, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 14px", fontSize: 12, fontWeight: 600, color: "var(--text)", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 }}>
+            <Copy size={13} /> Copier le code
+          </button>
+        </div>
+
+        <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 10, padding: "11px 13px", fontSize: 12, color: "var(--text)", lineHeight: 1.55, marginBottom: 16 }}>
+          <strong style={{ color: "var(--warn-fg)" }}>Ce code vaut paiement.</strong> Il n’apparaîtra plus dans
+          les listes : notez-le ou imprimez le reçu maintenant. Le redemander plus tard est possible,
+          mais c’est un geste enregistré au journal.
+        </div>
+
+        <div style={{ display: "grid", gap: 6, fontSize: 12.5, color: "var(--muted)", marginBottom: 18 }}>
+          <div style={{ display: "flex", justifyContent: "space-between" }}><span>Bénéficiaire</span><strong style={{ color: "var(--text)" }}>{vue.beneficiaire}</strong></div>
+          <div style={{ display: "flex", justifyContent: "space-between" }}><span>Il recevra</span><strong style={{ color: "var(--ok-fg)" }}>{montantTransfert(vue.montantARecevoir, vue.deviseReception)}</strong></div>
+          <div style={{ display: "flex", justifyContent: "space-between" }}><span>Total encaissé</span><strong style={{ color: "var(--text)" }}>{montantTransfert(Number(vue.montantEnvoye) + Number(vue.frais), vue.deviseEnvoi)}</strong></div>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={() => downloadRecuTransfert(vue, resultat.code, data?.entreprise)}
+            style={{ flex: 1, minWidth: 160, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 10, padding: "12px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
+            <Printer size={16} /> Imprimer le reçu
+          </button>
+          <button onClick={onFermer}
+            style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 10, padding: "12px 20px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+            Terminer
+          </button>
+        </div>
+      </Modal>
+    );
+  }
+
+  const champ = (label, valeur, onChange, options = {}) => (
+    <Field label={label}>
+      {options.select
+        ? <select aria-label={String(label).replace(" *", "")} value={valeur} onChange={(e) => onChange(e.target.value)} style={inputStyle}>{options.select}</select>
+        : <input aria-label={String(label).replace(" *", "")} value={valeur} onChange={(e) => onChange(e.target.value)} placeholder={options.placeholder || ""}
+            inputMode={options.inputMode} style={inputStyle} />}
+    </Field>
+  );
+
+  return (
+    <Modal title="Nouveau transfert d’argent" onClose={onFermer} wide saisieEnCours={!!(exp.nom || ben.nom || argent.montant)}>
+      <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 18, flexWrap: "wrap" }}>
+        {etapes.map((nom, i) => (
+          <React.Fragment key={nom}>
+            <button onClick={() => i < etape && setEtape(i)}
+              style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4, background: "none", border: "none", cursor: i < etape ? "pointer" : "default", padding: 0 }}>
+              <div style={{ width: 28, height: 28, borderRadius: "50%", display: "grid", placeItems: "center",
+                            background: i <= etape ? "var(--brand-solid)" : "var(--surface2)",
+                            color: i <= etape ? "#fff" : "var(--muted)", fontSize: 12, fontWeight: 700 }}>
+                {i < etape ? <Check size={14} /> : i + 1}
+              </div>
+              <span style={{ fontSize: 10.5, fontWeight: 600, color: i <= etape ? "var(--text)" : "var(--muted)" }}>{nom}</span>
+            </button>
+            {i < etapes.length - 1 && <div style={{ flex: 1, height: 1.5, background: i < etape ? "var(--brand-solid)" : "var(--border)", minWidth: 12 }} />}
+          </React.Fragment>
+        ))}
+      </div>
+
+      {etape === 0 && (
+        <>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.55 }}>
+            La pièce d’identité de l’expéditeur n’est pas une formalité : c’est elle qui permet de
+            lui rendre son argent si le transfert est annulé, et de répondre à un contrôle.
+          </div>
+          <div className="responsive-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            {champ("Nom *", exp.nom, (v) => setExp({ ...exp, nom: v }))}
+            {champ("Prénom", exp.prenom, (v) => setExp({ ...exp, prenom: v }))}
+          </div>
+          <Field label="Téléphone *"><PhoneInput value={exp.telephone} onChange={(v) => setExp({ ...exp, telephone: v })} /></Field>
+          <div className="responsive-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            {champ("Pièce d’identité", exp.pieceType, (v) => setExp({ ...exp, pieceType: v }), { select: PIECES_IDENTITE.map((p) => <option key={p} value={p}>{p}</option>) })}
+            {champ("Numéro de pièce", exp.pieceNumero, (v) => setExp({ ...exp, pieceNumero: v }))}
+          </div>
+          <div className="responsive-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            {champ("Adresse", exp.adresse, (v) => setExp({ ...exp, adresse: v }))}
+            {champ("Pays", exp.pays, (v) => setExp({ ...exp, pays: v }), { select: COUNTRIES.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code]} {c.name}</option>) })}
+          </div>
+        </>
+      )}
+
+      {etape === 1 && (
+        <>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.55 }}>
+            Le nom saisi ici est celui qui devra figurer sur la pièce présentée au retrait. Une
+            faute d’orthographe se paie d’un aller-retour du bénéficiaire.
+          </div>
+          <div className="responsive-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            {champ("Nom *", ben.nom, (v) => setBen({ ...ben, nom: v }))}
+            {champ("Prénom", ben.prenom, (v) => setBen({ ...ben, prenom: v }))}
+          </div>
+          <Field label="Téléphone"><PhoneInput value={ben.telephone} onChange={(v) => setBen({ ...ben, telephone: v })} defaultDial={indicatifDuPays(ben.pays)} /></Field>
+          <div className="responsive-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            {champ("Pays de retrait *", ben.pays, (v) => setBen({ ...ben, pays: v }), { select: COUNTRIES.map((c) => <option key={c.code} value={c.code}>{FLAGS[c.code]} {c.name}</option>) })}
+            {champ("Ville", ben.ville, (v) => setBen({ ...ben, ville: v }))}
+          </div>
+          <Field label="Agence de paiement souhaitée">
+            <select value={ben.agence} onChange={(e) => setBen({ ...ben, agence: e.target.value })} style={inputStyle}>
+              <option value="">N’importe quelle agence du réseau</option>
+              {(data?.sites || []).filter((s) => !ben.pays || s.pays === ben.pays).map((s) => <option key={s.id} value={s.nom}>{s.nom}</option>)}
+            </select>
+          </Field>
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -6 }}>
+            Indicative : le bénéficiaire pourra retirer dans n’importe quelle agence autorisée à payer.
+          </div>
+        </>
+      )}
+
+      {etape === 2 && (
+        <>
+          <div className="responsive-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            {champ("Devise d’envoi", argent.deviseEnvoi, (v) => setArgent({ ...argent, deviseEnvoi: v }), { select: (config.devisesEnvoi || []).map((d) => <option key={d} value={d}>{d}</option>) })}
+            {champ("Devise de réception", argent.deviseReception, (v) => setArgent({ ...argent, deviseReception: v }), { select: (config.devisesReception || []).map((d) => <option key={d} value={d}>{d}</option>) })}
+          </div>
+          {champ(`Montant envoyé (${argent.deviseEnvoi}) *`, argent.montant, (v) => setArgent({ ...argent, montant: v }), { inputMode: "decimal", placeholder: "0" })}
+
+          <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px", marginTop: 4 }}>
+            {devisEnCours && !devis && <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Calcul en cours…</div>}
+            {!devis && !devisEnCours && <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Saisissez un montant pour voir les frais et le montant à recevoir.</div>}
+            {devis && (
+              <div style={{ display: "grid", gap: 8, fontSize: 13, fontVariantNumeric: "tabular-nums" }}>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span style={{ color: "var(--muted)" }}>Montant envoyé</span>
+                  <strong style={{ color: "var(--text)" }}>{montantTransfert(devis.montantEnvoye, devis.deviseEnvoi)}</strong>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between" }}>
+                  <span style={{ color: "var(--muted)" }}>Frais de transfert</span>
+                  <strong style={{ color: "var(--text)" }}>{montantTransfert(devis.frais, devis.deviseEnvoi)}</strong>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+                  <span style={{ color: "var(--text)", fontWeight: 700 }}>Total à encaisser</span>
+                  <strong style={{ color: "var(--text)", fontSize: 15 }}>{montantTransfert(devis.totalPaye, devis.deviseEnvoi)}</strong>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: "var(--muted)" }}>
+                  <span>Taux appliqué</span>
+                  <span>1 {devis.deviseEnvoi} = {Number(devis.taux).toLocaleString("fr-FR", { maximumFractionDigits: 4 })} {devis.deviseReception}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+                  <span style={{ color: "var(--ok-fg)", fontWeight: 700 }}>Le bénéficiaire reçoit</span>
+                  <strong style={{ color: "var(--ok-fg)", fontSize: 16 }}>{montantTransfert(devis.montantARecevoir, devis.deviseReception)}</strong>
+                </div>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {etape === 3 && devis && (
+        <div style={{ display: "grid", gap: 12 }}>
+          {[["Expéditeur", `${exp.nom} ${exp.prenom}`.trim(), exp.telephone, [exp.pieceType, exp.pieceNumero].filter(Boolean).join(" — ")],
+            ["Bénéficiaire", `${ben.nom} ${ben.prenom}`.trim(), ben.telephone, [ben.ville, COUNTRIES.find((c) => c.code === ben.pays)?.name].filter(Boolean).join(", ")]]
+            .map(([titre, nom, tel, detail]) => (
+            <div key={titre} style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: "12px 14px" }}>
+              <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 5 }}>{titre}</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text)" }}>{nom || "—"}</div>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>{[tel, detail].filter(Boolean).join(" · ") || "—"}</div>
+            </div>
+          ))}
+          <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "14px 16px", display: "grid", gap: 7, fontVariantNumeric: "tabular-nums" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+              <span style={{ color: "var(--muted)" }}>À encaisser maintenant</span>
+              <strong style={{ color: "var(--text)", fontSize: 16 }}>{montantTransfert(devis.totalPaye, devis.deviseEnvoi)}</strong>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+              <span style={{ color: "var(--muted)" }}>Le bénéficiaire recevra</span>
+              <strong style={{ color: "var(--ok-fg)", fontSize: 16 }}>{montantTransfert(devis.montantARecevoir, devis.deviseReception)}</strong>
+            </div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", borderTop: "1px solid var(--info-border)", paddingTop: 7 }}>
+              Frais {montantTransfert(devis.frais, devis.deviseEnvoi)} · taux 1 {devis.deviseEnvoi} = {Number(devis.taux).toLocaleString("fr-FR", { maximumFractionDigits: 4 })} {devis.deviseReception}.
+              Le taux est figé à la création : il ne changera plus, quoi qu’il arrive d’ici au retrait.
+            </div>
+          </div>
+        </div>
+      )}
+
+      {erreur && (
+        <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 10, padding: "11px 13px", marginTop: 14, fontSize: 12.5, color: "var(--danger-fg)" }}>
+          {erreur}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, marginTop: 18 }}>
+        {etape > 0 && (
+          <button onClick={() => setEtape(etape - 1)} style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 10, padding: "11px 18px", fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+            Retour
+          </button>
+        )}
+        <div style={{ flex: 1 }} />
+        {etape < 3 ? (
+          <button onClick={() => peutAvancer && setEtape(etape + 1)} disabled={!peutAvancer}
+            style={{ background: peutAvancer ? "var(--brand-solid)" : "var(--surface2)", color: peutAvancer ? "#fff" : "var(--muted)", border: "none", borderRadius: 10, padding: "11px 22px", fontSize: 13.5, fontWeight: 700, cursor: peutAvancer ? "pointer" : "not-allowed", display: "flex", alignItems: "center", gap: 6 }}>
+            Suivant <ChevronRight size={15} />
+          </button>
+        ) : (
+          <button onClick={valider} disabled={envoi || !devis}
+            style={{ background: envoi || !devis ? "var(--surface2)" : "var(--brand-solid)", color: envoi || !devis ? "var(--muted)" : "#fff", border: "none", borderRadius: 10, padding: "11px 22px", fontSize: 13.5, fontWeight: 700, cursor: envoi || !devis ? "not-allowed" : "pointer", display: "flex", alignItems: "center", gap: 7 }}>
+            <Send size={15} /> {envoi ? "Enregistrement…" : "Encaisser et générer le code"}
+          </button>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * PAYER — le comptoir d'arrivée
+ *
+ * Trois temps, et l'ordre compte : on trouve le transfert, on vérifie l'identité, on paie. Les
+ * regrouper sur un seul écran ferait payer avant d'avoir regardé la pièce — c'est exactement ce
+ * qu'on veut rendre impossible.
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+function PayerTransfert({ data, onFait, onFermer, notify }) {
+  const [code, setCode] = useState("");
+  const [recherche, setRecherche] = useState(false);
+  const [trouve, setTrouve] = useState(null);
+  const [erreur, setErreur] = useState("");
+  const [detailRefus, setDetailRefus] = useState(null);
+  const [verif, setVerif] = useState({ nom: "", telephone: "", pieceType: PIECES_IDENTITE[0], pieceNumero: "", montantRemis: "" });
+  const [confirmation, setConfirmation] = useState(false);
+  const [paiement, setPaiement] = useState(false);
+  const [paye, setPaye] = useState(null);
+
+  async function chercher() {
+    const chiffres = code.replace(/\D/g, "");
+    if (chiffres.length !== 8) { setErreur("Un code de transfert compte huit chiffres."); return; }
+    setRecherche(true); setErreur(""); setDetailRefus(null); setTrouve(null);
+    try {
+      const r = await appelTransferts(`?code=${encodeURIComponent(chiffres)}`);
+      setTrouve(r.transfert);
+      // Le nom annoncé au départ pré-remplit la vérification : l'agent CORRIGE ce qu'il lit sur
+      // la pièce, il ne le recopie pas — un champ vide se remplit sans regarder.
+      setVerif((v) => ({ ...v, nom: r.transfert.beneficiaire || "", telephone: r.transfert.beneficiaireTelephone || "", montantRemis: String(r.transfert.montantARecevoir ?? "") }));
+    } catch (e) {
+      setErreur(e.message);
+      setDetailRefus(e.corps?.detail || null);
+    } finally {
+      setRecherche(false);
+    }
+  }
+
+  async function payer() {
+    setConfirmation(false);
+    setPaiement(true); setErreur("");
+    try {
+      const r = await appelTransferts("", {
+        method: "POST",
+        body: JSON.stringify({
+          action: "payer",
+          code: code.replace(/\D/g, ""),
+          benNomVerifie: verif.nom, benTelephoneVerifie: verif.telephone,
+          benPieceType: verif.pieceType, benPieceNumero: verif.pieceNumero,
+          montantRemis: montantSaisi(verif.montantRemis),
+        }),
+      });
+      const t = r.transfert;
+      setPaye({
+        reference: t.reference,
+        expediteur: `${t.exp_nom} ${t.exp_prenom}`.trim(),
+        beneficiaire: `${t.ben_nom} ${t.ben_prenom}`.trim(),
+        beneficiaireNomVerifie: t.ben_nom_verifie,
+        beneficiairePiece: t.ben_piece_type, beneficiairePieceNumero: t.ben_piece_numero,
+        montantRemis: t.montant_remis, montantARecevoir: t.montant_a_recevoir, deviseReception: t.devise_reception,
+        payeLe: t.paye_le, payePar: t.paye_par_nom, agencePaiement: t.agence_paiement,
+      });
+      onFait?.();
+    } catch (e) {
+      setErreur(e.message);
+      setDetailRefus(e.corps?.detail || null);
+      // Un refus « déjà payé » doit effacer la fiche : sinon le bouton reste là, et on réessaie.
+      if (e.corps?.raison === "deja_paye" || e.corps?.raison === "annule" || e.corps?.raison === "expire") setTrouve(null);
+    } finally {
+      setPaiement(false);
+    }
+  }
+
+  if (paye) {
+    return (
+      <Modal title="Transfert payé" onClose={onFermer} wide>
+        <div style={{ textAlign: "center", marginBottom: 20 }}>
+          <div style={{ width: 56, height: 56, margin: "0 auto 12px", borderRadius: 18, display: "grid", placeItems: "center", background: "color-mix(in srgb, var(--ok-fg) 14%, transparent)", border: "1px solid color-mix(in srgb, var(--ok-fg) 28%, transparent)" }}>
+            <CheckCircle2 size={26} color="var(--ok-fg)" />
+          </div>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 26, fontWeight: 700, color: "var(--ok-fg)" }}>
+            {montantTransfert(paye.montantRemis ?? paye.montantARecevoir, paye.deviseReception)}
+          </div>
+          <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 4 }}>
+            remis à {paye.beneficiaireNomVerifie || paye.beneficiaire} · {paye.reference}
+          </div>
+        </div>
+        <div style={{ background: "var(--ok-bg-soft)", border: "1px solid var(--ok-border)", borderRadius: 10, padding: "11px 13px", fontSize: 12.5, color: "var(--text)", marginBottom: 18, lineHeight: 1.55 }}>
+          Le code est désormais inutilisable : toute nouvelle présentation sera refusée.
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={() => downloadRecuPaiementTransfert(paye, data?.entreprise)}
+            style={{ flex: 1, minWidth: 160, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 10, padding: "12px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
+            <Printer size={16} /> Reçu de paiement
+          </button>
+          <button onClick={onFermer} style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 10, padding: "12px 20px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+            Terminer
+          </button>
+        </div>
+      </Modal>
+    );
+  }
+
+  return (
+    <Modal title="Payer un transfert" onClose={onFermer} wide saisieEnCours={!!trouve}>
+      <Field label="Code de transfert présenté par le bénéficiaire">
+        <div style={{ display: "flex", gap: 8 }}>
+          <input aria-label="Code de transfert" value={code} onChange={(e) => setCode(e.target.value)} onKeyDown={(e) => e.key === "Enter" && chercher()}
+            placeholder="TRF 4827 3195" inputMode="numeric" autoFocus
+            style={{ ...inputStyle, marginBottom: 0, fontSize: 18, fontWeight: 700, letterSpacing: "0.06em", fontVariantNumeric: "tabular-nums" }} />
+          <button onClick={chercher} disabled={recherche}
+            style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 10, padding: "0 20px", fontSize: 13.5, fontWeight: 700, cursor: recherche ? "wait" : "pointer", whiteSpace: "nowrap" }}>
+            {recherche ? "…" : "Rechercher"}
+          </button>
+        </div>
+      </Field>
+
+      {erreur && (
+        <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 10, padding: "12px 14px", marginBottom: 14 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "var(--danger-fg)" }}>{erreur}</div>
+          {detailRefus?.payeLe && (
+            <div style={{ fontSize: 12, color: "var(--text)", marginTop: 5, lineHeight: 1.5 }}>
+              Payé le {new Date(detailRefus.payeLe).toLocaleString("fr-FR")}
+              {detailRefus.payePar ? ` par ${detailRefus.payePar}` : ""}
+              {detailRefus.agencePaiement ? ` — agence ${detailRefus.agencePaiement}` : ""}.
+            </div>
+          )}
+          {detailRefus?.expireLe && !detailRefus?.payeLe && (
+            <div style={{ fontSize: 12, color: "var(--text)", marginTop: 5 }}>
+              Expiré le {new Date(detailRefus.expireLe).toLocaleDateString("fr-FR")}.
+            </div>
+          )}
+          {detailRefus?.motif && (
+            <div style={{ fontSize: 12, color: "var(--text)", marginTop: 5 }}>Motif : {detailRefus.motif}</div>
+          )}
+        </div>
+      )}
+
+      {trouve && (
+        <>
+          <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px", marginBottom: 16 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 12.5, color: "var(--muted)" }}>{trouve.reference}</span>
+              <BadgeStatutTransfert statut={trouve.statut} />
+            </div>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 28, fontWeight: 700, color: "var(--text)", letterSpacing: "-0.02em", marginBottom: 12 }}>
+              {montantTransfert(trouve.montantARecevoir, trouve.deviseReception)}
+            </div>
+            <div style={{ display: "grid", gap: 7, fontSize: 12.5 }}>
+              {[["Bénéficiaire annoncé", trouve.beneficiaire],
+                ["Téléphone annoncé", trouve.beneficiaireTelephone || "—"],
+                ["Envoyé par", `${trouve.expediteur} · ${trouve.expediteurTelephone || "—"}`],
+                ["Destination", [trouve.beneficiaireVille, paysLisible(trouve.beneficiairePays)].filter(Boolean).join(", ")],
+                ["Créé le", `${new Date(trouve.creeLe).toLocaleString("fr-FR")} — ${trouve.creePar} (${trouve.agenceEnvoi})`],
+                ["Valable jusqu’au", new Date(trouve.expireLe).toLocaleDateString("fr-FR")]].map(([k, v]) => (
+                <div key={k} style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                  <span style={{ color: "var(--muted)" }}>{k}</span>
+                  <span style={{ color: "var(--text)", fontWeight: 600, textAlign: "end" }}>{v}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 10, padding: "11px 13px", fontSize: 12.5, color: "var(--text)", lineHeight: 1.55, marginBottom: 14 }}>
+            <strong style={{ color: "var(--warn-fg)" }}>Vérifiez la pièce d’identité avant de payer.</strong> Le nom
+            ci-dessous est celui annoncé au départ : corrigez-le d’après la pièce présentée, il sera
+            porté sur le reçu et c’est lui qui fera foi.
+          </div>
+
+          <div className="responsive-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <Field label="Nom relevé sur la pièce *">
+              <input aria-label="Nom relevé sur la pièce" value={verif.nom} onChange={(e) => setVerif({ ...verif, nom: e.target.value })} style={inputStyle} />
+            </Field>
+            <Field label="Téléphone du bénéficiaire">
+              <input aria-label="Téléphone du bénéficiaire" value={verif.telephone} onChange={(e) => setVerif({ ...verif, telephone: e.target.value })} style={inputStyle} />
+            </Field>
+          </div>
+          <div className="responsive-grid-2" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <Field label="Type de pièce *">
+              <select aria-label="Type de pièce" value={verif.pieceType} onChange={(e) => setVerif({ ...verif, pieceType: e.target.value })} style={inputStyle}>
+                {PIECES_IDENTITE.map((p) => <option key={p} value={p}>{p}</option>)}
+              </select>
+            </Field>
+            <Field label="Numéro de la pièce *">
+              <input aria-label="Numéro de la pièce" value={verif.pieceNumero} onChange={(e) => setVerif({ ...verif, pieceNumero: e.target.value })} style={inputStyle} />
+            </Field>
+          </div>
+          <Field label={`Montant remis (${trouve.deviseReception})`}>
+            <input aria-label="Montant remis" value={verif.montantRemis} onChange={(e) => setVerif({ ...verif, montantRemis: e.target.value })}
+              inputMode="decimal" style={inputStyle} />
+          </Field>
+
+          <button onClick={() => setConfirmation(true)}
+            disabled={paiement || !verif.nom.trim() || !verif.pieceNumero.trim()}
+            style={{
+              width: "100%", marginTop: 6, borderRadius: 10, padding: "14px 0", fontSize: 14.5, fontWeight: 700,
+              border: "none", cursor: paiement || !verif.nom.trim() || !verif.pieceNumero.trim() ? "not-allowed" : "pointer",
+              background: paiement || !verif.nom.trim() || !verif.pieceNumero.trim() ? "var(--surface2)" : "var(--brand-solid)",
+              color: paiement || !verif.nom.trim() || !verif.pieceNumero.trim() ? "var(--muted)" : "#fff",
+              display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+            }}>
+            <HandCoins size={18} /> {paiement ? "Paiement en cours…" : "PAYER LE TRANSFERT"}
+          </button>
+
+          {confirmation && (
+            <ConfirmerAction
+              titre="Confirmer le paiement ?"
+              message={`Voulez-vous confirmer le paiement de ${montantTransfert(montantSaisi(verif.montantRemis) || trouve.montantARecevoir, trouve.deviseReception)} à ${verif.nom} ?`}
+              consequence="Le code deviendra immédiatement inutilisable et l’opération sera inscrite au journal, avec votre nom et votre agence. Elle ne pourra plus être annulée."
+              libelleAction="Confirmer le paiement"
+              onConfirmer={payer}
+              onAnnuler={() => setConfirmation(false)}
+            />
+          )}
+        </>
+      )}
+    </Modal>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * LA PAGE — liste, chiffres, caisse, journal, réglages
+ * ══════════════════════════════════════════════════════════════════════════════ */
+
+function TransfertsPage({ data, session, notify, persist }) {
+  const perm = useCallback((k) => effectivePermission(session, k), [session]);
+  const [onglet, setOnglet] = useState("liste");
+  const [config, setConfig] = useState(CONFIG_TRANSFERT_VIDE);
+  const [liste, setListe] = useState([]);
+  const [stats, setStats] = useState(null);
+  const [portee, setPortee] = useState("");
+  const [chargement, setChargement] = useState(true);
+  const [erreur, setErreur] = useState("");
+  const [recherche, setRecherche] = useState("");
+  const [filtres, setFiltres] = useState({ statut: "", pays: "", agence: "", depuis: "", jusqua: "" });
+  const [nouveau, setNouveau] = useState(false);
+  const [payer, setPayer] = useState(false);
+  const [detail, setDetail] = useState(null);
+  const [caisse, setCaisse] = useState(null);
+  const [journal, setJournal] = useState(null);
+
+  const chargerConfig = useCallback(() => {
+    appelTransferts("?config=1").then((r) => setConfig(r.config)).catch(() => {});
+  }, []);
+
+  const charger = useCallback(() => {
+    setChargement(true); setErreur("");
+    const params = new URLSearchParams();
+    if (recherche.trim()) params.set("recherche", recherche.trim());
+    Object.entries(filtres).forEach(([k, v]) => { if (v) params.set(k, v); });
+    appelTransferts(`?${params.toString()}`)
+      .then((r) => { setListe(r.transferts || []); setStats(r.stats || null); setPortee(r.portee || ""); })
+      .catch((e) => setErreur(e.message))
+      .finally(() => setChargement(false));
+  }, [recherche, filtres]);
+
+  useEffect(() => { chargerConfig(); }, [chargerConfig]);
+  useEffect(() => {
+    // Un léger délai après la frappe : sinon chaque lettre part au serveur.
+    const m = setTimeout(charger, recherche ? 400 : 0);
+    return () => clearTimeout(m);
+  }, [charger, recherche]);
+
+  const ouvrirCaisse = () => {
+    setOnglet("caisse");
+    appelTransferts("?caisse=1").then(setCaisse).catch((e) => setErreur(e.message));
+  };
+  const ouvrirJournal = () => {
+    setOnglet("journal");
+    appelTransferts("?journal=1").then((r) => setJournal(r.journal || [])).catch((e) => setErreur(e.message));
+  };
+
+  const carte = { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14 };
+  const onglets = [
+    { cle: "liste", label: "Transferts", icone: ArrowRightLeft, montrer: true },
+    { cle: "caisse", label: "Caisse", icone: Wallet, montrer: perm("transfert.caisse") || perm("transfert.voir_propres"), action: ouvrirCaisse },
+    { cle: "journal", label: "Journal", icone: ScrollText, montrer: perm("transfert.journal") || perm("transfert.voir_tous"), action: ouvrirJournal },
+    { cle: "agents", label: "Qui est autorisé", icone: Users, montrer: perm("users.consulter") || perm("transfert.config") },
+    { cle: "reglages", label: "Réglages", icone: Settings, montrer: perm("transfert.config") },
+  ].filter((o) => o.montrer);
+
+  /* Le module ne s'ouvre pas à quelqu'un qui n'a aucun droit dessus : mieux vaut une phrase
+     claire qu'une page vide qu'on prend pour une panne. */
+  const aucunDroit = !perm("transfert.creer") && !perm("transfert.payer")
+    && !perm("transfert.voir_propres") && !perm("transfert.voir_zone") && !perm("transfert.voir_tous");
+  if (aucunDroit) {
+    return (
+      <div style={{ ...carte, padding: "40px 24px", textAlign: "center", maxWidth: 520, margin: "40px auto" }}>
+        <Banknote size={30} color="var(--muted)" style={{ marginBottom: 12 }} />
+        <div style={{ fontSize: 15, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>Transfert d’argent</div>
+        <div style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.6 }}>
+          Aucun droit ne vous est ouvert sur ce module. Envoyer et payer de l’argent ne s’accordent
+          pas automatiquement : c’est l’administrateur qui désigne, compte par compte, qui envoie et
+          qui paie.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 14, flexWrap: "wrap", marginBottom: 18 }}>
+        <div>
+          <h1 style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 26, fontWeight: 700, color: "var(--text)", margin: 0 }}>Transfert d’argent</h1>
+          <div style={{ fontSize: 13, color: "var(--muted)", marginTop: 3 }}>
+            Envoi au comptoir, retrait sur code dans n’importe quelle agence du réseau.
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {perm("transfert.payer") && (
+            <button onClick={() => setPayer(true)}
+              style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--surface)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 10, padding: "11px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+              <HandCoins size={16} /> Payer un transfert
+            </button>
+          )}
+          {perm("transfert.creer") && (
+            <button onClick={() => setNouveau(true)}
+              style={{ display: "flex", alignItems: "center", gap: 7, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 10, padding: "11px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+              <Plus size={16} /> Nouveau transfert
+            </button>
+          )}
+        </div>
+      </div>
+
+      {onglets.length > 1 && (
+        <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
+          {onglets.map((o) => (
+            <button key={o.cle} onClick={() => (o.action ? o.action() : setOnglet(o.cle))}
+              style={{ display: "flex", alignItems: "center", gap: 6, background: onglet === o.cle ? "var(--brand-solid)" : "var(--surface)", color: onglet === o.cle ? "#fff" : "var(--text)", border: onglet === o.cle ? "none" : "1px solid var(--border)", borderRadius: 999, padding: "8px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+              <o.icone size={14} /> {o.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {erreur && (
+        <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 10, padding: "11px 14px", marginBottom: 14, fontSize: 12.5, color: "var(--danger-fg)" }}>{erreur}</div>
+      )}
+
+      {onglet === "liste" && (
+        <>
+          {stats && (
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
+              <StatCard label="Transferts" value={stats.total} icon={ArrowRightLeft} tint="var(--info-fg)"
+                trend={`${(stats.parStatut?.["Payé"]?.nombre || 0)} payés`} trendColor="var(--ok-fg)" />
+              <StatCard label="Envoyé" value={resumeDevises(stats.envoye)} icon={Send} tint="var(--brand-solid)"
+                trend="Montants confiés par les expéditeurs" trendColor="var(--muted)" />
+              <StatCard label="Frais encaissés" value={resumeDevises(stats.frais)} icon={Coins} tint="var(--warn-fg)"
+                trend="La recette du module" trendColor="var(--muted)" />
+              <StatCard label="En attente de retrait" value={stats.parStatut?.["Disponible au retrait"]?.nombre || 0} icon={Clock} tint="var(--ok-fg)"
+                trend="Argent encaissé, pas encore remis" trendColor="var(--muted)" />
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+            <div style={{ flex: 1, minWidth: 240, display: "flex", alignItems: "center", gap: 8, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 10, padding: "0 12px" }}>
+              <Search size={15} color="var(--muted)" />
+              <input value={recherche} onChange={(e) => setRecherche(e.target.value)}
+                placeholder="Référence, téléphone, nom, numéro de pièce…"
+                style={{ flex: 1, border: "none", outline: "none", background: "none", color: "var(--text)", fontSize: 13, padding: "11px 0" }} />
+            </div>
+            <select value={filtres.statut} onChange={(e) => setFiltres({ ...filtres, statut: e.target.value })}
+              style={{ ...inputStyle, marginBottom: 0, width: "auto", minWidth: 170 }}>
+              <option value="">Tous les statuts</option>
+              {STATUTS_TRANSFERT.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <input type="date" value={filtres.depuis} onChange={(e) => setFiltres({ ...filtres, depuis: e.target.value })}
+              title="Depuis" style={{ ...inputStyle, marginBottom: 0, width: "auto" }} />
+            <input type="date" value={filtres.jusqua} onChange={(e) => setFiltres({ ...filtres, jusqua: e.target.value })}
+              title="Jusqu’au" style={{ ...inputStyle, marginBottom: 0, width: "auto" }} />
+          </div>
+
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 10 }}>
+            {chargement ? "Chargement…" : `${liste.length} transfert${liste.length > 1 ? "s" : ""}`}
+            {portee === "propres" && " — vous ne voyez que les vôtres."}
+            {portee === "zone" && " — les transferts de votre agence."}
+          </div>
+
+          <div style={{ ...carte, overflow: "hidden" }}>
+            {liste.length === 0 && !chargement ? (
+              <div style={{ padding: "42px 24px", textAlign: "center" }}>
+                <div style={{ width: 50, height: 50, borderRadius: 16, display: "grid", placeItems: "center", margin: "0 auto 10px", background: "color-mix(in srgb, var(--info-fg) 12%, transparent)", border: "1px solid color-mix(in srgb, var(--info-fg) 22%, transparent)" }}>
+                  <Banknote size={22} color="var(--info-fg)" />
+                </div>
+                <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)" }}>Aucun transfert à afficher</div>
+                <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 4, maxWidth: 340, marginInline: "auto", lineHeight: 1.55 }}>
+                  {recherche || Object.values(filtres).some(Boolean)
+                    ? "Rien ne correspond à cette recherche. Un code de retrait ne se cherche pas ici : utilisez « Payer un transfert »."
+                    : "Les transferts créés apparaîtront ici, du plus récent au plus ancien."}
+                </div>
+              </div>
+            ) : (
+              <div>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead>
+                    <tr style={{ textAlign: "left" }}>
+                      {["Référence", "Expéditeur", "Bénéficiaire", "Destination", "Montant reçu", "Statut", "Date"].map((h) => (
+                        <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, fontWeight: 800, color: "var(--muted)", whiteSpace: "nowrap" }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {liste.map((t) => (
+                      <tr key={t.id} onClick={() => setDetail(t)} style={{ cursor: "pointer" }}>
+                        <td style={{ padding: "10px 14px", fontWeight: 700, color: "var(--info-fg)", fontSize: 12.5, whiteSpace: "nowrap" }}>{t.reference}</td>
+                        <td style={{ padding: "10px 14px", color: "var(--text)", fontSize: 12.5 }}>{t.expediteur}</td>
+                        <td style={{ padding: "10px 14px", color: "var(--text)", fontSize: 12.5 }}>{t.beneficiaire}</td>
+                        <td style={{ padding: "10px 14px", color: "var(--muted)", fontSize: 12, whiteSpace: "nowrap" }}>{[t.beneficiaireVille, paysLisible(t.beneficiairePays)].filter(Boolean).join(", ")}</td>
+                        <td style={{ padding: "10px 14px", color: "var(--text)", fontSize: 12.5, fontWeight: 600, whiteSpace: "nowrap" }}>{montantTransfert(t.montantARecevoir, t.deviseReception)}</td>
+                        <td style={{ padding: "10px 14px" }}><BadgeStatutTransfert statut={t.statut} /></td>
+                        <td style={{ padding: "10px 14px", color: "var(--muted)", fontSize: 12, whiteSpace: "nowrap" }}>{new Date(t.creeLe).toLocaleDateString("fr-FR")}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {onglet === "agents" && <AgentsAutorises data={data} persist={persist} session={session} notify={notify} carte={carte} />}
+      {onglet === "caisse" && <CaisseTransferts caisse={caisse} carte={carte} />}
+      {onglet === "journal" && <JournalTransferts journal={journal} carte={carte} />}
+      {onglet === "reglages" && <ReglagesTransferts data={data} persist={persist} config={config} onEnregistre={setConfig} notify={notify} carte={carte} />}
+
+      {nouveau && <NouveauTransfert data={data} session={session} config={config} notify={notify}
+        onFait={charger} onFermer={() => setNouveau(false)} />}
+      {payer && <PayerTransfert data={data} notify={notify} onFait={charger} onFermer={() => setPayer(false)} />}
+      {detail && <DetailTransfert transfert={detail} data={data} session={session} notify={notify}
+        onFerme={() => setDetail(null)} onChange={charger} />}
+    </div>
+  );
+}
+
+/** Un cumul multi-devises tient rarement sur une ligne : on montre la plus grosse, et le compte des autres. */
+function resumeDevises(montants) {
+  const entrees = Object.entries(montants || {}).filter(([, v]) => Number(v) > 0);
+  if (entrees.length === 0) return "—";
+  const [devise, valeur] = entrees.sort((a, b) => b[1] - a[1])[0];
+  const reste = entrees.length - 1;
+  return `${montantTransfert(valeur, devise)}${reste > 0 ? ` +${reste}` : ""}`;
+}
+
+/* ── La fiche d'un transfert ─────────────────────────────────────────────────── */
+
+function DetailTransfert({ transfert, data, session, notify, onFerme, onChange }) {
+  const perm = (k) => effectivePermission(session, k);
+  const [code, setCode] = useState(null);
+  const [motif, setMotif] = useState("");
+  const [annulation, setAnnulation] = useState(false);
+  const [travail, setTravail] = useState("");
+  const [erreur, setErreur] = useState("");
+  const annulable = !["Payé", "Annulé"].includes(transfert.statut);
+
+  async function revoirCode() {
+    setTravail("code"); setErreur("");
+    try {
+      const r = await appelTransferts(`?revoir=${encodeURIComponent(transfert.id)}&motif=${encodeURIComponent("Reçu perdu par le client")}`);
+      setCode(r.code);
+    } catch (e) { setErreur(e.message); } finally { setTravail(""); }
+  }
+
+  async function annuler() {
+    setAnnulation(false); setTravail("annuler"); setErreur("");
+    try {
+      await appelTransferts("", { method: "POST", body: JSON.stringify({ action: "annuler", id: transfert.id, motif }) });
+      notify?.("Transfert annulé — l’expéditeur doit être remboursé.");
+      onChange?.(); onFerme();
+    } catch (e) { setErreur(e.message); } finally { setTravail(""); }
+  }
+
+  const ligne = (k, v) => (
+    <div key={k} style={{ display: "flex", justifyContent: "space-between", gap: 12, padding: "7px 0", borderTop: "1px solid var(--surface2)" }}>
+      <span style={{ fontSize: 12.5, color: "var(--muted)" }}>{k}</span>
+      <span style={{ fontSize: 12.5, color: "var(--text)", fontWeight: 600, textAlign: "end" }}>{v ?? "—"}</span>
+    </div>
+  );
+
+  return (
+    <Modal title={transfert.reference} onClose={onFerme} wide>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+        <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 26, fontWeight: 700, color: "var(--text)", letterSpacing: "-0.02em" }}>
+          {montantTransfert(transfert.montantARecevoir, transfert.deviseReception)}
+        </div>
+        <BadgeStatutTransfert statut={transfert.statut} />
+      </div>
+
+      <div style={{ marginBottom: 16 }}>
+        {ligne("Expéditeur", `${transfert.expediteur} · ${transfert.expediteurTelephone || "—"}`)}
+        {ligne("Bénéficiaire", `${transfert.beneficiaire} · ${transfert.beneficiaireTelephone || "—"}`)}
+        {ligne("Destination", [transfert.beneficiaireVille, paysLisible(transfert.beneficiairePays)].filter(Boolean).join(", "))}
+        {ligne("Montant envoyé", montantTransfert(transfert.montantEnvoye, transfert.deviseEnvoi))}
+        {ligne("Frais", montantTransfert(transfert.frais, transfert.deviseEnvoi))}
+        {ligne("Taux figé à la création", `1 ${transfert.deviseEnvoi} = ${Number(transfert.taux).toLocaleString("fr-FR", { maximumFractionDigits: 4 })} ${transfert.deviseReception}`)}
+        {ligne("Créé le", `${new Date(transfert.creeLe).toLocaleString("fr-FR")} — ${transfert.creePar} (${transfert.agenceEnvoi})`)}
+        {ligne("Valable jusqu’au", new Date(transfert.expireLe).toLocaleDateString("fr-FR"))}
+        {transfert.payeLe && ligne("Payé le", `${new Date(transfert.payeLe).toLocaleString("fr-FR")} — ${transfert.payePar} (${transfert.agencePaiement})`)}
+        {transfert.annuleLe && ligne("Annulé le", `${new Date(transfert.annuleLe).toLocaleString("fr-FR")} — ${transfert.motifAnnulation || "sans motif"}`)}
+      </div>
+
+      {code && (
+        <div style={{ border: "1.5px solid var(--brand-solid)", borderRadius: 12, padding: "14px", textAlign: "center", marginBottom: 14, background: "color-mix(in srgb, var(--brand-solid) 7%, transparent)" }}>
+          <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: "0.07em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 6 }}>Code de retrait</div>
+          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 26, fontWeight: 700, color: "var(--brand-solid)", letterSpacing: "0.04em", fontVariantNumeric: "tabular-nums" }}>{codeLisible(code)}</div>
+          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6 }}>Cette relecture est inscrite au journal, à votre nom.</div>
+        </div>
+      )}
+
+      {erreur && <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 10, padding: "10px 12px", marginBottom: 12, fontSize: 12.5, color: "var(--danger-fg)" }}>{erreur}</div>}
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {perm("transfert.revoir_code") && annulable && !code && (
+          <button onClick={revoirCode} disabled={travail === "code"}
+            style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 10, padding: "10px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+            <Eye size={14} /> {travail === "code" ? "…" : "Revoir le code"}
+          </button>
+        )}
+        {perm("transfert.annuler") && annulable && (
+          <button onClick={() => setAnnulation(true)}
+            style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "1px solid var(--danger-border)", color: "var(--danger-fg)", borderRadius: 10, padding: "10px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+            <Ban size={14} /> Annuler le transfert
+          </button>
+        )}
+      </div>
+
+      {annulation && (
+        <Modal title="Annuler ce transfert ?" onClose={() => setAnnulation(false)} niveau={1}>
+          <div style={{ fontSize: 13, color: "var(--text)", marginBottom: 12, lineHeight: 1.6 }}>
+            Le code cessera de fonctionner et un remboursement de {montantTransfert(Number(transfert.montantEnvoye) + Number(transfert.frais), transfert.deviseEnvoi)} sera
+            inscrit en sortie de caisse : l’expéditeur doit être remboursé pour de bon, pas seulement dans le logiciel.
+          </div>
+          <Field label="Motif de l’annulation *">
+            <textarea value={motif} onChange={(e) => setMotif(e.target.value)} rows={3}
+              placeholder="Erreur de saisie, demande de l’expéditeur, bénéficiaire introuvable…"
+              style={{ ...inputStyle, resize: "vertical" }} />
+          </Field>
+          <button onClick={annuler} disabled={motif.trim().length < 3 || travail === "annuler"}
+            style={{ width: "100%", background: motif.trim().length < 3 ? "var(--surface2)" : "var(--danger-fg)", color: motif.trim().length < 3 ? "var(--muted)" : "#fff", border: "none", borderRadius: 10, padding: "12px 0", fontSize: 13.5, fontWeight: 700, cursor: motif.trim().length < 3 ? "not-allowed" : "pointer" }}>
+            {travail === "annuler" ? "Annulation…" : "Annuler et enregistrer le remboursement"}
+          </button>
+        </Modal>
+      )}
+    </Modal>
+  );
+}
+
+/* ── Qui est autorisé ─────────────────────────────────────────────────────────
+ * La question se pose dans ce sens-là : « qui, chez moi, peut faire des transferts ? ». Elle
+ * n'avait aucune réponse — il fallait ouvrir les comptes un par un et faire défiler leurs
+ * permissions. Cette page la donne d'un coup d'œil, et dit où aller pour la changer.
+ */
+
+function AgentsAutorises({ data, persist, session, notify, carte }) {
+  const comptes = (data?.users || []).filter((u) => u && u.role !== "Partenaire" && !u.partenaireParent);
+  const droit = (u, cle) => effectivePermission(u, cle);
+  const autorises = comptes.filter((u) => droit(u, "transfert.creer") || droit(u, "transfert.payer"));
+  const autres = comptes.filter((u) => !droit(u, "transfert.creer") && !droit(u, "transfert.payer"));
+  const peutRegler = effectivePermission(session, "users.permissions");
+
+  /*
+   * LA PAGE QUI RÉPOND À LA QUESTION DOIT RÉPONDRE AU GESTE QUI SUIT.
+   *
+   * Elle disait « pour changer, allez dans Configuration → Utilisateurs → la personne → onglet
+   * Permissions ». Quatre écrans pour basculer une case, en regardant justement la liste des
+   * personnes concernées — et la première chose qu'on fait devant ces pastilles, c'est appuyer
+   * dessus. Elles basculent donc le droit sur-le-champ, pour qui a celui de régler les droits.
+   *
+   * On écrit exactement ce que l'écran des permissions écrirait : la même clé, au même endroit du
+   * compte. Il n'y a pas deux chemins qui produisent deux formes différentes — sans quoi l'un des
+   * deux finirait par ne plus refléter l'autre.
+   */
+  function basculer(compte, cle) {
+    if (!peutRegler) return;
+    if (compte.role === "Administrateur") return;
+    const actuel = droit(compte, cle);
+    const nom = `${compte.prenom || ""} ${compte.nom || ""}`.trim() || compte.identifiant;
+    persist({
+      ...data,
+      users: (data.users || []).map((u) => (u.id === compte.id
+        ? { ...u, permissionsOverride: { ...(u.permissionsOverride || {}), [cle]: !actuel } }
+        : u)),
+      activityLog: pushActivity(data, session,
+        actuel ? "Droit de transfert retiré" : "Droit de transfert accordé",
+        `${nom} — ${cle === "transfert.creer" ? "envoyer de l’argent" : "payer un transfert"}`),
+    });
+    notify?.(actuel
+      ? `${nom} ne peut plus ${cle === "transfert.creer" ? "envoyer" : "payer"} d’argent.`
+      : `${nom} peut désormais ${cle === "transfert.creer" ? "envoyer" : "payer"} de l’argent.`);
+  }
+
+  const pastille = (u, cle, texte) => {
+    const actif = droit(u, cle);
+    const fige = !peutRegler || u.role === "Administrateur";
+    const libelle = cle === "transfert.creer" ? "Envoyer de l’argent" : "Payer un transfert";
+    const nom = `${u.prenom || ""} ${u.nom || ""}`.trim() || u.identifiant;
+    return (
+      <button
+        onClick={() => basculer(u, cle)}
+        disabled={fige}
+        aria-pressed={actif}
+        aria-label={`${libelle} — ${nom}`}
+        title={fige
+          ? (u.role === "Administrateur"
+            ? "Un administrateur a tous les droits : ils ne se retirent pas ici."
+            : "Changer les droits demande la permission « Gérer les permissions des autres comptes ».")
+          : `${actif ? "Retirer" : "Accorder"} : ${libelle.toLowerCase()} — ${nom}`}
+        style={{
+          display: "inline-flex", alignItems: "center", gap: 4, borderRadius: 999, padding: "5px 11px",
+          fontSize: 11, fontWeight: 700, whiteSpace: "nowrap",
+          background: actif ? "var(--ok-bg)" : "var(--surface2)",
+          color: actif ? "var(--ok-fg)" : "var(--muted)",
+          border: `1px solid ${actif ? "var(--ok-border)" : "var(--border)"}`,
+          cursor: fige ? "default" : "pointer", opacity: fige ? 0.65 : 1,
+        }}>
+        {actif ? <Check size={11} /> : <X size={11} />} {texte}
+      </button>
+    );
+  };
+
+  const ligne = (u) => (
+    <div key={u.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "12px 0", borderTop: "1px solid var(--surface2)", flexWrap: "wrap" }}>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)", display: "flex", alignItems: "center", gap: 7 }}>
+          {u.role === "Administrateur" && <Shield size={13} color="var(--brand-solid)" />}
+          {`${u.prenom || ""} ${u.nom || ""}`.trim() || u.identifiant}
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+          {u.role}{(u.zoneOperation || u.agence) ? ` · ${u.zoneOperation || u.agence}` : ""}
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {pastille(u, "transfert.creer", "Envoie")}
+        {pastille(u, "transfert.payer", "Paie")}
+      </div>
+    </div>
+  );
+
+  return (
+    <>
+      <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 15px", fontSize: 12.5, color: "var(--text)", lineHeight: 1.6, marginBottom: 16 }}>
+        Aucun rôle ne donne le droit de faire des transferts : il se donne <strong>nom par nom</strong>.
+        {peutRegler
+          ? <> <strong>Appuyez sur « Envoie » ou « Paie »</strong> en face de quelqu’un pour lui accorder
+            ou lui retirer le droit — c’est immédiat, et c’est inscrit au journal d’activité.</>
+          : <> Les accorder demande la permission « Gérer les permissions des autres comptes ».</>}
+      </div>
+
+      <div style={{ ...carte, padding: 18, marginBottom: 16 }}>
+        <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)" }}>
+          Autorisés <span style={{ color: "var(--muted)", fontWeight: 600 }}>· {autorises.length}</span>
+        </div>
+        {autorises.length === 0 ? (
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 10, lineHeight: 1.55 }}>
+            Personne n’est autorisé pour l’instant. Tant que c’est le cas, seul un administrateur
+            peut envoyer ou payer un transfert.
+          </div>
+        ) : autorises.map(ligne)}
+      </div>
+
+      <div style={{ ...carte, padding: 18 }}>
+        <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)" }}>
+          Non autorisés <span style={{ color: "var(--muted)", fontWeight: 600 }}>· {autres.length}</span>
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 4 }}>
+          Ces comptes ne peuvent ni envoyer ni payer d’argent. Ils continuent d’utiliser le reste
+          de l’application normalement.
+        </div>
+        {autres.map(ligne)}
+      </div>
+    </>
+  );
+}
+
+/* ── La caisse ────────────────────────────────────────────────────────────────── */
+
+function CaisseTransferts({ caisse, carte }) {
+  if (!caisse) return <div style={{ ...carte, padding: 20, fontSize: 13, color: "var(--muted)" }}>Chargement…</div>;
+  const bloc = (titre, groupes) => (
+    <div style={{ ...carte, padding: 18, marginBottom: 16 }}>
+      <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)", marginBottom: 12 }}>{titre}</div>
+      {groupes.length === 0 ? (
+        <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Aucun mouvement enregistré.</div>
+      ) : groupes.map((g) => (
+        <div key={g.cle} style={{ borderTop: "1px solid var(--surface2)", padding: "11px 0" }}>
+          <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)", marginBottom: 6 }}>{g.cle}</div>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+            {Object.entries(g.devises).map(([devise, d]) => (
+              <div key={devise} style={{ fontSize: 12, fontVariantNumeric: "tabular-nums" }}>
+                <div style={{ color: "var(--muted)" }}>
+                  <ArrowDownLeft size={11} style={{ verticalAlign: "-1px" }} /> {montantTransfert(d.entrees, devise)}
+                  {"  "}
+                  <ArrowUpRight size={11} style={{ verticalAlign: "-1px" }} /> {montantTransfert(d.sorties, devise)}
+                </div>
+                <div style={{ fontWeight: 700, color: d.solde >= 0 ? "var(--ok-fg)" : "var(--danger-fg)", fontSize: 14, marginTop: 2 }}>
+                  {montantTransfert(d.solde, devise)}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+
+  return (
+    <>
+      <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 15px", fontSize: 12.5, color: "var(--text)", lineHeight: 1.6, marginBottom: 16 }}>
+        Le solde est ce qui devrait se trouver dans le tiroir : l’argent encaissé sur les envois,
+        moins celui remis aux bénéficiaires et les remboursements d’annulation. Les devises ne
+        s’additionnent pas entre elles.
+      </div>
+      {bloc("Par agence", caisse.soldes?.parAgence || [])}
+      {bloc("Par agent", caisse.soldes?.parAgent || [])}
+      <div style={{ ...carte, overflow: "hidden" }}>
+        <div style={{ padding: "14px 18px", fontSize: 14, fontWeight: 700, color: "var(--text)" }}>Derniers mouvements</div>
+        <div>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr style={{ textAlign: "left" }}>{["Date", "Sens", "Motif", "Montant", "Agent", "Agence"].map((h) => (
+              <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, fontWeight: 800, color: "var(--muted)", whiteSpace: "nowrap" }}>{h}</th>))}</tr></thead>
+            <tbody>
+              {(caisse.mouvements || []).slice(0, 100).map((m) => (
+                <tr key={m.id}>
+                  <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>{new Date(m.le).toLocaleString("fr-FR")}</td>
+                  <td style={{ padding: "9px 14px" }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, borderRadius: 999, padding: "3px 9px",
+                                   background: m.sens === "entree" ? "var(--ok-bg)" : "var(--danger-bg)", color: m.sens === "entree" ? "var(--ok-fg)" : "var(--danger-fg)" }}>
+                      {m.sens === "entree" ? <ArrowDownLeft size={11} /> : <ArrowUpRight size={11} />}
+                      {m.sens === "entree" ? "Entrée" : "Sortie"}
+                    </span>
+                  </td>
+                  <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)" }}>{m.motif}</td>
+                  <td style={{ padding: "9px 14px", fontSize: 12.5, fontWeight: 700, color: "var(--text)", whiteSpace: "nowrap" }}>{montantTransfert(m.montant, m.devise)}</td>
+                  <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--muted)" }}>{m.agent_nom}</td>
+                  <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--muted)" }}>{m.agence}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {(caisse.mouvements || []).length === 0 && <div style={{ padding: 20, fontSize: 13, color: "var(--muted)" }}>Aucun mouvement.</div>}
+      </div>
+    </>
+  );
+}
+
+/* ── Le journal ───────────────────────────────────────────────────────────────── */
+
+const LIBELLE_ACTION_TRANSFERT = {
+  creation: "Création",
+  paiement: "Paiement",
+  paiement_refuse_deja_paye: "Paiement refusé — déjà payé",
+  paiement_refuse_expire: "Paiement refusé — expiré",
+  annulation: "Annulation",
+  expiration: "Expiration automatique",
+  code_reaffiche: "Code réaffiché",
+};
+
+function JournalTransferts({ journal, carte }) {
+  if (!journal) return <div style={{ ...carte, padding: 20, fontSize: 13, color: "var(--muted)" }}>Chargement…</div>;
+  return (
+    <>
+      <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 12, padding: "12px 15px", fontSize: 12.5, color: "var(--text)", lineHeight: 1.6, marginBottom: 16 }}>
+        Ce journal ne se modifie pas et ne s’efface pas — la base refuse l’un et l’autre, y compris
+        au serveur. Les tentatives de paiement REFUSÉES y figurent aussi : c’est là qu’on voit
+        qu’un code a été présenté deux fois.
+      </div>
+      <div style={{ ...carte, overflow: "hidden" }}>
+        <div>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr style={{ textAlign: "left" }}>{["Date", "Action", "Référence", "Par", "Agence", "Détail"].map((h) => (
+              <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, fontWeight: 800, color: "var(--muted)", whiteSpace: "nowrap" }}>{h}</th>))}</tr></thead>
+            <tbody>
+              {journal.map((l) => (
+                <tr key={l.id}>
+                  <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>{new Date(l.le).toLocaleString("fr-FR")}</td>
+                  <td style={{ padding: "9px 14px", fontSize: 12.5, fontWeight: 600, color: String(l.action).includes("refuse") ? "var(--danger-fg)" : "var(--text)" }}>
+                    {LIBELLE_ACTION_TRANSFERT[l.action] || l.action}
+                  </td>
+                  <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--info-fg)", fontWeight: 600, whiteSpace: "nowrap" }}>{l.reference || "—"}</td>
+                  <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--text)" }}>{l.acteur_nom || "—"}</td>
+                  <td style={{ padding: "9px 14px", fontSize: 12, color: "var(--muted)" }}>{l.agence || "—"}</td>
+                  <td style={{ padding: "9px 14px", fontSize: 11.5, color: "var(--muted)", maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {l.apres ? Object.entries(l.apres).map(([k, v]) => `${k} ${v}`).join(" · ") : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {journal.length === 0 && <div style={{ padding: 20, fontSize: 13, color: "var(--muted)" }}>Le journal est vide.</div>}
+      </div>
+    </>
+  );
+}
+
+/* ── Les réglages ─────────────────────────────────────────────────────────────
+ * Frais, taux, limites, commissions. Ils vivent dans le document JSON comme les autres réglages
+ * de l'entreprise — ils se lisent souvent, se changent rarement, et l'administrateur les gère au
+ * même endroit que le reste. Ce qu'un transfert emporte, lui, est figé dans sa propre ligne : ce
+ * qu'on modifie ici ne change AUCUN transfert déjà créé.
+ */
+
+const DEVISES_TRANSFERT = ["EUR", "GNF", "USD", "XOF", "CAD", "MAD", "GBP"];
+
+function ReglagesTransferts({ data, persist, config, onEnregistre, notify, carte }) {
+  const [brouillon, setBrouillon] = useState(config);
+  useEffect(() => { setBrouillon(config); }, [config]);
+  const modifie = JSON.stringify(brouillon) !== JSON.stringify(config);
+
+  const maj = (patch) => setBrouillon((b) => ({ ...b, ...patch }));
+  const majBareme = (devise, tranches) => maj({ bareme: { ...brouillon.bareme, [devise]: tranches } });
+
+  function enregistrer() {
+    persist({ ...data, transfertConfig: brouillon });
+    onEnregistre?.(brouillon);
+    notify?.("Réglages du transfert enregistrés");
+  }
+
+  const titre = (t, d) => (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ fontSize: 14.5, fontWeight: 700, color: "var(--text)" }}>{t}</div>
+      {d && <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 3, lineHeight: 1.55 }}>{d}</div>}
+    </div>
+  );
+
+  return (
+    <>
+      <div style={{ ...carte, padding: 18, marginBottom: 16 }}>
+        {titre("Le module", "Coupé, plus aucun transfert ne peut être créé — les paiements de ceux déjà en cours restent possibles.")}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 13, color: "var(--text)" }}>Transfert d’argent actif</span>
+          <button onClick={() => maj({ actif: brouillon.actif === false })}
+            aria-pressed={brouillon.actif !== false}
+            style={{ width: 44, height: 24, borderRadius: 20, border: "none", padding: 2, cursor: "pointer",
+                     background: brouillon.actif !== false ? "var(--ok-fg)" : "var(--surface2)", display: "flex",
+                     justifyContent: brouillon.actif !== false ? "flex-end" : "flex-start" }}>
+            <span style={{ width: 20, height: 20, borderRadius: 20, background: "#fff", display: "block" }} />
+          </button>
+        </div>
+        <Field label="Validité d’un code, en jours" style={{ marginTop: 14, marginBottom: 0 }}>
+          <input value={brouillon.validiteJours ?? 30} onChange={(e) => maj({ validiteJours: Number(e.target.value.replace(/\D/g, "")) || 0 })}
+            inputMode="numeric" style={{ ...inputStyle, marginBottom: 0, maxWidth: 140 }} />
+        </Field>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 6 }}>
+          Passé ce délai, le code est refusé au retrait. Le transfert n’est pas perdu : il redevient
+          l’affaire de l’agence de départ, qui rembourse ou le recrée.
+        </div>
+      </div>
+
+      <div style={{ ...carte, padding: 18, marginBottom: 16 }}>
+        {titre("Taux de change appliqués", "Votre taux l’emporte sur celui du marché — c’est là qu’est la marge d’un opérateur de transfert. Un couple non réglé retombe sur les taux de l’application ; s’il n’y en a pas, l’envoi est refusé plutôt que calculé au hasard.")}
+        {Object.entries(brouillon.taux || {}).map(([couple, valeur]) => (
+          <div key={couple} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", minWidth: 110 }}>{couple.replace(">", " → ")}</span>
+            <input value={valeur} onChange={(e) => maj({ taux: { ...brouillon.taux, [couple]: montantSaisi(e.target.value) } })}
+              inputMode="decimal" style={{ ...inputStyle, marginBottom: 0, maxWidth: 180 }} />
+            <button onClick={() => { const t = { ...brouillon.taux }; delete t[couple]; maj({ taux: t }); }}
+              style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer", padding: 4 }}><Trash2 size={14} /></button>
+          </div>
+        ))}
+        <AjoutTaux onAjouter={(de, vers, v) => maj({ taux: { ...brouillon.taux, [`${de}>${vers}`]: v } })} />
+      </div>
+
+      <div style={{ ...carte, padding: 18, marginBottom: 16 }}>
+        {titre("Barème des frais", "Par devise d’envoi, en tranches sur le montant envoyé. Un montant au-delà de la dernière tranche prend celle-ci.")}
+        {DEVISES_TRANSFERT.filter((d) => (brouillon.devisesEnvoi || []).includes(d)).map((devise) => (
+          <BaremeDevise key={devise} devise={devise} tranches={brouillon.bareme?.[devise] || []}
+            onChange={(t) => majBareme(devise, t)} />
+        ))}
+      </div>
+
+      <div style={{ ...carte, padding: 18, marginBottom: 16 }}>
+        {titre("Limites par envoi", "Un plancher évite les envois qui coûtent plus cher à traiter qu’ils ne rapportent ; un plafond limite ce qu’une seule erreur peut faire partir.")}
+        {(brouillon.devisesEnvoi || []).map((devise) => (
+          <div key={devise} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", minWidth: 60 }}>{devise}</span>
+            <input placeholder="minimum" value={brouillon.limites?.[devise]?.min ?? ""}
+              onChange={(e) => maj({ limites: { ...brouillon.limites, [devise]: { ...(brouillon.limites?.[devise] || {}), min: montantSaisi(e.target.value) } } })}
+              inputMode="decimal" style={{ ...inputStyle, marginBottom: 0, maxWidth: 150 }} />
+            <input placeholder="maximum" value={brouillon.limites?.[devise]?.max ?? ""}
+              onChange={(e) => maj({ limites: { ...brouillon.limites, [devise]: { ...(brouillon.limites?.[devise] || {}), max: montantSaisi(e.target.value) } } })}
+              inputMode="decimal" style={{ ...inputStyle, marginBottom: 0, maxWidth: 150 }} />
+          </div>
+        ))}
+      </div>
+
+      <div style={{ ...carte, padding: 18, marginBottom: 16 }}>
+        {titre("Commissions", "En pourcentage des FRAIS, jamais du principal : le principal appartient au bénéficiaire. Ce qui reste après ces trois parts revient au réseau — l’entreprise.")}
+        {[["agentEnvoi", "Agent expéditeur"], ["agentPaiement", "Agent payeur"], ["agence", "Agence"]].map(([cle, label]) => (
+          <div key={cle} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+            <span style={{ fontSize: 13, color: "var(--text)", flex: 1 }}>{label}</span>
+            <input value={brouillon.commissions?.[cle] ?? 0}
+              onChange={(e) => maj({ commissions: { ...brouillon.commissions, [cle]: montantSaisi(e.target.value) } })}
+              inputMode="decimal" style={{ ...inputStyle, marginBottom: 0, maxWidth: 90, textAlign: "right" }} />
+            <span style={{ fontSize: 13, color: "var(--muted)" }}>%</span>
+          </div>
+        ))}
+        {(() => {
+          const c = brouillon.commissions || {};
+          const somme = (Number(c.agentEnvoi) || 0) + (Number(c.agentPaiement) || 0) + (Number(c.agence) || 0);
+          const trop = somme > 100;
+          return (
+            <div style={{ marginTop: 10, fontSize: 12.5, fontWeight: 600, color: trop ? "var(--danger-fg)" : "var(--muted)" }}>
+              {trop
+                ? `Ces parts font ${somme} % des frais : au-delà de 100 %, la part du réseau serait négative.`
+                : `Part du réseau : ${(100 - somme).toFixed(2).replace(/\.00$/, "")} % des frais.`}
+            </div>
+          );
+        })()}
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <button onClick={enregistrer} disabled={!modifie}
+          style={{ background: modifie ? "var(--brand-solid)" : "var(--surface2)", color: modifie ? "#fff" : "var(--muted)",
+                   border: "none", borderRadius: 10, padding: "12px 24px", fontSize: 13.5, fontWeight: 700, cursor: modifie ? "pointer" : "not-allowed" }}>
+          Enregistrer les réglages
+        </button>
+      </div>
+    </>
+  );
+}
+
+function AjoutTaux({ onAjouter }) {
+  const [de, setDe] = useState("EUR");
+  const [vers, setVers] = useState("GNF");
+  const [valeur, setValeur] = useState("");
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+      <select value={de} onChange={(e) => setDe(e.target.value)} style={{ ...inputStyle, marginBottom: 0, width: "auto" }}>
+        {DEVISES_TRANSFERT.map((d) => <option key={d} value={d}>{d}</option>)}
+      </select>
+      <ChevronRight size={14} color="var(--muted)" />
+      <select value={vers} onChange={(e) => setVers(e.target.value)} style={{ ...inputStyle, marginBottom: 0, width: "auto" }}>
+        {DEVISES_TRANSFERT.map((d) => <option key={d} value={d}>{d}</option>)}
+      </select>
+      <input value={valeur} onChange={(e) => setValeur(e.target.value)} placeholder="ex : 10800" inputMode="decimal"
+        style={{ ...inputStyle, marginBottom: 0, maxWidth: 160 }} />
+      <button onClick={() => { const v = montantSaisi(valeur); if (de !== vers && v > 0) { onAjouter(de, vers, v); setValeur(""); } }}
+        style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "9px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+        Ajouter
+      </button>
+    </div>
+  );
+}
+
+function BaremeDevise({ devise, tranches, onChange }) {
+  const majTranche = (i, patch) => onChange(tranches.map((t, j) => (j === i ? { ...t, ...patch } : t)));
+  return (
+    <div style={{ borderTop: "1px solid var(--surface2)", paddingTop: 12, marginTop: 12 }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 8 }}>Envois en {devise}</div>
+      {tranches.map((t, i) => (
+        <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 7, flexWrap: "wrap" }}>
+          <input value={t.min ?? 0} onChange={(e) => majTranche(i, { min: montantSaisi(e.target.value) })}
+            placeholder="de" inputMode="decimal" style={{ ...inputStyle, marginBottom: 0, maxWidth: 120 }} />
+          <span style={{ fontSize: 12, color: "var(--muted)" }}>à</span>
+          <input value={t.max ?? ""} onChange={(e) => majTranche(i, { max: e.target.value === "" ? "" : montantSaisi(e.target.value) })}
+            placeholder="illimité" inputMode="decimal" style={{ ...inputStyle, marginBottom: 0, maxWidth: 120 }} />
+          <span style={{ fontSize: 12, color: "var(--muted)" }}>→</span>
+          <input value={t.valeur ?? 0} onChange={(e) => majTranche(i, { valeur: montantSaisi(e.target.value) })}
+            inputMode="decimal" style={{ ...inputStyle, marginBottom: 0, maxWidth: 110 }} />
+          <select value={t.type || "fixe"} onChange={(e) => majTranche(i, { type: e.target.value })}
+            style={{ ...inputStyle, marginBottom: 0, width: "auto" }}>
+            <option value="fixe">{devise} fixes</option>
+            <option value="pourcent">% du montant</option>
+          </select>
+          <button onClick={() => onChange(tranches.filter((_, j) => j !== i))}
+            style={{ background: "none", border: "none", color: "var(--danger-fg)", cursor: "pointer", padding: 4 }}><Trash2 size={14} /></button>
+        </div>
+      ))}
+      <button onClick={() => onChange([...tranches, { min: 0, max: "", valeur: 0, type: "fixe" }])}
+        style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: "var(--info-fg)", fontSize: 12.5, fontWeight: 700, cursor: "pointer", padding: 0 }}>
+        <Plus size={13} /> Ajouter une tranche
+      </button>
+    </div>
+  );
 }
 
 export default function AppWithBoundary() {

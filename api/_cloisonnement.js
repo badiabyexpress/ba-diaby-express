@@ -118,6 +118,28 @@ function liste(valeur) {
   return Array.isArray(valeur) ? valeur : [];
 }
 
+/*
+ * UNE CONVERSATION NE SE REMPLACE PAS, ELLE SE COMPLÈTE.
+ *
+ * Les messages échangés avec un client ou un partenaire étaient repris tels quels de ce que la
+ * page envoyait. Le geste ordinaire — ouvrir sa messagerie, ce qui marque les messages comme lus
+ * et enregistre — renvoyait donc la liste telle que cette page la connaissait. Un onglet resté
+ * ouvert depuis le matin, ou un second appareil, et les messages arrivés entre-temps
+ * disparaissaient des deux côtés, sans trace et sans que personne le voie.
+ *
+ * On garde donc ce que la page rapporte — c'est là que vivent ses marques de lecture et son
+ * nouveau message — et l'on remet ce qu'elle ignorait. Supprimer un message n'est jamais un
+ * geste légitime ici : rien n'est perdu à ne pas le permettre, et beaucoup à le permettre.
+ */
+function fusionnerConversation(base, envoye) {
+  if (!Array.isArray(envoye)) return liste(base);
+  const rapportes = new Set(envoye.map((m) => m && m.id).filter(Boolean));
+  const oublies = liste(base).filter((m) => m && m.id && !rapportes.has(m.id));
+  if (oublies.length === 0) return envoye;
+  /* Remis dans l'ordre du temps : une conversation se lit du plus ancien au plus récent. */
+  return [...envoye, ...oublies].sort((a, b) => new Date(a?.date || 0) - new Date(b?.date || 0));
+}
+
 function sans(objet, champs) {
   if (!objet || typeof objet !== "object") return objet;
   const sortie = { ...objet };
@@ -205,7 +227,11 @@ export function fusionnerEcritureClient(actuel, propose, compteId) {
     if (!c || c.id !== compteId || !envoyeCompte) return c;
     const retenu = { ...c };
     CHAMPS_COMPTE_MODIFIABLES.forEach((champ) => {
-      if (envoyeCompte[champ] !== undefined) retenu[champ] = envoyeCompte[champ];
+      if (envoyeCompte[champ] === undefined) return;
+      // La conversation se complète ; tout le reste se remplace.
+      retenu[champ] = champ === "messages"
+        ? fusionnerConversation(c.messages, envoyeCompte.messages)
+        : envoyeCompte[champ];
     });
     return retenu;
   });
@@ -364,6 +390,32 @@ export function fusionnerEcriturePartenaire(actuel, propose, partenaireId, compt
       ...sans(c, CHAMPS_COLIS_RESERVES),
       partenaireId,
       validationPartenaire: { statut: "En attente" },
+      /*
+       * LES MONTANTS ET LE PARCOURS SONT IMPOSÉS, PAS REÇUS.
+       *
+       * Le formulaire du partenaire posait déjà ces valeurs ; le serveur, lui, les acceptait
+       * telles qu'elles venaient. Un partenaire n'a pas besoin de notre écran pour écrire : il
+       * lui suffit d'envoyer autre chose. Vérifié — un colis déposé avec
+       * « prix: 999999, paye: 888888, reste: 111111, status: "Livré" » était accepté tel quel.
+       *
+       * Ce que cela permettait :
+       *   — `prix` gonfle le chiffre d'affaires de l'entreprise et le « reste à encaisser » de
+       *     ses fiches de voyage, avec de l'argent qu'aucun client ne doit ;
+       *   — `paye` fabrique un encaissement qui n'a jamais eu lieu ;
+       *   — `facturePartenaireId` rattache le colis à une facture DÉJÀ RÉGLÉE, et il se lit
+       *     alors « Réglé » sur le bordereau comme sur la fiche de voyage ;
+       *   — `status: "Livré"` fait franchir au colis tout le parcours sans que l'entreprise
+       *     l'ait pesé, contrôlé ni transporté.
+       *
+       * Un colis de partenaire n'est jamais facturé au comptoir : ses trois champs de prix
+       * client valent zéro, par construction. Il entre au dépôt, et nulle part ailleurs. Ce
+       * qu'il nous doit vit à part, dans `prixPartenaire`, et c'est l'agent qui l'arrête en le
+       * vérifiant.
+       */
+      prix: 0, paye: 0, reste: 0,
+      facturePartenaireId: null,
+      status: "Enregistré",
+      historique: [{ status: "Enregistré", date: new Date().toISOString() }],
     }));
 
   /* ---- Les utilisateurs ----------------------------------------------------------------- */
@@ -423,7 +475,9 @@ export function fusionnerEcriturePartenaire(actuel, propose, partenaireId, compt
        * Les messages échangés avec l'entreprise vivent sur sa fiche : il doit pouvoir en ajouter,
        * et marquer comme lus ceux qu'il a lus.
        */
-      if (Array.isArray(envoyeU.partenaireMessages)) retenu.partenaireMessages = envoyeU.partenaireMessages;
+      if (Array.isArray(envoyeU.partenaireMessages)) {
+        retenu.partenaireMessages = fusionnerConversation(u.partenaireMessages, envoyeU.partenaireMessages);
+      }
       users.push(u.id === compteId ? sansMotDePasseHerite(retenu, envoyeU) : retenu);
       return;
     }

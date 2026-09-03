@@ -3721,6 +3721,120 @@ function useIsMobile() {
 }
 
 /**
+ * L'INSTALLATION SUR L'ÉCRAN D'ACCUEIL — et pourquoi c'est une mesure de sécurité.
+ *
+ * On aurait pu distribuer un fichier .apk aux agents. On ne le fera pas : envoyer un fichier
+ * d'installation par WhatsApp apprend deux réflexes à un agent — installer ce qu'il reçoit, et
+ * autoriser les « sources inconnues » sur son téléphone. À partir de là, n'importe qui peut lui
+ * envoyer un « Ba-Diaby Express mise à jour.apk » qui affiche notre écran de connexion et récolte
+ * son mot de passe. C'est la méthode la plus courante aujourd'hui, et elle ne marche que sur des
+ * gens à qui on a appris à installer des fichiers.
+ *
+ * Ici il n'y a pas de fichier : il y a une adresse, que le certificat empêche un faux de prendre.
+ *
+ * Reste que l'installation se cache dans le menu du navigateur. Expliquer à chaque agent où
+ * cliquer ressemble assez à une manipulation étrange pour qu'il préfère, justement, un fichier
+ * qu'on lui envoie. D'où ce bouton : ce n'est pas un confort, c'est ce qui rend le refus de l'APK
+ * tenable.
+ */
+function dejaInstallee() {
+  if (typeof window === "undefined") return false;
+  if (window.navigator?.standalone) return true; // la façon de l'iPhone
+  return !!window.matchMedia?.("(display-mode: standalone)")?.matches;
+}
+
+/*
+ * L'iPhone ne propose rien : ni événement à écouter, ni bouton à déclencher. La pose sur l'écran
+ * d'accueil s'y fait à la main. On ne peut donc qu'expliquer — mais expliquer vaut mieux que ne
+ * rien afficher, car c'est exactement l'agent qu'on laisserait sans réponse qui acceptera un
+ * fichier envoyé par message.
+ *
+ * L'iPad récent se présente comme un Mac ; le nombre de points de contact le trahit.
+ */
+function estAppareilApple() {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  return /iPad|iPhone|iPod/.test(ua) || (/Macintosh/.test(ua) && (navigator.maxTouchPoints || 0) > 1);
+}
+
+function useInstallation() {
+  const [invite, setInvite] = useState(null);
+  const [installee, setInstallee] = useState(dejaInstallee);
+
+  useEffect(() => {
+    /*
+     * Chrome veut afficher sa propre barre d'installation, souvent au pire moment — au milieu
+     * d'une saisie de colis, avec le client en face. On la retient pour la déclencher depuis notre
+     * bouton, quand l'agent le décide.
+     */
+    const capter = (e) => { e.preventDefault(); setInvite(e); };
+    const posee = () => { setInvite(null); setInstallee(true); };
+    window.addEventListener("beforeinstallprompt", capter);
+    window.addEventListener("appinstalled", posee);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", capter);
+      window.removeEventListener("appinstalled", posee);
+    };
+  }, []);
+
+  async function installer() {
+    if (!invite) return;
+    invite.prompt();
+    try { await invite.userChoice; } catch { /* refus ou fenêtre fermée : rien à rattraper */ }
+    /* L'invitation ne sert qu'une fois. La garder laisserait un bouton qui ne fait plus rien. */
+    setInvite(null);
+  }
+
+  return { installee, invite, apple: estAppareilApple(), installer };
+}
+
+/**
+ * Le bouton, tel qu'il apparaît en bas du menu. Il ne s'affiche jamais pour rien : ni si
+ * l'application est déjà posée sur l'écran d'accueil, ni sur un navigateur qui ne sait pas
+ * l'installer — un bouton qui ne fait rien apprend à ne plus lire les boutons.
+ */
+function BoutonInstallation({ compact }) {
+  const { installee, invite, apple, installer } = useInstallation();
+  const [expliquer, setExpliquer] = useState(false);
+  if (installee) return null;
+  if (!invite && !apple) return null;
+
+  return (
+    <>
+      <button onClick={() => (invite ? installer() : setExpliquer(true))}
+        title={compact ? "Installer l’application" : undefined}
+        style={{ display: "flex", alignItems: "center", justifyContent: compact ? "center" : "flex-start", gap: 8, width: "100%", fontSize: 13, color: "#fff", background: "none", border: "none", cursor: "pointer", marginBottom: 8, padding: 0 }}>
+        <Download size={15} /> {!compact && "Installer l’application"}
+      </button>
+      {expliquer && (
+        <Modal onClose={() => setExpliquer(false)} title="Installer sur l’iPhone">
+          <div style={{ fontSize: 14, lineHeight: 1.65 }}>
+            <p style={{ marginTop: 0, color: "var(--muted)" }}>
+              L’iPhone n’a pas de bouton pour cela ; il faut passer par le menu de partage. Quatre gestes, une seule fois.
+            </p>
+            <ol style={{ paddingInlineStart: 20, margin: "14px 0" }}>
+              <li style={{ marginBottom: 8 }}>Ouvrez cette page dans <strong>Safari</strong> — l’entrée n’existe pas dans les autres navigateurs de l’iPhone.</li>
+              <li style={{ marginBottom: 8 }}>Touchez le bouton <strong>Partager</strong> : le carré avec une flèche vers le haut, en bas de l’écran.</li>
+              <li style={{ marginBottom: 8 }}>Faites défiler la liste, puis touchez <strong>« Sur l’écran d’accueil »</strong>.</li>
+              <li>Touchez <strong>« Ajouter »</strong>, en haut à droite.</li>
+            </ol>
+            {/*
+              L'avertissement est ici parce que c'est ici qu'il sera lu : au moment précis où
+              quelqu'un cherche comment installer l'application.
+            */}
+            <div style={{ borderInlineStart: "3px solid #E0A63A", background: "var(--card-2, rgba(224,166,58,0.08))", padding: "10px 14px", borderRadius: 6 }}>
+              <strong>N’installez jamais un fichier reçu par message.</strong> Ba-Diaby Express ne se
+              distribue pas en fichier, et ne le fera jamais : un fichier qui prétendrait être une
+              mise à jour de cette application est un faux, quel que soit son expéditeur.
+            </div>
+          </div>
+        </Modal>
+      )}
+    </>
+  );
+}
+
+/**
  * Durée d'inactivité au bout de laquelle la session se ferme (en minutes).
  * Le compte à rebours ne repart qu'à une vraie action de l'agent : clic, frappe, toucher,
  * défilement. Changer d'onglet, revenir sur l'application ou recharger la page ne déconnecte
@@ -4839,6 +4953,12 @@ function App() {
                 <div style={{ fontSize: 11.5, color: "var(--nav-muted)", marginBottom: 10 }}>{session.role}</div>
               </>
             )}
+            {/*
+              Poser l'application sur l'écran d'accueil, sans avoir à expliquer où cliquer dans le
+              menu du navigateur. C'est ce qui permet de ne jamais distribuer de fichier .apk —
+              voir BoutonInstallation.
+            */}
+            <BoutonInstallation compact={collapsed && !isMobile} />
             {/*
               La sécurité de SON compte, à portée de tout le monde.
               Elle ne peut pas vivre dans les réglages : un chauffeur n'y entre jamais, et son

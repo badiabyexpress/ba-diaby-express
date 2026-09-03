@@ -27449,6 +27449,23 @@ function IdentitePubliquePage({ data, persist, notify, onBack }) {
   const [domaine, setDomaine] = useState(site.domaine || "");
   const [trackingPublic, setTrackingPublic] = useState(site.trackingPublic ?? true);
 
+  /*
+   * CE QUI A ÉTÉ CHOISI MAIS PAS ENCORE ENREGISTRÉ.
+   *
+   * Choisir un fichier remplace l'aperçu tout de suite, et rien d'autre ne bouge : le bouton
+   * « Enregistrer » est trente lignes plus bas, donc hors écran sur un téléphone. On croit avoir
+   * changé son logo, on quitte la page, et rien n'a été enregistré — sans le moindre message.
+   *
+   * Un écran qui a quelque chose en attente doit le dire à l'endroit où le geste a eu lieu.
+   */
+  const enAttente = [
+    logo !== (b.logo || null) ? "le logo" : "",
+    nom !== nomInitial ? "le nom" : "",
+    tagline !== sloganInitial ? "le slogan" : "",
+    domaine !== (site.domaine || "") ? "le domaine" : "",
+    trackingPublic !== (site.trackingPublic ?? true) ? "le suivi public" : "",
+  ].filter(Boolean);
+
   // Deux valeurs qui divergent aujourd'hui : on prévient avant d'unifier.
   const divergences = [
     b.nom && site.nomPublic && b.nom !== site.nomPublic ? `le nom (« ${b.nom} » dans l’application, « ${site.nomPublic} » sur la page publique)` : "",
@@ -27504,9 +27521,25 @@ function IdentitePubliquePage({ data, persist, notify, onBack }) {
           </div>
         </Field>
         <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 }}>
-          Utilisés dans le menu de l’application, sur votre page d’accueil publique et sur tous vos
-          documents imprimés.
+          Utilisés dans le menu de l’application, sur votre page d’accueil publique, sur tous vos
+          documents imprimés et en tête des courriels automatiques.
         </div>
+        {/*
+          Le rappel est ici, sous le geste, et non près du bouton : c'est ici qu'on regarde, et
+          c'est d'ici qu'on repart en croyant avoir fini.
+        */}
+        {enAttente.length > 0 && (
+          <div style={{ marginTop: 14, background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 10, padding: "10px 12px" }}>
+            <div style={{ fontSize: 12.5, color: "var(--warn-fg)", lineHeight: 1.5, marginBottom: 8 }}>
+              <strong>Rien n’est encore enregistré.</strong> Vous avez changé {enAttente.join(", ")} —
+              cliquez ci-dessous, sinon ces modifications seront perdues en quittant la page.
+            </div>
+            <button onClick={save}
+              style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+              Enregistrer maintenant
+            </button>
+          </div>
+        )}
       </div>
 
       <CarteLienEspaceClient />

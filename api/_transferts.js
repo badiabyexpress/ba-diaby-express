@@ -64,22 +64,73 @@ export function secretDisponible() {
 
 export const PREFIXE_CODE = "TRF-";
 
+/*
+ * LA FORME DU CODE : deux lettres, deux chiffres au hasard, puis le jour et le mois du dépôt.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * « AB47-0309 » — déposé le 3 septembre. La date se lit dans le code, ce qui aide au comptoir :
+ * on sait d'un coup d'œil si l'envoi date d'hier ou du mois dernier, sans ouvrir la fiche.
+ *
+ * CE QUE CE CHOIX COÛTE, ET POURQUOI IL RESTE TENABLE
+ *
+ * La date n'est PAS un secret : elle figure sur le reçu, et pour un envoi du jour elle se devine.
+ * Elle n'apporte donc aucune protection — seuls les quatre premiers caractères en apportent.
+ * Deux lettres et deux chiffres font 57 600 combinaisons, contre cent millions pour les huit
+ * chiffres tirés au sort d'avant : mille sept cents fois moins.
+ *
+ * Ce qui rend le compte tenable, ce n'est pas ce nombre, c'est le plafond d'essais : dix codes
+ * ratés par connexion et par fenêtre, comptés en base et donc communs à toutes les instances (voir
+ * api/_verrou.js). Sans lui, 57 600 se parcourent en quelques minutes. Le jour où ce plafond
+ * sauterait, ce code ne protégerait plus grand-chose — c'est écrit ici pour qu'on le sache.
+ *
+ * NI I NI O DANS LES LETTRES.
+ *
+ * Ces codes se dictent au téléphone et se recopient d'un reçu imprimé. Un « I » lu pour un « 1 »
+ * ou un « O » pour un « 0 » sur un code qui libère de l'argent, c'est un client renvoyé chez lui.
+ * Vingt-quatre lettres au lieu de vingt-six coûtent quinze pour cent de combinaisons ; l'ambiguïté
+ * coûte davantage.
+ */
+const LETTRES_CODE = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+
 /**
- * Huit chiffres tirés uniformément.
+ * Un code de retrait pour un dépôt fait maintenant.
  *
  * `randomInt` puise dans le générateur cryptographique et corrige le biais du modulo — un
  * `Math.random()` mis à l'échelle produirait des codes prévisibles depuis un seul autre code, ce
  * qui, ici, se traduit par de l'argent retiré par quelqu'un d'autre.
  */
-export function genererCode() {
-  return PREFIXE_CODE + String(crypto.randomInt(0, 100000000)).padStart(8, "0");
+export function genererCode(maintenant = new Date()) {
+  const lettres = LETTRES_CODE[crypto.randomInt(0, LETTRES_CODE.length)]
+    + LETTRES_CODE[crypto.randomInt(0, LETTRES_CODE.length)];
+  const chiffres = String(crypto.randomInt(0, 100)).padStart(2, "0");
+  /* Heure de Conakry, qui est l'heure universelle — le jour du dépôt ne doit pas dépendre du poste. */
+  const jour = String(maintenant.getUTCDate()).padStart(2, "0");
+  const mois = String(maintenant.getUTCMonth() + 1).padStart(2, "0");
+  return `${PREFIXE_CODE}${lettres}${chiffres}${jour}${mois}`;
 }
 
-/** Forme canonique : on accepte « trf 4827 3195 », « 48273195 », « TRF-48273195 ». */
+/**
+ * Forme canonique du code saisi.
+ *
+ * On accepte « ab47 0309 », « AB47-0309 », « TRF-AB470309 » : au comptoir, un code se recopie d'un
+ * reçu froissé ou se prend sous la dictée, et refuser un tiret serait refuser un client qui a le
+ * bon code.
+ *
+ * LES CODES À HUIT CHIFFRES CONTINUENT D'ÊTRE ACCEPTÉS, et ce n'est pas une politesse : des
+ * transferts émis sous l'ancienne forme attendent d'être payés. Leur empreinte est en base, elle
+ * ne se recalcule pas, et cesser de reconnaître leur forme reviendrait à retenir l'argent de gens
+ * qui présentent le bon code. Cette branche disparaîtra quand le dernier aura été retiré ou
+ * remboursé — pas avant.
+ */
 export function normaliserCode(brut) {
-  const chiffres = String(brut || "").replace(/\D/g, "");
-  if (chiffres.length !== 8) return null;
-  return PREFIXE_CODE + chiffres;
+  const propre = String(brut || "").toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/^TRF/, "");
+
+  // Forme actuelle : deux lettres puis six chiffres.
+  if (/^[A-Z]{2}\d{6}$/.test(propre)) return PREFIXE_CODE + propre;
+
+  // Ancienne forme : huit chiffres. Conservée tant que des transferts en portent.
+  if (/^\d{8}$/.test(propre)) return PREFIXE_CODE + propre;
+
+  return null;
 }
 
 export function empreinteCode(code) {
@@ -236,6 +287,23 @@ export function calculerTransfert(config, document, { deviseEnvoi, deviseRecepti
   const taux = tauxApplique(config, document, de, vers);
   if (!(taux > 0)) {
     return { erreur: `Aucun taux n’est réglé pour ${de} → ${vers}. Réglez-le avant d’envoyer.` };
+  }
+
+  /*
+   * SANS BARÈME, ON REFUSE — ON NE FACTURE PAS ZÉRO.
+   *
+   * L'en-tête de ce fichier pose la règle : « dix millions de francs avec zéro franc de frais,
+   * c'est la règle numéro un d'un module d'argent, et elle ne se rattrape pas ». Le taux était
+   * déjà gardé ainsi ; le barème ne l'était pas. Une devise sans tranche produisait des frais nuls
+   * en silence, et l'envoi partait — l'entreprise travaillait gratuitement sans que rien ne le
+   * signale, et personne ne s'en apercevait avant de compter les recettes du mois.
+   *
+   * Le refus est explicite et nomme la devise : c'est ce qui distingue « il faut régler quelque
+   * chose » de « le module est cassé ».
+   */
+  const tranches = config?.bareme?.[de];
+  if (!Array.isArray(tranches) || tranches.length === 0) {
+    return { erreur: `Aucun barème de frais n’est réglé pour les envois en ${de}. Réglez-le dans Configuration → Transfert d’argent avant d’envoyer.` };
   }
 
   const limites = config?.limites?.[de] || {};

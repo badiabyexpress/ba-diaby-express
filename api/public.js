@@ -69,20 +69,46 @@ function historiquePublic(historique) {
   }));
 }
 
+/**
+ * « Tiguidanké Toure » devient « T. Toure ».
+ *
+ * LE NOM DE FAMILLE RESTE, LES PRÉNOMS PASSENT EN INITIALE.
+ *
+ * C'est ce qu'il faut pour qu'un client reconnaisse SON colis, et ce qu'il faut pour qu'un inconnu
+ * qui a deviné un numéro ne reparte pas avec un carnet d'adresses. C'est déjà la règle appliquée
+ * aux transferts d'argent dans ce même fichier ; les colis y échappaient.
+ *
+ * Un nom d'un seul mot est rendu tel quel : il n'y a rien à masquer, et l'effacer empêcherait la
+ * reconnaissance sans rien protéger.
+ */
+function nomAbrege(valeur) {
+  const mots = String(valeur || "").trim().split(/\s+/).filter(Boolean);
+  if (mots.length <= 1) return mots[0] || "";
+  const famille = mots[mots.length - 1];
+  const prenoms = mots.slice(0, -1).map((m) => `${m.charAt(0).toUpperCase()}.`).join(" ");
+  return `${prenoms} ${famille}`;
+}
+
 /*
  * Le colis, tel qu'un porteur du numéro de suivi peut le voir.
  *
  * On garde ce que la page affiche — et rien d'autre. Pas de téléphone, pas d'adresse, pas de
  * détail du contenu, pas de prix d'achat : celui qui a le numéro n'est pas forcément le
  * destinataire, et un numéro de suivi se devine.
+ *
+ * ET IL SE DEVINE VRAIMENT. « BDE » suivi du jour, du mois et du rang d'arrivée : BDE030901,
+ * BDE030902, BDE030903… Les téléphones et les adresses avaient bien été retirés d'ici, mais les
+ * noms complets étaient restés. Il suffisait donc de compter pour lever, jour après jour,
+ * l'expéditeur et le destinataire de chaque colis de l'entreprise — le carnet d'adresses entier,
+ * sans effraction et sans laisser de trace. D'où les initiales.
  */
 function colisPublic(c) {
   return {
     tracking: c.tracking,
     status: c.status,
     createdAt: c.createdAt,
-    expediteur: c.expediteur || "",
-    destinataire: c.destinataire || "",
+    expediteur: nomAbrege(c.expediteur),
+    destinataire: nomAbrege(c.destinataire),
     expediteurPays: c.expediteurPays || "GN",
     destinatairePays: c.destinatairePays || c.pays,
     pays: c.pays,

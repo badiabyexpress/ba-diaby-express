@@ -59,7 +59,7 @@ async function appelStockage(chemin, options = {}) {
 }
 
 /** Ce que contient un dossier du stockage, page par page — un dossier peut compter des milliers de pièces. */
-export async function listerDossier(dossier, plafond = 1000) {
+export async function listerEntrees(dossier, plafond = 1000) {
   const trouves = [];
   const parPage = 100;
   for (let page = 0; page * parPage < plafond; page++) {
@@ -67,11 +67,92 @@ export async function listerDossier(dossier, plafond = 1000) {
       method: "POST",
       body: JSON.stringify({ prefix: `${dossier}/`, limit: parPage, offset: page * parPage, sortBy: { column: "name", order: "asc" } }),
     });
-    const noms = (Array.isArray(lot) ? lot : []).map((f) => f?.name).filter(Boolean);
-    trouves.push(...noms);
-    if (noms.length < parPage) break;
+    const entrees = (Array.isArray(lot) ? lot : []).filter((f) => f?.name);
+    trouves.push(...entrees.map((f) => ({ nom: f.name, creeLe: f.created_at || f.updated_at || null })));
+    if (entrees.length < parPage) break;
   }
   return trouves;
+}
+
+/** Les seuls noms, pour qui n'a pas besoin des dates. */
+export async function listerDossier(dossier, plafond = 1000) {
+  return (await listerEntrees(dossier, plafond)).map((e) => e.nom);
+}
+
+/*
+ * CE QUE LE NAVIGATEUR NE PEUT PLUS FAIRE, ET QUE LE SERVEUR REPREND.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Le seau des documents était ouvert au public en lecture ET en suppression : la clé « anon » est
+ * dans le JavaScript du site, et cette clé permettait de lister toutes les factures, de les
+ * remplacer, ou de tout effacer. La porte est refermée — le navigateur ne peut plus que déposer.
+ *
+ * Mais il se servait de ce droit pour deux ménages légitimes : effacer la facture remplacée quand
+ * on en réédite une, et effacer les photos de pièces d'identité des colis remis depuis longtemps.
+ * Le second compte : ce sont des documents d'identité, et ne plus les effacer serait les garder
+ * indéfiniment.
+ *
+ * Ces deux ménages passent donc ici, dans la tâche de nuit, qui détient la clé de service.
+ */
+
+/** Le tronc commun d'un document : « factures/BDE030906-fca10586.pdf » → « BDE030906 ». */
+function trackingDuNom(nom) {
+  const base = String(nom).replace(/\.[a-z0-9]+$/i, "");
+  const tiret = base.lastIndexOf("-");
+  return tiret > 0 ? base.slice(0, tiret) : base;
+}
+
+/**
+ * Les factures et étiquettes REMPLACÉES — on ne garde que la dernière de chaque colis.
+ *
+ * Rééditer une facture en dépose une nouvelle sans retirer l'ancienne. Or l'ancienne annonçait
+ * peut-être un autre montant, et son adresse reste valable pour qui l'a relevée : c'est la version
+ * fausse qui resterait consultable pour toujours.
+ */
+function perimeesDansDossier(entrees, dossier) {
+  const parTracking = new Map();
+  entrees.forEach((e) => {
+    const clef = trackingDuNom(e.nom);
+    if (!parTracking.has(clef)) parTracking.set(clef, []);
+    parTracking.get(clef).push(e);
+  });
+  const aEffacer = [];
+  parTracking.forEach((lot) => {
+    if (lot.length < 2) return;
+    /* La plus récente reste ; une entrée sans date est traitée comme la plus ancienne. */
+    const trie = [...lot].sort((a, b) => new Date(b.creeLe || 0) - new Date(a.creeLe || 0));
+    trie.slice(1).forEach((e) => aEffacer.push(`${dossier}/${e.nom}`));
+  });
+  return aEffacer;
+}
+
+/*
+ * Une image déposée il y a trente secondes n'a pas encore sa référence enregistrée : l'agent est
+ * encore en train de remplir la fiche. Sans ce délai, la tâche de nuit effacerait la photo qu'il
+ * vient de prendre.
+ */
+const JOURS_AVANT_ORPHELINE = 7;
+
+/**
+ * Les images que plus aucune fiche ne cite.
+ *
+ * On cherche le nom du fichier dans le document entier, pas dans les champs qu'on croit connaître :
+ * une photo peut être citée par un colis, un contrat, une pièce d'identité, un logo de partenaire.
+ * Se fier à une liste de champs, c'est effacer le jour où quelqu'un en ajoute un. Le nom porte un
+ * jeton tiré au sort — le chercher dans le texte ne peut pas se tromper de fichier.
+ *
+ * Et l'erreur ne va que dans un sens : un fichier encore cité est gardé. On ne supprime que ce dont
+ * on est certain.
+ */
+function orphelinesDansDossier(entrees, texteDuDocument, dossier, maintenant = Date.now()) {
+  const limite = maintenant - JOURS_AVANT_ORPHELINE * 86400000;
+  return entrees
+    .filter((e) => {
+      const date = e.creeLe ? new Date(e.creeLe).getTime() : 0;
+      /* Sans date connue, on s'abstient : mieux vaut un fichier de trop qu'une photo perdue. */
+      if (!date || date > limite) return false;
+      return !texteDuDocument.includes(e.nom);
+    })
+    .map((e) => `${dossier}/${e.nom}`);
 }
 
 /**
@@ -81,7 +162,7 @@ export async function listerDossier(dossier, plafond = 1000) {
  * a eu lieu ne protège de rien — on croit la fuite refermée. Un échec n'interrompt jamais la
  * sauvegarde de nuit, qui compte davantage.
  */
-export async function purgerDocumentsDevinables({ simulation = false } = {}) {
+export async function purgerDocumentsDevinables({ simulation = false, document = null } = {}) {
   const { url, cle } = configurationBase();
   if (!url || !cle) return { fait: false, raison: "base-non-configuree" };
 
@@ -89,13 +170,35 @@ export async function purgerDocumentsDevinables({ simulation = false } = {}) {
   const parDossier = {};
   for (const dossier of DOSSIERS_A_SURVEILLER) {
     try {
-      const noms = await listerDossier(dossier);
-      const devinables = noms.filter(nomDevinable).map((nom) => `${dossier}/${nom}`);
-      parDossier[dossier] = { total: noms.length, devinables: devinables.length };
-      aEffacer.push(...devinables);
+      const entrees = await listerEntrees(dossier);
+      const devinables = entrees.filter((e) => nomDevinable(e.nom)).map((e) => `${dossier}/${e.nom}`);
+      const perimees = perimeesDansDossier(entrees, dossier);
+      parDossier[dossier] = { total: entrees.length, devinables: devinables.length, perimees: perimees.length };
+      aEffacer.push(...devinables, ...perimees);
     } catch (e) {
       parDossier[dossier] = { erreur: String(e?.message || e).slice(0, 120) };
     }
+  }
+
+  /*
+   * LES PHOTOS QUE PLUS AUCUNE FICHE NE CITE.
+   *
+   * Sans le document, on ne sait pas ce qui est cité : on ne touche alors à rien. Effacer sur un
+   * document vide reviendrait à vider le dossier des images d'un seul coup — exactement le geste
+   * qu'on ne peut pas rattraper.
+   */
+  if (document && typeof document === "object") {
+    try {
+      const texte = JSON.stringify(document);
+      const entrees = await listerEntrees("images");
+      const orphelines = orphelinesDansDossier(entrees, texte, "images");
+      parDossier.images = { total: entrees.length, orphelines: orphelines.length };
+      aEffacer.push(...orphelines);
+    } catch (e) {
+      parDossier.images = { erreur: String(e?.message || e).slice(0, 120) };
+    }
+  } else {
+    parDossier.images = { ignore: "document-absent" };
   }
 
   if (aEffacer.length === 0) return { fait: true, effaces: 0, parDossier };

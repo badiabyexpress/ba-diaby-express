@@ -44,6 +44,7 @@
 import { baseConfiguree, lireCle, ecrireCle, modifierDocument } from "./_base.js";
 import { hashPBKDF2, identifiantsMotDePasse, egaliteSure, genererCode, genererSel } from "./_motdepasse.js";
 import { jetonInterne, ENTETE_INTERNE } from "./_session.js";
+import { passage, adresseDe, refuser } from "./_verrou.js";
 
 export const CLE_REINIT = "bde-reinit";
 
@@ -83,25 +84,33 @@ function chiffres(valeur) {
 }
 
 /*
- * Un ralentisseur par adresse — comme dans api/inscription.js, et pour une raison de plus.
+ * Un ralentisseur par adresse — et un second, par compte visé.
  *
  * Cette fonction est ouverte à qui connaît son adresse : c'est sa nature même, celui qui a perdu
  * son mot de passe n'a pas de session à présenter. Mais chacun de ses appels FAIT DÉPENSER —
  * un message facturé par Meta, un courriel qui engage la réputation du domaine. Sans compteur,
  * une boucle de quelques lignes vidait le quota de l'entreprise et faisait sonner le téléphone
  * d'un client toute la nuit.
+ *
+ * IL Y AVAIT BIEN UN COMPTEUR, MAIS IL ÉTAIT EN MÉMOIRE.
+ *
+ * Une fonction serverless ne tourne pas sur une machine : il s'en allume autant qu'il en faut, et
+ * chacune démarre avec sa propre mémoire vide. Le plafond de dix par heure valait donc PAR
+ * INSTANCE — et il suffisait d'appeler assez vite pour en faire naître d'autres, chacune offrant
+ * dix appels neufs. Le compteur ralentissait un client maladroit ; il n'arrêtait pas ce contre
+ * quoi il était écrit. Le verrou de `_verrou.js`, lui, compte dans la base : il est le même pour
+ * toutes les instances.
+ *
+ * ET UN SECOND COMPTEUR, PAR COMPTE.
+ *
+ * Le premier protège l'entreprise ; il ne protège pas le client. Quelqu'un qui dispose de
+ * plusieurs adresses passait dessous et faisait sonner le téléphone d'une personne précise toute
+ * la nuit — chaque message étant, de surcroît, facturé. Trois codes par heure et par compte
+ * suffisent largement à qui a vraiment perdu son mot de passe.
  */
-const demandesParAdresse = new Map();
-function tropDeDemandes(adresse) {
-  const maintenant = Date.now();
-  const e = demandesParAdresse.get(adresse);
-  if (!e || maintenant - e.debut > 60 * 60 * 1000) {
-    demandesParAdresse.set(adresse, { debut: maintenant, n: 1 });
-    return false;
-  }
-  e.n += 1;
-  return e.n > 10;
-}
+const DEMANDES_PAR_ADRESSE = 10;
+const DEMANDES_PAR_COMPTE = 3;
+const FENETRE_DEMANDES_MS = 60 * 60 * 1000;
 
 async function lireDemandes() {
   const { valeur } = await lireCle(CLE_REINIT);
@@ -242,9 +251,34 @@ export default async function handler(req, res) {
   const listeDe = (document) => (equipe ? document?.users : document?.clientAccounts) || [];
   const CHAMP = equipe ? "users" : "clientAccounts";
 
-  const adresseAppelante = String(req.headers["x-forwarded-for"] || "?");
-  if ((etape === "demande" || etape === "identifiant") && tropDeDemandes(adresseAppelante)) {
-    return res.status(429).json({ error: "Trop de demandes depuis cet appareil. Réessayez dans une heure." });
+  if (etape === "demande" || etape === "identifiant") {
+    const parAdresse = await passage({
+      nature: "reinit-demande", cle: adresseDe(req),
+      max: DEMANDES_PAR_ADRESSE, fenetreMs: FENETRE_DEMANDES_MS,
+    });
+    if (parAdresse.bloque) {
+      return refuser(res, parAdresse.dansSecondes,
+        "Trop de demandes depuis cet appareil. Réessayez dans une heure.");
+    }
+
+    /*
+     * LE SECOND COMPTEUR PORTE SUR L'IDENTIFIANT DEMANDÉ, PAS SUR LE COMPTE TROUVÉ.
+     *
+     * La différence n'est pas un détail. Compter sur le compte obligerait à le chercher d'abord, et
+     * à ne refuser que s'il existe : le refus lui-même apprendrait alors quels identifiants sont
+     * valides — exactement ce que la réponse neutre plus bas s'applique à ne pas dire. Compté sur
+     * ce qui est TAPÉ, le plafond se comporte pareil pour un compte réel et pour un nom inventé.
+     */
+    if (cherche) {
+      const parCompte = await passage({
+        nature: "reinit-compte", cle: `${equipe ? "equipe" : "client"}|${cherche}`,
+        max: DEMANDES_PAR_COMPTE, fenetreMs: FENETRE_DEMANDES_MS,
+      });
+      if (parCompte.bloque) {
+        return refuser(res, parCompte.dansSecondes,
+          "Un code a déjà été demandé plusieurs fois pour ce compte. Attendez une heure, ou contactez l’agence.");
+      }
+    }
   }
 
   try {

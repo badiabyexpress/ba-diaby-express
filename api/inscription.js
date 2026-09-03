@@ -23,6 +23,7 @@
 import { baseConfiguree, modifierDocument } from "./_base.js";
 import { identifiantsMotDePasse } from "./_motdepasse.js";
 import { signerSession, empreinteDuCompte } from "./_session.js";
+import { passage, adresseDe, refuser } from "./_verrou.js";
 
 /**
  * Le numéro de téléphone réduit à ce qui l'identifie, pour rapprocher deux écritures du même
@@ -38,18 +39,18 @@ function clefTelephone(numero) {
 const LONGUEUR_MOT_DE_PASSE = 8;
 
 /*
- * Un compteur par adresse. Comme dans api/login.js, ce n'est pas une protection absolue — une
- * fonction serverless peut être recréée — mais un ralentisseur : il suffit à empêcher qu'on
- * remplisse la base de comptes en quelques secondes.
+ * Un compteur par adresse — dans la base, et non en mémoire.
+ *
+ * Il l'était : « ce n'est pas une protection absolue, une fonction serverless peut être recréée ».
+ * C'était pire que cela. Il n'en existe pas une qu'on recrée : il s'en allume autant qu'il en
+ * faut, chacune avec sa mémoire vide, et appeler vite suffisait à en faire naître d'autres —
+ * chacune offrant cinq créations neuves. Le plafond ralentissait un client maladroit ; il
+ * n'arrêtait pas celui qui remplit la base de comptes, c'est-à-dire ce contre quoi il était écrit.
+ *
+ * Le verrou de `_verrou.js` compte dans la base : il est le même pour toutes les instances.
  */
-const creations = new Map();
-function tropDeCreations(adresse) {
-  const maintenant = Date.now();
-  const e = creations.get(adresse);
-  if (!e || maintenant - e.debut > 60 * 60 * 1000) { creations.set(adresse, { debut: maintenant, n: 1 }); return false; }
-  e.n += 1;
-  return e.n > 5;
-}
+const CREATIONS_PAR_ADRESSE = 5;
+const FENETRE_CREATIONS_MS = 60 * 60 * 1000;
 
 /** Retire les espaces de bord et coupe : un nom de 10 000 caractères n'est pas un nom. */
 function propre(valeur, maximum = 120) {
@@ -62,9 +63,13 @@ export default async function handler(req, res) {
     return res.status(501).json({ error: "Création de compte côté serveur non configurée" });
   }
 
-  const adresse = String(req.headers["x-forwarded-for"] || "?");
-  if (tropDeCreations(adresse)) {
-    return res.status(429).json({ error: "Trop de comptes créés depuis cet appareil. Réessayez plus tard." });
+  const limite = await passage({
+    nature: "inscription", cle: adresseDe(req),
+    max: CREATIONS_PAR_ADRESSE, fenetreMs: FENETRE_CREATIONS_MS,
+  });
+  if (limite.bloque) {
+    return refuser(res, limite.dansSecondes,
+      "Trop de comptes créés depuis cet appareil. Réessayez plus tard.");
   }
 
   try {

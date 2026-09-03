@@ -320,7 +320,15 @@ export default async function handler(req, res) {
    */
   let documents = null;
   try {
-    documents = await purgerDocumentsDevinables();
+    /*
+     * Le document sert à savoir quelles images sont encore citées quelque part. Le navigateur
+     * effaçait lui-même les photos de pièces d'identité des colis remis depuis longtemps ; il ne
+     * le peut plus depuis que le seau lui est fermé en suppression, et c'est ce ménage-là qui
+     * reprend ici. Sans le document, la purge des images est simplement sautée — jamais tentée à
+     * l'aveugle.
+     */
+    const pourImages = await lireCle("bde-data").then((r) => r?.valeur || null).catch(() => null);
+    documents = await purgerDocumentsDevinables({ document: pourImages });
   } catch (e) {
     documents = { fait: false, raison: "exception", detail: String(e?.message || e).slice(0, 160) };
   }

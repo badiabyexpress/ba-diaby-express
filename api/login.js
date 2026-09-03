@@ -153,14 +153,28 @@ export function comptesCorrespondants(liste, saisi) {
 const ESSAIS_PAR_CONNEXION = 40;
 const FENETRE_CONNEXION_MS = 10 * 60 * 1000;
 
-const essais = new Map();
-function tropDEssais(cle) {
-  const maintenant = Date.now();
-  const e = essais.get(cle);
-  if (!e || maintenant - e.debut > 10 * 60 * 1000) { essais.set(cle, { debut: maintenant, n: 1 }); return false; }
-  e.n += 1;
-  return e.n > 10;
-}
+/*
+ * LE COMPTEUR PAR COMPTE ÉTAIT EN MÉMOIRE — c'est-à-dire nulle part.
+ *
+ * Celui-ci est le plus important des deux : le compteur par adresse arrête quelqu'un qui essaie
+ * mille mots de passe depuis chez lui, mais pas la manière dont on entre vraiment — un même mot de
+ * passe courant présenté à tous les comptes, ou un même compte attaqué depuis des centaines
+ * d'adresses différentes.
+ *
+ * Or il vivait dans la mémoire d'une instance serverless. Il ne s'en recrée pas une : il s'en
+ * allume autant qu'il en faut, chacune avec sa mémoire vide. Dix essais par instance, et il
+ * suffisait d'appeler vite pour en obtenir d'autres. Le plafond arrêtait un agent qui se trompe
+ * de touche ; il ne voyait pas passer une attaque distribuée.
+ *
+ * DEUX CLEFS PLUTÔT QU'UNE.
+ *
+ *   — « adresse|identifiant », comme avant : la personne qui insiste depuis un même appareil ;
+ *   — « identifiant » seul, qui manquait : le même compte visé depuis partout à la fois. Son
+ *     plafond est plus haut, parce qu'il peut, lui, enfermer dehors un agent réel — vingt essais
+ *     en dix minutes sur un seul compte, ce n'est plus quelqu'un qui cherche son mot de passe.
+ */
+const ESSAIS_PAR_COMPTE_ET_ADRESSE = 10;
+const ESSAIS_PAR_COMPTE = 20;
 
 /* ==========================================================================================
  * LA DOUBLE AUTHENTIFICATION — le socle commun aux deux étapes et à l'inscription
@@ -638,9 +652,21 @@ export default async function handler(req, res) {
      *
      * Le second compte donc les essais par CONNEXION, quel que soit l'identifiant visé.
      */
-    const cleEssais = `${adresseDe(req)}|${String(identifiant).toLowerCase()}`;
-    if (tropDEssais(cleEssais)) {
-      return res.status(429).json({ error: "Trop de tentatives. Réessayez dans quelques minutes." });
+    const vise = String(identifiant).toLowerCase();
+    const parAppareil = await passage({
+      nature: "connexion-compte-appareil", cle: `${adresseDe(req)}|${vise}`,
+      max: ESSAIS_PAR_COMPTE_ET_ADRESSE, fenetreMs: FENETRE_CONNEXION_MS,
+    });
+    if (parAppareil.bloque) {
+      return refuser(res, parAppareil.dansSecondes, "Trop de tentatives. Réessayez dans quelques minutes.");
+    }
+    const parCompte = await passage({
+      nature: "connexion-compte", cle: vise,
+      max: ESSAIS_PAR_COMPTE, fenetreMs: FENETRE_CONNEXION_MS,
+    });
+    if (parCompte.bloque) {
+      return refuser(res, parCompte.dansSecondes,
+        "Trop de tentatives sur ce compte. Réessayez dans quelques minutes.");
     }
     const parConnexion = await passage({
       nature: "connexion", cle: adresseDe(req),

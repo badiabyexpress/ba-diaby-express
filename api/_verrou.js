@@ -70,7 +70,36 @@ export function passage({ nature, cle, max, fenetreMs, maintenant = Date.now() }
  * relais, et à fermer la porte à tous dès le premier automate.
  */
 export function adresseDe(req) {
-  const brut = req?.headers?.["x-forwarded-for"] || req?.headers?.["x-real-ip"] || "";
+  const entetes = req?.headers || {};
+
+  /*
+   * DERRIÈRE CLOUDFLARE, C'EST « CF-Connecting-IP » QUI FAIT FOI — ET NULLE PART AILLEURS.
+   *
+   * Si l'on met un service comme Cloudflare devant le site, toutes les requêtes arrivent chez
+   * l'hébergeur depuis les adresses de ce service. Sans rien changer, tous les visiteurs se
+   * mettent alors à partager le même compteur : un seul robot un peu vif bloquerait le comptoir
+   * de Conakry, l'agent de Paris et le client qui suit son colis, tous ensemble.
+   *
+   * Cloudflare réécrit systématiquement `CF-Connecting-IP` avec l'adresse réelle du visiteur.
+   * C'est ce qui en fait une source sûre : le visiteur ne peut pas la fabriquer, elle est
+   * remplacée au passage.
+   *
+   * MAIS SEULEMENT SI L'ON EST VRAIMENT DERRIÈRE. Sans ce service devant, cet en-tête n'est plus
+   * réécrit par personne : n'importe qui pourrait l'envoyer, en changer à chaque requête, et
+   * repartir avec un compteur neuf à chaque essai. Le verrou deviendrait décoratif.
+   *
+   * On ne devine donc pas la topologie du réseau — on la déclare. `DERRIERE_CLOUDFLARE=1` dans
+   * les variables d'environnement, et seulement quand c'est vrai. Non renseignée, le
+   * comportement est exactement celui d'avant : cette ligne peut être posée avant la bascule du
+   * DNS, sans rien changer tant qu'elle n'a pas eu lieu.
+   */
+  if (process.env.DERRIERE_CLOUDFLARE === "1") {
+    const reelle = String(entetes["cf-connecting-ip"] || "").trim();
+    if (reelle) return reelle;
+    /* L'en-tête manque : on retombe sur le chemin ordinaire plutôt que de tout confondre. */
+  }
+
+  const brut = entetes["x-forwarded-for"] || entetes["x-real-ip"] || "";
   const premiere = String(brut).split(",")[0].trim();
   return premiere || "inconnue";
 }

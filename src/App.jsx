@@ -8581,6 +8581,52 @@ export function alertesDuCompte(data, session, maintenant = Date.now()) {
     detail: "Vos données sont intactes. Il reste un onglet à fermer quelque part.",
   });
 
+  /*
+   * LA SAUVEGARDE QUI ÉCHOUE EN SILENCE, ET LES REGISTRES QUI FONDENT.
+   *
+   * Ces deux alertes viennent du relevé écrit chaque nuit par la tâche de sauvegarde. Elles sont
+   * ici, en tête et réservées à qui peut agir, pour une raison précise : les deux pertes de cet
+   * été n'ont déclenché aucun signal. La copie hors site a échoué toutes les nuits pendant une
+   * semaine sans que rien ne l'annonce, et cinquante-huit catégories devenues quarante-deux ont
+   * été découvertes par hasard, huit jours plus tard.
+   *
+   * Une sauvegarde dont on ignore qu'elle est cassée est pire que pas de sauvegarde : on se croit
+   * couvert. C'est le seul cas où une alerte doit sonner alors que rien n'a l'air d'aller mal.
+   */
+  if (perm("config.acceder")) {
+    const veille = data.veille || null;
+    const horsBase = veille?.horsBase || null;
+    /*
+     * On n'alerte que si la nuit a bien eu lieu et que la copie n'est pas partie. Une base neuve,
+     * ou une tâche qui n'a jamais tourné, ne porte pas de relevé : crier au danger là-dessus
+     * apprendrait à ignorer cette cloche.
+     */
+    const copieEnPanne = !!horsBase && horsBase.envoyee === false;
+    const depuis = horsBase?.dernierSucces || null;
+    const jours = depuis ? Math.floor((maintenant - new Date(depuis).getTime()) / 86400000) : null;
+    ajouter({
+      cle: "copie-hors-site", gravite: "grave", vue: "admin", icone: ShieldCheck,
+      compte: copieEnPanne ? 1 : 0,
+      titre: () => "Aucune copie de secours hors du serveur",
+      detail: depuis
+        ? `La dernière est partie il y a ${jours} jour${jours > 1 ? "s" : ""}. Vos sauvegardes et vos données sont au même endroit.`
+        : "Aucune n’est jamais partie. Vos sauvegardes et vos données sont au même endroit.",
+    });
+
+    /*
+     * Une chute d'effectifs se signale le lendemain matin, tant que la copie de la veille existe
+     * encore. Passé la fenêtre de conservation, l'information ne vaut plus rien.
+     */
+    const chutes = Array.isArray(veille?.chutes) ? veille.chutes : [];
+    ajouter({
+      cle: "chute-donnees", gravite: "grave", vue: "admin", icone: AlertTriangle,
+      compte: chutes.length,
+      titre: (n) => `${n} liste${n > 1 ? "s" : ""} a${n > 1 ? "" : ""} perdu des lignes cette nuit`,
+      detail: chutes.map((c) => `${c.cle} : ${c.hier} → ${c.maintenant}`).join(" · ")
+        || "Vérifiez avant que la sauvegarde de la veille ne soit effacée.",
+    });
+  }
+
   if (perm("espaceclient.gerer")) {
     const messages = (data.clientAccounts || []).filter((c) => (c.messages || []).some((m) => m.expediteur === "client" && !m.lu)).length;
     const preAlertes = (data.preAlertes || []).filter((p) => p.statut === "En attente").length;
@@ -28880,16 +28926,60 @@ function EtatVeille({ data, notify }) {
           ? `Échec de la dernière sauvegarde (${veille.raison || "raison inconnue"}).`
           : `Dernière sauvegarde ${quand.toLocaleString("fr-FR")}${veille.colis !== undefined ? ` — ${veille.colis} colis, ${veille.comptes} comptes` : ""}.`;
 
+  /*
+   * LA COPIE HORS DU SERVEUR — annoncée à part, parce qu'elle protège d'autre chose.
+   *
+   * La ligne du dessus disait « Dernière sauvegarde … — 69 colis, 9 comptes » sur fond vert,
+   * pendant que la copie par courriel échouait toutes les nuits depuis une semaine. Les deux
+   * étaient vraies, et ensemble elles mentaient : la sauvegarde de nuit protège d'une fausse
+   * manœuvre, elle ne protège de rien si le compte de l'hébergeur disparaît — les quinze copies
+   * et le document vivant y sont côte à côte.
+   *
+   * Le motif exact du refus est affiché tel quel. C'est laid, et c'est voulu : « refus-resend-422 »
+   * ne se répare pas, « domaine non vérifié » se répare en cinq minutes.
+   */
+  const horsBase = veille?.horsBase || null;
+  const copieOk = horsBase?.envoyee === true;
+  const teinteCopie = copieOk ? "ok" : "danger";
+  const dernierSucces = horsBase?.dernierSucces ? new Date(horsBase.dernierSucces) : null;
+
   return (
-    <div style={{ background: `var(--${teinte}-bg)`, border: `1px solid var(--${teinte}-border)`, borderRadius: 10, padding: "11px 13px", marginBottom: 14, display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
-      {bon ? <CheckCircle2 size={15} color={`var(--${teinte}-fg)`} style={{ flexShrink: 0, marginTop: 2 }} />
-        : <AlertTriangle size={15} color={`var(--${teinte}-fg)`} style={{ flexShrink: 0, marginTop: 2 }} />}
-      <div style={{ fontSize: 12.5, color: `var(--${teinte}-fg)`, lineHeight: 1.55, flex: 1, minWidth: 200 }}>{message}</div>
-      <button onClick={sauvegarderMaintenant} disabled={encours}
-        style={{ background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: encours ? "default" : "pointer", opacity: encours ? 0.6 : 1, flexShrink: 0 }}>
-        {encours ? "Sauvegarde…" : "Sauvegarder maintenant"}
-      </button>
-    </div>
+    <>
+      <div style={{ background: `var(--${teinte}-bg)`, border: `1px solid var(--${teinte}-border)`, borderRadius: 10, padding: "11px 13px", marginBottom: 10, display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
+        {bon ? <CheckCircle2 size={15} color={`var(--${teinte}-fg)`} style={{ flexShrink: 0, marginTop: 2 }} />
+          : <AlertTriangle size={15} color={`var(--${teinte}-fg)`} style={{ flexShrink: 0, marginTop: 2 }} />}
+        <div style={{ fontSize: 12.5, color: `var(--${teinte}-fg)`, lineHeight: 1.55, flex: 1, minWidth: 200 }}>{message}</div>
+        <button onClick={sauvegarderMaintenant} disabled={encours}
+          style={{ background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: encours ? "default" : "pointer", opacity: encours ? 0.6 : 1, flexShrink: 0 }}>
+          {encours ? "Sauvegarde…" : "Sauvegarder maintenant"}
+        </button>
+      </div>
+
+      {horsBase && (
+        <div style={{ background: `var(--${teinteCopie}-bg)`, border: `1px solid var(--${teinteCopie}-border)`, borderRadius: 10, padding: "11px 13px", marginBottom: 14, display: "flex", gap: 10, alignItems: "flex-start" }}>
+          {copieOk ? <ShieldCheck size={15} color={`var(--${teinteCopie}-fg)`} style={{ flexShrink: 0, marginTop: 2 }} />
+            : <AlertTriangle size={15} color={`var(--${teinteCopie}-fg)`} style={{ flexShrink: 0, marginTop: 2 }} />}
+          <div style={{ fontSize: 12.5, color: `var(--${teinteCopie}-fg)`, lineHeight: 1.55, flex: 1, minWidth: 200 }}>
+            {copieOk ? (
+              <>Copie de secours envoyée hors du serveur cette nuit{horsBase.octets ? ` (${Math.round(horsBase.octets / 1024)} ko)` : ""}.</>
+            ) : (
+              <>
+                <strong>Aucune copie n’est partie hors du serveur.</strong>{" "}
+                {dernierSucces
+                  ? `La dernière remonte au ${dernierSucces.toLocaleDateString("fr-FR")}.`
+                  : "Aucune n’est jamais partie."}{" "}
+                Vos sauvegardes et vos données vivent au même endroit : une perte du compte
+                d’hébergement emporterait les deux.
+                <div style={{ marginTop: 6, fontSize: 11.5, opacity: 0.85 }}>
+                  Motif du refus : <code>{horsBase.raison || "inconnu"}</code>
+                  {horsBase.detail ? <> — {String(horsBase.detail).slice(0, 180)}</> : null}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 

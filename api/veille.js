@@ -35,7 +35,7 @@ import { releveDeFraude, signauxDeFraude, corpsAlerteFraude } from "./_fraude.js
 import { destinataireAlerte } from "./_alerte.js";
 import { purgerDocumentsDevinables } from "./_documents.js";
 import crypto from "node:crypto";
-import { expediteurCourriel, enteteCourriel } from "./_expediteur.js";
+import { expediteurCourriel, enteteCourriel, reponseCourriel } from "./_expediteur.js";
 
 const PREFIXE = "bde-backup-";
 /*
@@ -234,7 +234,11 @@ async function envoyerAlerteFraude(document, signaux) {
     const reponse = await fetch(RESEND_URL, {
       method: "POST",
       headers: { Authorization: `Bearer ${cle}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: expediteur, to: [destinataire], subject: sujet, html }),
+      body: JSON.stringify({
+        from: expediteur, to: [destinataire], subject: sujet, html,
+        /* Sans elle, répondre à ce message écrit dans le vide : voir reponseCourriel(). */
+        ...(reponseCourriel() ? { reply_to: reponseCourriel() } : {}),
+      }),
     });
     if (!reponse.ok) {
       const detail = await reponse.text().catch(() => "");

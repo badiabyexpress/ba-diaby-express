@@ -90,6 +90,25 @@ export function expediteurCourriel() {
   return analyserExpediteur(process.env.EMAIL_FROM).normalise;
 }
 
+/**
+ * OÙ ATTERRISSENT LES RÉPONSES — et pourquoi c'est ici aussi.
+ *
+ * `contact@badiabyexpress.com` n'est PAS une boîte aux lettres : Resend autorise l'envoi depuis
+ * n'importe quelle adresse du domaine vérifié, sans que cette adresse existe. Une réponse envoyée
+ * là ne va donc nulle part, et personne ne le sait — on ne remarque jamais ce qu'on n'a pas reçu.
+ *
+ * `EMAIL_REPLY_TO` existe pour cela, et n'était lue QUE par api/email.js — exactement la même
+ * faute que pour l'adresse d'expédition, découverte en même temps. Le bilan quotidien et les trois
+ * alertes partaient donc sans adresse de réponse : y répondre écrivait dans le vide.
+ *
+ * Rendue seulement si elle a la forme d'une adresse : une valeur bancale ferait refuser l'envoi
+ * entier par Resend, et l'on perdrait le message pour avoir voulu soigner sa réponse.
+ */
+export function reponseCourriel() {
+  const analyse = analyserExpediteur(process.env.EMAIL_REPLY_TO);
+  return analyse.valide ? analyse.normalise : null;
+}
+
 /*
  * L'ADRESSE PUBLIQUE DU SITE, VUE DEPUIS LE SERVEUR
  * ─────────────────────────────────────────────────────────────────────────────

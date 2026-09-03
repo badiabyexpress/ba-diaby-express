@@ -144,6 +144,18 @@ export function chutesDepuis(avant, apres) {
     .filter(Boolean);
 }
 
+/** Appelle une fonction SQL avec la clé de service. */
+async function rpcServeur(nom) {
+  const { url, cle } = configurationBase();
+  if (!url || !cle) return null;
+  const reponse = await fetch(`${url}/rest/v1/rpc/${nom}`, {
+    method: "POST",
+    headers: { apikey: cle, Authorization: `Bearer ${cle}`, "Content-Type": "application/json" },
+    body: "{}",
+  });
+  return reponse.ok ? reponse.json().catch(() => null) : null;
+}
+
 /** Les sauvegardes existantes, par leur nom seul — jamais leur contenu. */
 async function listerSauvegardes() {
   const { url, cle } = configurationBase();
@@ -263,6 +275,13 @@ export default async function handler(req, res) {
   } catch (e) {
     documents = { fait: false, raison: "exception", detail: String(e?.message || e).slice(0, 160) };
   }
+
+  /*
+   * Les compteurs d'essais périmés. Une ligne dont la fenêtre s'est refermée hier n'apprend plus
+   * rien à personne, et laisser grandir cette table indéfiniment finirait par coûter en lecture
+   * ce qu'elle fait gagner en protection.
+   */
+  try { await rpcServeur("purger_verrous"); } catch (e) { /* réessayée demain */ }
 
   const clef = cleDuJour();
 

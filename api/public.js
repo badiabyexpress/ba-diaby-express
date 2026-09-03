@@ -160,7 +160,7 @@ export default async function handler(req, res) {
    * réponse, sinon limiter les appels revient à s'infliger la charge qu'on voulait éviter.
    */
   if (suivi !== undefined) {
-    const compte = passage({
+    const compte = await passage({
       nature: "suivi-public", cle: adresseDe(req),
       max: SUIVIS_PAR_FENETRE, fenetreMs: FENETRE_SUIVI_MS,
     });
@@ -225,7 +225,7 @@ export default async function handler(req, res) {
         const trouve = await chercherTransfertPublic(code, estCodeTransfert);
         if (trouve) return res.status(200).json({ transfert: trouve, branding: donnees.branding || {} });
         if (estReferenceTransfert) {
-          const balayage = passage({
+          const balayage = await passage({
             nature: "suivi-introuvable", cle: adresseDe(req),
             max: INTROUVABLES_PAR_FENETRE, fenetreMs: FENETRE_SUIVI_MS,
           });
@@ -246,7 +246,7 @@ export default async function handler(req, res) {
          * même (une liste vide) pour ne pas apprendre à l'automate ce qui existe et ce qui n'existe
          * pas.
          */
-        const balayage = passage({
+        const balayage = await passage({
           nature: "suivi-introuvable", cle: adresseDe(req),
           max: INTROUVABLES_PAR_FENETRE, fenetreMs: FENETRE_SUIVI_MS,
         });

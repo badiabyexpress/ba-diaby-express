@@ -29,14 +29,39 @@
 import { configurationBase, baseConfiguree, lireCle, ecrireCle, modifierDocument } from "./_base.js";
 import { ENTETE_INTERNE, jetonInterne, refusSaufEquipe } from "./_session.js";
 import { chiffresDuJour, envoyerBilanEmail, envoyerBilanWhatsApp } from "./_bilan.js";
+/* `noterVeille` est déclarée plus bas : une fonction nommée est hissée, l'ordre de lecture prime. */
 import { envoyerCopieHorsBase } from "./_copie.js";
+import { releveDeFraude, signauxDeFraude, corpsAlerteFraude } from "./_fraude.js";
+import { destinataireAlerte } from "./_alerte.js";
 import { purgerDocumentsDevinables } from "./_documents.js";
 import crypto from "node:crypto";
+import { expediteurCourriel, enteteCourriel, reponseCourriel } from "./_expediteur.js";
 
 const PREFIXE = "bde-backup-";
-/* La même fenêtre que la sauvegarde du navigateur : deux règles différentes se contrediraient. */
-const JOURS_CONSERVES = 14;
+/*
+ * TRENTE JOURS, ET NON QUATORZE.
+ *
+ * Ce n'est pas un chiffre de confort. Trois factures partenaire ont disparu entre le 26 et le
+ * 31 août ; personne ne s'en est aperçu avant le 3 septembre — huit jours. La seule copie qui
+ * contenait encore les colis facturés datait du 24 août, et la fenêtre de quatorze jours allait
+ * l'effacer la nuit suivante. À deux jours près, ces données étaient perdues pour de bon.
+ *
+ * Une perte silencieuse ne se découvre pas le lendemain : elle se découvre quand quelqu'un
+ * cherche une pièce précise, souvent des semaines plus tard. La fenêtre doit donc couvrir le
+ * délai de DÉCOUVERTE, pas le délai de l'incident.
+ */
+const JOURS_CONSERVES = 30;
 const TABLE = "bde_data";
+
+/*
+ * Une sauvegarde quotidienne porte exactement « bde-backup-AAAA-MM-JJ ». Les copies prises à la
+ * main avant une opération délicate portent un suffixe : « …-avant-restauration-cat ».
+ *
+ * La distinction n'est pas cosmétique. La purge gardait les N dernières clés, toutes confondues :
+ * chaque copie de précaution occupait donc un emplacement et raccourcissait d'un jour l'historique
+ * récupérable. Prendre une précaution réduisait la protection — exactement l'inverse du but.
+ */
+const QUOTIDIENNE = /^bde-backup-\d{4}-\d{2}-\d{2}$/;
 
 /** La clé du jour, en heure de Conakry — qui est l'heure universelle, sans décalage ni été. */
 export function cleDuJour(maintenant = new Date()) {
@@ -66,8 +91,73 @@ export function documentPlausible(valeur) {
  * que ce qui dépasse — jamais la liste entière, même si elle paraît absurde.
  */
 export function clesAPurger(cles, aGarder = JOURS_CONSERVES) {
-  const propres = (Array.isArray(cles) ? cles : []).filter((k) => typeof k === "string" && k.startsWith(PREFIXE)).sort();
-  return propres.slice(0, Math.max(0, propres.length - aGarder));
+  const quotidiennes = (Array.isArray(cles) ? cles : [])
+    .filter((k) => typeof k === "string" && QUOTIDIENNE.test(k))
+    .sort();
+  /*
+   * Les copies prises à la main ne sont jamais rendues : ce n'est pas un oubli.
+   *
+   * On les prend avant une opération risquée, précisément parce qu'on n'est pas sûr de soi. Les
+   * effacer au bout de trente jours parce que le calendrier a tourné reviendrait à retirer le
+   * filet une fois le funambule engagé. Elles sont peu nombreuses, elles portent un nom qui dit
+   * pourquoi elles existent, et c'est à une personne de décider qu'on n'en a plus besoin.
+   */
+  return quotidiennes.slice(0, Math.max(0, quotidiennes.length - aGarder));
+}
+
+/**
+ * Combien de lignes porte chaque registre du document.
+ *
+ * On compte tout ce qui est une liste, sans en nommer aucune : une collection ajoutée l'an
+ * prochain sera surveillée le soir même, sans que personne ait à y penser. Une liste qui n'existe
+ * pas encore n'est pas comptée à zéro — elle est simplement absente, et une absence ne se compare
+ * pas à une chute.
+ */
+export function effectifsDuDocument(document) {
+  const compte = {};
+  Object.entries(document || {}).forEach(([cle, valeur]) => {
+    if (Array.isArray(valeur)) compte[cle] = valeur.length;
+  });
+  return compte;
+}
+
+/*
+ * CE QUI A FONDU DEPUIS HIER SOIR.
+ *
+ * Le seuil n'est pas un pourcentage unique, et c'est délibéré. Sur une liste de dix lignes,
+ * perdre le quart n'est souvent qu'un ménage ; sur une liste de trois cents, c'est un accident.
+ * On retient donc ce qui perd À LA FOIS plus de deux lignes et plus du dixième de sa hauteur :
+ * les suppressions ordinaires d'une journée de travail passent, une collection qui s'effondre
+ * ne passe pas.
+ *
+ * Ce n'est pas un verrou — la sauvegarde est déjà écrite quand on arrive ici, et c'est très bien
+ * ainsi : refuser de sauvegarder parce qu'un chiffre a baissé priverait de copie le jour où l'on
+ * en a le plus besoin. C'est un signal, et il n'a qu'un seul destinataire : quelqu'un qui pourra
+ * regarder pendant que la copie de la veille existe encore.
+ */
+export function chutesDepuis(avant, apres) {
+  if (!avant || typeof avant !== "object") return [];
+  return Object.entries(apres || {})
+    .map(([cle, maintenant]) => {
+      const hier = avant[cle];
+      if (typeof hier !== "number") return null;   // collection nouvelle : rien à comparer
+      const perdus = hier - maintenant;
+      if (perdus <= 2 || perdus < hier / 10) return null;
+      return { cle, hier, maintenant, perdus };
+    })
+    .filter(Boolean);
+}
+
+/** Appelle une fonction SQL avec la clé de service. */
+async function rpcServeur(nom) {
+  const { url, cle } = configurationBase();
+  if (!url || !cle) return null;
+  const reponse = await fetch(`${url}/rest/v1/rpc/${nom}`, {
+    method: "POST",
+    headers: { apikey: cle, Authorization: `Bearer ${cle}`, "Content-Type": "application/json" },
+    body: "{}",
+  });
+  return reponse.ok ? reponse.json().catch(() => null) : null;
 }
 
 /** Les sauvegardes existantes, par leur nom seul — jamais leur contenu. */
@@ -113,6 +203,51 @@ function estAppelInterne(req) {
   const recu = req.headers?.[ENTETE_INTERNE];
   if (!attendu || typeof recu !== "string" || recu.length !== attendu.length) return false;
   return crypto.timingSafeEqual(Buffer.from(recu, "utf8"), Buffer.from(attendu, "utf8"));
+}
+
+/**
+ * LE COURRIEL DE FRAUDE — envoyé seulement quand il y a quelque chose de grave à dire.
+ *
+ * Le seuil est volontairement haut : seuls les signaux « graves » déclenchent un envoi. Une rafale
+ * d'essais arrêtée par le plafond mérite d'apparaître dans la cloche le matin ; elle ne mérite pas
+ * de réveiller quelqu'un. Ce qui le mérite, c'est une réussite au bout d'une rafale, ou un
+ * balayage en cours — les deux cas où attendre le lendemain coûte quelque chose.
+ *
+ * Comme toutes les alertes du site, elle part par courriel et non par WhatsApp : hors de la
+ * fenêtre de vingt-quatre heures, Meta n'autorise que ses modèles approuvés, et une intrusion est
+ * par nature imprévisible. Promettre un WhatsApp reviendrait à promettre une alerte qui
+ * n'arriverait jamais.
+ */
+const RESEND_URL = "https://api.resend.com/emails";
+
+async function envoyerAlerteFraude(document, signaux) {
+  const cle = process.env.RESEND_API_KEY;
+  /* Jamais la variable brute : voir api/_expediteur.js — c'est ce qui a fait refuser
+   * chaque courriel automatique par Resend pendant des semaines. */
+  const expediteur = expediteurCourriel();
+  if (!cle || !expediteur) return { envoye: false, raison: "courriel-non-configure" };
+  const destinataire = destinataireAlerte(document);
+  if (!destinataire) return { envoye: false, raison: "aucun-destinataire" };
+
+  const { sujet, html } = corpsAlerteFraude(signaux, document, enteteCourriel(document));
+  try {
+    const reponse = await fetch(RESEND_URL, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${cle}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: expediteur, to: [destinataire], subject: sujet, html,
+        /* Sans elle, répondre à ce message écrit dans le vide : voir reponseCourriel(). */
+        ...(reponseCourriel() ? { reply_to: reponseCourriel() } : {}),
+      }),
+    });
+    if (!reponse.ok) {
+      const detail = await reponse.text().catch(() => "");
+      return { envoye: false, raison: `refus-resend-${reponse.status}`, detail: detail.slice(0, 200) };
+    }
+    return { envoye: true, destinataire };
+  } catch (e) {
+    return { envoye: false, raison: "reseau", detail: String(e?.message || e).slice(0, 200) };
+  }
 }
 
 /**
@@ -185,9 +320,74 @@ export default async function handler(req, res) {
    */
   let documents = null;
   try {
-    documents = await purgerDocumentsDevinables();
+    /*
+     * Le document sert à savoir quelles images sont encore citées quelque part. Le navigateur
+     * effaçait lui-même les photos de pièces d'identité des colis remis depuis longtemps ; il ne
+     * le peut plus depuis que le seau lui est fermé en suppression, et c'est ce ménage-là qui
+     * reprend ici. Sans le document, la purge des images est simplement sautée — jamais tentée à
+     * l'aveugle.
+     */
+    const pourImages = await lireCle("bde-data").then((r) => r?.valeur || null).catch(() => null);
+    documents = await purgerDocumentsDevinables({ document: pourImages });
   } catch (e) {
     documents = { fait: false, raison: "exception", detail: String(e?.message || e).slice(0, 160) };
+  }
+
+  /*
+   * Les compteurs d'essais périmés. Une ligne dont la fenêtre s'est refermée hier n'apprend plus
+   * rien à personne, et laisser grandir cette table indéfiniment finirait par coûter en lecture
+   * ce qu'elle fait gagner en protection.
+   */
+  try { await rpcServeur("purger_verrous"); } catch (e) { /* réessayée demain */ }
+
+  /*
+   * ENVOYER LE BILAN TOUT DE SUITE, POUR VOIR SI ÇA MARCHE.
+   *
+   * Sans cette porte, régler le bilan WhatsApp demandait une nuit d'attente par essai : on pose une
+   * variable, on attend le lendemain matin, on découvre qu'il manquait autre chose, on recommence.
+   * Trois erreurs de saisie — un indicatif oublié, un modèle pas encore validé, un numéro qui n'est
+   * pas sur WhatsApp — et l'on y passe la semaine.
+   *
+   * Elle ne touche NI la sauvegarde NI la purge : elle calcule les chiffres et tente les deux
+   * envois, rien d'autre. Elle est réservée à l'équipe par le garde du dessus, et elle n'écrit dans
+   * le relevé que ce qui concerne le bilan — sans quoi un essai de midi ferait croire que la tâche
+   * de nuit a tourné.
+   */
+  const veutTesterLeBilan = req.query?.bilan !== undefined || req.body?.action === "bilan";
+  if (veutTesterLeBilan) {
+    const vivant = await lireCle("bde-data").catch(() => ({ valeur: null }));
+    if (!documentPlausible(vivant.valeur)) {
+      return res.status(409).json({ ok: false, error: "Document introuvable ou incomplet — bilan non calculé." });
+    }
+    const chiffres = chiffresDuJour(vivant.valeur);
+    const parEmail = await envoyerBilanEmail(vivant.valeur, chiffres);
+    /* Un destinataire d'essai, s'il en est proposé un : voir envoyerBilanWhatsApp. */
+    const numeroEssai = String(req.body?.destinataire || "").replace(/\D/g, "").slice(0, 20) || null;
+    const parWhatsApp = await envoyerBilanWhatsApp(chiffres, numeroEssai);
+    const etatBilan = {
+      jour: chiffres.jour,
+      email: !!parEmail.envoye,
+      raisonEmail: parEmail.envoye ? null : parEmail.raison || null,
+      /* La réponse exacte de Resend : « refus-resend-422 » ne se répare pas, sa phrase si. */
+      detailEmail: parEmail.envoye ? null : parEmail.detail || null,
+      whatsapp: !!parWhatsApp.envoye,
+      raisonWhatsApp: parWhatsApp.envoye ? null : parWhatsApp.raison || null,
+      detailWhatsApp: parWhatsApp.envoye ? null : parWhatsApp.detail || null,
+      modele: parWhatsApp.modele || null,
+      /* Un essai à la main se distingue d'un envoi de nuit : sinon on croirait la tâche passée. */
+      essai: new Date().toISOString(),
+    };
+    await noterVeille({ bilan: etatBilan });
+    return res.status(200).json({
+      ok: true, essai: true, bilan: etatBilan, chiffres,
+      /*
+       * L'identifiant rendu par Meta et le numéro réellement visé. C'est ce qui permet de dire
+       * « Meta a accepté, pour CE numéro » plutôt que « envoyé » — un mot qui laisse croire que le
+       * téléphone a reçu quelque chose.
+       */
+      whatsappId: parWhatsApp?.id || null,
+      whatsappVers: parWhatsApp?.destinataire || null,
+    });
   }
 
   const clef = cleDuJour();
@@ -202,8 +402,45 @@ export default async function handler(req, res) {
      */
     const dejaLa = await lireCle(clef);
     if (dejaLa.valeur !== null && dejaLa.valeur !== undefined) {
-      await noterVeille({ etat: "deja-faite", clef });
-      return res.status(200).json({ ok: true, etat: "deja-faite", clef, ecrite: false, documents });
+      /*
+       * LA SAUVEGARDE EST FAITE, MAIS LA COPIE HORS SITE PEUT ENCORE MANQUER.
+       *
+       * On s'arrêtait ici, et c'était un défaut : une copie qui rate à deux heures du matin
+       * n'avait plus aucune seconde chance de la journée. Elle échouait alors chaque nuit, et
+       * l'écran de Configuration montrait un motif vieux de vingt-quatre heures — personne ne
+       * pouvait vérifier une correction avant le lendemain.
+       *
+       * On ne refait pas la sauvegarde : la première copie de la journée précède les fausses
+       * manœuvres de la journée, et la réécrire reviendrait à sauvegarder l'accident. Mais on
+       * réessaie ce qui a échoué, et lui seul.
+       */
+      const veillePrecedente = (await lireCle("bde-data")).valeur?.veille || null;
+      if (veillePrecedente?.horsBase?.envoyee === true) {
+        await noterVeille({ etat: "deja-faite", clef });
+        return res.status(200).json({ ok: true, etat: "deja-faite", clef, ecrite: false, documents });
+      }
+
+      let reprise = null;
+      try {
+        reprise = await envoyerCopieHorsBase(dejaLa.valeur, clef.replace(PREFIXE, ""));
+      } catch (e) {
+        reprise = { envoye: false, raison: "exception", detail: String(e?.message || e).slice(0, 160) };
+      }
+      await noterVeille({
+        etat: "deja-faite",
+        clef,
+        horsBase: reprise?.envoye
+          ? { envoyee: true, octets: reprise.octets, le: new Date().toISOString() }
+          : {
+            envoyee: false,
+            raison: reprise?.raison || "inconnue",
+            detail: reprise?.detail || null,
+            dernierSucces: veillePrecedente?.horsBase?.dernierSucces || null,
+          },
+      });
+      return res.status(200).json({
+        ok: true, etat: "deja-faite", clef, ecrite: false, documents, copieHorsBase: reprise,
+      });
     }
 
     const vivant = await lireCle("bde-data");
@@ -258,6 +495,37 @@ export default async function handler(req, res) {
       copieHorsBase = { envoye: false, raison: "exception", detail: String(e?.message || e).slice(0, 160) };
     }
 
+    /*
+     * Le relevé de la nuit d'avant, lu AVANT d'écrire celui de cette nuit — sans quoi on
+     * comparerait les effectifs à eux-mêmes et aucune chute ne se verrait jamais.
+     */
+    const veillePrecedente = vivant.valeur?.veille || null;
+    const effectifs = effectifsDuDocument(vivant.valeur);
+
+    /*
+     * CE QUI RESSEMBLE À UNE ATTAQUE, RELEVÉ EN MÊME TEMPS QUE LE RESTE.
+     *
+     * Le site savait déjà se défendre — les essais sont plafonnés, les mots de passe coûtent
+     * 150 000 tours à vérifier — mais rien ne RACONTAIT ce qui avait été tenté. Un automate arrêté
+     * par le plafond revenait le lendemain avec une liste plus longue, et le jour où il trouvait,
+     * la connexion réussie ressemblait à toutes les autres.
+     *
+     * Le relevé est écrit dans tous les cas : c'est lui que la cloche lit le matin. Le courriel,
+     * lui, ne part que pour les signaux graves — une réussite au bout d'une rafale, un balayage en
+     * cours. Une alerte qui crie tous les jours n'est plus lue le jour où elle a raison.
+     */
+    let fraude = null;
+    try {
+      fraude = releveDeFraude(vivant.valeur);
+      const graves = signauxDeFraude(vivant.valeur).filter((s) => s.gravite === "grave");
+      if (graves.length > 0) {
+        const envoi = await envoyerAlerteFraude(vivant.valeur, graves);
+        fraude = { ...fraude, alerte: envoi.envoye ? { envoyee: true } : { envoyee: false, raison: envoi.raison } };
+      }
+    } catch (e) {
+      fraude = { erreur: String(e?.message || e).slice(0, 160) };
+    }
+
     let bilan = null;
     try {
       const chiffres = chiffresDuJour(vivant.valeur);
@@ -274,17 +542,68 @@ export default async function handler(req, res) {
       colis: Array.isArray(vivant.valeur.colis) ? vivant.valeur.colis.length : 0,
       comptes: vivant.valeur.users.length,
       purgees: purgees.length,
-      /* Une copie hors site dont on ne sait pas si elle est partie ne protège de rien. */
+      /*
+       * Une copie hors site dont on ne sait pas si elle est partie ne protège de rien — et une
+       * dont on sait qu'elle échoue sans savoir POURQUOI ne se répare pas.
+       *
+       * Le refus de Resend porte son motif dans le corps de la réponse ; envoyerCopieHorsBase le
+       * récupère fidèlement dans `detail`, et ce relevé le jetait. Résultat : « refus-resend-422 »
+       * toutes les nuits depuis le 31 août, sans que rien ne dise que le domaine d'envoi n'est
+       * pas vérifié, que le destinataire est refusé, ou autre chose encore. On garde donc le
+       * motif, et la date du dernier succès — c'est elle qui dit depuis combien de temps
+       * l'entreprise n'a plus aucune copie ailleurs que chez son hébergeur.
+       */
       horsBase: copieHorsBase?.envoye
-        ? { envoyee: true, octets: copieHorsBase.octets }
-        : { envoyee: false, raison: copieHorsBase?.raison || "inconnue" },
+        ? { envoyee: true, octets: copieHorsBase.octets, le: new Date().toISOString() }
+        : {
+          envoyee: false,
+          raison: copieHorsBase?.raison || "inconnue",
+          detail: copieHorsBase?.detail || null,
+          /* Conservée d'une nuit sur l'autre : sans elle, on ne saurait pas depuis quand. */
+          dernierSucces: veillePrecedente?.horsBase?.envoyee
+            ? veillePrecedente.horsBase.le || veillePrecedente.le || null
+            : veillePrecedente?.horsBase?.dernierSucces || null,
+        },
+      /*
+       * LES EFFECTIFS DE LA NUIT, ET CE QU'ILS ONT PERDU DEPUIS LA VEILLE.
+       *
+       * Les deux pertes de cet été — cinquante-huit catégories devenues quarante-deux, trois
+       * factures partenaire devenues zéro — n'ont déclenché aucune alerte. Elles ont été
+       * découvertes parce qu'un humain a cherché une pièce précise, huit jours plus tard.
+       *
+       * Compter chaque collection prend une milliseconde et se compare à la nuit d'avant. Ce
+       * n'est pas un garde-fou — il est trop tard pour empêcher quoi que ce soit — c'est un
+       * détecteur : il transforme « on s'en apercevra peut-être un jour » en « on le sait demain
+       * matin », pendant que la sauvegarde de la veille existe encore.
+       */
+      effectifs,
+      chutes: chutesDepuis(veillePrecedente?.effectifs, effectifs),
+      /* Ce que le journal des accès raconte de la nuit — voir api/_fraude.js. */
+      fraude,
       /* Un ménage dont on ne sait pas s'il a eu lieu ne referme rien : on croit la fuite fermée. */
       documents: documents?.fait
         ? { effaces: documents.effaces }
         : { effaces: 0, raison: documents?.raison || "inconnue" },
+      /*
+       * L'ÉTAT DU BILAN, AVEC SES MOTIFS — pas seulement deux booléens.
+       *
+       * On gardait « email: false, whatsapp: false » et rien d'autre : impossible de distinguer
+       * « la variable n'est pas posée » de « Meta refuse le modèle » ou de « le numéro est faux ».
+       * C'est la même erreur que celle qui a laissé la copie hors site échouer huit nuits de suite
+       * sous un « refus-resend-422 » que personne ne pouvait interpréter. Un motif qu'on ne garde
+       * pas est une panne qu'on ne répare pas.
+       */
       bilan: bilan && bilan.chiffres
-        ? { jour: bilan.chiffres.jour, email: !!bilan.parEmail?.envoye, whatsapp: !!bilan.parWhatsApp?.envoye,
-          raisonWhatsApp: bilan.parWhatsApp?.envoye ? null : bilan.parWhatsApp?.raison || null }
+        ? {
+          jour: bilan.chiffres.jour,
+          email: !!bilan.parEmail?.envoye,
+          raisonEmail: bilan.parEmail?.envoye ? null : bilan.parEmail?.raison || null,
+          detailEmail: bilan.parEmail?.envoye ? null : bilan.parEmail?.detail || null,
+          whatsapp: !!bilan.parWhatsApp?.envoye,
+          raisonWhatsApp: bilan.parWhatsApp?.envoye ? null : bilan.parWhatsApp?.raison || null,
+          detailWhatsApp: bilan.parWhatsApp?.envoye ? null : bilan.parWhatsApp?.detail || null,
+          modele: bilan.parWhatsApp?.modele || null,
+        }
         : bilan,
     };
     await noterVeille(compte);

@@ -19,6 +19,8 @@
  * reviendrait à promettre une alerte qui n'arriverait jamais.
  */
 
+import { expediteurCourriel, reponseCourriel } from "./_expediteur.js";
+
 const RESEND = "https://api.resend.com/emails";
 
 /**
@@ -83,7 +85,9 @@ export function corpsAlerte(alerte, document) {
  */
 export async function envoyerAlerteEcrasement(document, alerte) {
   const cle = process.env.RESEND_API_KEY;
-  const expediteur = process.env.EMAIL_FROM;
+  /* Jamais la variable brute : voir api/_expediteur.js — c'est ce qui a fait refuser
+   * chaque courriel automatique par Resend pendant des semaines. */
+  const expediteur = expediteurCourriel();
   if (!cle || !expediteur) return { envoye: false, raison: "courriel-non-configure" };
   const destinataire = destinataireAlerte(document);
   if (!destinataire) return { envoye: false, raison: "aucun-destinataire" };
@@ -93,7 +97,11 @@ export async function envoyerAlerteEcrasement(document, alerte) {
     const reponse = await fetch(RESEND, {
       method: "POST",
       headers: { Authorization: `Bearer ${cle}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: expediteur, to: [destinataire], subject: sujet, html }),
+      body: JSON.stringify({
+        from: expediteur, to: [destinataire], subject: sujet, html,
+        /* Sans elle, répondre à ce message écrit dans le vide : voir reponseCourriel(). */
+        ...(reponseCourriel() ? { reply_to: reponseCourriel() } : {}),
+      }),
     });
     if (!reponse.ok) {
       const detail = await reponse.text().catch(() => "");

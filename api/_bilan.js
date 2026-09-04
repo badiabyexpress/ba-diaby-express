@@ -21,6 +21,8 @@
  * un bilan qu'on croit recevoir et qui n'arrive pas est pire que pas de bilan du tout.
  */
 
+import { expediteurCourriel, enteteCourriel, reponseCourriel } from "./_expediteur.js";
+
 const RESEND = "https://api.resend.com/emails";
 const VERSION_GRAPH = "v21.0";
 
@@ -29,6 +31,22 @@ export const MODELE_BILAN = "bde_bilan_quotidien";
 
 const liste = (x) => (Array.isArray(x) ? x : []);
 const nombre = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
+
+/**
+ * Le numéro sous la forme que Meta attend : indicatif du pays, puis le numéro. Rien devant.
+ *
+ * Meta refuse « 00224… » avec « (#131009) Parameter value is not valid » — un message qui ne dit
+ * ni quel paramètre, ni pourquoi. Or « 00 » est exactement la façon dont un numéro international
+ * s'écrit en Guinée, et sur un clavier de téléphone c'est ce que l'on tape. On retire donc ce
+ * préfixe de composition, comme on retire déjà le « + » et les espaces : ce sont trois manières
+ * d'écrire le même numéro, et aucune n'est une faute de la part de qui la saisit.
+ *
+ * On ne retire jamais un « 0 » seul : dans un numéro national il fait partie du numéro.
+ */
+export function numeroPourMeta(valeur) {
+  const chiffres = String(valeur || "").replace(/\D/g, "");
+  return chiffres.startsWith("00") ? chiffres.slice(2) : chiffres;
+}
 
 /** Le jour visé, en heure de Conakry — qui est l'heure universelle, sans décalage ni été. */
 export function jourPrecedent(maintenant = new Date()) {
@@ -134,6 +152,7 @@ export function corpsBilan(chiffres, document) {
     sujet: `${nom} — bilan du ${jourLisible}`,
     html: `
       <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;font-size:15px;color:#0A2647;line-height:1.6">
+        ${enteteCourriel(document)}
         <p style="margin:0 0 4px;font-size:13px;color:#666">Bilan de la journée</p>
         <p style="margin:0 0 18px;font-size:19px;font-weight:700">${echapper(jourLisible)}</p>
         <table style="border-collapse:collapse">
@@ -159,7 +178,9 @@ export function corpsBilan(chiffres, document) {
 
 export async function envoyerBilanEmail(document, chiffres) {
   const cle = process.env.RESEND_API_KEY;
-  const expediteur = process.env.EMAIL_FROM;
+  /* Jamais la variable brute : voir api/_expediteur.js — c'est ce qui a fait refuser
+   * chaque courriel automatique par Resend pendant des semaines. */
+  const expediteur = expediteurCourriel();
   if (!cle || !expediteur) return { envoye: false, raison: "courriel-non-configure" };
   const destinataire = String(process.env.ALERTE_EMAIL || "").trim()
     || liste(document?.users).find((u) => u?.role === "Administrateur" && String(u.email || "").includes("@"))?.email;
@@ -170,7 +191,11 @@ export async function envoyerBilanEmail(document, chiffres) {
     const reponse = await fetch(RESEND, {
       method: "POST",
       headers: { Authorization: `Bearer ${cle}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: expediteur, to: [destinataire], subject: sujet, html }),
+      body: JSON.stringify({
+        from: expediteur, to: [destinataire], subject: sujet, html,
+        /* Sans elle, répondre à ce message écrit dans le vide : voir reponseCourriel(). */
+        ...(reponseCourriel() ? { reply_to: reponseCourriel() } : {}),
+      }),
     });
     if (!reponse.ok) {
       const detail = await reponse.text().catch(() => "");
@@ -190,10 +215,37 @@ export async function envoyerBilanEmail(document, chiffres) {
  * chez Meta. Il manque l'une des trois, on le dit et l'on s'arrête là : le courriel, lui, est déjà
  * parti avec le détail complet.
  */
-export async function envoyerBilanWhatsApp(chiffres) {
+export async function envoyerBilanWhatsApp(chiffres, destinataireEssai = null) {
   const jeton = process.env.WHATSAPP_TOKEN;
-  const numeroId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  const destinataire = String(process.env.BILAN_WHATSAPP || "").replace(/\D/g, "");
+  /*
+   * LE NOM DE LA VARIABLE, ET LA PANNE QU'IL A CAUSÉE.
+   *
+   * Ce fichier lisait `WHATSAPP_PHONE_NUMBER_ID`. Tout le reste de l'application — api/whatsapp.js,
+   * qui envoie réellement les messages aux clients depuis des mois — lit `WHATSAPP_PHONE_ID`. La
+   * variable au nom long n'a jamais existé nulle part.
+   *
+   * Conséquence : le bilan WhatsApp répondait « whatsapp-non-configure » quoi qu'on fasse. On
+   * pouvait poser BILAN_WHATSAPP, faire approuver le modèle chez Meta, redéployer — rien n'y
+   * changeait, et le message accusait une configuration manquante qui, elle, était en place.
+   *
+   * On lit donc le nom réellement utilisé, et l'on accepte l'ancien en second : si quelqu'un a posé
+   * la variable au nom long entre-temps en suivant l'ancien message, elle continue de servir plutôt
+   * que d'être ignorée en silence.
+   */
+  const numeroId = process.env.WHATSAPP_PHONE_ID || process.env.WHATSAPP_PHONE_NUMBER_ID;
+  /*
+   * UN NUMÉRO D'ESSAI, POUR SAVOIR LEQUEL DES DEUX EST FAUTIF.
+   *
+   * « Meta a accepté » et « le téléphone a reçu » sont deux choses différentes : l'API rend un
+   * identifiant de message dès qu'elle accepte la demande, sans rien promettre de la livraison. Un
+   * numéro qui n'est pas sur WhatsApp, un chiffre de travers, une ligne qui a changé de main —
+   * l'envoi est « réussi » et personne ne reçoit rien.
+   *
+   * Tant qu'on ne pouvait essayer que le numéro de la variable d'environnement, chaque hypothèse
+   * coûtait une modification dans Vercel et un redéploiement. On accepte donc un destinataire pour
+   * l'essai, sans rien changer à l'envoi de nuit, qui garde le sien.
+   */
+  const destinataire = numeroPourMeta(destinataireEssai || process.env.BILAN_WHATSAPP);
   if (!jeton || !numeroId) return { envoye: false, raison: "whatsapp-non-configure" };
   if (!destinataire) return { envoye: false, raison: "aucun-numero-de-bilan", modele: MODELE_BILAN };
 
@@ -209,7 +261,13 @@ export async function envoyerBilanWhatsApp(chiffres) {
           type: "template",
           template: {
             name: MODELE_BILAN,
-            language: { code: process.env.WHATSAPP_LANG || "fr" },
+            /*
+             * Même faute que pour le numéro : `WHATSAPP_LANG` n'existe nulle part, la variable
+             * s'appelle `WHATSAPP_TEMPLATE_LANG` partout ailleurs. Une langue qui ne correspond pas
+             * à celle du modèle déposé fait répondre à Meta « le modèle n'existe pas dans cette
+             * traduction » — un refus qu'on aurait mis sur le compte du modèle, et non de la langue.
+             */
+            language: { code: process.env.WHATSAPP_TEMPLATE_LANG || process.env.WHATSAPP_LANG || "fr" },
             components: [{
               type: "body",
               parameters: variablesBilan(chiffres).map((v) => ({ type: "text", text: String(v) })),

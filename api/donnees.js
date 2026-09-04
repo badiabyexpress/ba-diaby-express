@@ -36,6 +36,7 @@ import {
   vueClient, fusionnerEcritureClient,
   vuePartenaire, fusionnerEcriturePartenaire, partenaireDuCompte,
   fusionnerEcritureEquipe, vueEquipeZone, collectionsQuiFondent, intentionDeRemplacement,
+  sansSecretsTotp,
 } from "./_cloisonnement.js";
 import { envoyerAlerteEcrasement } from "./_alerte.js";
 
@@ -217,9 +218,19 @@ export default async function handler(req, res) {
         const perime = jetonPerime(ligne.value, session);
         if (perime) return res.status(401).json({ error: perime, sessionRevoquee: true });
       }
-      const valeurLue = estClient ? vueClient(ligne.value, compteId)
+      const vueDuRole = estClient ? vueClient(ligne.value, compteId)
         : estPartenaire ? vuePartenaire(ligne.value, partenaireDuCompte(ligne.value, compteId))
           : vueEquipeZone(ligne.value, compteId);
+      /*
+       * Un dernier tamis, le même pour tout le monde — équipe comprise, et c'est le point.
+       *
+       * Le secret du second facteur n'est pas une empreinte : c'est la clé. Qui la lit calcule les
+       * codes du téléphone de la personne, indéfiniment. Elle ne descend donc dans aucun
+       * navigateur, quel que soit le rôle ; ce qui descend, c'est un booléen d'état. Une copie
+       * téléchargée depuis un écran n'en porte donc pas — ce qui est tant mieux, puisque ces
+       * copies voyagent par courriel et par clé USB.
+       */
+      const valeurLue = sansSecretsTotp(vueDuRole);
       return res.status(200).json({ value: valeurLue, updated_at: ligne.updated_at || null });
     }
 

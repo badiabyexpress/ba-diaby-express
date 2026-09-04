@@ -35,6 +35,7 @@
  */
 
 import { effectivePermission } from "./_permissions.js";
+import { CHAMPS_TOTP_SECRETS, codesSecoursRestants } from "./_totp.js";
 
 /*
  * Ce que tout le monde peut voir.
@@ -118,10 +119,74 @@ function liste(valeur) {
   return Array.isArray(valeur) ? valeur : [];
 }
 
+/*
+ * UNE CONVERSATION NE SE REMPLACE PAS, ELLE SE COMPLÈTE.
+ *
+ * Les messages échangés avec un client ou un partenaire étaient repris tels quels de ce que la
+ * page envoyait. Le geste ordinaire — ouvrir sa messagerie, ce qui marque les messages comme lus
+ * et enregistre — renvoyait donc la liste telle que cette page la connaissait. Un onglet resté
+ * ouvert depuis le matin, ou un second appareil, et les messages arrivés entre-temps
+ * disparaissaient des deux côtés, sans trace et sans que personne le voie.
+ *
+ * On garde donc ce que la page rapporte — c'est là que vivent ses marques de lecture et son
+ * nouveau message — et l'on remet ce qu'elle ignorait. Supprimer un message n'est jamais un
+ * geste légitime ici : rien n'est perdu à ne pas le permettre, et beaucoup à le permettre.
+ */
+function fusionnerConversation(base, envoye) {
+  if (!Array.isArray(envoye)) return liste(base);
+  const rapportes = new Set(envoye.map((m) => m && m.id).filter(Boolean));
+  const oublies = liste(base).filter((m) => m && m.id && !rapportes.has(m.id));
+  if (oublies.length === 0) return envoye;
+  /* Remis dans l'ordre du temps : une conversation se lit du plus ancien au plus récent. */
+  return [...envoye, ...oublies].sort((a, b) => new Date(a?.date || 0) - new Date(b?.date || 0));
+}
+
 function sans(objet, champs) {
   if (!objet || typeof objet !== "object") return objet;
   const sortie = { ...objet };
   champs.forEach((c) => { delete sortie[c]; });
+  return sortie;
+}
+
+/*
+ * LE SECRET DU SECOND FACTEUR NE DESCEND JAMAIS AU NAVIGATEUR — À PERSONNE, PAS MÊME À L'ÉQUIPE.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Les empreintes de mots de passe sont retirées des espaces cloisonnés, mais l'équipe, elle,
+ * reçoit le document entier : c'est son travail de le réécrire. Une empreinte PBKDF2 n'y est pas
+ * un cadeau — il faut 150 000 tours par essai pour en tirer quelque chose.
+ *
+ * Un secret TOTP, lui, N'EST PAS UNE EMPREINTE : c'est la clé elle-même. Qui la lit calcule les
+ * codes aussi bien que le téléphone de la personne, pour toujours, sans rien casser. La laisser
+ * circuler reviendrait à afficher le second facteur de chaque collègue dans les données que
+ * n'importe quel poste de l'agence télécharge à chaque chargement de page.
+ *
+ * On la retire donc de TOUTES les lectures, et l'on met à la place un booléen : de quoi afficher
+ * « en place » ou « pas en place » dans les écrans, sans rien livrer de ce qui sert à entrer.
+ * L'écriture, elle, la remet en place (voir preserverIdentifiants) — un navigateur ne peut donc
+ * ni la lire ni l'effacer.
+ */
+function compteSansSecretTotp(compte) {
+  if (!compte || typeof compte !== "object") return compte;
+  const actif = !!compte.totpSecret;
+  const enPreparation = !!compte.totpEnAttente;
+  const restants = codesSecoursRestants(compte.totpSecours);
+  if (!actif && !enPreparation && !restants && compte.totpActif === undefined) return compte;
+  return {
+    ...sans(compte, CHAMPS_TOTP_SECRETS),
+    totpActif: actif,
+    totpEnPreparation: enPreparation,
+    /* Le nombre, jamais les empreintes : c'est tout ce dont l'écran a besoin pour prévenir. */
+    totpSecoursRestants: restants,
+  };
+}
+
+export function sansSecretsTotp(document) {
+  if (!document || typeof document !== "object" || Array.isArray(document)) return document;
+  const sortie = { ...document };
+  ["users", "clientAccounts"].forEach((cle) => {
+    if (!Array.isArray(sortie[cle])) return;
+    sortie[cle] = sortie[cle].map(compteSansSecretTotp);
+  });
   return sortie;
 }
 
@@ -205,7 +270,11 @@ export function fusionnerEcritureClient(actuel, propose, compteId) {
     if (!c || c.id !== compteId || !envoyeCompte) return c;
     const retenu = { ...c };
     CHAMPS_COMPTE_MODIFIABLES.forEach((champ) => {
-      if (envoyeCompte[champ] !== undefined) retenu[champ] = envoyeCompte[champ];
+      if (envoyeCompte[champ] === undefined) return;
+      // La conversation se complète ; tout le reste se remplace.
+      retenu[champ] = champ === "messages"
+        ? fusionnerConversation(c.messages, envoyeCompte.messages)
+        : envoyeCompte[champ];
     });
     return retenu;
   });
@@ -364,6 +433,32 @@ export function fusionnerEcriturePartenaire(actuel, propose, partenaireId, compt
       ...sans(c, CHAMPS_COLIS_RESERVES),
       partenaireId,
       validationPartenaire: { statut: "En attente" },
+      /*
+       * LES MONTANTS ET LE PARCOURS SONT IMPOSÉS, PAS REÇUS.
+       *
+       * Le formulaire du partenaire posait déjà ces valeurs ; le serveur, lui, les acceptait
+       * telles qu'elles venaient. Un partenaire n'a pas besoin de notre écran pour écrire : il
+       * lui suffit d'envoyer autre chose. Vérifié — un colis déposé avec
+       * « prix: 999999, paye: 888888, reste: 111111, status: "Livré" » était accepté tel quel.
+       *
+       * Ce que cela permettait :
+       *   — `prix` gonfle le chiffre d'affaires de l'entreprise et le « reste à encaisser » de
+       *     ses fiches de voyage, avec de l'argent qu'aucun client ne doit ;
+       *   — `paye` fabrique un encaissement qui n'a jamais eu lieu ;
+       *   — `facturePartenaireId` rattache le colis à une facture DÉJÀ RÉGLÉE, et il se lit
+       *     alors « Réglé » sur le bordereau comme sur la fiche de voyage ;
+       *   — `status: "Livré"` fait franchir au colis tout le parcours sans que l'entreprise
+       *     l'ait pesé, contrôlé ni transporté.
+       *
+       * Un colis de partenaire n'est jamais facturé au comptoir : ses trois champs de prix
+       * client valent zéro, par construction. Il entre au dépôt, et nulle part ailleurs. Ce
+       * qu'il nous doit vit à part, dans `prixPartenaire`, et c'est l'agent qui l'arrête en le
+       * vérifiant.
+       */
+      prix: 0, paye: 0, reste: 0,
+      facturePartenaireId: null,
+      status: "Enregistré",
+      historique: [{ status: "Enregistré", date: new Date().toISOString() }],
     }));
 
   /* ---- Les utilisateurs ----------------------------------------------------------------- */
@@ -423,7 +518,9 @@ export function fusionnerEcriturePartenaire(actuel, propose, partenaireId, compt
        * Les messages échangés avec l'entreprise vivent sur sa fiche : il doit pouvoir en ajouter,
        * et marquer comme lus ceux qu'il a lus.
        */
-      if (Array.isArray(envoyeU.partenaireMessages)) retenu.partenaireMessages = envoyeU.partenaireMessages;
+      if (Array.isArray(envoyeU.partenaireMessages)) {
+        retenu.partenaireMessages = fusionnerConversation(u.partenaireMessages, envoyeU.partenaireMessages);
+      }
       users.push(u.id === compteId ? sansMotDePasseHerite(retenu, envoyeU) : retenu);
       return;
     }
@@ -679,6 +776,33 @@ export function preserverIdentifiants(comptesBase, comptesSortie) {
     const dateBase = Date.parse(ancien.sessionsRevoqueesLe || "") || 0;
     const dateEnvoyee = Date.parse(compte.sessionsRevoqueesLe || "") || 0;
     if (dateBase > dateEnvoyee) repris.sessionsRevoqueesLe = ancien.sessionsRevoqueesLe;
+
+    /*
+     * LE SECOND FACTEUR NE SE POSE NI NE SE RETIRE DEPUIS UN NAVIGATEUR.
+     *
+     * Le secret est retiré de toutes les lectures (voir sansSecretsTotp) : aucune page ne le
+     * connaît, donc aucune page ne peut le renvoyer. Sans cette ligne, le premier enregistrement
+     * venu l'effacerait par simple omission — exactement la mécanique qui avait vidé les mots de
+     * passe de deux comptes clients en août — et la double authentification tomberait toute seule,
+     * sans un mot, sur le compte le mieux protégé de l'entreprise.
+     *
+     * La règle est donc absolue et vaut dans les deux sens : ce qui est en base reste en base, ce
+     * qui n'y est pas ne s'y met pas. Poser ou retirer le second facteur passe par api/login.js,
+     * qui exige le code du téléphone dans un sens et le mot de passe dans l'autre.
+     *
+     * Elle est placée AVANT le raccourci du changement de mot de passe : changer son mot de passe
+     * ne doit pas emporter son second facteur avec lui.
+     */
+    CHAMPS_TOTP_SECRETS.forEach((champ) => {
+      if (ancien[champ] !== undefined) repris[champ] = ancien[champ];
+      else delete repris[champ];
+    });
+    /* Marques de lecture, pas des données : elles sont recalculées à chaque lecture. */
+    delete repris.totpActif;
+    delete repris.totpEnPreparation;
+    delete repris.totpSecoursRestants;
+    if (ancien.totpActiveLe !== undefined) repris.totpActiveLe = ancien.totpActiveLe;
+    else delete repris.totpActiveLe;
 
     if (compte.motdepasseSecure || compte.motdepasse) return repris; // changement voulu : il gagne
     CHAMPS_IDENTIFIANTS.forEach((champ) => {

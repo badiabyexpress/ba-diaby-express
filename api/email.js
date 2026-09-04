@@ -32,64 +32,15 @@
  */
 
 import { refusSaufEquipe } from "./_session.js";
+import { analyserExpediteur } from "./_expediteur.js";
 
 /*
- * L'adresse expéditrice doit avoir la forme « Nom <adresse@domaine> », ou être une adresse nue.
- * Resend refuse tout le reste — et son refus ne dit pas ce qui cloche, ce qui laisse chercher
- * longtemps quand la valeur porte des guillemets de trop ou qu'un chevron manque.
+ * L'analyse de EMAIL_FROM vit maintenant dans api/_expediteur.js, et pour une raison précise :
+ * elle n'était appliquée QUE dans ce fichier. Les cinq autres expéditeurs du serveur — copie hors
+ * site, bilan quotidien, alertes d'écrasement, de connexion et de fraude — donnaient la variable
+ * brute à Resend, qui les refusait toutes par un 422 « Invalid `from` field ». Les courriels aux
+ * clients partaient, aucun courriel automatique ne partait, et rien ne reliait les deux.
  */
-const ADRESSE_SEULE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-function analyserExpediteur(valeur) {
-  /*
-   * On répare les deux fautes de saisie courantes plutôt que de les refuser.
-   *
-   * Cette valeur se saisit dans l'interface de Vercel, souvent depuis un téléphone. Les chevrons
-   * demandent d'aller chercher la table des symboles et se perdent en route ; les guillemets, eux,
-   * s'ajoutent par réflexe. Dans les deux cas Resend refuse l'envoi sans dire pourquoi, et
-   * l'application ouvre un brouillon — un refus silencieux pour un caractère manquant.
-   *
-   * Rien n'est deviné : on ne reconstruit l'adresse que si la fin de la valeur EST une adresse
-   * e-mail. Ce qui précède devient le nom affiché.
-   */
-  let brut = String(valeur || "").trim();
-  // Guillemets englobants, simples ou doubles.
-  const englobants = /^(["'])([\s\S]*)\1$/.exec(brut);
-  if (englobants) brut = englobants[2].trim();
-
-  const entreChevrons = /<([^>]+)>\s*$/.exec(brut);
-  if (entreChevrons) {
-    const adresse = entreChevrons[1].trim();
-    const valide = ADRESSE_SEULE.test(adresse);
-    const nom = brut.slice(0, entreChevrons.index).trim().replace(/^(["'])([\s\S]*)\1$/, "$2");
-    return {
-      valide,
-      domaine: valide ? adresse.split("@")[1] : null,
-      avecNom: !!nom,
-      normalise: valide ? (nom ? `${nom} <${adresse}>` : adresse) : null,
-    };
-  }
-
-  if (ADRESSE_SEULE.test(brut)) {
-    return { valide: true, domaine: brut.split("@")[1], avecNom: false, normalise: brut };
-  }
-
-  // « Ba-Diaby Express contact@badiabyexpress.com » — les chevrons manquent, on les remet.
-  const morceaux = brut.split(/\s+/);
-  const derniere = morceaux[morceaux.length - 1] || "";
-  if (morceaux.length > 1 && ADRESSE_SEULE.test(derniere)) {
-    const nom = morceaux.slice(0, -1).join(" ").replace(/^(["'])([\s\S]*)\1$/, "$2").trim();
-    return {
-      valide: true,
-      domaine: derniere.split("@")[1],
-      avecNom: !!nom,
-      normalise: nom ? `${nom} <${derniere}>` : derniere,
-      repare: true,
-    };
-  }
-
-  return { valide: false, domaine: null, avecNom: false, normalise: null };
-}
 
 export default async function handler(req, res) {
   /*

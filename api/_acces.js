@@ -26,6 +26,7 @@
 
 import crypto from "node:crypto";
 import { destinataireAlerte } from "./_alerte.js";
+import { expediteurCourriel, enteteCourriel, reponseCourriel } from "./_expediteur.js";
 
 const RESEND = "https://api.resend.com/emails";
 
@@ -154,6 +155,7 @@ export function corpsAlerteConnexion(entree, document) {
     sujet: `${nom} — connexion depuis un appareil inhabituel (${entree.identifiant})`,
     html: `
       <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;font-size:15px;color:#0A2647;line-height:1.6">
+        ${enteteCourriel(document)}
         <p><strong>Une connexion vient d’être faite depuis un appareil et une adresse jamais vus pour ce compte.</strong></p>
         <table style="border-collapse:collapse;margin:16px 0">
           <tr><td style="padding:4px 14px 4px 0;color:#666">Compte</td><td><strong>${echapper(entree.identifiant)}</strong>${entree.qui ? ` — ${echapper(entree.qui)}` : ""}</td></tr>
@@ -182,7 +184,9 @@ export function corpsAlerteConnexion(entree, document) {
 
 export async function envoyerAlerteConnexion(document, entree) {
   const cle = process.env.RESEND_API_KEY;
-  const expediteur = process.env.EMAIL_FROM;
+  /* Jamais la variable brute : voir api/_expediteur.js — c'est ce qui a fait refuser
+   * chaque courriel automatique par Resend pendant des semaines. */
+  const expediteur = expediteurCourriel();
   if (!cle || !expediteur) return { envoye: false, raison: "courriel-non-configure" };
   const destinataire = destinataireAlerte(document);
   if (!destinataire) return { envoye: false, raison: "aucun-destinataire" };
@@ -192,7 +196,11 @@ export async function envoyerAlerteConnexion(document, entree) {
     const reponse = await fetch(RESEND, {
       method: "POST",
       headers: { Authorization: `Bearer ${cle}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from: expediteur, to: [destinataire], subject: sujet, html }),
+      body: JSON.stringify({
+        from: expediteur, to: [destinataire], subject: sujet, html,
+        /* Sans elle, répondre à ce message écrit dans le vide : voir reponseCourriel(). */
+        ...(reponseCourriel() ? { reply_to: reponseCourriel() } : {}),
+      }),
     });
     if (!reponse.ok) {
       const detail = await reponse.text().catch(() => "");

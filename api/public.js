@@ -47,7 +47,13 @@ async function chercherTransfertPublic(saisie, parCode) {
   } else {
     filtre = `reference=eq.${encodeURIComponent(saisie.toUpperCase())}`;
   }
-  const reponse = await fetch(`${url}/rest/v1/transferts?${filtre}&select=*&limit=1`, {
+  /*
+   * Un transfert retiré par l'administration ne se vérifie plus en ligne. Le QR d'un reçu déjà
+   * imprimé continue d'exister — on ne rappelle pas un papier — mais il ne doit pas confirmer
+   * une opération que l'entreprise a sortie de ses livres : ce serait donner du crédit à un reçu
+   * qui n'en a plus. La page répond alors comme pour une référence inconnue.
+   */
+  const reponse = await fetch(`${url}/rest/v1/transferts?${filtre}&supprime_le=is.null&select=*&limit=1`, {
     headers: { apikey: cle, Authorization: `Bearer ${cle}` },
   }).catch(() => null);
   if (!reponse || !reponse.ok) return null;
@@ -63,20 +69,46 @@ function historiquePublic(historique) {
   }));
 }
 
+/**
+ * « Tiguidanké Toure » devient « T. Toure ».
+ *
+ * LE NOM DE FAMILLE RESTE, LES PRÉNOMS PASSENT EN INITIALE.
+ *
+ * C'est ce qu'il faut pour qu'un client reconnaisse SON colis, et ce qu'il faut pour qu'un inconnu
+ * qui a deviné un numéro ne reparte pas avec un carnet d'adresses. C'est déjà la règle appliquée
+ * aux transferts d'argent dans ce même fichier ; les colis y échappaient.
+ *
+ * Un nom d'un seul mot est rendu tel quel : il n'y a rien à masquer, et l'effacer empêcherait la
+ * reconnaissance sans rien protéger.
+ */
+function nomAbrege(valeur) {
+  const mots = String(valeur || "").trim().split(/\s+/).filter(Boolean);
+  if (mots.length <= 1) return mots[0] || "";
+  const famille = mots[mots.length - 1];
+  const prenoms = mots.slice(0, -1).map((m) => `${m.charAt(0).toUpperCase()}.`).join(" ");
+  return `${prenoms} ${famille}`;
+}
+
 /*
  * Le colis, tel qu'un porteur du numéro de suivi peut le voir.
  *
  * On garde ce que la page affiche — et rien d'autre. Pas de téléphone, pas d'adresse, pas de
  * détail du contenu, pas de prix d'achat : celui qui a le numéro n'est pas forcément le
  * destinataire, et un numéro de suivi se devine.
+ *
+ * ET IL SE DEVINE VRAIMENT. « BDE » suivi du jour, du mois et du rang d'arrivée : BDE030901,
+ * BDE030902, BDE030903… Les téléphones et les adresses avaient bien été retirés d'ici, mais les
+ * noms complets étaient restés. Il suffisait donc de compter pour lever, jour après jour,
+ * l'expéditeur et le destinataire de chaque colis de l'entreprise — le carnet d'adresses entier,
+ * sans effraction et sans laisser de trace. D'où les initiales.
  */
 function colisPublic(c) {
   return {
     tracking: c.tracking,
     status: c.status,
     createdAt: c.createdAt,
-    expediteur: c.expediteur || "",
-    destinataire: c.destinataire || "",
+    expediteur: nomAbrege(c.expediteur),
+    destinataire: nomAbrege(c.destinataire),
     expediteurPays: c.expediteurPays || "GN",
     destinatairePays: c.destinatairePays || c.pays,
     pays: c.pays,
@@ -147,14 +179,49 @@ const INTROUVABLES_PAR_FENETRE = 10;
 export default async function handler(req, res) {
   if (req.method !== "GET") return res.status(405).json({ error: "Méthode non autorisée" });
 
-  const { suivi, vitrine, cgu } = req.query || {};
+  const { suivi, vitrine, cgu, logo } = req.query || {};
+
+  /*
+   * LE LOGO, À UNE VRAIE ADRESSE.
+   *
+   * Il est enregistré dans les données sous forme de `data:image/...;base64,…`, et c'est
+   * délibéré : les PDF le dessinent à l'impression, et jsPDF ne sait pas aller chercher une image
+   * distante. Mais AUCUN CLIENT DE MESSAGERIE N'AFFICHE UNE IMAGE `data:` — Gmail les retire, et
+   * l'on obtiendrait un carré vide en tête de chaque bilan.
+   *
+   * On le sert donc ici, décodé, sous une adresse ordinaire que n'importe quel client sait
+   * charger. C'est déjà ce que la vitrine publie de l'entreprise : rien de nouveau n'est exposé.
+   *
+   * Sans logo enregistré, on répond 404 plutôt qu'une image vide : l'appelant sait alors ne rien
+   * afficher, au lieu de montrer une icône cassée.
+   */
+  if (logo !== undefined) {
+    try {
+      const { donnees } = await lireBase();
+      const brut = String(donnees?.branding?.logo || "");
+      const m = /^data:(image\/[a-z+.-]+);base64,([A-Za-z0-9+/=]+)$/i.exec(brut);
+      if (!m) return res.status(404).end();
+      const octets = Buffer.from(m[2], "base64");
+      res.setHeader("Content-Type", m[1]);
+      res.setHeader("Content-Length", String(octets.length));
+      /*
+       * Une heure de cache, et pas davantage : un logo change rarement, mais le jour où il change
+       * on ne veut pas que les courriels de la semaine gardent l'ancien. Les relais de messagerie
+       * recopient l'image de leur côté, ce délai leur suffit largement.
+       */
+      res.setHeader("Cache-Control", "public, max-age=3600");
+      return res.status(200).send(octets);
+    } catch (e) {
+      return res.status(404).end();
+    }
+  }
 
   /*
    * Le verrou est posé AVANT la lecture de la base : un refus doit coûter moins cher qu'une
    * réponse, sinon limiter les appels revient à s'infliger la charge qu'on voulait éviter.
    */
   if (suivi !== undefined) {
-    const compte = passage({
+    const compte = await passage({
       nature: "suivi-public", cle: adresseDe(req),
       max: SUIVIS_PAR_FENETRE, fenetreMs: FENETRE_SUIVI_MS,
     });
@@ -207,19 +274,21 @@ export default async function handler(req, res) {
        * UN TRANSFERT D'ARGENT SE SUIT AU MÊME ENDROIT QU'UN COLIS.
        *
        * Le client ne sait pas qu'il y a deux systèmes derrière : il tape ce qu'on lui a donné.
-       * On reconnaît donc un code de retrait (huit chiffres, avec ou sans le préfixe) et une
+       * On reconnaît donc un code de retrait — deux lettres et six chiffres depuis septembre,
+       * huit chiffres pour ceux émis avant, avec ou sans le préfixe — et une
        * référence (TX-…), et on répond avec ce qu'un inconnu peut voir sans nuire à personne :
        * l'état, la destination, le montant à recevoir, et des initiales. Ni téléphone, ni pièce
        * d'identité, ni nom complet de l'autre partie — un code tapé au hasard ne doit jamais
        * renseigner sur des gens qu'on ne connaît pas.
        */
-      const estCodeTransfert = /^(TRF[\s-]*)?\d{8}$/i.test(code.replace(/\s/g, " ").trim());
+      const sansSeparateurs = code.toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/^TRF/, "");
+      const estCodeTransfert = /^[A-Z]{2}\d{6}$/.test(sansSeparateurs) || /^\d{8}$/.test(sansSeparateurs);
       const estReferenceTransfert = /^TX-\d{8}-\d{6}$/i.test(code);
       if ((estCodeTransfert || estReferenceTransfert) && secretDisponible()) {
         const trouve = await chercherTransfertPublic(code, estCodeTransfert);
         if (trouve) return res.status(200).json({ transfert: trouve, branding: donnees.branding || {} });
         if (estReferenceTransfert) {
-          const balayage = passage({
+          const balayage = await passage({
             nature: "suivi-introuvable", cle: adresseDe(req),
             max: INTROUVABLES_PAR_FENETRE, fenetreMs: FENETRE_SUIVI_MS,
           });
@@ -229,7 +298,7 @@ export default async function handler(req, res) {
           }
           return res.status(200).json({ colis: [], users: [] });
         }
-        // Un code à huit chiffres qui ne correspond à rien peut aussi être un numéro de colis :
+        // Un code de huit caractères qui ne correspond à rien peut aussi être un numéro de colis :
         // on continue la recherche plus bas plutôt que de refuser tout de suite.
       }
       const trouve = (donnees.colis || []).find((c) => String(c.tracking || "").toUpperCase() === code);
@@ -240,7 +309,7 @@ export default async function handler(req, res) {
          * même (une liste vide) pour ne pas apprendre à l'automate ce qui existe et ce qui n'existe
          * pas.
          */
-        const balayage = passage({
+        const balayage = await passage({
           nature: "suivi-introuvable", cle: adresseDe(req),
           max: INTROUVABLES_PAR_FENETRE, fenetreMs: FENETRE_SUIVI_MS,
         });

@@ -1,7 +1,13 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useDeferredValue, memo, createContext, useContext } from "react";
 import { Mail, Upload, Key, Package, Truck, Users, DollarSign, LayoutDashboard, Settings, Search, Plus, LogOut, MapPin, Plane, Ship, CheckCircle2, Clock, AlertTriangle, X, User, Lock, Shield, ChevronRight, ChevronLeft, ChevronDown, Printer, Trash2, MessageCircle, Camera, Navigation, Globe, Sparkles, Download, RefreshCw, PenTool, ShieldCheck, Receipt, FileStack, Sun, Moon, Menu, Eye, EyeOff, Check, Bell, SlidersHorizontal, Copy, MoreHorizontal, Wallet, Banknote, Send, ArrowRightLeft, HandCoins, Coins, ArrowUpRight, ArrowDownLeft, ScrollText, Ban } from "lucide-react";
 import { ROLES, PERMISSIONS_SCHEMA, ROLE_DEFAULT_PERMISSIONS, effectivePermission } from "../api/_permissions.js";
-import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree, relireDuServeur } from "./lib/storage.js";
+/*
+ * Les règles de détection viennent du serveur, et c'est volontaire — comme les permissions
+ * au-dessus. Le fichier est pur : il prend un document, il rend une liste, il n'ouvre ni base ni
+ * variable d'environnement.
+ */
+import { signauxDeFraude } from "../api/_fraude.js";
+import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree, relireDuServeur, oublierCacheLocal } from "./lib/storage.js";
 import { VILLES_PAR_PAYS } from "./data/villesParPays.js";
 
 /* ---------- design tokens ----------
@@ -937,6 +943,36 @@ function estColisPartenaire(colis) {
   return !!colis?.partenaireId;
 }
 
+/**
+ * CE QU'UNE LIGNE DE LA LISTE DOIT AFFICHER SOUS « FRAIS D'EXPÉDITION » — ET DE QUI C'EST DÛ.
+ *
+ * Sur un colis partenaire, `prix` vaut zéro par construction, et c'est voulu : ce n'est pas le
+ * client du partenaire que l'entreprise facture. Ce que ce client paie au partenaire ne se trouve
+ * nulle part dans cette application, et ne doit pas s'y trouver — c'est l'affaire du partenaire,
+ * pas la nôtre.
+ *
+ * Ce qui EST dû, en revanche, c'est ce que le partenaire doit à l'entreprise, au tarif de son
+ * contrat. Ce montant existe : il vit dans `prixPartenaire`, dans la devise du contrat. La liste
+ * lisait pourtant `prix` sans regarder : ces colis s'affichaient « 0 GNF », comme s'ils ne
+ * valaient rien, alors qu'ils sont bel et bien facturés — ailleurs, et à quelqu'un d'autre. Sur
+ * une page de soixante-seize colis, cela fausse la lecture de toute la colonne.
+ *
+ * LA MENTION N'EST PAS DÉCORATIVE.
+ *
+ * Sans elle, un agent lit ce nombre comme ce que le destinataire doit régler au comptoir, et le
+ * lui réclame — alors que ce colis est déjà payé d'avance par le partenaire. Le montant seul
+ * serait plus trompeur que le zéro qu'il remplace.
+ */
+function fraisAffichesColis(colis) {
+  const tauxGNF = LIVE_RATES.GNF || CURRENCIES.GNF;
+  if (!estColisPartenaire(colis)) {
+    return { montant: fmtGNF((Number(colis?.prix) || 0) * tauxGNF), du: null };
+  }
+  /* `prixPartenaire` est dans la devise du contrat ; la colonne, elle, est en francs. */
+  const duEnEuros = versEUR(Number(colis?.prixPartenaire) || 0, colis?.devisePartenaire);
+  return { montant: fmtGNF(duEnEuros * tauxGNF), du: "Facturé au partenaire" };
+}
+
 /*
  * Le nom sous lequel un partenaire s'affiche partout.
  *
@@ -1749,6 +1785,41 @@ function statutFacturePartenaire(facture) {
   if (regle <= 0.005) return "Impayée";
   return regle >= (Number(facture?.total) || 0) - 0.005 ? "Réglée" : "Partielle";
 }
+/*
+ * CE QU'UN COLIS PARTENAIRE DOIT ENCORE À LA CAISSE.
+ *
+ * Les documents de transport écrivaient « Sur facture » à la place du règlement. C'était exact
+ * mais inutilisable : celui qui arrête les comptes veut un chiffre, pas un renvoi. La question
+ * qu'il se pose est la même que pour un client — combien a été payé, combien reste-t-il dû.
+ *
+ * Trois situations, et une seule réponse chiffrée pour chacune :
+ *
+ *   — Le colis n'est encore sur aucune facture : rien n'a été payé, tout est dû.
+ *   — Sa facture est réglée : tout est payé, rien n'est dû.
+ *   — Sa facture est partiellement réglée : on répartit le versement au prorata du poids de ce
+ *     colis dans la facture. Attribuer un versement à tel colis plutôt qu'à tel autre serait une
+ *     invention ; le prorata, lui, est une convention comptable ordinaire, et surtout il fait
+ *     tomber les totaux juste — la somme des parts vaut exactement le versement reçu.
+ *
+ * Les montants sont dans la devise du CONTRAT, comme prixPartenaire et comme facture.total :
+ * c'est l'appelant qui convertit pour son document.
+ */
+function reglementColisPartenaire(colis, facturesPartenaire) {
+  const du = Number(colis?.prixPartenaire) || 0;
+  const facture = (facturesPartenaire || []).find((f) => f.id === colis?.facturePartenaireId);
+  if (!facture) return { paye: 0, reste: du, facture: null, etat: "À facturer" };
+  const total = Number(facture.total) || 0;
+  const regle = totalRegleFacture(facture);
+  // Une facture à zéro ne se répartit pas : on évite la division et on la dit réglée.
+  const paye = total <= 0.005 ? du : Math.min(du, +(du * (regle / total)).toFixed(2));
+  return {
+    paye,
+    reste: +Math.max(0, du - paye).toFixed(2),
+    facture,
+    etat: statutFacturePartenaire(facture),
+  };
+}
+
 const STATUT_FACTURE_STYLE = {
   "Impayée": { bg: "var(--danger-bg)", fg: "var(--danger-fg)" },
   "Partielle": { bg: "var(--warn-bg)", fg: "var(--warn-fg)" },
@@ -2928,6 +2999,63 @@ function trackingUrlFor(tracking) {
 }
 
 /*
+ * L'ADRESSE DE VÉRIFICATION D'UN TRANSFERT — ET POURQUOI ELLE NE PORTE PAS LE CODE.
+ *
+ * Un reçu se photographie et se transfère sur WhatsApp ; c'est même ce qu'on demande à l'agent de
+ * faire. Le code de retrait, lui, VAUT PAIEMENT : quiconque le présente avec une pièce au nom du
+ * bénéficiaire repart avec l'argent. Le mettre dans le QR — donc dans une image qui circule, et
+ * dans une adresse qui s'enregistre dans l'historique du navigateur, dans les journaux du serveur
+ * et dans les aperçus de lien — reviendrait à joindre les billets au reçu.
+ *
+ * Le QR porte donc la RÉFÉRENCE (TX-…), qui ne débloque rien. Elle ouvre une page publique qui
+ * montre l'état du transfert, la destination, le montant à recevoir et des initiales : de quoi
+ * s'assurer que l'opération existe et qu'elle est bien celle qu'on croit, sans rien apprendre sur
+ * des inconnus à qui taperait une référence au hasard.
+ *
+ * Le code reste imprimé en toutes lettres sur le reçu de l'expéditeur — c'est à lui qu'il est
+ * remis, en main propre, avec l'avertissement qui va avec.
+ */
+/*
+ * LES NUMÉROS DE SUIVI SONT CLIQUABLES SUR LE PAPIER AUSSI.
+ *
+ * À l'écran, un numéro de colis ouvre sa fiche depuis une vingtaine d'endroits. Sur la fiche de
+ * voyage et sur le bordereau — les deux documents qu'on relit vraiment pour faire les comptes —
+ * c'était du texte mort : pour savoir qui est « BDE310814 », il fallait le recopier à la main
+ * dans la recherche. Douze caractères, plusieurs dizaines de fois par jour, avec chaque fois la
+ * possibilité d'en rater un.
+ *
+ * Un PDF sait porter des liens. On pose donc, sur la cellule du numéro, la même adresse que celle
+ * des QR codes déjà imprimés sur les cartons : la page de suivi publique. Elle a trois qualités
+ * qu'aucune adresse interne n'aurait ici — elle s'ouvre sans compte, depuis n'importe quel
+ * téléphone, et elle ne montre que ce qu'un porteur du numéro peut légitimement voir. Un
+ * bordereau se remet au transporteur : il ne doit pas ouvrir nos écrans.
+ *
+ * La couleur et le soulignement sont indispensables : un lien qu'on ne voit pas n'est pas un lien.
+ */
+const LIEN_PDF = [22, 92, 170];
+
+function poserLiensSuivi(doc, donnees, colonne = 0) {
+  const cellule = donnees?.cell;
+  if (!cellule || donnees.section !== "body") return;
+  if (donnees.column?.index !== colonne) return;
+  const code = String(cellule.raw ?? "").trim();
+  if (!code) return;
+  doc.link(cellule.x, cellule.y, cellule.width, cellule.height, { url: trackingUrlFor(code) });
+}
+
+/* Le même geste sur le chemin de repli, qui écrit le tableau ligne à ligne sans le greffon. */
+function texteAvecLienSuivi(doc, code, x, y) {
+  const texte = String(code ?? "");
+  if (!texte) return;
+  doc.setTextColor(...LIEN_PDF);
+  doc.textWithLink(texte, x, y, { url: trackingUrlFor(texte) });
+}
+
+function lienVerificationTransfert(reference) {
+  return `${adressePublique()}/verify-transfer/${encodeURIComponent(reference)}`;
+}
+
+/*
  * LES ADRESSES COURTES.
  *
  * Chaque page publique de ce site se demandait par un paramètre : « …/?client », « …/?suivi=1&
@@ -2946,9 +3074,15 @@ function trackingUrlFor(tracking) {
  * Cela ne tient que parce que vercel.json réécrit tout ce qui n'est pas /api/ vers index.html :
  * sans cette règle, « /client » serait un fichier introuvable et répondrait 404.
  */
+/*
+ * « verify-transfer » et « verifier-transfert » mènent au suivi, et c'est voulu : le client ne
+ * sait pas qu'il y a deux systèmes derrière, il scanne ce qu'on lui a imprimé. La page de suivi
+ * reconnaît déjà une référence de transfert (TX-…) aussi bien qu'un numéro de colis — il n'y a
+ * donc pas de seconde page à écrire, ni de seconde fonction serverless à déployer.
+ */
 const CHEMINS_COURTS = {
   client: ["client", "espace-client", "espaceclient", "mon-compte"],
-  suivi: ["suivi", "colis"],
+  suivi: ["suivi", "colis", "verify-transfer", "verifier-transfert"],
   cgu: ["cgu", "conditions"],
   connexion: ["connexion"],
 };
@@ -3621,6 +3755,197 @@ function useIsMobile() {
 }
 
 /**
+ * L'INSTALLATION SUR L'ÉCRAN D'ACCUEIL — et pourquoi c'est une mesure de sécurité.
+ *
+ * On aurait pu distribuer un fichier .apk aux agents. On ne le fera pas : envoyer un fichier
+ * d'installation par WhatsApp apprend deux réflexes à un agent — installer ce qu'il reçoit, et
+ * autoriser les « sources inconnues » sur son téléphone. À partir de là, n'importe qui peut lui
+ * envoyer un « Ba-Diaby Express mise à jour.apk » qui affiche notre écran de connexion et récolte
+ * son mot de passe. C'est la méthode la plus courante aujourd'hui, et elle ne marche que sur des
+ * gens à qui on a appris à installer des fichiers.
+ *
+ * Ici il n'y a pas de fichier : il y a une adresse, que le certificat empêche un faux de prendre.
+ *
+ * Reste que l'installation se cache dans le menu du navigateur. Expliquer à chaque agent où
+ * cliquer ressemble assez à une manipulation étrange pour qu'il préfère, justement, un fichier
+ * qu'on lui envoie. D'où ce bouton : ce n'est pas un confort, c'est ce qui rend le refus de l'APK
+ * tenable.
+ */
+function dejaInstallee() {
+  if (typeof window === "undefined") return false;
+  if (window.navigator?.standalone) return true; // la façon de l'iPhone
+  return !!window.matchMedia?.("(display-mode: standalone)")?.matches;
+}
+
+/*
+ * L'iPhone ne propose rien : ni événement à écouter, ni bouton à déclencher. La pose sur l'écran
+ * d'accueil s'y fait à la main. On ne peut donc qu'expliquer — mais expliquer vaut mieux que ne
+ * rien afficher, car c'est exactement l'agent qu'on laisserait sans réponse qui acceptera un
+ * fichier envoyé par message.
+ *
+ * L'iPad récent se présente comme un Mac ; le nombre de points de contact le trahit.
+ */
+function estAppareilApple() {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  return /iPad|iPhone|iPod/.test(ua) || (/Macintosh/.test(ua) && (navigator.maxTouchPoints || 0) > 1);
+}
+
+function estAndroid() {
+  if (typeof navigator === "undefined") return false;
+  return /Android/.test(navigator.userAgent || "");
+}
+
+function useInstallation() {
+  /*
+   * LA PROPOSITION EST DÉJÀ ARRIVÉE, ET ELLE A ÉTÉ RETENUE POUR NOUS.
+   *
+   * Chrome ne l'envoie qu'une fois, au chargement de la page — donc avant la connexion, alors que
+   * ce menu n'existe pas encore. Se contenter d'écouter ici, c'était écouter après le passage du
+   * train : le bouton ne s'affichait jamais, sur aucun téléphone. src/main.jsx la retient dès le
+   * premier instant ; on la récupère.
+   */
+  const [invite, setInvite] = useState(() => (typeof window === "undefined" ? null : window.__bdeInvitationInstallation));
+  const [installee, setInstallee] = useState(dejaInstallee);
+
+  useEffect(() => {
+    /* Au cas où elle arriverait plus tard : on écoute les deux, la nôtre et celle du navigateur. */
+    const relayee = () => setInvite(window.__bdeInvitationInstallation);
+    const capter = (e) => { e.preventDefault(); setInvite(e); };
+    const posee = () => { setInvite(null); setInstallee(true); };
+    window.addEventListener("bde-installable", relayee);
+    window.addEventListener("bde-installee", posee);
+    window.addEventListener("beforeinstallprompt", capter);
+    window.addEventListener("appinstalled", posee);
+    return () => {
+      window.removeEventListener("bde-installable", relayee);
+      window.removeEventListener("bde-installee", posee);
+      window.removeEventListener("beforeinstallprompt", capter);
+      window.removeEventListener("appinstalled", posee);
+    };
+  }, []);
+
+  async function installer() {
+    if (!invite) return;
+    invite.prompt();
+    try { await invite.userChoice; } catch { /* refus ou fenêtre fermée : rien à rattraper */ }
+    /* L'invitation ne sert qu'une fois. La garder laisserait un bouton qui ne fait plus rien. */
+    window.__bdeInvitationInstallation = null;
+    setInvite(null);
+  }
+
+  return { installee, invite, apple: estAppareilApple(), android: estAndroid(), installer };
+}
+
+/**
+ * Le bouton, tel qu'il apparaît en bas du menu.
+ *
+ * Il ne s'affiche pas si l'application est déjà posée sur l'écran d'accueil, ni sur un ordinateur
+ * dont le navigateur n'a rien proposé — là, il n'y aurait rien à dire.
+ *
+ * MAIS SUR UN TÉLÉPHONE, IL S'AFFICHE TOUJOURS.
+ *
+ * Y compris quand le navigateur n'a envoyé aucune proposition : il ouvre alors le mode d'emploi.
+ * La première version se cachait dans ce cas, et le résultat a été exactement ce qu'on voulait
+ * éviter — un agent sans réponse, à qui il ne reste qu'un fichier reçu par message. Un bouton qui
+ * explique n'est pas un bouton mort.
+ */
+function BoutonInstallation({ compact }) {
+  const { installee, invite, apple, android, installer } = useInstallation();
+  const [expliquer, setExpliquer] = useState(false);
+  if (installee) return null;
+  if (!invite && !apple && !android) return null;
+
+  const encadreDuFaux = (
+    /*
+     * L'avertissement est ici parce que c'est ici qu'il sera lu : au moment précis où quelqu'un
+     * cherche comment installer l'application — c'est-à-dire au moment où on lui proposerait un
+     * fichier.
+     */
+    <div style={{ borderInlineStart: "3px solid #E0A63A", background: "var(--card-2, rgba(224,166,58,0.08))", padding: "10px 14px", borderRadius: 6 }}>
+      <strong>N’installez jamais un fichier reçu par message.</strong> Ba-Diaby Express ne se
+      distribue pas en fichier, et ne le fera jamais : un fichier qui prétendrait être une
+      mise à jour de cette application est un faux, quel que soit son expéditeur.
+    </div>
+  );
+
+  return (
+    <>
+      <button onClick={() => (invite ? installer() : setExpliquer(true))}
+        title={compact ? "Installer l’application" : undefined}
+        style={{ display: "flex", alignItems: "center", justifyContent: compact ? "center" : "flex-start", gap: 8, width: "100%", fontSize: 13, color: "#fff", background: "none", border: "none", cursor: "pointer", marginBottom: 8, padding: 0 }}>
+        <Download size={15} /> {!compact && "Installer l’application"}
+      </button>
+      {expliquer && apple && (
+        <Modal onClose={() => setExpliquer(false)} title="Installer sur l’iPhone">
+          <div style={{ fontSize: 14, lineHeight: 1.65 }}>
+            <p style={{ marginTop: 0, color: "var(--muted)" }}>
+              L’iPhone n’a pas de bouton pour cela ; il faut passer par le menu de partage. Quatre gestes, une seule fois.
+            </p>
+            <ol style={{ paddingInlineStart: 20, margin: "14px 0" }}>
+              <li style={{ marginBottom: 8 }}>Ouvrez cette page dans <strong>Safari</strong> — l’entrée n’existe pas dans les autres navigateurs de l’iPhone.</li>
+              <li style={{ marginBottom: 8 }}>Touchez le bouton <strong>Partager</strong> : le carré avec une flèche vers le haut, en bas de l’écran.</li>
+              <li style={{ marginBottom: 8 }}>Faites défiler la liste, puis touchez <strong>« Sur l’écran d’accueil »</strong>.</li>
+              <li>Touchez <strong>« Ajouter »</strong>, en haut à droite.</li>
+            </ol>
+            {encadreDuFaux}
+          </div>
+        </Modal>
+      )}
+      {expliquer && !apple && (
+        <Modal onClose={() => setExpliquer(false)} title="Installer sur Android">
+          <div style={{ fontSize: 14, lineHeight: 1.65 }}>
+            <p style={{ marginTop: 0, color: "var(--muted)" }}>
+              Votre navigateur n’a rien proposé pour l’instant. Ce n’est pas grave : l’installation
+              se fait aussi à la main, par son menu.
+            </p>
+            <ol style={{ paddingInlineStart: 20, margin: "14px 0" }}>
+              <li style={{ marginBottom: 8 }}>Ouvrez cette page dans <strong>Chrome</strong> — voir l’encadré ci-dessous.</li>
+              <li style={{ marginBottom: 8 }}>Touchez les <strong>trois points ⋮</strong> en haut à droite du navigateur.</li>
+              <li style={{ marginBottom: 8 }}>Touchez <strong>« Installer l’application »</strong> — ou, selon le téléphone, <strong>« Ajouter à l’écran d’accueil »</strong>.</li>
+              <li>Confirmez avec <strong>« Installer »</strong>.</li>
+            </ol>
+            {/*
+              CE QUI ARRIVE AVEC SAMSUNG INTERNET, ET QU'ON NE PEUT PAS CORRIGER D'ICI.
+              Sur Android, installer une application web fabrique un vrai paquet Android. Chrome
+              délègue cette fabrication aux serveurs de Google, qui produisent un paquet à jour et
+              signé par eux. Les autres navigateurs le fabriquent sur le téléphone, avec une cible
+              Android ancienne — et Play Protect le bloque. Rien dans notre manifeste ne décide de
+              cela ; seul le choix du navigateur le décide. D'où cet encadré, écrit là où l'agent
+              rencontre le blocage, avec la consigne de NE PAS passer outre.
+            */}
+            <div style={{ borderInlineStart: "3px solid #E0A63A", background: "var(--card-2, rgba(224,166,58,0.08))", padding: "10px 14px", borderRadius: 6, marginBottom: 14 }}>
+              <strong>Si Android affiche « Appli non sécurisée bloquée » (Play Protect) :</strong> vous
+              n’êtes pas dans Chrome. Touchez <strong>OK</strong>, et surtout <strong>pas
+              « Installer quand même »</strong>. Fermez, ouvrez <strong>badiabyexpress.com</strong> dans
+              <strong> Chrome</strong>, et recommencez : le blocage disparaît. Les autres navigateurs
+              fabriquent l’application sur le téléphone avec une version d’Android trop ancienne ;
+              Chrome la fait fabriquer par Google, à jour et signée.
+            </div>
+            <p style={{ color: "var(--muted)", marginBottom: 14 }}>
+              Vous pouvez aussi rester sur votre navigateur et choisir simplement
+              <strong> « Ajouter à l’écran d’accueil »</strong> : le raccourci s’installe sans
+              avertissement, mais l’application ne s’ouvrira pas hors réseau.
+            </p>
+            {/*
+              Le cas le plus fréquent, et celui qu'on ne devinerait pas : le navigateur n'a pas
+              encore reconnu l'application, parce que c'est la première visite depuis une mise à
+              jour. Un rechargement suffit, et il faut le dire avant que l'agent renonce.
+            */}
+            <p style={{ color: "var(--muted)", marginBottom: 14 }}>
+              Si l’entrée n’apparaît pas dans le menu, fermez complètement le navigateur, rouvrez
+              <strong> badiabyexpress.com</strong> et réessayez : à la première visite après une mise
+              à jour, il lui faut un passage pour reconnaître l’application.
+            </p>
+            {encadreDuFaux}
+          </div>
+        </Modal>
+      )}
+    </>
+  );
+}
+
+/**
  * Durée d'inactivité au bout de laquelle la session se ferme (en minutes).
  * Le compte à rebours ne repart qu'à une vraie action de l'agent : clic, frappe, toucher,
  * défilement. Changer d'onglet, revenir sur l'application ou recharger la page ne déconnecte
@@ -3629,12 +3954,25 @@ function useIsMobile() {
  * ramenait à l'écran de connexion.
  *
  * Une fois connecté dans la journée, agent comme client doit rester connecté sur son appareil
- * tant qu'il l'utilise au moins une fois toutes les 6 h — d'où un délai large plutôt que les
- * 10 minutes d'origine, pensées pour un usage bureautique classique et trop courtes pour un
- * usage ponctuel entre deux colis.
+ * tant qu'il l'utilise régulièrement — d'où un délai large plutôt que les 10 minutes d'origine,
+ * pensées pour un usage bureautique classique et trop courtes pour un usage ponctuel entre deux
+ * colis.
+ *
+ * POURQUOI 2 H POUR UN AGENT, ET 1 H POUR UN CLIENT.
+ *
+ * C'était 6 h pour les deux : un téléphone posé sur un comptoir à 9 h rouvrait la session à 15 h,
+ * déjà connecté, avec le fichier clients dedans.
+ *
+ * Le compte à rebours ne repart qu'à une vraie action ; quelqu'un qui travaille ne l'atteint donc
+ * jamais. Il ne se déclenche qu'après une inaction réelle, et c'est là qu'il faut arbitrer :
+ * — 2 h pour un agent, parce qu'une tournée de livraison ou une pause déjeuner ne doit pas le
+ *   déconnecter. Se reconnecter demande du réseau, et dans un dépôt il n'y en a pas toujours :
+ *   un délai trop court se paierait en comptes partagés et en mots de passe écrits sur un cahier ;
+ * — 1 h pour un client, qui consulte ses colis quelques minutes, souvent depuis un téléphone
+ *   emprunté, et qui se reconnectera sans peine de chez lui.
  */
-const MINUTES_INACTIVITE_AGENT = 360;
-const MINUTES_INACTIVITE_CLIENT = 360;
+const MINUTES_INACTIVITE_AGENT = 120;
+const MINUTES_INACTIVITE_CLIENT = 60;
 const CLE_SESSION_CLIENT = "bde-session-client";
 const CLE_SESSION = "bde-session";
 const CLE_JETON = "bde-jeton";
@@ -3695,7 +4033,59 @@ async function connexionServeur(identifiant, motdepasse, espace) {
   if (reponse.status !== 401 && reponse.status !== 429 && !reponse.ok) return null;
   const corps = await reponse.json().catch(() => ({}));
   if (!reponse.ok) return { refus: corps.error || "Identifiant ou mot de passe incorrect." };
-  return corps; // { token, expireA, userId }
+  /* { token, expireA, userId, utilisateur } — ou { besoinCode, defi } si le compte a un second facteur. */
+  return corps;
+}
+
+/*
+ * LA DEUXIÈME ÉTAPE DE LA CONNEXION — le code à six chiffres.
+ *
+ * Le mot de passe a été vérifié par le serveur, qui a rendu un « défi » signé valable cinq
+ * minutes. Il ne donne accès à rien : il atteste seulement que le mot de passe vient d'être
+ * accepté. C'est le code du téléphone qui, joint à lui, ouvre la session.
+ *
+ * Rien n'est calculé ici, et c'est tout le changement : l'ancienne double authentification tirait
+ * le code par Math.random() DANS le navigateur et le comparait sur place — une porte qu'il
+ * suffisait de contourner en appelant /api/login directement.
+ */
+async function secondFacteurServeur(defi, code) {
+  let reponse;
+  try {
+    reponse = await fetch("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ defi, code }),
+    });
+  } catch (e) {
+    return { refus: "Connexion impossible pour le moment. Vérifiez votre réseau et réessayez." };
+  }
+  const corps = await reponse.json().catch(() => ({}));
+  if (!reponse.ok) return { refus: corps.error || "Code incorrect." };
+  return corps;
+}
+
+/**
+ * Les trois gestes de la double authentification, depuis un compte déjà connecté.
+ *
+ * `preparer` tire un secret et le montre une seule fois ; `activer` demande un code pour prouver
+ * que le téléphone le lit vraiment — sans cette preuve, un QR code mal scanné enfermerait la
+ * personne dehors à sa connexion suivante ; `retirer` exige le mot de passe, sans quoi une session
+ * volée suffirait à désarmer la protection qu'elle est justement censée franchir.
+ */
+async function appelDoubleAuthentification(action, extra = {}) {
+  let reponse;
+  try {
+    reponse = await appelServeurQuiDepense("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, ...extra }),
+    });
+  } catch (e) {
+    return { erreur: "Serveur injoignable. Réessayez quand le réseau sera revenu." };
+  }
+  const corps = await reponse.json().catch(() => ({}));
+  if (!reponse.ok) return { erreur: corps.error || "Opération impossible pour le moment." };
+  return corps;
 }
 
 function lireJetonEnregistre() {
@@ -3998,6 +4388,14 @@ function App() {
   const [adminResetKey, setAdminResetKey] = useState(0);
   const isMobile = useIsMobile();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  /*
+   * La sécurité du compte, ouverte depuis le pied du menu.
+   *
+   * Elle est là et pas dans les réglages parce qu'elle concerne CHACUN : un chauffeur n'ouvre
+   * jamais la gestion des utilisateurs, et son compte a pourtant besoin d'être protégé comme les
+   * autres. Le pied du menu est le seul endroit que tout le monde voit.
+   */
+  const [securiteOuverte, setSecuriteOuverte] = useState(false);
   /*
    * La section ouverte dans l'espace partenaire.
    *
@@ -4640,10 +5038,17 @@ function App() {
             </button>
             {/*
               * La cloche vit ici, sur la première ligne du menu : c'est le seul endroit visible
-              * sans faire défiler et sans replier quoi que ce soit. Sur téléphone, elle est
-              * doublée dans la barre du haut — là, le menu est fermé la plupart du temps.
+              * sans faire défiler et sans replier quoi que ce soit.
+              *
+              * SUR TÉLÉPHONE, ELLE N'Y EST PAS — la barre du haut en porte déjà une, et le menu se
+              * dépose PAR-DESSUS elle quand on l'ouvre. On voyait donc deux cloches, même compte,
+              * même panneau, l'une devant l'autre. Deux fois le même chiffre fait douter du chiffre.
+              *
+              * Sur ordinateur il n'y a pas de barre du haut : celle-ci est la seule, et elle reste.
               */}
-            <ClocheNotifications data={data} session={session} onAller={allerDepuisLaCloche} surFondSombre />
+            {!isMobile && (
+              <ClocheNotifications data={data} session={session} onAller={allerDepuisLaCloche} surFondSombre />
+            )}
           </div>
           <nav style={{ padding: 12, display: "flex", flexDirection: "column", gap: 3, flex: 1, overflowY: "auto" }}>
             {nav.map((n) => (
@@ -4685,22 +5090,48 @@ function App() {
                 <div style={{ fontSize: 11.5, color: "var(--nav-muted)", marginBottom: 10 }}>{session.role}</div>
               </>
             )}
-            <button onClick={() => { ecrireSessionEnregistree(null); ecrireJeton(null); ecrireJetonSession(null); setVersionAcces((n) => n + 1); setSession(null); setView("dashboard"); setOngletPartenaire("accueil"); setShowLogin(false); const url = new URL(window.location.href); url.searchParams.delete("connexion"); window.history.replaceState({}, "", url); }} title={(collapsed && !isMobile) ? t.logout : undefined} style={{ display: "flex", alignItems: "center", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", gap: 8, width: "100%", fontSize: 13, color: "var(--brand-on-dark)", background: "none", border: "none", cursor: "pointer" }}>
+            {/*
+              Poser l'application sur l'écran d'accueil, sans avoir à expliquer où cliquer dans le
+              menu du navigateur. C'est ce qui permet de ne jamais distribuer de fichier .apk —
+              voir BoutonInstallation.
+            */}
+            <BoutonInstallation compact={collapsed && !isMobile} />
+            {/*
+              La sécurité de SON compte, à portée de tout le monde.
+              Elle ne peut pas vivre dans les réglages : un chauffeur n'y entre jamais, et son
+              compte donne pourtant à voir les colis et les adresses des clients.
+            */}
+            <button onClick={() => setSecuriteOuverte(true)} title={(collapsed && !isMobile) ? "Sécurité de mon compte" : undefined}
+              style={{ display: "flex", alignItems: "center", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", gap: 8, width: "100%", fontSize: 13, color: "#fff", background: "none", border: "none", cursor: "pointer", marginBottom: 8, padding: 0 }}>
+              <ShieldCheck size={15} /> {!(collapsed && !isMobile) && "Sécurité de mon compte"}
+            </button>
+            <button onClick={() => { oublierCacheLocal(); ecrireSessionEnregistree(null); ecrireJeton(null); ecrireJetonSession(null); setVersionAcces((n) => n + 1); setSession(null); setView("dashboard"); setOngletPartenaire("accueil"); setShowLogin(false); const url = new URL(window.location.href); url.searchParams.delete("connexion"); window.history.replaceState({}, "", url); }} title={(collapsed && !isMobile) ? t.logout : undefined} style={{ display: "flex", alignItems: "center", justifyContent: (collapsed && !isMobile) ? "center" : "flex-start", gap: 8, width: "100%", fontSize: 13, color: "var(--brand-on-dark)", background: "none", border: "none", cursor: "pointer" }}>
               <LogOut size={15} /> {!(collapsed && !isMobile) && t.logout}
             </button>
           </div>
         </aside>
+        {securiteOuverte && (
+          <Modal onClose={() => setSecuriteOuverte(false)} title="Sécurité de mon compte">
+            <DoubleAuthentification
+              compte={(data?.users || []).find((u) => u.id === session.id) || session}
+              nu
+            />
+          </Modal>
+        )}
         <div className="bde-app-workspace" style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
           {isMobile && (
             <div className="bde-mobile-topbar" style={{ position: "sticky", top: 0, zIndex: 20, display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", background: "#0A2647", color: "#fff" }}>
-              <button onClick={() => setMobileNavOpen(true)} style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 8, width: 34, height: 34, display: "grid", placeItems: "center", color: "#fff", cursor: "pointer", flexShrink: 0 }}>
+              {/* Sans nom accessible, un lecteur d’écran annonce « bouton » pour ce qui ouvre toute la navigation. */}
+              <button onClick={() => setMobileNavOpen(true)} aria-label="Ouvrir le menu"
+                style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 8, width: 34, height: 34, display: "grid", placeItems: "center", color: "#fff", cursor: "pointer", flexShrink: 0 }}>
                 <Menu size={18} />
               </button>
               <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 15, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flex: 1 }}>
                 {nav.find((n) => n.actif ?? (n.key === view))?.label || identite.nom || "BA-DIABY EXPRESS"}
               </div>
               <ClocheNotifications data={data} session={session} onAller={allerDepuisLaCloche} surFondSombre />
-              <button onClick={() => setShowGlobalSearch(true)} style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 8, width: 34, height: 34, display: "grid", placeItems: "center", color: "#fff", cursor: "pointer", flexShrink: 0 }}>
+              <button onClick={() => setShowGlobalSearch(true)} aria-label="Rechercher"
+                style={{ background: "rgba(255,255,255,0.1)", border: "none", borderRadius: 8, width: 34, height: 34, display: "grid", placeItems: "center", color: "#fff", cursor: "pointer", flexShrink: 0 }}>
                 <Search size={16} />
               </button>
             </div>
@@ -5159,6 +5590,40 @@ function Shell({ children, rtl, theme }) {
         @media (prefers-reduced-motion: reduce) {
           .bde-app-sidebar nav button, .bde-app-main button, .bde-app-main input, .bde-app-main select, .bde-app-main textarea { transition: none !important; }
         }
+
+        /* ==========================================================================
+           IMPRIMER UN REÇU DEPUIS L'ÉCRAN
+           --------------------------------------------------------------------------
+           Le bouton « Télécharger PDF » produit un A4 mis en page au millimètre : c'est
+           lui la pièce d'archive. Mais un agent pressé fait Ctrl+P sur ce qu'il a sous
+           les yeux, et sans ces règles il imprimait la barre latérale, le menu et un
+           reçu coupé en deux.
+
+           On masque donc tout SAUF le reçu, on le repose en haut de la page, et on rend
+           ses couleurs obligatoires : sans print-color-adjust, les navigateurs suppriment
+           les aplats pour économiser l'encre — le bandeau et le cadre de sécurité
+           disparaîtraient, et c'est justement ce qui distingue un reçu d'une photocopie.
+
+           Les sections ne se coupent pas : break-inside sur chaque bloc, et le pied de
+           page reste solidaire de ce qu'il conclut.
+           ========================================================================== */
+        @media print {
+          body * { visibility: hidden !important; }
+          .bde-recu, .bde-recu * { visibility: visible !important; }
+          .bde-recu {
+            position: absolute !important; inset: 0 auto auto 0;
+            width: 100% !important; max-width: none !important;
+            margin: 0 !important; border-radius: 0 !important;
+            box-shadow: none !important; border: none !important;
+          }
+          .bde-recu-actions { display: none !important; }
+          .bde-recu-bloc { break-inside: avoid; page-break-inside: avoid; }
+          .bde-recu, .bde-recu * {
+            -webkit-print-color-adjust: exact !important;
+            print-color-adjust: exact !important;
+          }
+        }
+        @page { size: A4; margin: 12mm; }
 
         /* ==========================================================================
            SYSTÈME VISUEL DE L'ESPACE DE TRAVAIL
@@ -6743,8 +7208,14 @@ function ClientProfilModal({ compte, onSave, onClose }) {
      * les comptes chargés depuis la base quand le serveur n'est pas disponible.
      */
     const parLeServeur = await connexionServeur(compte.identifiant, ancien, "client");
+    /*
+     * `besoinCode` compte comme une bonne réponse : le serveur ne réclame le code du téléphone
+     * QU'APRÈS avoir vérifié le mot de passe. Sans cette moitié-là, activer la double
+     * authentification aurait rendu impossible de changer son propre mot de passe — l'écran aurait
+     * répondu « mot de passe actuel incorrect » à un mot de passe parfaitement juste.
+     */
     const bon = parLeServeur
-      ? !!parLeServeur.utilisateur
+      ? !!(parLeServeur.utilisateur || parLeServeur.besoinCode)
       : (await verifyPassword(ancien, compte)).ok;
     if (!bon) { setErrMdp(tcx("Mot de passe actuel incorrect.")); return; }
     if (!nouveau || nouveau.length < 8) { setErrMdp(tcx("Choisissez un mot de passe d’au moins 8 caractères.")); return; }
@@ -6875,6 +7346,18 @@ function ClientProfilModal({ compte, onSave, onClose }) {
             </div>
           </>
         )}
+      </div>
+
+      {/*
+        La double authentification du client.
+
+        Elle n'a rien d'un luxe ici : le portail donne à voir ce qu'il expédie, à qui, et ce qu'il
+        doit encore. Un mot de passe réutilisé ailleurs suffisait jusqu'à présent à ouvrir tout
+        cela. L'application d'authentification est gratuite et rien ne s'envoie — donc rien ne
+        dépend du réseau ni du crédit téléphonique du client.
+      */}
+      <div style={{ borderTop: "1px solid var(--border)", marginTop: 18, paddingTop: 14 }}>
+        <DoubleAuthentification compte={compte} nu />
       </div>
     </Modal>
   );
@@ -7387,6 +7870,14 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
   const [mode, setMode] = useState("login"); // login | inscription | reset
   const [identifiant, setIdentifiant] = useState("");
   const [motdepasse, setMotdepasse] = useState("");
+  /*
+   * Le défi rendu par le serveur quand le compte porte une double authentification. Il atteste que
+   * le mot de passe vient d'être vérifié, vaut cinq minutes, et n'ouvre rien par lui-même.
+   */
+  const [defiClient, setDefiClient] = useState("");
+  const [codeSaisi, setCodeSaisi] = useState("");
+  /* Le téléphone n'est pas là : on saisit alors l'un des codes imprimés à l'activation. */
+  const [secoursClient, setSecoursClient] = useState(false);
   const [showPw, setShowPw] = useState(false);
   const [err, setErr] = useState("");
   const [compte, setCompte] = useState(null);
@@ -7517,6 +8008,12 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
      */
     const serveur = await connexionServeur(identifiant.trim(), motdepasse, "client");
     if (serveur?.refus) { setErr(serveur.refus); return; }
+    /*
+     * Le compte porte une double authentification : le mot de passe est bon, mais rien n'est
+     * encore ouvert. Le serveur rend un défi signé de cinq minutes, qu'on lui représentera avec
+     * le code du téléphone.
+     */
+    if (serveur?.besoinCode) { setDefiClient(serveur.defi); setCodeSaisi(""); return; }
     if (serveur?.session) ecrireJetonSession(serveur.session, serveur.sessionExpireA);
 
     let acc = serveur?.utilisateur || null;
@@ -7533,9 +8030,43 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
       // et la vérification retomberait sur l'ancien schéma, rendant la connexion impossible.
       const local = await verifyPassword(motdepasse, acc);
       if (!local.ok) { setErr("Identifiant ou mot de passe incorrect."); return; }
+      /*
+       * Hors ligne, un compte à double authentification ne s'ouvre pas : le secret qui produit les
+       * codes ne descend dans aucun navigateur, cet appareil ne peut donc rien vérifier seul. Le
+       * dire franchement vaut mieux que de laisser croire que couper le réseau suffit à passer.
+       */
+      if (acc.totpActif) {
+        setErr("Ce compte demande le code de votre application d’authentification, et cette vérification se fait sur le serveur. Réessayez une fois le réseau revenu.");
+        return;
+      }
       migratedUser = local.migratedUser;
     }
 
+    installerCompte(acc, migratedUser);
+  }
+
+  /*
+   * La deuxième étape, quand le compte porte un second facteur : le code à six chiffres, vérifié
+   * par le serveur — jamais ici. C'est lui qui rend alors la session et la fiche du client.
+   */
+  async function validerCode(e) {
+    e.preventDefault();
+    setErr("");
+    const reponse = await secondFacteurServeur(defiClient, codeSaisi.trim());
+    if (reponse?.refus) { setErr(reponse.refus); return; }
+    if (!reponse?.utilisateur) { setErr("Code incorrect."); return; }
+    if (reponse.session) ecrireJetonSession(reponse.session, reponse.sessionExpireA);
+    onBesoinBase?.();
+    if (reponse.secoursUtilise) {
+      window.alert(reponse.secoursRestants > 0
+        ? tc(`Code de secours utilisé. Il vous en reste ${reponse.secoursRestants}. Rayez-le sur votre feuille.`, lang)
+        : tc("C’était votre dernier code de secours. Allez dans « Mon profil » pour en imprimer de nouveaux.", lang));
+    }
+    setDefiClient(""); setSecoursClient(false);
+    installerCompte(reponse.utilisateur, null);
+  }
+
+  function installerCompte(acc, migratedUser) {
     if (data) setNotifications(calculerNotificationsClient(acc, data));
 
     // Un SEUL enregistrement combinant la date de visite et, le cas échéant, la mise à niveau du
@@ -7656,7 +8187,43 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
             identifiant est libre et qui écrit. Si le serveur ne peut pas — clé pas encore
             posée — preparerRepli() a demandé les données, et l'attente est couverte plus haut
             par l'écran de chargement du portail. */}
-        {mode === "inscription" ? (
+        {defiClient ? (
+          /*
+           * La deuxième étape. Elle remplace l'écran de connexion plutôt que de s'ajouter à côté :
+           * il ne doit rester qu'une seule chose à faire, et le mot de passe déjà saisi n'a plus
+           * à être visible.
+           */
+          <form onSubmit={validerCode} style={{ width: "100%", maxWidth: 380, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 16, padding: 26, boxShadow: "0 4px 20px rgba(10,38,71,0.08)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 8 }}>
+              <ShieldCheck size={19} color="var(--ok-fg)" />
+              <div style={{ fontWeight: 700, fontSize: 15, color: "var(--text)" }}>{T("Double authentification")}</div>
+            </div>
+            <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>
+              {secoursClient
+                ? T("Entrez l’un des codes de secours imprimés lors de l’activation. Chacun ne sert qu’une fois.")
+                : T("Recopiez le code à six chiffres affiché par votre application d’authentification. Il change toutes les trente secondes.")}
+            </div>
+            <input value={codeSaisi} onChange={(e) => setCodeSaisi(e.target.value)}
+              inputMode={secoursClient ? "text" : "numeric"} autoComplete="one-time-code"
+              maxLength={secoursClient ? 13 : 6} autoFocus autoCapitalize="characters" spellCheck={false}
+              placeholder={secoursClient ? "ABCDE-FGHJK" : "000000"}
+              aria-label={secoursClient ? T("Code de secours") : T("Code à six chiffres")}
+              style={{ ...inputStyle, textAlign: "center", fontSize: secoursClient ? 19 : 23, letterSpacing: secoursClient ? 3 : 8, padding: "12px 14px", marginBottom: 12 }} />
+            {err && <div style={{ color: "var(--danger-fg)", fontSize: 13, marginBottom: 10, lineHeight: 1.5 }}>{err}</div>}
+            <button type="submit" style={{ width: "100%", background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "13px 0", fontSize: 15, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}>{T("Vérifier")}</button>
+            {/* La sortie de secours, visible depuis l'écran même qui bloque. */}
+            <button type="button" onClick={() => { setSecoursClient((s) => !s); setCodeSaisi(""); setErr(""); }}
+              style={{ width: "100%", marginTop: 12, background: "none", border: "none", color: "var(--brand-on-dark)", fontSize: 12.5, fontWeight: 600, cursor: "pointer", textDecoration: "underline" }}>
+              {secoursClient
+                ? T("Revenir au code du téléphone")
+                : T("Je n’ai pas mon téléphone — utiliser un code de secours")}
+            </button>
+            <button type="button" onClick={() => { setDefiClient(""); setCodeSaisi(""); setSecoursClient(false); setErr(""); }}
+              style={{ width: "100%", marginTop: 8, background: "none", border: "none", color: "var(--muted)", fontSize: 13, cursor: "pointer" }}>
+              {T("Revenir à l’écran de connexion")}
+            </button>
+          </form>
+        ) : mode === "inscription" ? (
           <ClientRegisterForm data={data} persist={persist} onRegistered={(acc) => { ecrireSessionClient(acc.id); setCompte(acc); onBesoinBase?.(); }} onCancel={() => setMode("login")} />
         ) : mode === "reset" ? (
           <ClientResetPasswordForm data={data} persist={persist} onDone={() => { setMode("login"); setErr(""); }} onCancel={() => setMode("login")} />
@@ -7707,7 +8274,7 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
             <button onClick={() => setShowProfil(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Mon profil")}</button>
             {mesColis.length > 0 && <button onClick={() => downloadClientManifest(compte, mesColis, deviseClient)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Mon bordereau (PDF)")}</button>}
             <ClientLangSwitch lang={lang} onChange={setLang} />
-            <button onClick={() => { ecrireSessionClient(null); setCompte(null); setIdentifiant(""); setMotdepasse(""); setMode("login"); }} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--muted)", fontWeight: 600, cursor: "pointer" }}>{T("Déconnexion")}</button>
+            <button onClick={() => { oublierCacheLocal(); ecrireSessionClient(null); setCompte(null); setIdentifiant(""); setMotdepasse(""); setMode("login"); }} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--muted)", fontWeight: 600, cursor: "pointer" }}>{T("Déconnexion")}</button>
           </div>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 24 }}>
@@ -8185,8 +8752,14 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
   const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
   const [pending, setPending] = useState(null);
-  const [otp, setOtp] = useState("");
+  /*
+   * Le défi rendu par le serveur après vérification du mot de passe. Il vaut cinq minutes et
+   * n'ouvre rien par lui-même : il atteste seulement que la première étape est franchie.
+   */
+  const [defi, setDefi] = useState("");
   const [otpInput, setOtpInput] = useState("");
+  /* Le téléphone n'est pas là : on saisit alors l'un des codes imprimés à l'activation. */
+  const [secours, setSecours] = useState(false);
   const [showPw, setShowPw] = useState(false);
   /*
    * L'équipe n'avait pas de sortie de secours.
@@ -8218,6 +8791,13 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
        * vérifier quoi que ce soit — elle arrivait avec toute la base, livrée à quiconque ouvrait
        * le site. Le sel et l'empreinte ne quittent plus le serveur.
        */
+      /*
+       * Le compte porte une double authentification : le mot de passe est bon, mais le serveur ne
+       * délivre encore aucune session. Il rend un défi signé, valable cinq minutes, qu'on lui
+       * représentera avec le code affiché par le téléphone.
+       */
+      if (serveur?.besoinCode) { setDefi(serveur.defi); setOtpInput(""); setPending({ code: true }); return; }
+
       if (serveur?.utilisateur) {
         if (serveur.token) { ecrireJeton(serveur.token, serveur.expireA); onJeton?.(); }
         /*
@@ -8226,9 +8806,7 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
          * sans lui — et refusé, une fois la base fermée.
          */
         if (serveur.session) { ecrireJetonSession(serveur.session, serveur.sessionExpireA); onJeton?.(); }
-        const compte = serveur.utilisateur;
-        if (compte.twoFA) { const code = genOtp(); setOtp(code); setPending(compte); }
-        else onLogin(compte);
+        onLogin(serveur.utilisateur);
         return;
       }
 
@@ -8269,17 +8847,46 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
         migratedUser = local.migratedUser;
       }
       const finalUser = migratedUser || u;
-      if (finalUser.twoFA) { const code = genOtp(); setOtp(code); setPending(finalUser); }
-      else onLogin(finalUser);
+      /*
+       * HORS LIGNE, UN COMPTE À DOUBLE AUTHENTIFICATION NE S'OUVRE PAS — ET C'EST VOULU.
+       *
+       * Le secret qui produit les codes ne descend plus dans aucun navigateur : cet appareil est
+       * donc incapable de vérifier quoi que ce soit tout seul. La version d'avant s'en tirait en
+       * tirant elle-même un code au hasard et en l'affichant à l'écran ; couper le réseau était
+       * alors le moyen le plus simple de contourner la protection, avec le seul mot de passe.
+       *
+       * On le dit franchement plutôt que de faire semblant. Ce compte se connecte quand le réseau
+       * revient ; celui qui n'a pas activé le second facteur, lui, travaille hors ligne comme avant.
+       */
+      if (finalUser.totpActif) {
+        setErr("Ce compte demande le code de votre application d’authentification, et cette vérification se fait sur le serveur. Reconnectez-vous une fois le réseau revenu.");
+        return;
+      }
+      onLogin(finalUser);
     } catch (ex) {
       console.error(ex);
       setErr("Erreur technique : " + ex.message);
     }
   }
-  function verifyOtp(e) {
+
+  async function verifyOtp(e) {
     e.preventDefault();
-    if (otpInput === otp) onLogin(pending);
-    else setErr("Code de vérification incorrect.");
+    setErr("");
+    const reponse = await secondFacteurServeur(defi, otpInput.trim());
+    if (reponse?.refus) { setErr(reponse.refus); return; }
+    if (!reponse?.utilisateur) { setErr("Code incorrect."); return; }
+    if (reponse.token) { ecrireJeton(reponse.token, reponse.expireA); onJeton?.(); }
+    if (reponse.session) { ecrireJetonSession(reponse.session, reponse.sessionExpireA); onJeton?.(); }
+    /*
+     * Un code de secours vient de servir : il ne servira plus. On le dit, avec ce qui reste — la
+     * réserve se découvre vide au pire moment si personne ne la compte à voix haute.
+     */
+    if (reponse.secoursUtilise) {
+      window.alert(reponse.secoursRestants > 0
+        ? `Code de secours utilisé. Il vous en reste ${reponse.secoursRestants}.\n\nRayez-le sur votre feuille. Pensez à refaire une liste depuis « Sécurité de mon compte ».`
+        : "C’était votre DERNIER code de secours.\n\nAllez tout de suite dans « Sécurité de mon compte » pour en imprimer de nouveaux : sans eux, perdre votre téléphone fermerait ce compte définitivement.");
+    }
+    onLogin(reponse.utilisateur);
   }
 
   if (oubli) {
@@ -8301,12 +8908,34 @@ function Login({ users, onLogin, offline, theme, onToggleTheme, onBackToHome, on
       <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "linear-gradient(135deg,#0A2647 0%,#0A2647 55%,#C8102E 250%)" }}>
         <div style={{ width: "min(92vw, 400px)", background: "var(--surface)", borderRadius: 18, padding: "38px 34px", boxShadow: "0 28px 70px rgba(10,38,71,0.4)" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 8 }}><ShieldCheck size={20} color="var(--brand-on-dark)" /><div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 16, color: "var(--text)" }}>Double authentification</div></div>
-          <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>Démo : aucune passerelle SMS n’étant connectée, votre code de vérification est affiché ci-dessous.</div>
-          <div style={{ background: "var(--surface2)", borderRadius: 13, padding: "14px 16px", textAlign: "center", fontFamily: "'Space Grotesk',sans-serif", fontSize: 27, letterSpacing: 5, color: "var(--text)", marginBottom: 16 }}>{otp}</div>
+          <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>
+            {secours
+              ? <>Entrez l’un des codes de secours imprimés lors de l’activation. Chacun ne sert
+                <strong style={{ color: "var(--text)" }}> qu’une fois</strong>.</>
+              : <>Ouvrez votre application d’authentification et recopiez le code à six chiffres affiché en face de
+                <strong style={{ color: "var(--text)" }}> Ba-Diaby Express</strong>. Il change toutes les trente secondes.</>}
+          </div>
           <div>
-            <input value={otpInput} onChange={(e) => setOtpInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && verifyOtp(e)} placeholder="Entrez le code à 6 chiffres" style={{ ...inputStyle, marginBottom: 12, textAlign: "center", fontSize: 15, padding: "12px 14px" }} />
-            {err && <div style={{ color: "var(--danger-fg)", fontSize: 13, marginBottom: 10 }}>{err}</div>}
+            <input value={otpInput} onChange={(e) => setOtpInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && verifyOtp(e)}
+              inputMode={secours ? "text" : "numeric"} autoComplete="one-time-code"
+              maxLength={secours ? 13 : 6} autoFocus autoCapitalize="characters" spellCheck={false}
+              placeholder={secours ? "ABCDE-FGHJK" : "000000"}
+              aria-label={secours ? "Code de secours" : "Code à six chiffres"}
+              style={{ ...inputStyle, marginBottom: 12, textAlign: "center", fontSize: secours ? 19 : 23, letterSpacing: secours ? 3 : 8, padding: "12px 14px" }} />
+            {err && <div style={{ color: "var(--danger-fg)", fontSize: 13, marginBottom: 10, lineHeight: 1.5 }}>{err}</div>}
             <button type="button" onClick={verifyOtp} style={{ width: "100%", background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "13px 0", fontWeight: 700, fontSize: 15, cursor: "pointer", boxShadow: "0 4px 14px rgba(214,39,63,0.28)" }}>Vérifier</button>
+            {/*
+              La sortie de secours doit être VISIBLE depuis l'écran qui bloque. Cachée dans une aide
+              en ligne, elle n'existe pas pour la personne dont le téléphone vient de tomber.
+            */}
+            <button type="button" onClick={() => { setSecours((s) => !s); setOtpInput(""); setErr(""); }}
+              style={{ width: "100%", marginTop: 12, background: "none", border: "none", color: "var(--brand-on-dark)", fontSize: 12.5, fontWeight: 600, cursor: "pointer", textDecoration: "underline" }}>
+              {secours ? "Revenir au code du téléphone" : "Je n’ai pas mon téléphone — utiliser un code de secours"}
+            </button>
+            <button type="button" onClick={() => { setPending(null); setDefi(""); setOtpInput(""); setSecours(false); setErr(""); }}
+              style={{ width: "100%", marginTop: 8, background: "none", border: "none", color: "var(--muted)", fontSize: 12.5, cursor: "pointer" }}>
+              Revenir à l’écran de connexion
+            </button>
           </div>
         </div>
       </div>
@@ -8499,6 +9128,85 @@ export function alertesDuCompte(data, session, maintenant = Date.now()) {
     titre: (n) => `${n} enregistrement${n > 1 ? "s" : ""} refusé${n > 1 ? "s" : ""} — page périmée`,
     detail: "Vos données sont intactes. Il reste un onglet à fermer quelque part.",
   });
+
+  /*
+   * LA SAUVEGARDE QUI ÉCHOUE EN SILENCE, ET LES REGISTRES QUI FONDENT.
+   *
+   * Ces deux alertes viennent du relevé écrit chaque nuit par la tâche de sauvegarde. Elles sont
+   * ici, en tête et réservées à qui peut agir, pour une raison précise : les deux pertes de cet
+   * été n'ont déclenché aucun signal. La copie hors site a échoué toutes les nuits pendant une
+   * semaine sans que rien ne l'annonce, et cinquante-huit catégories devenues quarante-deux ont
+   * été découvertes par hasard, huit jours plus tard.
+   *
+   * Une sauvegarde dont on ignore qu'elle est cassée est pire que pas de sauvegarde : on se croit
+   * couvert. C'est le seul cas où une alerte doit sonner alors que rien n'a l'air d'aller mal.
+   */
+  if (perm("config.acceder")) {
+    const veille = data.veille || null;
+    const horsBase = veille?.horsBase || null;
+    /*
+     * On n'alerte que si la nuit a bien eu lieu et que la copie n'est pas partie. Une base neuve,
+     * ou une tâche qui n'a jamais tourné, ne porte pas de relevé : crier au danger là-dessus
+     * apprendrait à ignorer cette cloche.
+     */
+    const copieEnPanne = !!horsBase && horsBase.envoyee === false;
+    const depuis = horsBase?.dernierSucces || null;
+    const jours = depuis ? Math.floor((maintenant - new Date(depuis).getTime()) / 86400000) : null;
+    ajouter({
+      cle: "copie-hors-site", gravite: "grave", vue: "admin", icone: ShieldCheck,
+      compte: copieEnPanne ? 1 : 0,
+      titre: () => "Aucune copie de secours hors du serveur",
+      detail: depuis
+        ? `La dernière est partie il y a ${jours} jour${jours > 1 ? "s" : ""}. Vos sauvegardes et vos données sont au même endroit.`
+        : "Aucune n’est jamais partie. Vos sauvegardes et vos données sont au même endroit.",
+    });
+
+    /*
+     * CE QUI RESSEMBLE À UNE ATTAQUE EN COURS — calculé ici, en direct, pas la nuit dernière.
+     *
+     * Les autres alertes de ce bloc viennent du relevé de nuit : une sauvegarde ratée ou une liste
+     * qui a fondu se constatent le lendemain, et c'est assez tôt. Une rafale de mots de passe, non.
+     * Elle dure quelques minutes, et un relevé quotidien la raconterait le lendemain matin — au
+     * mieux quatorze heures trop tard, quand la personne est déjà entrée ou repartie.
+     *
+     * Le journal des accès est déjà dans le document que cette page a en main : le calcul ne coûte
+     * rien de plus qu'un parcours de quelques centaines de lignes, et il se refait à chaque
+     * chargement. La tâche de nuit applique EXACTEMENT les mêmes règles pour envoyer le courriel
+     * (voir api/_fraude.js) — un seul jeu de seuils, pas deux qui divergent.
+     */
+    const signaux = signauxDeFraude(data, maintenant);
+    const gravesFraude = signaux.filter((s) => s.gravite === "grave");
+    ajouter({
+      cle: "fraude-grave", gravite: "grave", vue: "admin", icone: Ban,
+      compte: gravesFraude.length,
+      titre: (n) => (n === 1 ? gravesFraude[0].quoi : `${n} tentatives d’intrusion`),
+      detail: gravesFraude.length === 1
+        ? gravesFraude[0].detail
+        : gravesFraude.map((s) => s.quoi).join(" · "),
+    });
+    const autresFraude = signaux.filter((s) => s.gravite !== "grave");
+    ajouter({
+      cle: "fraude-surveiller", gravite: "alerte", vue: "admin", icone: Shield,
+      compte: autresFraude.length,
+      titre: (n) => (n === 1 ? autresFraude[0].quoi : `${n} activités inhabituelles`),
+      detail: autresFraude.length === 1
+        ? autresFraude[0].detail
+        : autresFraude.map((s) => s.quoi).join(" · "),
+    });
+
+    /*
+     * Une chute d'effectifs se signale le lendemain matin, tant que la copie de la veille existe
+     * encore. Passé la fenêtre de conservation, l'information ne vaut plus rien.
+     */
+    const chutes = Array.isArray(veille?.chutes) ? veille.chutes : [];
+    ajouter({
+      cle: "chute-donnees", gravite: "grave", vue: "admin", icone: AlertTriangle,
+      compte: chutes.length,
+      titre: (n) => `${n} liste${n > 1 ? "s" : ""} a${n > 1 ? "" : ""} perdu des lignes cette nuit`,
+      detail: chutes.map((c) => `${c.cle} : ${c.hier} → ${c.maintenant}`).join(" · ")
+        || "Vérifiez avant que la sauvegarde de la veille ne soit effacée.",
+    });
+  }
 
   if (perm("espaceclient.gerer")) {
     const messages = (data.clientAccounts || []).filter((c) => (c.messages || []).some((m) => m.expediteur === "client" && !m.lu)).length;
@@ -9384,7 +10092,10 @@ function PartnerDashboard({ data, session, persist, verifier, notify, onglet }) 
      */
     const parLeServeur = await connexionServeur(monCompte.identifiant, ancien);
     if (parLeServeur?.refus) return { erreur: parLeServeur.refus };
-    const bon = parLeServeur ? !!parLeServeur.utilisateur : (await verifyPassword(ancien, monCompte)).ok;
+    /* `besoinCode` vaut « mot de passe accepté » : le code n'est réclamé qu'après cette vérification. */
+    const bon = parLeServeur
+      ? !!(parLeServeur.utilisateur || parLeServeur.besoinCode)
+      : (await verifyPassword(ancien, monCompte)).ok;
     if (!bon) return { erreur: "Mot de passe actuel incorrect." };
 
     const identifiants = await creerIdentifiantsMotDePasse(nouveau);
@@ -10001,6 +10712,7 @@ function PartnerDashboard({ data, session, persist, verifier, notify, onglet }) 
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(300px,1fr))", gap: 16, marginBottom: 20, alignItems: "start" }}>
           {!estEmploye && <IdentitePartenaire key={moi.id} partenaire={moi} session={session} onSave={enregistrerIdentite} />}
           <MonMotDePasse compte={monCompte} onChanger={changerMonMotDePasse} />
+          <DoubleAuthentification compte={monCompte} />
           {!estEmploye && (
             <AccesEmployes
               employes={mesEmployes} onCreer={creerAcces} onSupprimer={supprimerAcces}
@@ -10128,6 +10840,332 @@ function nombreArticles(colis) {
  * sans cette exigence il suffirait de l'attraper posé sur un comptoir pour en verrouiller
  * l'accès. Le nouveau n'est jamais conservé en clair — seule son empreinte l'est.
  */
+/**
+ * LA DOUBLE AUTHENTIFICATION — la mettre en place, la retirer.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Il n'y a RIEN À SOUSCRIRE et rien à payer : Google Authenticator est une application gratuite,
+ * et le procédé qu'elle applique est une norme publique (RFC 6238). Aucun compte à créer chez qui
+ * que ce soit, aucun message envoyé, aucun abonnement. Microsoft Authenticator, Authy et FreeOTP
+ * font exactement la même chose et se valent ici.
+ *
+ * TROIS ÉTAPES, ET LA TROISIÈME EST LA PLUS IMPORTANTE
+ *
+ *   1. Le serveur tire un secret et l'affiche une seule fois, sous forme de QR code.
+ *   2. La personne le scanne : son téléphone se met à afficher un code qui change toutes les
+ *      trente secondes.
+ *   3. ELLE RECOPIE CE CODE ICI. Tant qu'elle ne l'a pas fait, rien n'est activé — un QR code mal
+ *      scanné ou une application refermée trop tôt l'enfermerait dehors à sa prochaine connexion,
+ *      sans recours et sans qu'elle comprenne pourquoi.
+ *
+ * Le secret ne redescend jamais ensuite : les lectures le retirent pour tout le monde, équipe
+ * comprise (voir api/_cloisonnement.js). Le retirer exige le mot de passe — sans quoi un téléphone
+ * déverrouillé attrapé sur un comptoir suffirait à désarmer la protection posée pour ce cas précis.
+ *
+ * LES CODES DE SECOURS, ET POURQUOI ILS NE SONT PAS UNE OPTION
+ *
+ * Un second facteur bien fait tient à un objet. Téléphone perdu, volé, noyé, ou simplement
+ * remplacé sans avoir pensé à transférer l'application — et la personne est dehors. DÉFINITIVEMENT :
+ * le secret est réimposé depuis la base à chaque enregistrement, et personne, pas même un
+ * administrateur, ne peut le retirer depuis l'application. Pour le seul compte administrateur de
+ * l'entreprise, cela reviendrait à confier les clés de la maison à un appareil qui se casse.
+ *
+ * Huit codes sont donc tirés à l'activation, affichés UNE SEULE FOIS, à imprimer et à ranger.
+ * Chacun remplace le téléphone une fois. L'écran refuse de se refermer tant qu'on n'a pas déclaré
+ * les avoir mis de côté : une liste fermée sans être notée est pire que pas de liste du tout, on
+ * la croit quelque part.
+ */
+function DoubleAuthentification({ compte, onChange, nu = false }) {
+  const [actif, setActif] = useState(!!compte?.totpActif);
+  const [etape, setEtape] = useState("repos");   // repos | inscription | codes | retrait | refaire
+  const [secret, setSecret] = useState("");
+  const [qr, setQr] = useState("");
+  const [code, setCode] = useState("");
+  const [motdepasse, setMotdepasse] = useState("");
+  const [codesSecours, setCodesSecours] = useState(null);
+  const [notes, setNotes] = useState(false);
+  const [copie, setCopie] = useState(false);
+  const [err, setErr] = useState("");
+  const [occupe, setOccupe] = useState(false);
+
+  /* La fiche peut arriver après le premier rendu : l'état affiché suit celui de la base. */
+  useEffect(() => { setActif(!!compte?.totpActif); }, [compte?.totpActif]);
+
+  /*
+   * Combien de codes restent en réserve. La liste elle-même ne descend jamais — le serveur n'en
+   * garde que des empreintes — mais le nombre, lui, doit se voir : on ne doit pas découvrir la
+   * réserve vide le jour où l'on n'a plus qu'elle pour entrer.
+   */
+  const restants = Number(compte?.totpSecoursRestants ?? 0);
+
+  function fermer() {
+    setEtape("repos"); setSecret(""); setQr(""); setCode(""); setMotdepasse("");
+    setCodesSecours(null); setNotes(false); setCopie(false); setErr("");
+  }
+
+  async function commencer() {
+    setErr(""); setOccupe(true);
+    const r = await appelDoubleAuthentification("totp-preparer");
+    setOccupe(false);
+    if (r?.erreur) { setErr(r.erreur); return; }
+    setSecret(r.secret || "");
+    setEtape("inscription");
+    /*
+     * Le QR code est un confort, pas la voie unique : la bibliothèque vient d'un service extérieur
+     * et peut ne pas se charger. Le secret reste alors lisible juste en dessous, et toutes les
+     * applications acceptent qu'on le tape à la main.
+     */
+    try { setQr(await generateQRDataUrl(r.uri, 220)); } catch (e) { setQr(""); }
+  }
+
+  async function activer(e) {
+    e.preventDefault();
+    setErr(""); setOccupe(true);
+    const r = await appelDoubleAuthentification("totp-activer", { code: code.trim() });
+    setOccupe(false);
+    if (r?.erreur) { setErr(r.erreur); return; }
+    setActif(true);
+    /*
+     * On ne referme PAS : les codes de secours n'existent en clair qu'à cet instant. Les faire
+     * disparaître avec la modale reviendrait à activer une serrure et à jeter le double des clés.
+     */
+    setCodesSecours(r.codesSecours || []);
+    setSecret(""); setQr(""); setCode(""); setNotes(false);
+    setEtape("codes");
+    onChange?.();
+  }
+
+  /** Refaire la liste — après en avoir usé, ou quand la feuille a été perdue. */
+  async function refaireCodes(e) {
+    e.preventDefault();
+    setErr(""); setOccupe(true);
+    const r = await appelDoubleAuthentification("totp-secours", { motdepasse });
+    setOccupe(false);
+    if (r?.erreur) { setErr(r.erreur); return; }
+    setMotdepasse(""); setNotes(false);
+    setCodesSecours(r.codesSecours || []);
+    setEtape("codes");
+    onChange?.();
+  }
+
+  /*
+   * Imprimer, plutôt que « télécharger ».
+   *
+   * Un fichier de codes de secours qui reste dans le dossier « Téléchargements » d'un ordinateur
+   * partagé, c'est le second facteur rangé à côté du premier. Une feuille se met dans un tiroir,
+   * et c'est précisément l'endroit où elle doit être.
+   */
+  function imprimerCodes() {
+    const fenetre = window.open("", "_blank", "width=520,height=680");
+    if (!fenetre) { setErr("Votre navigateur a bloqué la fenêtre d’impression. Recopiez les codes à la main."); return; }
+    const lignes = (codesSecours || []).map((c) => `<li>${c}</li>`).join("");
+    fenetre.document.write(`<!doctype html><html lang="fr"><head><meta charset="utf-8">
+      <title>Codes de secours — Ba-Diaby Express</title>
+      <style>
+        body{font-family:system-ui,sans-serif;padding:32px;color:#111}
+        h1{font-size:17px;margin:0 0 4px} p{font-size:12.5px;color:#444;line-height:1.6;max-width:46em}
+        ul{list-style:none;padding:0;margin:20px 0;display:grid;grid-template-columns:1fr 1fr;gap:10px}
+        li{font-family:ui-monospace,monospace;font-size:17px;letter-spacing:2px;border:1px solid #bbb;
+           border-radius:6px;padding:9px 12px;text-align:center}
+      </style></head><body>
+      <h1>Codes de secours — ${compte?.identifiant || "compte"}</h1>
+      <p>Chacun de ces codes remplace <strong>une seule fois</strong> le code de votre téléphone, si
+      vous l’avez perdu. Rangez cette feuille ailleurs que près de l’ordinateur, et rayez chaque code
+      après usage. Ba-Diaby Express ne peut pas les retrouver : ils ne sont pas conservés en clair.</p>
+      <ul>${lignes}</ul>
+      <p>Émis le ${new Date().toLocaleDateString("fr-FR")}. Imprimer une nouvelle liste annule celle-ci.</p>
+      </body></html>`);
+    fenetre.document.close();
+    fenetre.focus();
+    fenetre.print();
+  }
+
+  async function copierCodes() {
+    try {
+      await navigator.clipboard.writeText((codesSecours || []).join("\n"));
+      setCopie(true);
+      setTimeout(() => setCopie(false), 2200);
+    } catch (e) { setErr("Copie impossible sur cet appareil. Recopiez les codes à la main."); }
+  }
+
+  async function retirer(e) {
+    e.preventDefault();
+    setErr(""); setOccupe(true);
+    const r = await appelDoubleAuthentification("totp-retirer", { motdepasse });
+    setOccupe(false);
+    if (r?.erreur) { setErr(r.erreur); return; }
+    setActif(false);
+    fermer();
+    onChange?.();
+  }
+
+  /* `nu` : posé dans une modale qui a déjà son fond, le cadre ferait une carte dans une carte. */
+  const carte = nu
+    ? {}
+    : { background: "var(--surface)", borderRadius: 14, padding: 22, border: "1px solid var(--border)" };
+  const boutonPlein = { background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 9, padding: "11px 18px", fontSize: 13, fontWeight: 700, cursor: occupe ? "wait" : "pointer" };
+  const boutonSobre = { background: "var(--surface2)", border: "1.5px solid var(--border)", color: "var(--text)", borderRadius: 9, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer" };
+
+  return (
+    <div style={carte}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+        <ShieldCheck size={16} color={actif ? "var(--ok-fg)" : "var(--muted)"} />
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14 }}>Double authentification</div>
+        {actif && <span style={{ background: "var(--ok-bg-soft)", color: "var(--ok-fg)", borderRadius: 20, padding: "2px 9px", fontSize: 11, fontWeight: 700 }}>en place</span>}
+      </div>
+      <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16, lineHeight: 1.55 }}>
+        {actif
+          ? "À chaque connexion, votre mot de passe est suivi d’un code à six chiffres lu sur votre téléphone. Quelqu’un qui apprendrait votre mot de passe n’entrerait pas pour autant."
+          : "Un code à six chiffres, lu sur votre téléphone, s’ajoute à votre mot de passe. L’application est gratuite — Google Authenticator, Microsoft Authenticator ou Authy — et il n’y a aucun abonnement à prendre : rien n’est envoyé, rien n’est facturé."}
+      </div>
+
+      {err && etape === "repos" && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10, lineHeight: 1.5 }}>{err}</div>}
+
+      {/*
+        LA RÉSERVE, ANNONCÉE AVANT D'ÊTRE VIDE.
+        Zéro code restant, c'est un compte qui tient à un seul téléphone — et qui se ferme
+        définitivement avec lui. Ça se dit en rouge, pas en petit.
+      */}
+      {etape === "repos" && actif && (
+        <div style={{
+          background: restants === 0 ? "var(--danger-bg)" : restants <= 2 ? "var(--warn-bg)" : "var(--surface2)",
+          color: restants === 0 ? "var(--danger-fg)" : restants <= 2 ? "var(--warn-fg)" : "var(--muted)",
+          borderRadius: 10, padding: "10px 12px", fontSize: 12, lineHeight: 1.55, marginBottom: 12,
+        }}>
+          {restants === 0
+            ? <><strong>Aucun code de secours.</strong> Si vous perdez ce téléphone, ce compte se ferme
+              définitivement — personne ne pourra le rouvrir depuis l’application. Imprimez une liste.</>
+            : <><strong>{restants} code{restants > 1 ? "s" : ""} de secours</strong> en réserve.
+              Chacun remplace votre téléphone une fois, s’il est perdu.</>}
+        </div>
+      )}
+
+      {etape === "repos" && (actif ? (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button onClick={() => { setErr(""); setMotdepasse(""); setEtape("refaire"); }} style={boutonPlein}>
+            {restants === 0 ? "Imprimer des codes de secours" : "Refaire mes codes de secours"}
+          </button>
+          <button onClick={() => { setErr(""); setMotdepasse(""); setEtape("retrait"); }} style={boutonSobre}>Retirer</button>
+        </div>
+      ) : (
+        <button onClick={commencer} disabled={occupe} style={boutonPlein}>
+          {occupe ? "Préparation…" : "Activer la double authentification"}
+        </button>
+      ))}
+
+      {etape === "codes" && (
+        <div>
+          <div style={{ background: "var(--warn-bg)", color: "var(--warn-fg)", borderRadius: 10, padding: "11px 13px", fontSize: 12.5, lineHeight: 1.55, marginBottom: 12 }}>
+            <strong>C’est la seule fois où ces codes s’affichent.</strong> Ils ne sont pas conservés en
+            clair : ni vous ni nous ne pourrons les retrouver ensuite. Imprimez-les et rangez la feuille
+            ailleurs que près de l’ordinateur.
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 12 }}>
+            {(codesSecours || []).map((c) => (
+              <div key={c} style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "9px 6px", textAlign: "center", fontFamily: "ui-monospace, monospace", fontSize: 14, letterSpacing: 1.5, color: "var(--text)" }}>{c}</div>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
+            <button type="button" onClick={imprimerCodes} style={{ ...boutonSobre, flex: 1 }}>Imprimer</button>
+            <button type="button" onClick={copierCodes} style={{ ...boutonSobre, flex: 1 }}>{copie ? "Copié ✓" : "Copier"}</button>
+          </div>
+          <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.55, marginBottom: 10 }}>
+            Chacun remplace <strong style={{ color: "var(--text)" }}>une seule fois</strong> le code de
+            votre téléphone. Rayez-le après usage. Refaire une liste annule celle-ci.
+          </div>
+          {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10, lineHeight: 1.5 }}>{err}</div>}
+          {/*
+            La case à cocher n'est pas une formalité : elle est le seul moment où quelqu'un se
+            demande où il vient de ranger la feuille. Sans elle, on referme et on croit l'avoir.
+          */}
+          <label style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 12.5, color: "var(--text)", cursor: "pointer", marginBottom: 10, lineHeight: 1.5 }}>
+            <input type="checkbox" checked={notes} onChange={(e) => setNotes(e.target.checked)} style={{ marginTop: 2 }} />
+            J’ai imprimé ou recopié ces codes, et je sais où ils sont rangés.
+          </label>
+          <button type="button" onClick={fermer} disabled={!notes}
+            style={{ ...boutonPlein, width: "100%", opacity: notes ? 1 : 0.45, cursor: notes ? "pointer" : "not-allowed" }}>
+            Terminer
+          </button>
+        </div>
+      )}
+
+      {etape === "refaire" && (
+        <form onSubmit={refaireCodes}>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10, lineHeight: 1.55 }}>
+            Une nouvelle liste de huit codes remplacera l’ancienne, qui cessera aussitôt de valoir.
+            Votre mot de passe est demandé : ces codes contournent le second facteur, une session
+            volée ne doit pas pouvoir s’en fabriquer une série neuve.
+          </div>
+          <input type="password" value={motdepasse} onChange={(e) => setMotdepasse(e.target.value)}
+            autoComplete="current-password" placeholder="Votre mot de passe"
+            style={{ ...inputStyle, marginBottom: 10 }} />
+          {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10, lineHeight: 1.5 }}>{err}</div>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="submit" disabled={occupe} style={{ ...boutonPlein, flex: 1 }}>
+              {occupe ? "…" : "Générer huit codes"}
+            </button>
+            <button type="button" onClick={fermer} style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 9, padding: "11px 16px", fontSize: 13, cursor: "pointer" }}>Annuler</button>
+          </div>
+        </form>
+      )}
+
+      {etape === "inscription" && (
+        <form onSubmit={activer}>
+          <ol style={{ margin: "0 0 14px", paddingInlineStart: 18, fontSize: 12.5, color: "var(--muted)", lineHeight: 1.7 }}>
+            <li>Installez <strong style={{ color: "var(--text)" }}>Google Authenticator</strong> depuis le Play Store ou l’App Store — c’est gratuit.</li>
+            <li>Ouvrez-la, touchez <strong style={{ color: "var(--text)" }}>+</strong> puis « Scanner un code QR ».</li>
+            <li>Visez l’image ci-dessous, puis recopiez ici le code qui s’affiche.</li>
+          </ol>
+          {qr
+            ? <div style={{ display: "grid", placeItems: "center", marginBottom: 12 }}>
+              <img src={qr} alt="Code QR d’inscription à la double authentification" style={{ width: 200, height: 200, borderRadius: 10, background: "#fff", padding: 8 }} />
+            </div>
+            : <div style={{ background: "var(--warn-bg)", color: "var(--warn-fg)", borderRadius: 10, padding: "10px 12px", fontSize: 12, marginBottom: 12, lineHeight: 1.5 }}>
+              L’image du code n’a pas pu être générée. Saisissez la clé ci-dessous à la main dans votre application (« Saisir une clé de configuration »).
+            </div>}
+          {/*
+            La clé en toutes lettres, sous le QR code : les téléphones anciens n'ont pas toujours
+            d'appareil photo utilisable, et une application refuse parfois de scanner un écran.
+          */}
+          <div style={{ background: "var(--surface2)", borderRadius: 10, padding: "10px 12px", marginBottom: 12 }}>
+            <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>Ou saisissez cette clé à la main :</div>
+            <div style={{ fontFamily: "monospace", fontSize: 12.5, color: "var(--text)", wordBreak: "break-all", letterSpacing: 1 }}>{secret}</div>
+          </div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 6 }}>Code affiché par votre application :</div>
+          <input value={code} onChange={(e) => setCode(e.target.value)} inputMode="numeric" maxLength={6}
+            placeholder="000000" aria-label="Code à six chiffres"
+            style={{ ...inputStyle, textAlign: "center", fontSize: 20, letterSpacing: 7, marginBottom: 10 }} />
+          {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10, lineHeight: 1.5 }}>{err}</div>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="submit" disabled={occupe} style={{ ...boutonPlein, flex: 1 }}>
+              {occupe ? "Vérification…" : "Vérifier et activer"}
+            </button>
+            <button type="button" onClick={fermer} style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 9, padding: "11px 16px", fontSize: 13, cursor: "pointer" }}>Annuler</button>
+          </div>
+        </form>
+      )}
+
+      {etape === "retrait" && (
+        <form onSubmit={retirer}>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10, lineHeight: 1.55 }}>
+            Votre mot de passe est demandé ici, et nulle part ailleurs : sans lui, un téléphone
+            resté ouvert sur un comptoir suffirait à retirer la protection.
+          </div>
+          <input type="password" value={motdepasse} onChange={(e) => setMotdepasse(e.target.value)}
+            autoComplete="current-password" placeholder="Votre mot de passe"
+            style={{ ...inputStyle, marginBottom: 10 }} />
+          {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10, lineHeight: 1.5 }}>{err}</div>}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button type="submit" disabled={occupe} style={{ ...boutonSobre, flex: 1, color: "var(--danger-fg)" }}>
+              {occupe ? "…" : "Retirer"}
+            </button>
+            <button type="button" onClick={fermer} style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 9, padding: "10px 16px", fontSize: 13, cursor: "pointer" }}>Annuler</button>
+          </div>
+        </form>
+      )}
+    </div>
+  );
+}
+
 function MonMotDePasse({ compte, onChanger }) {
   const [ouvert, setOuvert] = useState(false);
   const [ancien, setAncien] = useState("");
@@ -15028,7 +16066,15 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
                     {colonnes.route && <td style={{ padding: "10px 14px", color: "var(--muted)", fontSize: 12.5, whiteSpace: "nowrap" }}>{routeLabel(c.pays, c.direction)}</td>}
                     {colonnes.poids && <td style={{ padding: "10px 14px", color: "var(--text)", fontSize: 12.5, whiteSpace: "nowrap" }}>{c.poids} kg</td>}
                     {colonnes.type && <td style={{ padding: "10px 14px", color: "var(--muted)", fontSize: 12.5, whiteSpace: "nowrap" }}>{c.mode === "air" ? "Aérien" : "Maritime"}</td>}
-                    {colonnes.frais && <td style={{ padding: "10px 14px", color: "var(--text)", fontWeight: 600, fontSize: 12.5, whiteSpace: "nowrap" }}>{fmtGNF(c.prix * (LIVE_RATES.GNF || CURRENCIES.GNF))}</td>}
+                    {colonnes.frais && (() => {
+                      const frais = fraisAffichesColis(c);
+                      return (
+                        <td style={{ padding: "10px 14px", color: "var(--text)", fontWeight: 600, fontSize: 12.5, whiteSpace: "nowrap" }}>
+                          {frais.montant}
+                          {frais.du && <div style={{ fontSize: 10.5, fontWeight: 600, color: "var(--muted)", marginTop: 2 }}>{frais.du}</div>}
+                        </td>
+                      );
+                    })()}
                     <td style={{ padding: "10px 14px" }}>
                       <span style={{ display: "inline-flex", alignItems: "center", gap: 5, background: st.bg, color: st.fg, padding: "4px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}><Icon size={12} /> {c.status}</span>
                     </td>
@@ -15539,7 +16585,7 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
     setGenPdf(true);
     try {
       const depensesLiees = (data.depenses || []).filter((d) => d.bordereauId === bordereau.id || d.bordereauNumero === bordereau.numero || String(d.nom || "").endsWith(`(${bordereau.numero})`));
-      await downloadRouteManifest(colisInclus, country, bordereau.direction, bordereau, devise, depensesLiees);
+      await downloadRouteManifest(colisInclus, country, bordereau.direction, bordereau, devise, depensesLiees, data.facturesPartenaire);
     }
     catch (e) { console.error(e); notify?.("Échec de génération du PDF"); }
     setGenPdf(false);
@@ -16950,28 +17996,45 @@ async function downloadReceptionBordereau(compte, colisSelectionnes, tarifs) {
   openPdf(doc, `bordereau-reception-${compte.nom}-${numero}.pdf`);
 }
 
-async function downloadRouteManifest(colisRoute, country, direction, bordereau, deviseAffichage, depensesLiees = []) {
+async function downloadRouteManifest(colisRoute, country, direction, bordereau, deviseAffichage, depensesLiees = [], facturesPartenaire = []) {
   const cur = deviseAffichage || country.currency;
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF());
   const label = direction === "import" ? `${country.city} → Conakry` : `Conakry → ${country.city}`;
   const poidsTotal = colisRoute.reduce((s, c) => s + c.poids, 0);
   /*
-   * UN COLIS PARTENAIRE NE COMPTE PAS DANS L'ARGENT DU BORDEREAU.
+   * TOUS LES MONTANTS S'AFFICHENT — Y COMPRIS CEUX DES COLIS PARTENAIRES.
    *
-   * La fiche de voyage le dit depuis toujours : là où il y aurait un prix, elle écrit « — », et
-   * dans la colonne du reste, « Partenaire ». Le bordereau, lui, imprimait « 0 GNF » et
-   * « Non payé » — les deux mentions qui, sur un document remis au transporteur puis rangé dans
-   * un classeur, se lisent exactement comme un client qui doit de l'argent. Pire : ces zéros
-   * entraient dans « MONTANT TOTAL » et dans « Reste à percevoir », si bien qu'un bordereau
-   * chargé de colis partenaire annonçait une créance que personne ne devait.
+   * Le bordereau a d'abord imprimé « 0 GNF » et « Non payé » pour ces colis, ce qui les faisait
+   * lire comme des clients endettés et gonflait « Reste à percevoir » d'une créance que personne
+   * ne devait. On les a alors tus — « — » puis « Sur facture ». Exact, mais inutilisable pour
+   * arrêter des comptes : celui qui totalise veut un chiffre, pas un renvoi vers un autre
+   * document.
    *
-   * Ces colis appartiennent au partenaire, qui les facture à ses propres clients selon un tarif
-   * dont nous n'avons pas connaissance et que nous n'avons pas à faire figurer. Ils sont donc
-   * comptés en colis et en kilos — c'est ce qu'on charge dans l'avion — mais jamais en francs.
+   * Ils portent donc leurs trois montants comme n'importe quelle ligne : facturé, payé, reste dû.
+   * Ce qui est affiché est ce que LE PARTENAIRE doit à l'entreprise, au tarif du contrat qui nous
+   * lie à lui. Ce qu'il facture ensuite à ses propres clients n'est enregistré nulle part et ne
+   * figure sur aucun document.
+   *
+   * Une seule distinction subsiste, et elle n'est pas cosmétique : cette créance ne se recouvre
+   * pas au comptoir ni auprès du transporteur, mais sur la facture mensuelle du partenaire. Les
+   * totaux la comptent donc à part de l'argent du guichet.
    */
   const colisFactures = colisRoute.filter((c) => !estColisPartenaire(c));
   const nbPartenaires = colisRoute.length - colisFactures.length;
+  // prixPartenaire et facture.total vivent dans la devise du contrat : d'où versEUR avant fmt.
+  const duPartenaire = (c) => {
+    const r = reglementColisPartenaire(c, facturesPartenaire);
+    return {
+      facture: versEUR(Number(c.prixPartenaire) || 0, c.devisePartenaire),
+      paye: versEUR(r.paye, c.devisePartenaire),
+      reste: versEUR(r.reste, c.devisePartenaire),
+    };
+  };
+  const lignesPartenaires = colisRoute.filter(estColisPartenaire);
+  const totalPartenaires = lignesPartenaires.reduce((s, c) => s + duPartenaire(c).facture, 0);
+  const reglePartenaires = lignesPartenaires.reduce((s, c) => s + duPartenaire(c).paye, 0);
+  const duParPartenaires = lignesPartenaires.reduce((s, c) => s + duPartenaire(c).reste, 0);
 
   // Bandeau d’en-tête — filet rouge au pied de la bande navy, comme sur l'étiquette et le ticket
   // d'envoi : même identité de marque bicolore sur tous les documents imprimés.
@@ -17019,7 +18082,8 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   };
   stat(14, "COLIS", colisRoute.length);
   stat(76, "POIDS TOTAL", `${poidsTotal.toFixed(1)} kg`);
-  stat(138, "MONTANT TOTAL", fmt(colisFactures.reduce((s, c) => s + c.prix, 0), cur), true);
+  // Tout ce que la route a produit, colis partenaires compris : c'est le chiffre qu'on cherche ici.
+  stat(138, "MONTANT TOTAL", fmt(colisFactures.reduce((s, c) => s + c.prix, 0) + totalPartenaires, cur), true);
   y += 26;
 
   /*
@@ -17030,8 +18094,18 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
    * partiellement payé, ou pas payé du tout. C'est la question posée à chaque remise.
    */
   const reglementDuColis = (c) => {
-    // Même mention que sur la fiche de voyage : ni « payé », ni « dû », le colis n'est pas à nous.
-    if (estColisPartenaire(c)) return { libelle: "Partenaire", teinte: [91, 141, 239] };
+    /*
+     * Pour un colis partenaire, la colonne dit le montant encore dû — pas « Sur facture », qui ne
+     * se totalise pas. La teinte bleue reste : elle distingue d'un coup d'œil une créance sur un
+     * partenaire, qui se recouvre sur sa facture mensuelle, d'un impayé de guichet qu'on réclame
+     * à la personne en face.
+     */
+    if (estColisPartenaire(c)) {
+      const d = duPartenaire(c);
+      return d.reste > 0.005
+        ? { libelle: `Dû partenaire\n${fmt(d.reste, cur)}`, teinte: [91, 141, 239] }
+        : { libelle: "Réglé", teinte: [40, 140, 90] };
+    }
     const paye = Number(c.paye) || 0;
     if (paye <= 0.005) return { libelle: "Non payé", teinte: [200, 45, 60] };
     if ((Number(c.reste) || 0) <= 0.005) return { libelle: "Payé", teinte: [40, 140, 90] };
@@ -17040,7 +18114,9 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   const head = ["N° de suivi", "Destinataire", "Téléphone", "Articles", "Poids", "Statut", `Montant (${cur})`, "Règlement"];
   const body = colisRoute.map((c) => [
     c.tracking, c.destinataire, c.telephone, String(nombreArticles(c)),
-    `${c.poids} kg`, c.status, estColisPartenaire(c) ? "—" : fmt(c.prix, cur), reglementDuColis(c).libelle,
+    `${c.poids} kg`, c.status,
+    estColisPartenaire(c) ? fmt(duPartenaire(c).facture, cur) : fmt(c.prix, cur),
+    reglementDuColis(c).libelle,
   ]);
 
   const hasAutoTable = await ensureAutoTable();
@@ -17067,7 +18143,7 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
        * à droite, et la somme des largeurs fait exactement les 182 mm utiles d'une page A4.
        */
       columnStyles: {
-        0: { cellWidth: 24 },  // N° de suivi
+        0: { cellWidth: 24, textColor: LIEN_PDF },  // N° de suivi — cliquable, voir poserLiensSuivi
         1: { cellWidth: 30 },  // Destinataire
         2: { cellWidth: 24 },  // Téléphone
         3: { cellWidth: 14, halign: "center" },  // Articles
@@ -17082,6 +18158,8 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
         const c = colisRoute[donnees.row.index];
         if (c) { donnees.cell.styles.textColor = reglementDuColis(c).teinte; donnees.cell.styles.fontStyle = "bold"; }
       },
+      /* Le numéro de suivi mène à la fiche du colis, comme sur la fiche de voyage. */
+      didDrawCell: (donnees) => poserLiensSuivi(doc, donnees),
       margin: { left: 14, right: 14 },
     });
     finalY = doc.lastAutoTable.finalY || y + 8;
@@ -17116,6 +18194,7 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
         doc.setFont(undefined, j === 6 || j === 7 ? "bold" : "normal");
         cellules.forEach((ligne, k) => {
           const yl = finalY + 4 + k * 3.4;
+          if (j === 0 && k === 0) { texteAvecLienSuivi(doc, ligne, colX[j] + 1.5, yl); doc.setTextColor(30, 40, 55); return; }
           if (j === 6) doc.text(ligne, colX[j] + largeurs[j] - 1.5, yl, { align: "right" });
           else if (j === 3) doc.text(ligne, colX[j] + largeurs[j] / 2, yl, { align: "center" });
           else doc.text(ligne, colX[j] + 1.5, yl);
@@ -17146,7 +18225,12 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   doc.setFontSize(9); doc.setFont(undefined, "bold"); doc.setTextColor(10, 38, 71);
   // Le reste à percevoir est calé sur le bord droit du panneau : en francs guinéens, la ligne est
   // longue, et posée à une abscisse fixe elle sortait de la feuille.
-  doc.text(`Facturé : ${fmt(totalFacture, cur)}`, 18, finalY + 12.5);
+  /*
+   * Ces trois chiffres ne parlent que des CLIENTS, et le libellé le dit maintenant. Y verser le
+   * facturé partenaire ferait mentir « reste à percevoir » : cet argent-là ne se réclame pas au
+   * comptoir ni au transporteur, il part sur la facture mensuelle du partenaire.
+   */
+  doc.text(`Facturé clients : ${fmt(totalFacture, cur)}`, 18, finalY + 12.5);
   doc.setTextColor(62, 160, 90);
   doc.text(`Encaissé : ${fmt(totalEncaisse, cur)}`, 105, finalY + 12.5, { align: "center" });
   doc.setTextColor(226, 63, 82);
@@ -17154,15 +18238,25 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
 
   finalY += 24;
   /*
-   * Sans cette ligne, un bordereau de vingt colis dont douze sont partenaires afficherait un
-   * total calculé sur huit, et le lecteur croirait à une erreur de saisie. Elle dit d'où vient
-   * l'écart entre le nombre de colis affiché en haut et le nombre de lignes qui portent un prix.
+   * La mention disait que les colis partenaires ne comptent « jamais dans les montants ci-dessus ».
+   * Ce n'est plus vrai : ils portent désormais le tarif de leur contrat, et le MONTANT TOTAL les
+   * additionne. Elle dit maintenant l'autre chose, celle qui reste vraie et qui compte à la remise :
+   * cet argent ne s'encaisse pas ici.
    */
   if (nbPartenaires > 0) {
-    if (finalY > 262) { doc.addPage(); finalY = 20; }
+    if (finalY > 258) { doc.addPage(); finalY = 20; }
+    const s = nbPartenaires > 1 ? "s" : "";
+    doc.setFont(undefined, "bold"); doc.setFontSize(8.5); doc.setTextColor(10, 38, 71);
+    doc.text(`Facturé aux partenaires (${nbPartenaires} colis) : ${fmt(totalPartenaires, cur)}`
+      + `${reglePartenaires > 0.005 ? `  ·  déjà réglé ${fmt(reglePartenaires, cur)}` : ""}`
+      + `  ·  reste dû ${fmt(duParPartenaires, cur)}`, 14, finalY);
+    finalY += 5;
     doc.setFont(undefined, "normal"); doc.setFontSize(8); doc.setTextColor(120, 130, 150);
     const mention = doc.splitTextToSize(
-      `Dont ${nbPartenaires} colis partenaire${nbPartenaires > 1 ? "s" : ""} — transporté${nbPartenaires > 1 ? "s" : ""} pour un partenaire et non facturé${nbPartenaires > 1 ? "s" : ""} par Ba-Diaby Express : ils comptent dans les colis et les kilos, jamais dans les montants ci-dessus.`,
+      `Ce${s === "s" ? "s" : ""} ${nbPartenaires} colis partenaire${s} ${s === "s" ? "sont facturés" : "est facturé"} au partenaire,`
+      + ` au tarif de son contrat, et compté${s} dans le montant total. Cette créance se recouvre sur`
+      + ` la facture mensuelle du partenaire : rien n'est à encaisser pour`
+      + ` ${s === "s" ? "eux" : "lui"} à la remise, et elle n'entre pas dans le « reste à percevoir » ci-dessus.`,
       182,
     );
     doc.text(mention, 14, finalY);
@@ -23591,7 +24685,7 @@ function versEUR(montant, devise) {
 }
 
 /** Totaux d'un voyage : ce que les colis rapportent, ce qu'ils coûtent, ce qu'il en reste. */
-function totauxVoyage(colisInclus, depenses, users, remises) {
+function totauxVoyage(colisInclus, depenses, users, remises, facturesPartenaire) {
   const facture = colisInclus.reduce((s, c) => s + (Number(c.prix) || 0), 0);
   const encaisse = colisInclus.reduce((s, c) => s + (Number(c.paye) || 0), 0);
   const depensesEUR = (depenses || []).reduce((s, d) => s + versEUR(d.montant, d.devise), 0);
@@ -23604,6 +24698,35 @@ function totauxVoyage(colisInclus, depenses, users, remises) {
    */
   const facturables = colisInclus.filter((c) => !estColisPartenaire(c));
   const nbPartenaires = colisInclus.length - facturables.length;
+  /*
+   * CE QUE LES PARTENAIRES DOIVENT À L'ENTREPRISE.
+   *
+   * Il manquait à la fiche, et sans lui le compte d'une rotation était faux : sur ce voyage, sept
+   * colis sur seize sont des colis partenaires. Ils ne rapportaient rien au document, alors qu'ils
+   * ont voyagé dans le même avion et qu'ils sont bel et bien facturés — au tarif du contrat, à
+   * l'entreprise partenaire, pas au client du comptoir.
+   *
+   * C'est `prixPartenaire` : le prix DU CONTRAT entre nous et le partenaire. Ce que le partenaire
+   * facture à son propre client ne nous regarde pas, n'est enregistré nulle part, et n'a donc
+   * aucune raison de figurer ici.
+   *
+   * Il reste compté à part de `facture`, et c'est essentiel : cet argent n'entre pas au comptoir
+   * avec le colis, il arrive sur la facture mensuelle du partenaire. Le mélanger au facturé client
+   * ferait dire à « reste à encaisser auprès des clients » une somme qu'aucun client ne doit.
+   */
+  const facturePartenaires = colisInclus
+    .filter(estColisPartenaire)
+    .reduce((s, c) => s + versEUR(Number(c.prixPartenaire) || 0, c.devisePartenaire), 0);
+  /*
+   * Ce que les partenaires ont déjà réglé, et ce qu'ils doivent encore. Un colis part sur une
+   * facture mensuelle : tant qu'elle n'est pas honorée, l'argent n'est pas dans le tiroir, et il
+   * doit se lire comme une créance — pas comme un renvoi vers un autre document.
+   */
+  const regleParPartenaires = colisInclus.filter(estColisPartenaire)
+    .reduce((s, c) => s + versEUR(reglementColisPartenaire(c, facturesPartenaire).paye, c.devisePartenaire), 0);
+  const duParPartenaires = Math.max(0, facturePartenaires - regleParPartenaires);
+  // Tout ce que la rotation a produit, d'où qu'il vienne : c'est le chiffre du responsable.
+  const factureTotal = facture + facturePartenaires;
   const payes = facturables.filter((c) => (Number(c.reste) || 0) <= 0.005);
   const impayes = facturables.filter((c) => (Number(c.reste) || 0) > 0.005 && (Number(c.paye) || 0) <= 0.005);
   return {
@@ -23611,16 +24734,29 @@ function totauxVoyage(colisInclus, depenses, users, remises) {
     poids: colisInclus.reduce((s, c) => s + (Number(c.poids) || 0), 0),
     facture, encaisse,
     resteAEncaisser: Math.max(+(facture - encaisse).toFixed(2), 0),
-    nbPartenaires,
+    nbPartenaires, facturePartenaires, factureTotal, regleParPartenaires, duParPartenaires,
     nbPayes: payes.length,
     nbImpayes: impayes.length,
     nbPartiels: facturables.length - payes.length - impayes.length,
     encaissements: encaissementsParAgent(colisInclus, users, remises),
     depensesEUR,
-    resultat: +(facture - depensesEUR).toFixed(2),
+    /*
+     * PAS D'ARRONDI ICI — LE TOTAL DOIT VALOIR LA SOMME DE SES PARTIES.
+     *
+     * Ces trois montants étaient arrondis au centime d'euro, la monnaie de base. C'est invisible
+     * sur une fiche en euros ; sur une fiche en francs guinéens, un demi-centime vaut près de
+     * cinquante francs. Le panneau annonçait « 6 221 360 + 2 680 000 = 8 901 405 » — un total qui
+     * ne tombe pas juste sous les yeux du responsable qui l'additionne à la main, sur le document
+     * même qui sert à arrêter les comptes.
+     *
+     * L'arrondi appartient à l'affichage, et fmt() s'en charge déjà, à la bonne décimale pour
+     * chaque devise. Le calcul, lui, garde sa précision — c'est la règle partout ailleurs dans la
+     * fiche, où ni `facture` ni `encaisse` ne sont arrondis.
+     */
+    resultat: factureTotal - depensesEUR,
     // Ce qui est réellement dans les caisses une fois le voyage payé, par opposition au résultat
     // calculé sur le facturé : c'est le chiffre qui dit si la rotation a rapporté de l'argent frais.
-    tresorerie: +(encaisse - depensesEUR).toFixed(2),
+    tresorerie: encaisse - depensesEUR,
   };
 }
 
@@ -23655,7 +24791,19 @@ function statutPaiementColis(c) {
  */
 function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data, devise = "GNF") {
   const INK = [26, 30, 38], MUTED = [122, 130, 142], RED = [214, 39, 63], NAVY = [10, 38, 71];
-  const t = totauxVoyage(colisInclus, voyage.depenses, data?.users, data?.remisesCaisse);
+  const t = totauxVoyage(colisInclus, voyage.depenses, data?.users, data?.remisesCaisse, data?.facturesPartenaire);
+  /*
+   * Les trois montants d'un colis partenaire, ramenés à la devise de la fiche : ce qui lui est
+   * facturé, ce qu'il a déjà réglé, ce qu'il doit encore à la caisse.
+   */
+  const duPartenaire = (c) => {
+    const r = reglementColisPartenaire(c, data?.facturesPartenaire);
+    return {
+      facture: versEUR(Number(c.prixPartenaire) || 0, c.devisePartenaire),
+      paye: versEUR(r.paye, c.devisePartenaire),
+      reste: versEUR(r.reste, c.devisePartenaire),
+    };
+  };
   let y = 20;
   doc.addImage(DEFAULT_LOGO, "PNG", 14, y - 6, 16, 16);
   doc.setFont(undefined, "bold"); doc.setFontSize(16); doc.setTextColor(...INK);
@@ -23690,11 +24838,22 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data, devis
     c.tracking, c.destinataire || "—",
     (c.direction || "export") === "export" ? "Aller" : "Retour",
     `${(Number(c.poids) || 0).toFixed(1)} kg`,
-    // Un colis partenaire n'a ni prix ni règlement chez nous : la fiche le dit, plutôt que
-    // d'afficher des zéros qui se liraient comme un colis soldé.
-    estColisPartenaire(c) ? "—" : fmt(c.prix, devise),
-    estColisPartenaire(c) ? "—" : fmt(c.paye, devise),
-    estColisPartenaire(c) ? "Partenaire" : ((Number(c.reste) || 0) > 0 ? fmt(c.reste, devise) : "Payé"),
+    /*
+     * Un colis partenaire EST facturé — au partenaire, pas au client du comptoir. La fiche
+     * l'affichait « — », et sept colis sur seize disparaissaient du compte de la rotation.
+     *
+     * Le montant est celui du contrat qui nous lie au partenaire. Ce qu'il facture ensuite à son
+     * propre client n'est pas enregistré et n'a rien à faire ici.
+     *
+     * Les trois colonnes d'argent disent maintenant la même chose pour tout le monde : facturé,
+     * payé, reste dû. « Sur facture » était exact mais ne se totalisait pas — celui qui arrête
+     * les comptes veut savoir COMBIEN le partenaire doit encore à la caisse, pas où le chercher.
+     */
+    estColisPartenaire(c) ? fmt(duPartenaire(c).facture, devise) : fmt(c.prix, devise),
+    estColisPartenaire(c) ? fmt(duPartenaire(c).paye, devise) : fmt(c.paye, devise),
+    estColisPartenaire(c)
+      ? (duPartenaire(c).reste > 0.005 ? fmt(duPartenaire(c).reste, devise) : "Réglé")
+      : ((Number(c.reste) || 0) > 0 ? fmt(c.reste, devise) : "Payé"),
   ]);
   if (hasAutoTable && doc.autoTable && body.length > 0) {
     doc.autoTable({
@@ -23702,9 +24861,11 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data, devis
       theme: "grid", headStyles: { fillColor: NAVY, textColor: 255, fontSize: 7.5 },
       styles: { fontSize: 7.5, textColor: [40, 40, 40], overflow: "linebreak", cellPadding: 1.3 },
       // Les trois colonnes d'argent sont calées à droite : c'est ainsi qu'on additionne de tête.
-      columnStyles: { 0: { cellWidth: 24 }, 1: { cellWidth: 42 }, 2: { cellWidth: 14 }, 3: { cellWidth: 16 },
+      columnStyles: { 0: { cellWidth: 24, textColor: LIEN_PDF }, 1: { cellWidth: 42 }, 2: { cellWidth: 14 }, 3: { cellWidth: 16 },
                       4: { cellWidth: 30, halign: "right" }, 5: { cellWidth: 28, halign: "right" }, 6: { cellWidth: 28, halign: "right" } },
       margin: { left: 14, right: 14 },
+      /* Le numéro de suivi mène à la fiche du colis — voir poserLiensSuivi. */
+      didDrawCell: (donnees) => poserLiensSuivi(doc, donnees),
     });
     y = doc.lastAutoTable.finalY + 7;
   } else {
@@ -23727,9 +24888,11 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data, devis
       const hauteur = Math.max(...lignes.map((l) => l.length)) * 3.2 + 2.4;
       if (y + hauteur > 272) { doc.addPage(); y = 20; }
       if (i % 2 === 1) { doc.setFillColor(238, 243, 250); doc.rect(14, y, 182, hauteur, "F"); }
-      lignes.forEach((cellules, j) => cellules.forEach((ligne, k) => (j >= 4
-        ? doc.text(ligne, colX[j] + largeurs[j] - 1.5, y + 3.8 + k * 3.2, { align: "right" })
-        : doc.text(ligne, colX[j] + 1.5, y + 3.8 + k * 3.2))));
+      lignes.forEach((cellules, j) => cellules.forEach((ligne, k) => {
+        if (j === 0 && k === 0) { texteAvecLienSuivi(doc, ligne, colX[j] + 1.5, y + 3.8); doc.setTextColor(40, 40, 40); return; }
+        if (j >= 4) doc.text(ligne, colX[j] + largeurs[j] - 1.5, y + 3.8 + k * 3.2, { align: "right" });
+        else doc.text(ligne, colX[j] + 1.5, y + 3.8 + k * 3.2);
+      }));
       y += hauteur;
     });
     y += 7;
@@ -23771,7 +24934,25 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data, devis
   sauterSiBesoin();
   doc.text("Reste à encaisser auprès des clients", 16, y);
   doc.text(fmt(t.resteAEncaisser, devise), 196, y, { align: "right" });
-  y += 8;
+  y += 5.5;
+  /*
+   * Cet argent-là ne se réclame pas au comptoir : il part sur la facture mensuelle du partenaire.
+   * Le dire ici évite qu'on aille le chercher deux fois — ou qu'on l'oublie.
+   */
+  if (t.facturePartenaires > 0.005) {
+    sauterSiBesoin();
+    doc.text(`Reste à encaisser auprès des partenaires (${t.nbPartenaires} colis)`, 16, y);
+    doc.text(fmt(t.duParPartenaires, devise), 196, y, { align: "right" });
+    y += 5.5;
+    // Ce qui est déjà rentré ne se répète que s'il y a quelque chose à dire.
+    if (t.regleParPartenaires > 0.005) {
+      sauterSiBesoin();
+      doc.text("   dont déjà réglé par facture", 16, y);
+      doc.text(fmt(t.regleParPartenaires, devise), 196, y, { align: "right" });
+      y += 5.5;
+    }
+  }
+  y += 3;
 
   if ((voyage.depenses || []).length > 0) {
     if (y > 235) { doc.addPage(); y = 20; }
@@ -23799,29 +24980,67 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data, devis
    * 62 mm, pied de page compris. Au-delà de 224 mm, ils ne tiennent plus : c'est le seul endroit
    * où l'on accepte une seconde page, et une rotation ordinaire n'y arrive pas.
    */
-  if (y > 224) { doc.addPage(); y = 20; }
-  doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, 32, "F");
+  /*
+   * LE PANNEAU DE RÉSULTAT — DEUX SOURCES DE RECETTE, JAMAIS CONFONDUES.
+   *
+   * Les colis clients se règlent au comptoir ; les colis partenaires se règlent sur une facture
+   * mensuelle. Les additionner en une seule ligne aurait donné un chiffre d'affaires juste et un
+   * « reste à encaisser » faux. On les montre donc l'un sous l'autre, puis leur total.
+   *
+   * Le bilan final, lui, ne bouge pas : il dit l'argent RÉELLEMENT rentré. Le facturé partenaire
+   * n'y entrera que le jour où sa facture sera réglée.
+   */
+  const avecPartenaires = t.facturePartenaires > 0.005;
+  const hauteurPanneau = avecPartenaires ? 46 : 32;
+  if (y > 262 - hauteurPanneau) { doc.addPage(); y = 20; }
+  doc.setFillColor(245, 247, 251); doc.rect(14, y, 182, hauteurPanneau, "F");
   doc.setFontSize(10); doc.setTextColor(...NAVY); doc.setFont(undefined, "bold");
-  doc.text("Recettes (chiffre d’affaires)", 18, y + 7.5);
-  doc.text(fmt(t.facture, devise), 192, y + 7.5, { align: "right" });
+  let yp = y + 7.5;
+  doc.text(avecPartenaires ? "Facturé aux clients" : "Recettes (chiffre d’affaires)", 18, yp);
+  doc.text(fmt(t.facture, devise), 192, yp, { align: "right" });
+  if (avecPartenaires) {
+    yp += 6.5;
+    doc.text(`Facturé aux partenaires (${t.nbPartenaires} colis)`, 18, yp);
+    doc.text(fmt(t.facturePartenaires, devise), 192, yp, { align: "right" });
+    yp += 7;
+    doc.setDrawColor(205, 212, 224); doc.setLineWidth(0.3); doc.line(18, yp - 3.5, 192, yp - 3.5);
+    doc.text("Recettes (chiffre d’affaires)", 18, yp);
+    doc.text(fmt(t.factureTotal, devise), 192, yp, { align: "right" });
+  }
+  yp += 6.5;
   doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
-  doc.text("Dépenses du voyage", 18, y + 14);
-  doc.text(`- ${fmt(t.depensesEUR, devise)}`, 192, y + 14, { align: "right" });
+  doc.text("Dépenses du voyage", 18, yp);
+  doc.text(`- ${fmt(t.depensesEUR, devise)}`, 192, yp, { align: "right" });
+  yp += 7.5;
   doc.setFont(undefined, "bold"); doc.setFontSize(10.5);
   doc.setTextColor(...(t.resultat >= 0 ? [22, 161, 99] : [214, 39, 63]));
-  doc.text("Résultat sur le facturé", 18, y + 21.5);
-  doc.text(fmt(t.resultat, devise), 192, y + 21.5, { align: "right" });
+  doc.text("Résultat sur le facturé", 18, yp);
+  doc.text(fmt(t.resultat, devise), 192, yp, { align: "right" });
+  yp += 8;
   doc.setFontSize(12);
   doc.setTextColor(...(t.tresorerie >= 0 ? [22, 161, 99] : [214, 39, 63]));
-  doc.text("Bilan final (argent rentré)", 18, y + 29.5);
-  doc.text(fmt(t.tresorerie, devise), 192, y + 29.5, { align: "right" });
-  y += 37;
+  doc.text("Bilan final (argent rentré)", 18, yp);
+  doc.text(fmt(t.tresorerie, devise), 192, yp, { align: "right" });
+  y += hauteurPanneau + 5;
 
   const tauxFiche = LIVE_RATES[devise] || CURRENCIES[devise] || 1;
   doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...MUTED);
   doc.text(`Bilan final = encaissé ${fmt(t.encaisse, devise)} - dépenses ${fmt(t.depensesEUR, devise)}.`
     + (devise === "EUR" ? "" : ` Tous les montants sont en ${devise} (1 EUR = ${tauxFiche.toLocaleString("fr-FR")} ${devise}).`), 14, y);
-  y += 11;
+  y += 5;
+  if (avecPartenaires) {
+    /*
+     * Sans cette phrase, on chercherait le facturé partenaire dans le bilan final et on croirait
+     * à une erreur de calcul. Le bilan final ne compte que ce qui est entré au comptoir sur cette
+     * rotation ; un règlement de facture partenaire entre par la Caisse, et l'y ajouter ici le
+     * compterait deux fois.
+     */
+    doc.text(`Les partenaires doivent encore ${fmt(t.duParPartenaires, devise)} à la caisse sur ce voyage.`
+      + " Ces montants n’entrent pas dans le bilan final : ils sont réglés sur la facture mensuelle"
+      + " du partenaire et suivis dans Caisse, pas au comptoir.", 14, y);
+    y += 5;
+  }
+  y += 6;
   // Le pied de page est à 288 mm : la ligne de signature doit rester au-dessus.
   if (y > 262) { doc.addPage(); y = 20; }
   doc.setFontSize(9); doc.setTextColor(90, 100, 120);
@@ -23911,7 +25130,7 @@ function VoyagesPage({ data, persist, session, notify }) {
     const set = new Set(trackings);
     return data.colis.filter((c) => set.has(c.tracking));
   }, [data.colis, trackings]);
-  const totaux = useMemo(() => totauxVoyage(colisInclus, depenses, data.users, data.remisesCaisse), [colisInclus, depenses, data.users, data.remisesCaisse]);
+  const totaux = useMemo(() => totauxVoyage(colisInclus, depenses, data.users, data.remisesCaisse, data.facturesPartenaire), [colisInclus, depenses, data.users, data.remisesCaisse, data.facturesPartenaire]);
   const colisPartenaires = useMemo(() => colisInclus.filter(estColisPartenaire), [colisInclus]);
   /** Le récapitulatif partenaires bloque la validation tant qu'il n'a pas été confirmé. */
   const controlePartenairesRequis = colisPartenaires.length > 0 && !partenairesVerifies;
@@ -23922,7 +25141,7 @@ function VoyagesPage({ data, persist, session, notify }) {
     return ["export", "import"].map((sens) => ({
       sens,
       libelle: libelleVoyage(pays, sens),
-      ...totauxVoyage(colisInclus.filter((c) => (c.direction || "export") === sens), [], data.users, data.remisesCaisse),
+      ...totauxVoyage(colisInclus.filter((c) => (c.direction || "export") === sens), [], data.users, data.remisesCaisse, data.facturesPartenaire),
     }));
   }, [direction, colisInclus, pays, data.users, data.remisesCaisse]);
 
@@ -24079,7 +25298,7 @@ function VoyagesPage({ data, persist, session, notify }) {
           </div>
         ) : voyages.map((v) => {
           const set = new Set(v.trackings || []);
-          const t = totauxVoyage(data.colis.filter((c) => set.has(c.tracking)), v.depenses, data.users, data.remisesCaisse);
+          const t = totauxVoyage(data.colis.filter((c) => set.has(c.tracking)), v.depenses, data.users, data.remisesCaisse, data.facturesPartenaire);
           const valide = v.statut === "Validé";
           return (
             <div key={v.id} style={{ ...carte, marginBottom: 12, padding: "14px 16px" }}>
@@ -24187,7 +25406,16 @@ function VoyagesPage({ data, persist, session, notify }) {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 12, marginBottom: 18 }}>
         {[
           { label: "Colis embarqués", valeur: String(totaux.nbColis), sous: `${totaux.poids.toFixed(1)} kg au total`, icon: Package, tint: "#5B8DEF" },
-          { label: "Recettes (chiffre d’affaires)", valeur: fmt(totaux.facture, "EUR"), sous: `encaissé ${fmt(totaux.encaisse, "EUR")} · reste ${fmt(totaux.resteAEncaisser, "EUR")}`, icon: DollarSign, tint: "#0A2647" },
+          /*
+           * L'écran dit désormais la même chose que la fiche imprimée : le facturé partenaire
+           * fait partie des recettes, mais il se règle sur la facture mensuelle du partenaire —
+           * pas au comptoir. La carte le montre donc dans son total et le nomme en dessous.
+           */
+          { label: "Recettes (chiffre d’affaires)", valeur: fmt(totaux.factureTotal, "EUR"),
+            sous: totaux.facturePartenaires > 0.005
+              ? `clients ${fmt(totaux.facture, "EUR")} · partenaires ${fmt(totaux.facturePartenaires, "EUR")}`
+              : `encaissé ${fmt(totaux.encaisse, "EUR")} · reste ${fmt(totaux.resteAEncaisser, "EUR")}`,
+            icon: DollarSign, tint: "#0A2647" },
           { label: "Dépenses du voyage", valeur: fmt(totaux.depensesEUR, "EUR"), sous: `${depenses.length} ligne${depenses.length > 1 ? "s" : ""}`, icon: Receipt, tint: "#B8801C" },
           { label: "Résultat du voyage", valeur: fmt(totaux.resultat, "EUR"), sous: fmtGNF(totaux.resultat * (LIVE_RATES.GNF || CURRENCIES.GNF)), icon: Plane, tint: totaux.resultat >= 0 ? "#16A163" : "#E23F52" },
         ].map((k) => (
@@ -24407,14 +25635,21 @@ function VoyagesPage({ data, persist, session, notify }) {
             <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--text)" }}>
               Contrôle avant départ — {colisPartenaires.length} colis partenaire{colisPartenaires.length > 1 ? "s" : ""}
             </div>
+            {/*
+              * Cette phrase disait « ni tarif ni facture chez nous ». C'était vrai du client du
+              * partenaire, pas du partenaire lui-même : il nous doit le tarif de son contrat, et
+              * la fiche le compte désormais dans les recettes. La laisser telle quelle ferait dire
+              * au même écran deux choses contraires.
+              */}
             <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 }}>
-              Ces colis n’ont ni tarif ni facture chez nous : ce récapitulatif est le seul contrôle de ce
-              qu’ils contiennent. Vérifiez client, articles et poids avant de sceller le voyage.
+              Ces colis ne sont pas encaissés au comptoir : ils sont facturés au partenaire, au tarif
+              de son contrat. Ce récapitulatif est le seul contrôle de ce qu’ils contiennent —
+              vérifiez client, articles et poids avant de sceller le voyage.
             </div>
           </div>
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", minWidth: 600, borderCollapse: "collapse" }}>
-              <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Partenaire", "Client", "Articles", "Poids"].map((h) => <th key={h} style={{ padding: "9px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
+              <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>{["N° de suivi", "Partenaire", "Client", "Articles", "Poids", "Facturé au partenaire", "Reste dû"].map((h) => <th key={h} style={{ padding: "9px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>)}</tr></thead>
               <tbody>
                 {colisPartenaires.map((c) => {
                   const p = (data.users || []).find((u) => u.id === c.partenaireId);
@@ -24429,6 +25664,27 @@ function VoyagesPage({ data, persist, session, notify }) {
                         ))}
                       </td>
                       <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{c.poids} kg</td>
+                      {/*
+                        * Le tarif du contrat — jamais ce que le partenaire facture à son client.
+                        *
+                        * `prixPartenaire` est stocké DANS la devise du contrat (voir
+                        * detailPrixPartenaire : poids × tarif.parKg), pas dans la base euro. Il
+                        * passe donc par versEUR avant fmt, sans quoi un montant en francs serait
+                        * multiplié une seconde fois par le taux.
+                        */}
+                      <td style={{ padding: "9px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 700, whiteSpace: "nowrap" }}>
+                        {fmt(versEUR(Number(c.prixPartenaire) || 0, c.devisePartenaire), c.devisePartenaire || "GNF")}
+                      </td>
+                      {/* Ce qui reste dû à la caisse : zéro dès que la facture qui le porte est réglée. */}
+                      {(() => {
+                        const r = reglementColisPartenaire(c, data.facturesPartenaire);
+                        const du = r.reste > 0.005;
+                        return (
+                          <td style={{ padding: "9px 14px", fontSize: 12.5, fontWeight: 700, whiteSpace: "nowrap", color: du ? "var(--danger-fg)" : "var(--ok-fg)" }}>
+                            {du ? fmt(versEUR(r.reste, c.devisePartenaire), c.devisePartenaire || "GNF") : "Réglé"}
+                          </td>
+                        );
+                      })()}
                     </tr>
                   );
                 })}
@@ -24437,7 +25693,7 @@ function VoyagesPage({ data, persist, session, notify }) {
           </div>
           <div style={{ padding: "12px 16px", borderTop: "1px solid var(--border)", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
             <div style={{ fontSize: 12.5, color: "var(--muted)" }}>
-              Total partenaires : <strong style={{ color: "var(--text)" }}>{colisPartenaires.reduce((s, c) => s + nombreArticles(c), 0)} articles</strong> · <strong style={{ color: "var(--text)" }}>{colisPartenaires.reduce((s, c) => s + (Number(c.poids) || 0), 0).toFixed(1)} kg</strong>
+              Total partenaires : <strong style={{ color: "var(--text)" }}>{colisPartenaires.reduce((s, c) => s + nombreArticles(c), 0)} articles</strong> · <strong style={{ color: "var(--text)" }}>{colisPartenaires.reduce((s, c) => s + (Number(c.poids) || 0), 0).toFixed(1)} kg</strong> · facturé <strong style={{ color: "var(--text)" }}>{fmt(totaux.facturePartenaires, "EUR")}</strong> · reste dû <strong style={{ color: totaux.duParPartenaires > 0.005 ? "var(--danger-fg)" : "var(--ok-fg)" }}>{fmt(totaux.duParPartenaires, "EUR")}</strong>
             </div>
             {enLecture ? (
               <div style={{ fontSize: 12.5, color: "var(--ok-fg)", fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
@@ -26465,6 +27721,23 @@ function IdentitePubliquePage({ data, persist, notify, onBack }) {
   const [domaine, setDomaine] = useState(site.domaine || "");
   const [trackingPublic, setTrackingPublic] = useState(site.trackingPublic ?? true);
 
+  /*
+   * CE QUI A ÉTÉ CHOISI MAIS PAS ENCORE ENREGISTRÉ.
+   *
+   * Choisir un fichier remplace l'aperçu tout de suite, et rien d'autre ne bouge : le bouton
+   * « Enregistrer » est trente lignes plus bas, donc hors écran sur un téléphone. On croit avoir
+   * changé son logo, on quitte la page, et rien n'a été enregistré — sans le moindre message.
+   *
+   * Un écran qui a quelque chose en attente doit le dire à l'endroit où le geste a eu lieu.
+   */
+  const enAttente = [
+    logo !== (b.logo || null) ? "le logo" : "",
+    nom !== nomInitial ? "le nom" : "",
+    tagline !== sloganInitial ? "le slogan" : "",
+    domaine !== (site.domaine || "") ? "le domaine" : "",
+    trackingPublic !== (site.trackingPublic ?? true) ? "le suivi public" : "",
+  ].filter(Boolean);
+
   // Deux valeurs qui divergent aujourd'hui : on prévient avant d'unifier.
   const divergences = [
     b.nom && site.nomPublic && b.nom !== site.nomPublic ? `le nom (« ${b.nom} » dans l’application, « ${site.nomPublic} » sur la page publique)` : "",
@@ -26520,9 +27793,25 @@ function IdentitePubliquePage({ data, persist, notify, onBack }) {
           </div>
         </Field>
         <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 }}>
-          Utilisés dans le menu de l’application, sur votre page d’accueil publique et sur tous vos
-          documents imprimés.
+          Utilisés dans le menu de l’application, sur votre page d’accueil publique, sur tous vos
+          documents imprimés et en tête des courriels automatiques.
         </div>
+        {/*
+          Le rappel est ici, sous le geste, et non près du bouton : c'est ici qu'on regarde, et
+          c'est d'ici qu'on repart en croyant avoir fini.
+        */}
+        {enAttente.length > 0 && (
+          <div style={{ marginTop: 14, background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 10, padding: "10px 12px" }}>
+            <div style={{ fontSize: 12.5, color: "var(--warn-fg)", lineHeight: 1.5, marginBottom: 8 }}>
+              <strong>Rien n’est encore enregistré.</strong> Vous avez changé {enAttente.join(", ")} —
+              cliquez ci-dessous, sinon ces modifications seront perdues en quittant la page.
+            </div>
+            <button onClick={save}
+              style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+              Enregistrer maintenant
+            </button>
+          </div>
+        )}
       </div>
 
       <CarteLienEspaceClient />
@@ -28596,16 +29885,293 @@ function EtatVeille({ data, notify }) {
           ? `Échec de la dernière sauvegarde (${veille.raison || "raison inconnue"}).`
           : `Dernière sauvegarde ${quand.toLocaleString("fr-FR")}${veille.colis !== undefined ? ` — ${veille.colis} colis, ${veille.comptes} comptes` : ""}.`;
 
+  /*
+   * LA COPIE HORS DU SERVEUR — annoncée à part, parce qu'elle protège d'autre chose.
+   *
+   * La ligne du dessus disait « Dernière sauvegarde … — 69 colis, 9 comptes » sur fond vert,
+   * pendant que la copie par courriel échouait toutes les nuits depuis une semaine. Les deux
+   * étaient vraies, et ensemble elles mentaient : la sauvegarde de nuit protège d'une fausse
+   * manœuvre, elle ne protège de rien si le compte de l'hébergeur disparaît — les quinze copies
+   * et le document vivant y sont côte à côte.
+   *
+   * Le motif exact du refus est affiché tel quel. C'est laid, et c'est voulu : « refus-resend-422 »
+   * ne se répare pas, « domaine non vérifié » se répare en cinq minutes.
+   */
+  const horsBase = veille?.horsBase || null;
+  const copieOk = horsBase?.envoyee === true;
+  const teinteCopie = copieOk ? "ok" : "danger";
+  const dernierSucces = horsBase?.dernierSucces ? new Date(horsBase.dernierSucces) : null;
+
+  /*
+   * LE BILAN QUOTIDIEN — et ce qui l'empêche d'arriver.
+   *
+   * Il est calculé et envoyé chaque nuit depuis le serveur, par courriel et par WhatsApp. Son état
+   * était consigné dans le relevé et affiché nulle part : exactement ce qui a laissé la copie hors
+   * site échouer huit nuits de suite sans que personne l'apprenne.
+   *
+   * Un bilan qu'on croit recevoir et qui n'arrive jamais est pire que pas de bilan : on cesse
+   * d'ouvrir l'application le matin en pensant que le message viendra. On dit donc ce qui manque,
+   * en nommant le geste — pas le code d'erreur.
+   */
+  const bilanNuit = veille?.bilan || null;
+  const bilanWhatsAppOk = bilanNuit?.whatsapp === true;
+  const bilanEmailOk = bilanNuit?.email === true;
+  const bilanComplet = bilanWhatsAppOk && bilanEmailOk;
+  /*
+   * Trois teintes, pas deux : une seule voie qui marche n'est pas la même chose que rien du tout.
+   * Le vert n'est donné qu'aux deux, parce que chacune protège d'une panne de l'autre.
+   */
+  const teinteBilan = bilanComplet ? "ok" : ((bilanEmailOk || bilanWhatsAppOk) ? "warn" : "danger");
+  /*
+   * Chaque motif rendu par le serveur est traduit en un geste. « modele-absent-ou-non-approuve »
+   * ne se répare pas ; « déposez le modèle dans WhatsApp Manager » se répare.
+   */
+  const QUOI_FAIRE_WHATSAPP = {
+    "whatsapp-non-configure": "Le jeton WhatsApp n’est pas posé sur le serveur. Ajoutez WHATSAPP_TOKEN et WHATSAPP_PHONE_ID dans les variables d’environnement de Vercel — ce sont les mêmes que celles qui servent déjà aux messages clients.",
+    "aucun-numero-de-bilan": "Il manque le numéro qui doit recevoir le bilan. Ajoutez BILAN_WHATSAPP dans les variables d’environnement de Vercel — le numéro complet avec l’indicatif, sans espaces ni signe plus.",
+    "modele-absent-ou-non-approuve": "Meta n’autorise, hors des vingt-quatre heures suivant un message du destinataire, que des modèles approuvés. Déposez le modèle nommé ci-dessous dans WhatsApp Manager → Modèles de message, avec quatre variables dans le corps, puis attendez sa validation.",
+    reseau: "Le serveur n’a pas pu joindre Meta cette nuit. Si cela se répète, vérifiez que le jeton n’a pas expiré.",
+  };
+  const gesteWhatsApp = QUOI_FAIRE_WHATSAPP[bilanNuit?.raisonWhatsApp]
+    || (bilanNuit?.raisonWhatsApp ? "Refus de Meta. Le motif exact est indiqué ci-dessous." : null);
+
+  /*
+   * ESSAYER L'ENVOI MAINTENANT, PLUTÔT QU'ATTENDRE DEMAIN.
+   *
+   * Régler le bilan WhatsApp demandait une nuit d'attente par essai : on pose une variable, on
+   * attend le lendemain matin, on découvre qu'il manquait autre chose, on recommence. Un indicatif
+   * oublié, un modèle pas encore validé, un numéro qui n'est pas sur WhatsApp — et l'on y passe la
+   * semaine, sans jamais savoir laquelle des trois choses cloche.
+   *
+   * Ce bouton n'écrit aucune sauvegarde et n'efface rien : il calcule les chiffres et tente les
+   * deux envois. Le message qui revient est celui du serveur, mot pour mot.
+   */
+  const [essaiBilan, setEssaiBilan] = useState(false);
+  /*
+   * Un numéro d'essai, facultatif. Sans lui, chaque hypothèse — « le numéro est faux », « cette
+   * ligne n'a pas WhatsApp » — coûtait une modification dans Vercel et un redéploiement.
+   */
+  const [numeroEssai, setNumeroEssai] = useState("");
+
+  /*
+   * L'ADRESSE D'EXPÉDITION RÉELLEMENT CONFIGURÉE, VUE DU SERVEUR.
+   *
+   * Resend affichait « badiabyexpress.com — Verified », et le site recevait quand même
+   * « refus-resend-422 » sur chaque envoi. Les deux étaient vrais : le domaine est bien vérifié, et
+   * l'adresse d'expédition ne lui appartient pas. Un envoi depuis une autre adresse que le domaine
+   * vérifié est refusé, avec un code qui ne le dit pas.
+   *
+   * On ne peut pas le deviner depuis le navigateur : EMAIL_FROM est un secret de serveur. Mais
+   * api/email.js sait répondre « voici le domaine que je vois », sans livrer l'adresse complète —
+   * et c'est exactement ce qu'il faut confronter à la ligne verte de Resend.
+   */
+  const [expediteur, setExpediteur] = useState(null);
+  useEffect(() => {
+    let vivant = true;
+    appelServeurQuiDepense("/api/email?etat=1")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((corps) => { if (vivant && corps) setExpediteur(corps); })
+      .catch(() => {});
+    return () => { vivant = false; };
+  }, []);
+
+  async function testerLeBilan() {
+    setEssaiBilan(true);
+    try {
+      const reponse = await appelServeurQuiDepense("/api/veille?bilan=1", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(numeroEssai.trim() ? { destinataire: numeroEssai.trim() } : {}),
+      });
+      const corps = await reponse.json().catch(() => ({}));
+      if (!reponse.ok) { notify?.(corps.error || "Envoi impossible pour le moment."); return; }
+      const b = corps.bilan || {};
+      /*
+       * « ACCEPTÉ PAR META », ET NON « ENVOYÉ ».
+       *
+       * L'API rend un identifiant de message dès qu'elle accepte la demande, sans rien promettre de
+       * la livraison. Un numéro qui n'est pas sur WhatsApp, un chiffre de travers, une ligne qui a
+       * changé de main : l'appel « réussit » et personne ne reçoit rien. Écrire « envoyé » ferait
+       * chercher la panne partout sauf là où elle est.
+       */
+      notify?.(b.whatsapp
+        ? `Meta a accepté le message pour le ${corps.whatsappVers || "numéro configuré"}. S’il n’arrive pas, c’est que cette ligne n’est pas sur WhatsApp ou que le numéro est faux.`
+        : `WhatsApp refusé : ${b.raisonWhatsApp || "motif inconnu"}${b.detailWhatsApp ? ` — ${String(b.detailWhatsApp).slice(0, 120)}` : ""}`);
+    } catch (e) {
+      notify?.("Serveur injoignable — essai impossible.");
+    } finally {
+      setEssaiBilan(false);
+    }
+  }
+
   return (
-    <div style={{ background: `var(--${teinte}-bg)`, border: `1px solid var(--${teinte}-border)`, borderRadius: 10, padding: "11px 13px", marginBottom: 14, display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
-      {bon ? <CheckCircle2 size={15} color={`var(--${teinte}-fg)`} style={{ flexShrink: 0, marginTop: 2 }} />
-        : <AlertTriangle size={15} color={`var(--${teinte}-fg)`} style={{ flexShrink: 0, marginTop: 2 }} />}
-      <div style={{ fontSize: 12.5, color: `var(--${teinte}-fg)`, lineHeight: 1.55, flex: 1, minWidth: 200 }}>{message}</div>
-      <button onClick={sauvegarderMaintenant} disabled={encours}
-        style={{ background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: encours ? "default" : "pointer", opacity: encours ? 0.6 : 1, flexShrink: 0 }}>
-        {encours ? "Sauvegarde…" : "Sauvegarder maintenant"}
-      </button>
-    </div>
+    <>
+      <div style={{ background: `var(--${teinte}-bg)`, border: `1px solid var(--${teinte}-border)`, borderRadius: 10, padding: "11px 13px", marginBottom: 10, display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
+        {bon ? <CheckCircle2 size={15} color={`var(--${teinte}-fg)`} style={{ flexShrink: 0, marginTop: 2 }} />
+          : <AlertTriangle size={15} color={`var(--${teinte}-fg)`} style={{ flexShrink: 0, marginTop: 2 }} />}
+        <div style={{ fontSize: 12.5, color: `var(--${teinte}-fg)`, lineHeight: 1.55, flex: 1, minWidth: 200 }}>{message}</div>
+        <button onClick={sauvegarderMaintenant} disabled={encours}
+          style={{ background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: encours ? "default" : "pointer", opacity: encours ? 0.6 : 1, flexShrink: 0 }}>
+          {encours ? "Sauvegarde…" : "Sauvegarder maintenant"}
+        </button>
+      </div>
+
+      {horsBase && (
+        <div style={{ background: `var(--${teinteCopie}-bg)`, border: `1px solid var(--${teinteCopie}-border)`, borderRadius: 10, padding: "11px 13px", marginBottom: 14, display: "flex", gap: 10, alignItems: "flex-start" }}>
+          {copieOk ? <ShieldCheck size={15} color={`var(--${teinteCopie}-fg)`} style={{ flexShrink: 0, marginTop: 2 }} />
+            : <AlertTriangle size={15} color={`var(--${teinteCopie}-fg)`} style={{ flexShrink: 0, marginTop: 2 }} />}
+          <div style={{ fontSize: 12.5, color: `var(--${teinteCopie}-fg)`, lineHeight: 1.55, flex: 1, minWidth: 200 }}>
+            {copieOk ? (
+              <>Copie de secours envoyée hors du serveur cette nuit{horsBase.octets ? ` (${Math.round(horsBase.octets / 1024)} ko)` : ""}.</>
+            ) : (
+              <>
+                <strong>Aucune copie n’est partie hors du serveur.</strong>{" "}
+                {dernierSucces
+                  ? `La dernière remonte au ${dernierSucces.toLocaleDateString("fr-FR")}.`
+                  : "Aucune n’est jamais partie."}{" "}
+                Vos sauvegardes et vos données vivent au même endroit : une perte du compte
+                d’hébergement emporterait les deux.
+                <div style={{ marginTop: 6, fontSize: 11.5, opacity: 0.85 }}>
+                  Motif du refus : <code>{horsBase.raison || "inconnu"}</code>
+                  {horsBase.detail ? <> — {String(horsBase.detail).slice(0, 180)}</> : null}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/*
+        Affiché dès qu'une nuit a eu lieu, même si le bilan n'a jamais été tenté : c'est justement
+        l'état où l'on a le plus besoin du bouton d'essai.
+      */}
+      {veille && (
+        <div style={{ background: `var(--${teinteBilan}-bg)`, border: `1px solid var(--${teinteBilan}-border)`, borderRadius: 10, padding: "11px 13px", marginBottom: 14, display: "flex", gap: 10, alignItems: "flex-start" }}>
+          {bilanComplet ? <CheckCircle2 size={15} color={`var(--${teinteBilan}-fg)`} style={{ flexShrink: 0, marginTop: 2 }} />
+            : <AlertTriangle size={15} color={`var(--${teinteBilan}-fg)`} style={{ flexShrink: 0, marginTop: 2 }} />}
+          <div style={{ fontSize: 12.5, color: `var(--${teinteBilan}-fg)`, lineHeight: 1.55, flex: 1, minWidth: 200 }}>
+            {bilanComplet ? (
+              <>
+                Bilan de la journée envoyé{bilanNuit.essai ? " à l’essai" : " cette nuit"}, par courriel et sur WhatsApp.
+              </>
+            ) : (
+              <>
+                {/*
+                  QUATRE CAS, ET J'EN AVAIS ÉCRIT DEUX.
+                  Le texte ne prévoyait que « le courriel marche, pas WhatsApp » — jamais l'inverse.
+                  Le jour où WhatsApp est parti et le courriel non, l'écran a donc annoncé « n'est
+                  envoyé nulle part » alors que le message était bien arrivé sur le téléphone. Un
+                  bandeau qui se trompe dans le sens alarmant fait chercher une panne qui n'existe
+                  pas ; il use la confiance aussi sûrement que celui qui rassure à tort.
+                */}
+                <strong>
+                  {!bilanNuit
+                    ? "Le bilan quotidien n’a encore jamais été tenté."
+                    : bilanEmailOk
+                      ? "Le bilan quotidien part par courriel, mais pas sur WhatsApp."
+                      : bilanWhatsAppOk
+                        ? "Le bilan quotidien part sur WhatsApp, mais pas par courriel."
+                        : "Le bilan quotidien n’est envoyé nulle part."}
+                </strong>
+                {/*
+                  Le courriel d'abord : c'est lui qui porte le détail complet, et il ne dépend
+                  d'aucun modèle à faire approuver. Sans lui, il n'y a pas de bilan du tout.
+                */}
+                {bilanNuit && !bilanEmailOk && (
+                  <div style={{ marginTop: 6 }}>
+                    <strong>Courriel :</strong>{" "}
+                    {bilanNuit.raisonEmail === "courriel-non-configure"
+                      ? "RESEND_API_KEY ou EMAIL_FROM manquent dans les variables d’environnement de Vercel."
+                      : bilanNuit.raisonEmail === "aucun-destinataire"
+                        ? "Aucune adresse où l’envoyer. Renseignez ALERTE_EMAIL dans Vercel, ou l’adresse e-mail d’un compte administrateur."
+                        : <>refusé — <code>{bilanNuit.raisonEmail || "motif inconnu"}</code></>}
+                    {bilanNuit.detailEmail && (
+                      <div style={{ marginTop: 4, fontSize: 11.5, opacity: 0.85 }}>
+                        Réponse de Resend : {String(bilanNuit.detailEmail).slice(0, 200)}
+                      </div>
+                    )}
+                    {/*
+                      LA LIGNE QUI TRANCHE.
+                      Resend peut afficher « Verified » en vert et refuser tous les envois : il
+                      vérifie un DOMAINE, et n'accepte que les adresses qui en font partie. Confronter
+                      ce qu'il a vérifié à ce que le serveur envoie prend une seconde ; sans cette
+                      ligne, on cherche du côté du DNS, qui est justement le seul endroit correct.
+                    */}
+                    {expediteur && (
+                      <div style={{ marginTop: 4, fontSize: 11.5, opacity: 0.85 }}>
+                        {expediteur.domaine
+                          ? <>Le serveur envoie depuis le domaine <code>{expediteur.domaine}</code> — il doit
+                            être exactement celui qui est « Verified » chez Resend, sinon tout envoi est refusé.</>
+                          : expediteur.expediteur
+                            ? <>EMAIL_FROM est mal formée : attendu « Nom &lt;adresse@domaine&gt; ».</>
+                            : <>EMAIL_FROM n’est pas posée dans Vercel.</>}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {bilanNuit && !bilanWhatsAppOk && (
+                  <div style={{ marginTop: 6 }}>
+                    <strong>WhatsApp :</strong> {gesteWhatsApp || "non tenté."}
+                    {bilanNuit.modele && (
+                      <div style={{ marginTop: 4 }}>
+                        Modèle attendu : <code>{bilanNuit.modele}</code>
+                      </div>
+                    )}
+                    {bilanNuit.detailWhatsApp && (
+                      <div style={{ marginTop: 4, fontSize: 11.5, opacity: 0.85 }}>
+                        Réponse de Meta : {String(bilanNuit.detailWhatsApp).slice(0, 180)}
+                      </div>
+                    )}
+                    <div style={{ marginTop: 4, fontSize: 11.5, opacity: 0.85 }}>
+                      Motif : <code>{bilanNuit.raisonWhatsApp || "inconnu"}</code>
+                    </div>
+                  </div>
+                )}
+                {/*
+                  UNE VARIABLE D'ENVIRONNEMENT N'EST LUE QU'AU DÉPLOIEMENT SUIVANT.
+                  C'est le piège qui fait perdre le plus de temps : la variable est bien posée, on
+                  la voit dans Vercel, et le serveur qui tourne ne la connaît pas encore.
+
+                  Mais on ne le dit QUE quand une variable est en cause. Affiché sous un refus de
+                  Resend, ce conseil envoie redéployer pour rien — et un écran qui donne le mauvais
+                  geste coûte plus qu'un écran qui se tait.
+                */}
+                {/^(whatsapp-non-configure|aucun-numero-de-bilan|courriel-non-configure|aucun-destinataire)$/
+                  .test(bilanNuit?.raisonWhatsApp || bilanNuit?.raisonEmail || "") && (
+                  <div style={{ marginTop: 8, fontSize: 11.5, opacity: 0.85 }}>
+                    Si vous venez d’ajouter une variable dans Vercel, redéployez d’abord :
+                    une variable n’est lue qu’au déploiement suivant.
+                  </div>
+                )}
+              </>
+            )}
+            {/*
+              Sans ce bouton, chaque essai coûtait une nuit d'attente : on pose une variable, on
+              attend le lendemain matin, on découvre qu'il manquait autre chose. Trois erreurs de
+              saisie et l'on y passe la semaine.
+            */}
+            <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <button onClick={testerLeBilan} disabled={essaiBilan}
+                style={{ background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 700, cursor: essaiBilan ? "default" : "pointer", opacity: essaiBilan ? 0.6 : 1 }}>
+                {essaiBilan ? "Envoi…" : "Envoyer le bilan maintenant"}
+              </button>
+              {/*
+                Le numéro d'essai. Facultatif, et il ne change rien à l'envoi de nuit : il sert à
+                savoir SI c'est le numéro qui cloche, sans passer par Vercel et un redéploiement
+                pour chaque hypothèse.
+              */}
+              <input value={numeroEssai} onChange={(e) => setNumeroEssai(e.target.value)}
+                inputMode="numeric" placeholder="essayer un autre numéro" aria-label="Numéro d’essai"
+                style={{ background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 10px", fontSize: 12, width: 190 }} />
+            </div>
+            <div style={{ marginTop: 6, fontSize: 11.5, opacity: 0.8 }}>
+              Le numéro d’essai ne change pas l’envoi de nuit — il sert à savoir si c’est la ligne
+              qui pose problème. Avec l’indicatif, sans espaces ni signe plus.
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -28746,17 +30312,42 @@ function ParametresSystemePage({ data, persist, notify, onBack, offline }) {
 
         <div style={{ background: "var(--surface)", borderRadius: 14, padding: 20, border: "1px solid var(--border)" }}>
           <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Sauvegardes automatiques</div>
-          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>Une copie complète est enregistrée chaque nuit par le serveur, conservée 14 jours — que quelqu’un ouvre l’application ou non.</div>
+          {/*
+            Trente jours, et non quatorze : la fenêtre a été allongée après la perte de trois
+            factures partenaire découverte huit jours plus tard, alors que la seule copie qui les
+            contenait encore allait être effacée la nuit suivante. Cette phrase, elle, était restée
+            à quatorze — une promesse fausse dans le sens rassurant, ce qui est le pire des deux.
+          */}
+          <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 14 }}>Une copie complète est enregistrée chaque nuit par le serveur, conservée 30 jours — que quelqu’un ouvre l’application ou non. Les copies prises à la main avant une opération délicate ne sont jamais effacées automatiquement.</div>
           <EtatVeille data={data} notify={notify} />
           {backups === null && <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Chargement…</div>}
           {backups !== null && backups.length === 0 && <div style={{ fontSize: 12.5, color: "var(--muted)" }}>Aucune sauvegarde pour le moment — la prochaine passera cette nuit.</div>}
           {backups && backups.length > 0 && (
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {backups.map((key) => {
-                const dateStr = key.replace(BACKUP_PREFIX, "");
+                /*
+                  « Invalid Date », trois fois dans la liste.
+                  Une copie prise à la main porte un suffixe — « 2026-09-03-avant-restauration-cat »
+                  — et la chaîne entière était donnée à new Date(). Résultat : les copies les plus
+                  précieuses, celles qu'on prend justement avant une opération risquée, étaient les
+                  seules qu'on ne pouvait pas dater dans la liste où l'on va les chercher.
+                  On lit donc la date au début, et l'on dit à quoi sert le reste.
+                */
+                const brut = key.replace(BACKUP_PREFIX, "");
+                const jour = brut.slice(0, 10);
+                const suffixe = brut.slice(11).replace(/-/g, " ").trim();
+                const quand = new Date(`${jour}T12:00:00Z`);
+                const lisible = Number.isNaN(quand.getTime())
+                  ? brut
+                  : quand.toLocaleDateString("fr-FR", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
                 return (
-                  <div key={key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--surface2)", borderRadius: 8, padding: "8px 12px" }}>
-                    <span style={{ fontSize: 12.5, color: "var(--text)" }}>{new Date(dateStr).toLocaleDateString("fr-FR", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}</span>
+                  <div key={key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: "var(--surface2)", borderRadius: 8, padding: "8px 12px" }}>
+                    <span style={{ fontSize: 12.5, color: "var(--text)", minWidth: 0 }}>
+                      {lisible}
+                      {suffixe && (
+                        <span style={{ color: "var(--muted)", fontSize: 11.5 }}> · copie manuelle ({suffixe})</span>
+                      )}
+                    </span>
                     {confirmRestore === key ? (
                       <div style={{ display: "flex", gap: 8 }}>
                         <button onClick={() => setConfirmRestore(null)} style={{ background: "none", border: "none", color: "var(--muted)", fontSize: 11.5, cursor: "pointer" }}>Annuler</button>
@@ -30304,6 +31895,60 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
   }
 
   /*
+   * SUPPRIMER UNE FACTURE PARTENAIRE — RÉSERVÉ À L'ADMINISTRATEUR.
+   * ─────────────────────────────────────────────────────────────────────────────
+   * Ce qu'il faut savoir avant de lire la suite : « Rouvrir » supprimait DÉJÀ la facture, et tous
+   * les rôles — agent compris — en ont le droit. Une facture pouvait donc disparaître de la main
+   * de n'importe qui, sous un mot qui annonçait une modification. Ces trois factures perdues entre
+   * le 26 et le 31 août, retrouvées huit jours plus tard dans une sauvegarde qui allait être
+   * effacée, disent assez ce que coûte une pièce comptable qui s'en va sans bruit.
+   *
+   * Deux gestes distincts, donc, et une règle commune :
+   *
+   *   — ROUVRIR reste le geste de correction : la facture est reprise, ses colis redeviennent
+   *     modifiables et repartiront sur une facture neuve. C'est ce qu'on fait quand un montant
+   *     est faux.
+   *   — SUPPRIMER est le geste de renoncement : la facture n'aurait pas dû exister — un doublon,
+   *     un mauvais partenaire. Elle s'en va, et ses colis retournent à facturer, parce qu'ils
+   *     restent dus : les laisser rattachés à une facture disparue les ferait sortir des comptes
+   *     sans que personne ne s'en aperçoive.
+   *
+   * Les deux exigent désormais un administrateur, parce que les deux font le même dégât. Restreindre
+   * l'un en laissant l'autre ouvert aurait donné une protection de façade.
+   */
+  const peutSupprimerFacture = session?.role === "Administrateur";
+
+  function supprimerFacturePartenaire(facture) {
+    if (!peutSupprimerFacture) {
+      notify?.("Seul un administrateur peut supprimer une facture partenaire.");
+      return;
+    }
+    /*
+     * Un versement reçu interdit la suppression, comme il interdit la réouverture — et pour la
+     * même raison : l'argent serait encore là, sans facture à laquelle le rattacher. Il faut
+     * d'abord annuler les versements, un par un, ce qui laisse une trace de chacun.
+     */
+    if (reglementsFacture(facture).length > 0) {
+      notify?.(`Facture ${facture.numero} déjà réglée — annulez d’abord ses versements`);
+      return;
+    }
+    const inclus = new Set(facture.trackings || []);
+    persist({
+      ...data,
+      facturesPartenaire: facturesPartenaire.filter((f) => f.id !== facture.id),
+      colis: (data.colis || []).map((c) => (inclus.has(c.tracking) ? { ...c, facturePartenaireId: null } : c)),
+      /*
+       * Le journal garde le numéro, le montant et le nombre de colis. Une facture supprimée ne
+       * laisse aucune autre trace : c'est la seule ligne qui permettra, dans six mois, de dire
+       * pourquoi FP-2026-0002 n'existe pas entre la 0001 et la 0003.
+       */
+      activityLog: pushActivity(data, session, "Facture partenaire supprimée",
+        `${facture.numero} — ${fmt(Number(facture.total) || 0, facture.devise)}, ${inclus.size} colis rendus à la facturation`),
+    });
+    notify?.(`Facture ${facture.numero} supprimée — ses ${inclus.size} colis reviennent à facturer`);
+  }
+
+  /*
    * Versement d'un partenaire sur l'une de ses factures.
    *
    * C'est le seul endroit de l'application où l'entreprise constate de l'argent reçu d'un
@@ -30589,7 +32234,14 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
           colis={data.colis || []} onImprimer={imprimerFacture} onReleve={imprimerReleve}
           onCreerFacture={effectivePermission(session, "factures.creer") ? creerFacture : null}
           onCorriger={effectivePermission(session, "factures.modifier") ? corrigerMontant : null}
-          onRouvrir={effectivePermission(session, "factures.modifier") ? rouvrirFacture : null}
+          /*
+           * Rouvrir supprime la facture — c'est écrit dans sa propre confirmation. Le geste rejoint
+           * donc la suppression derrière la même règle : seul un administrateur. Le laisser ouvert
+           * à tous aurait fait de la suppression réservée une protection de façade, puisque le
+           * même effet s'obtenait à côté sous un autre mot.
+           */
+          onRouvrir={peutSupprimerFacture ? rouvrirFacture : null}
+          onSupprimer={peutSupprimerFacture ? supprimerFacturePartenaire : null}
           onEncaisser={effectivePermission(session, "factures.modifier") ? encaisserFacture : null}
           onAnnulerReglement={effectivePermission(session, "factures.modifier") ? annulerReglement : null}
           onRelancer={effectivePermission(session, "factures.modifier") ? marquerRelance : null}
@@ -31303,7 +32955,7 @@ function DepotsAnnoncesPartenaire({ annonces, onAnnuler }) {
 }
 
 /** Regroupement des colis vérifiés en une facture unique, et historique des factures émises. */
-function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreerFacture, onImprimer, onCorriger, onRouvrir, onEncaisser, onAnnulerReglement, onRelancer, onReleve }) {
+function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreerFacture, onImprimer, onCorriger, onRouvrir, onSupprimer, onEncaisser, onAnnulerReglement, onRelancer, onReleve }) {
   const reglagesDuPartenaire = reglagesPartenaire(partenaire);
   const devise = reglagesDuPartenaire.tarif.devise;
   const delaiReglement = reglagesDuPartenaire.delaiReglementJours;
@@ -31331,6 +32983,8 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
   const totalTout = aFacturer.reduce((s, c) => s + (Number(c.prixPartenaire) || 0), 0);
   const [confirmation, setConfirmation] = useState(false);
   const [aRouvrir, setARouvrir] = useState(null);
+  /* La facture qu'on s'apprête à supprimer pour de bon — réservé à l'administrateur. */
+  const [aSupprimer, setASupprimer] = useState(null);
   const [enCorrection, setEnCorrection] = useState(null);
   const [montant, setMontant] = useState("");
   const [aEncaisser, setAEncaisser] = useState(null);
@@ -31538,6 +33192,16 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
                   {onRouvrir && <button onClick={() => setARouvrir(f)} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "1.5px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
                     <RefreshCw size={14} /> Rouvrir
                   </button>}
+                  {/*
+                    Supprimer se distingue de rouvrir par l'intention, pas par l'effet : rouvrir
+                    reprend une facture pour la refaire, supprimer renonce à une facture qui
+                    n'aurait pas dû exister. Le bouton est donc là, en rouge et en dernier — on ne
+                    le rencontre pas en cherchant autre chose.
+                  */}
+                  {onSupprimer && <button onClick={() => setASupprimer(f)}
+                    style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "1.5px solid var(--danger-border)", color: "var(--danger-fg)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                    <Trash2 size={14} /> Supprimer
+                  </button>}
                 </div>
               </div>
               {versements.length > 0 && (
@@ -31620,6 +33284,31 @@ function FacturationPartenaire({ partenaire, aFacturer, factures, colis, onCreer
           libelleAction="Rouvrir"
           onConfirmer={() => { const f = aRouvrir; setARouvrir(null); onRouvrir(f); }}
           onAnnuler={() => setARouvrir(null)}
+        />
+      ))}
+
+      {/*
+        La suppression dit ce qu'elle laisse derrière elle, et pas seulement ce qu'elle emporte.
+        Un numéro manquant dans une suite de factures se remarque des mois plus tard, quand plus
+        personne ne se souvient : autant l'annoncer au moment où on le crée.
+      */}
+      {aSupprimer && (reglementsFacture(aSupprimer).length > 0 ? (
+        <ConfirmerAction
+          titre="Facture déjà réglée"
+          message={`${aSupprimer.numero} porte ${reglementsFacture(aSupprimer).length} versement${reglementsFacture(aSupprimer).length > 1 ? "s" : ""}, pour ${fmt(totalRegleFacture(aSupprimer), aSupprimer.devise)}.`}
+          consequence="La supprimer laisserait cet argent sans facture à laquelle le rattacher. Annulez d’abord ses versements, un par un — chacun laisse une trace — puis revenez."
+          libelleAction="J’ai compris"
+          onConfirmer={() => setASupprimer(null)}
+          onAnnuler={() => setASupprimer(null)}
+        />
+      ) : (
+        <ConfirmerAction
+          titre="Supprimer cette facture ?"
+          message={`${aSupprimer.numero} — ${(aSupprimer.trackings || []).length} colis, ${fmt(Number(aSupprimer.total) || 0, aSupprimer.devise)}.`}
+          consequence={`La facture disparaît définitivement et son numéro laissera un trou dans la suite : ${aSupprimer.numero} n’existera plus. Ses colis retournent dans la liste à facturer — ils restent dus, et les laisser rattachés à une facture supprimée les ferait sortir des comptes sans bruit. Le journal d’activité gardera le numéro, le montant et la date. Si le partenaire a déjà reçu ce document, prévenez-le.`}
+          libelleAction="Supprimer définitivement"
+          onConfirmer={() => { const f = aSupprimer; setASupprimer(null); onSupprimer(f); }}
+          onAnnuler={() => setASupprimer(null)}
         />
       ))}
 
@@ -31872,7 +33561,15 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
                   {u.role !== "Administrateur" && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>{FLAGS[u.paysOperation || "GN"] || ""} basé {(COUNTRIES.find((c) => c.code === (u.paysOperation || "GN"))?.name) || "Guinée"}</div>}
                 </td>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{u.role === "Administrateur" ? "Tous les pays" : (u.paysAutorises?.length ? u.paysAutorises.map((c) => FLAGS[c]).join(" ") : "Tous les pays")}</td>
-                <td style={{ padding: "12px 16px", fontSize: 13, whiteSpace: "nowrap" }}>{u.twoFA ? <ShieldCheck size={15} color="var(--ok-fg)" /> : "—"}</td>
+                {/*
+                  L'état réel, et non plus la case cochée à la création : celle-ci ne voulait rien
+                  dire — le code était tiré dans le navigateur. La colonne dit maintenant si un
+                  téléphone est bien inscrit, ce qui est la seule chose qui protège quelque chose.
+                */}
+                <td style={{ padding: "12px 16px", fontSize: 13, whiteSpace: "nowrap" }}
+                  title={u.totpActif ? "Un téléphone est inscrit : le mot de passe seul ne suffit pas à entrer." : "Aucun second facteur. La personne l’active elle-même depuis « Sécurité de mon compte »."}>
+                  {u.totpActif ? <ShieldCheck size={15} color="var(--ok-fg)" /> : "—"}
+                </td>
                 <td style={{ padding: "12px 16px", textAlign: "right", whiteSpace: "nowrap" }} onClick={(e) => e.stopPropagation()}>{effectivePermission(session, "users.gerer") && <button onClick={() => deconnecterPartout(u)} title={`Déconnecter ${u.prenom} de tous ses appareils`} aria-label="Déconnecter de tous les appareils" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><LogOut size={15} /></button>}{effectivePermission(session, "users.gerer") && <button onClick={() => setUtilisateurAReinit(u)} title="Réinitialiser le mot de passe" style={{ background: "none", border: "none", color: "var(--muted)", cursor: "pointer", marginInlineEnd: 10 }}><Key size={15} /></button>}{effectivePermission(session, "users.gerer") && (() => {
                   const raison = raisonDeNePasSupprimer(u);
                   return (
@@ -32392,9 +34089,17 @@ function UserForm({ onClose, onSave, existing, sites }) {
             </div>
           </div>
         )}
-        <label style={{ gridColumn: "1 / -1", display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--text)", margin: "-6px 0 8px", cursor: "pointer" }}>
-          <input type="checkbox" checked={twoFA} onChange={(e) => setTwoFA(e.target.checked)} /> Activer la double authentification (démo)
-        </label>
+        {/*
+          LA CASE « DOUBLE AUTHENTIFICATION (DÉMO) » A DISPARU, ET C'EST VOULU.
+          Elle ne pouvait pas tenir sa promesse : personne ne peut inscrire le téléphone de
+          quelqu'un d'autre — c'est la personne qui scanne le code, sur SON appareil. Cocher une
+          case ici ne protégeait donc rien ; elle affichait seulement un cadenas.
+        */}
+        <div style={{ gridColumn: "1 / -1", background: "var(--surface2)", borderRadius: 9, padding: "10px 12px", fontSize: 12, color: "var(--muted)", lineHeight: 1.55, margin: "-6px 0 8px" }}>
+          <strong style={{ color: "var(--text)" }}>Double authentification :</strong> elle s’active depuis
+          le compte lui-même, dans « Sécurité de mon compte ». C’est la personne qui scanne le code avec
+          son propre téléphone — personne ne peut le faire à sa place.
+        </div>
         {err && <div style={{ gridColumn: "1 / -1", color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 4 }}>{err}</div>}
         <div style={{ gridColumn: "1 / -1", display: "flex", justifyContent: "flex-end", gap: 10 }}>
           <button type="button" onClick={onClose} style={{ padding: "10px 18px", borderRadius: 8, border: "1.5px solid var(--border)", background: "var(--surface)", color: "var(--muted)", fontSize: 13.5, cursor: "pointer" }}>Annuler</button>
@@ -32633,78 +34338,353 @@ function paysLisible(code) {
   return pays ? `${FLAGS[pays.code] || ""} ${pays.name}`.trim() : (code || "—");
 }
 
-function codeLisible(code) {
-  const chiffres = String(code || "").replace(/\D/g, "");
-  if (chiffres.length !== 8) return code || "";
-  return `TRF ${chiffres.slice(0, 4)} ${chiffres.slice(4)}`;
+/*
+ * UN TAUX S'ÉCRIT AVEC ASSEZ DE CHIFFRES POUR REFAIRE LE CALCUL.
+ *
+ * Le module affichait « 1 GNF = 0,0001 EUR ». Arrondi à quatre décimales, un taux GNF→EUR réel
+ * (0,0000926) devient faux de huit pour cent, et le montant reçu ne se retrouve plus à partir du
+ * montant envoyé. Sur un devis c'est gênant ; sur un reçu — dont c'est justement le rôle de
+ * trancher une contestation six mois plus tard — c'est le document de l'entreprise qui lui donne
+ * tort.
+ *
+ * On compte donc en chiffres SIGNIFICATIFS et non en décimales : « 0,0000926 » quelle que soit
+ * l'échelle de la devise. Et sous un centième, on ajoute la lecture inverse, parce que c'est
+ * ainsi qu'un taux se dit et se vérifie au comptoir : personne n'annonce « zéro virgule zéro zéro
+ * zéro zéro neuf », on annonce « dix mille huit cents francs pour un euro ».
+ */
+function tauxLisible(taux, deviseEnvoi, deviseReception) {
+  const valeur = Number(taux);
+  if (!Number.isFinite(valeur) || valeur <= 0) return "—";
+  const direct = `1 ${deviseEnvoi} = ${valeur.toLocaleString("fr-FR", { maximumSignificantDigits: 6 })} ${deviseReception}`;
+  if (valeur >= 0.01) return direct;
+  return `${direct}  (1 ${deviseReception} = ${(1 / valeur).toLocaleString("fr-FR", { maximumFractionDigits: 2 })} ${deviseEnvoi})`;
 }
 
-/* ── LE REÇU D'ENVOI ───────────────────────────────────────────────────────────
- * C'est la pièce que l'expéditeur emporte, et sur laquelle il lira le code à sa famille. Le code
- * y est donc le plus gros élément de la page — plus gros que le montant, plus gros que le nom de
- * l'entreprise. Tout le reste sert à trancher une contestation ; lui sert à retirer l'argent.
+function codeLisible(code) {
+  /*
+   * Le code porte désormais deux lettres, deux chiffres au hasard, puis le jour et le mois du
+   * dépôt : « TRF AB47 0309 ». Ne garder que les chiffres, comme avant, en effaçait les lettres —
+   * l'agent lisait « TRF 4703 09 » et dictait un code faux.
+   *
+   * La coupure en deux groupes de quatre n'est pas cosmétique : « AB470309 » se dicte mal,
+   * « AB47 0309 » se dicte — et le second groupe est la date, ce qui le rend facile à retenir.
+   * Les anciens codes à huit chiffres se lisent de la même façon.
+   */
+  const propre = String(code || "").toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/^TRF/, "");
+  if (propre.length !== 8) return code || "";
+  return `TRF ${propre.slice(0, 4)} ${propre.slice(4)}`;
+}
+
+/*
+ * Ce que l'agent tape, ramené à la forme comparable.
+ *
+ * Il recopie d'un reçu froissé ou prend sous la dictée : les espaces, les tirets, les minuscules
+ * et le « TRF » de tête passent. Un code juste ne doit jamais être refusé pour un tiret.
  */
+function codeACopier(code) {
+  /*
+   * PAS DE TIRET DANS CE QU'ON COLLE.
+   *
+   * « TRF-AB470309 » est la forme INTERNE : c'est elle qui sert au calcul de l'empreinte, et elle
+   * ne peut pas changer sans rendre inutilisables les codes déjà émis. Mais elle n'a rien à faire
+   * dans un message WhatsApp : le tiret se recopie mal, se prend pour une césure, et l'expéditeur
+   * le retape de travers.
+   *
+   * On colle donc les huit caractères nus — « AB470309 » — que la saisie du comptoir accepte
+   * telle quelle, avec ou sans espaces.
+   */
+  return String(code || "").toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/^TRF/, "");
+}
+
+function codeTransfertSaisi(brut) {
+  return String(brut || "").toUpperCase().replace(/[^A-Z0-9]/g, "").replace(/^TRF/, "").slice(0, 8);
+}
+
+/* ── LE REÇU DE TRANSFERT D'ARGENT ─────────────────────────────────────────────
+ *
+ * Une pièce A4, imprimable et archivable, qui doit tenir trois rôles à la fois :
+ *
+ *   — Pour l'EXPÉDITEUR, c'est la preuve de ce qu'il a payé et le support du code qu'il dictera
+ *     à sa famille. Le code est donc le plus gros élément de la page.
+ *   — Pour le BÉNÉFICIAIRE, c'est ce qu'on lui transfère par WhatsApp pour qu'il sache quoi
+ *     venir chercher, où, et jusqu'à quand.
+ *   — Pour l'ENTREPRISE, c'est la pièce qu'on ressort six mois plus tard pour trancher une
+ *     contestation. D'où le détail des montants, le taux figé, l'agent, l'agence et l'heure.
+ *
+ * DEUX CHOIX QUI NE SONT PAS DÉCORATIFS
+ *
+ * 1. Le QR porte la RÉFÉRENCE, jamais le code de retrait (voir lienVerificationTransfert). Un
+ *    reçu circule ; le code vaut paiement. Les deux ne voyagent pas ensemble.
+ *
+ * 2. Le filigrane et le cadre ne sont pas là pour faire joli : un reçu d'argent se photocopie et
+ *    se retouche. Ils rendent la falsification visible à l'œil, et le QR la rend vérifiable —
+ *    c'est la page publique qui fait foi, pas le papier.
+ */
+
+/** Les couleurs du document. Écrites en dur : jsPDF ne sait pas lire une variable CSS. */
+const RECU_ENCRE = [17, 20, 26], RECU_GRIS = [118, 126, 140], RECU_NAVY = [10, 38, 71];
+const RECU_ROUGE = [214, 39, 63], RECU_VERT = [21, 122, 71], RECU_TRAIT = [222, 226, 233];
+
+/** La teinte du statut, pour que l'état saute aux yeux avant la lecture. */
+function couleurStatutRecu(statut) {
+  if (statut === "Payé") return RECU_VERT;
+  if (statut === "Annulé" || statut === "Expiré") return RECU_ROUGE;
+  return [180, 116, 12];
+}
+
+/*
+ * Le filigrane, posé AVANT tout le reste pour passer dessous.
+ *
+ * En gris très clair plutôt qu'en transparence : les GState de jsPDF ne survivent pas à toutes
+ * les visionneuses PDF, et un filigrane qui redevient opaque à l'impression rendrait le reçu
+ * illisible — exactement le contraire du but.
+ */
+function filigraneRecu(doc, texte) {
+  doc.setTextColor(244, 245, 247);
+  doc.setFont(undefined, "bold");
+  doc.setFontSize(46);
+  [
+    [16, 250], [22, 178], [28, 106],
+  ].forEach(([x, y]) => doc.text(texte, x, y, { angle: 32 }));
+  doc.setTextColor(...RECU_ENCRE);
+}
+
+/** L'en-tête commun aux deux reçus : cadre de sécurité, bandeau, logo, numéro de pièce. */
+function enteteRecu(doc, { titre, reference, statut, W }) {
+  const M = 14;
+  doc.setDrawColor(...RECU_ENCRE); doc.setLineWidth(0.6);
+  doc.rect(6, 6, W - 12, 297 - 12);
+  doc.setDrawColor(...RECU_TRAIT); doc.setLineWidth(0.3);
+  doc.rect(8, 8, W - 16, 297 - 16);
+
+  doc.setFillColor(...RECU_NAVY); doc.rect(8, 8, W - 16, 30, "F");
+  doc.setFillColor(255, 255, 255); doc.roundedRect(13, 12, 22, 22, 2.5, 2.5, "F");
+  doc.addImage(DEFAULT_LOGO, "PNG", 14, 13, 20, 20);
+
+  doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold"); doc.setFontSize(15);
+  doc.text("BA-DIABY EXPRESS", 39, 20);
+  doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(176, 194, 220);
+  doc.text(titre, 39, 26.5);
+  doc.setFontSize(7.5);
+  doc.text("Transfert d’argent international", 39, 31.5);
+
+  // Le numéro de pièce, à droite : c'est par lui qu'on retrouve le dossier.
+  doc.setFontSize(7.2); doc.setTextColor(150, 172, 205);
+  doc.text("N° DE REÇU", W - M, 18, { align: "right" });
+  doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(255, 255, 255);
+  doc.text(reference, W - M, 24, { align: "right" });
+
+  const teinte = couleurStatutRecu(statut);
+  const largeur = doc.getTextWidth(statut.toUpperCase()) + 9;
+  doc.setFillColor(...teinte);
+  doc.roundedRect(W - M - largeur, 27.5, largeur, 6.5, 1.6, 1.6, "F");
+  doc.setFontSize(7.6); doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold");
+  doc.text(statut.toUpperCase(), W - M - largeur / 2, 32, { align: "center" });
+  return M;
+}
+
+/** Un titre de section — le trait sous le libellé sépare sans alourdir. */
+function sectionRecu(doc, titre, x, y, largeur) {
+  doc.setFont(undefined, "bold"); doc.setFontSize(7.8); doc.setTextColor(...RECU_GRIS);
+  doc.text(titre.toUpperCase(), x, y);
+  doc.setDrawColor(...RECU_TRAIT); doc.setLineWidth(0.4);
+  doc.line(x, y + 2, x + largeur, y + 2);
+  return y + 8;
+}
+
+/*
+ * Le pied de page : à qui s'adresser, et comment vérifier.
+ *
+ * Les coordonnées viennent des réglages de l'entreprise — jamais écrites en dur ici, sinon
+ * changer de numéro de téléphone demanderait un déploiement.
+ */
+function piedRecu(doc, { entreprise, reference, W, qr }) {
+  const M = 14;
+  let y = 232;
+
+  doc.setFillColor(249, 250, 251);
+  doc.roundedRect(M, y, W - 2 * M, 30, 2.5, 2.5, "F");
+  doc.setDrawColor(...RECU_TRAIT); doc.setLineWidth(0.3);
+  doc.roundedRect(M, y, W - 2 * M, 30, 2.5, 2.5, "S");
+
+  doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...RECU_ENCRE);
+  doc.text("Besoin d’aide ? Contactez notre service client", M + 6, y + 8);
+  doc.setFont(undefined, "normal"); doc.setFontSize(8.2); doc.setTextColor(...RECU_GRIS);
+  const tels = [entreprise?.telephone, entreprise?.telephone2].filter(Boolean).join("  ·  ");
+  if (tels) doc.text(tels, M + 6, y + 14.5);
+  const contact = [entreprise?.email, entreprise?.siteWeb].filter(Boolean).join("  ·  ");
+  if (contact) doc.text(contact, M + 6, y + 20);
+  if (entreprise?.adresseSiege) doc.text(entreprise.adresseSiege, M + 6, y + 25.5);
+
+  /* ── Détails de vérification ── */
+  y = 268;
+  doc.setDrawColor(...RECU_TRAIT); doc.setLineWidth(0.4);
+  doc.line(M, y - 4, W - M, y - 4);
+  if (qr) doc.addImage(qr, "PNG", M, y - 1, 17, 17);
+
+  doc.setFont(undefined, "bold"); doc.setFontSize(7.4); doc.setTextColor(...RECU_ENCRE);
+  doc.text("DÉTAILS DE VÉRIFICATION", M + 21, y + 1.5);
+  doc.setFont(undefined, "normal"); doc.setFontSize(6.9); doc.setTextColor(...RECU_GRIS);
+  doc.text(`Référence ${reference}  ·  Reçu généré le ${new Date().toLocaleString("fr-FR")}`, M + 21, y + 6);
+  doc.text(`Vérifiez en ligne : ${lienVerificationTransfert(reference)}`, M + 21, y + 10.5);
+  doc.text("Reçu généré électroniquement — valable sans signature ni cachet.", M + 21, y + 15);
+
+  const rccm = String(entreprise?.rccm || "").trim();
+  doc.setFontSize(6.6); doc.setTextColor(160, 166, 178);
+  doc.text(`Ba-Diaby Express${rccm ? ` · RCCM ${rccm}` : ""}`, W - M, y + 15, { align: "right" });
+}
+
 async function downloadRecuTransfert(transfert, code, entreprise = {}) {
   const jspdf = await loadJsPDF();
-  const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a5" }));
-  const W = 148, M = 10;
-  const INK = [20, 22, 26], MUTED = [122, 130, 142], NAVY = [10, 38, 71], RED = [214, 39, 63];
+  const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a4" }));
+  const W = 210, M = 14, COL = (W - 2 * M - 8) / 2;
 
-  doc.setDrawColor(20, 20, 20); doc.setLineWidth(0.5); doc.rect(3, 3, W - 6, 210 - 6);
-  doc.setFillColor(...NAVY); doc.rect(3, 3, W - 6, 26, "F");
-  doc.setFillColor(255, 255, 255); doc.roundedRect(8, 6, 20, 20, 2.5, 2.5, "F");
-  doc.addImage(DEFAULT_LOGO, "PNG", 9, 7, 18, 18);
-  doc.setTextColor(255, 255, 255); doc.setFontSize(13); doc.setFont(undefined, "bold");
-  doc.text("BA-DIABY EXPRESS", 31, 13);
-  doc.setFontSize(8.5); doc.setFont(undefined, "normal"); doc.setTextColor(180, 195, 220);
-  doc.text("Reçu de transfert d’argent", 31, 19);
-  doc.setFontSize(7.5); doc.text(transfert.reference, W - M, 19, { align: "right" });
+  /*
+   * Le QR est fabriqué dans le navigateur, sans appel réseau. S'il échoue — bibliothèque bloquée
+   * par un filtrage d'entreprise, réseau coupé — le reçu s'imprime quand même : une pièce de
+   * caisse ne doit jamais dépendre d'Internet. Seul le carré manque, et l'adresse écrite en
+   * toutes lettres juste à côté fait le même travail.
+   */
+  let qr = null;
+  try { qr = await generateQRDataUrl(lienVerificationTransfert(transfert.reference), 240); }
+  catch (e) { console.error("QR indisponible — le reçu est imprimé sans.", e); }
 
-  // ── Le code, en grand, encadré ────────────────────────────────────────────
-  let y = 38;
-  doc.setDrawColor(...RED); doc.setLineWidth(0.8);
-  doc.roundedRect(M, y, W - 2 * M, 26, 2, 2, "S");
-  doc.setFontSize(8); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
-  doc.text("CODE DE RETRAIT — à communiquer au bénéficiaire", W / 2, y + 7, { align: "center" });
-  doc.setFontSize(21); doc.setTextColor(...RED); doc.setFont(undefined, "bold");
-  doc.text(codeLisible(code), W / 2, y + 19, { align: "center" });
-  y += 34;
+  filigraneRecu(doc, "TRANSFERT D’ARGENT");
+  enteteRecu(doc, { titre: "Reçu de transfert d’argent", reference: transfert.reference,
+                    statut: transfert.statut || "Disponible au retrait", W });
 
-  const ligne = (libelle, valeur, gras) => {
-    doc.setFontSize(8); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
-    doc.text(libelle, M, y);
-    doc.setFontSize(gras ? 11 : 9.5); doc.setTextColor(...INK); doc.setFont(undefined, gras ? "bold" : "normal");
-    doc.text(String(valeur ?? "—"), W - M, y, { align: "right" });
-    y += gras ? 8 : 6.5;
+  /* ── LE CODE DE RETRAIT — le plus gros élément de la page ── */
+  let y = 48;
+  /*
+   * SANS CODE, PAS DE CADRE VIDE.
+   *
+   * Le reçu se rouvre depuis la fiche d'un transfert, où le code n'est PAS affiché — le
+   * redemander est un geste séparé et tracé. Imprimer alors un grand cadre rouge vide sous le
+   * titre « code de transaction » donnait une pièce qui a l'air cassée, et laissait croire à un
+   * client qu'on lui avait remis un reçu incomplet. On imprime donc un duplicata assumé : il
+   * porte tout le dossier, il dit ce qu'il est, et il renvoie vers le bon geste.
+   */
+  if (code) {
+    doc.setDrawColor(...RECU_ROUGE); doc.setLineWidth(0.9);
+    doc.roundedRect(M, y, W - 2 * M - 34, 28, 2.5, 2.5, "S");
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.6); doc.setTextColor(...RECU_GRIS);
+    doc.text("CODE DE TRANSACTION — à communiquer au bénéficiaire uniquement", M + 7, y + 8);
+    doc.setFont(undefined, "bold"); doc.setFontSize(26); doc.setTextColor(...RECU_ROUGE);
+    doc.text(codeLisible(code), M + 7, y + 21);
+  } else {
+    doc.setFillColor(247, 249, 252);
+    doc.roundedRect(M, y, W - 2 * M - 34, 28, 2.5, 2.5, "F");
+    doc.setDrawColor(...RECU_TRAIT); doc.setLineWidth(0.5);
+    doc.roundedRect(M, y, W - 2 * M - 34, 28, 2.5, 2.5, "S");
+    doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(...RECU_ENCRE);
+    doc.text("DUPLICATA — sans code de retrait", M + 7, y + 11);
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.6); doc.setTextColor(...RECU_GRIS);
+    doc.text("Le code n’est pas réimprimé. Pour le redonner à l’expéditeur, utilisez", M + 7, y + 18);
+    doc.text("« Revoir le code » sur la fiche du transfert — ce geste est enregistré.", M + 7, y + 22.5);
+  }
+
+  if (qr) {
+    doc.addImage(qr, "PNG", W - M - 30, y, 30, 30);
+    doc.setFont(undefined, "normal"); doc.setFontSize(6.2); doc.setTextColor(...RECU_GRIS);
+    doc.text("Vérifier ce reçu", W - M - 15, y + 33, { align: "center" });
+  }
+  y += 40;
+
+  /* ── L'OPÉRATION ── */
+  y = sectionRecu(doc, "L’opération", M, y, W - 2 * M);
+  const paire = (libelle, valeur, x, largeur) => {
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.4); doc.setTextColor(...RECU_GRIS);
+    doc.text(libelle, x, y);
+    doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...RECU_ENCRE);
+    doc.text(doc.splitTextToSize(String(valeur ?? "—"), largeur)[0] || "—", x, y + 5);
   };
+  paire("Date et heure", new Date(transfert.creeLe).toLocaleString("fr-FR"), M, COL);
+  paire("Valable jusqu’au", new Date(transfert.expireLe).toLocaleDateString("fr-FR"), M + COL / 2, COL);
+  paire("Agence émettrice", transfert.agenceEnvoi, M + COL, COL);
+  paire("Agent", transfert.creePar, M + COL + COL / 2, COL);
+  y += 14;
 
-  ligne("Expéditeur", transfert.expediteur);
-  ligne("Bénéficiaire", transfert.beneficiaire);
-  ligne("Destination", [transfert.beneficiaireVille, nomPaysImprime(transfert.beneficiairePays)].filter(Boolean).join(", "));
-  doc.setDrawColor(220); doc.line(M, y, W - M, y); y += 7;
+  /* ── LES DEUX PARTIES, CÔTE À CÔTE ── */
+  const hautColonnes = y;
+  let yG = sectionRecu(doc, "Expéditeur", M, y, COL);
+  const champ = (libelle, valeur, x, yy, largeur) => {
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.2); doc.setTextColor(...RECU_GRIS);
+    doc.text(libelle, x, yy);
+    doc.setFont(undefined, "bold"); doc.setFontSize(8.8); doc.setTextColor(...RECU_ENCRE);
+    const lignes = doc.splitTextToSize(String(valeur || "—"), largeur);
+    doc.text(lignes[0], x, yy + 4.6);
+    return yy + 10.5;
+  };
+  yG = champ("Nom complet", transfert.expediteur, M, yG, COL);
+  yG = champ("Téléphone", transfert.expediteurTelephone, M, yG, COL);
+  yG = champ("Pays", nomPaysImprime(transfert.expediteurPays), M, yG, COL);
+
+  const xD = M + COL + 8;
+  let yD = sectionRecu(doc, "Bénéficiaire", xD, hautColonnes, COL);
+  yD = champ("Nom complet", transfert.beneficiaire, xD, yD, COL);
+  yD = champ("Téléphone", transfert.beneficiaireTelephone, xD, yD, COL);
+  yD = champ("Pays et ville", [transfert.beneficiaireVille, nomPaysImprime(transfert.beneficiairePays)]
+        .filter(Boolean).join(", "), xD, yD, COL);
+
+  y = Math.max(yG, yD) + 4;
+
+  /* ── LES MONTANTS — la partie qu'on relit en cas de contestation ── */
+  y = sectionRecu(doc, "Montants", M, y, W - 2 * M);
+  const total = Number(transfert.montantEnvoye) + Number(transfert.frais);
+  const ligne = (libelle, valeur, options = {}) => {
+    doc.setFont(undefined, options.fort ? "bold" : "normal");
+    doc.setFontSize(options.fort ? 9.5 : 8.6);
+    doc.setTextColor(...(options.fort ? RECU_ENCRE : RECU_GRIS));
+    doc.text(libelle, M + 4, y);
+    doc.setFont(undefined, "bold");
+    doc.setFontSize(options.grand ? 12 : options.fort ? 10 : 9);
+    doc.setTextColor(...(options.teinte || RECU_ENCRE));
+    doc.text(String(valeur), W - M - 4, y, { align: "right" });
+    y += options.grand ? 10 : 7;
+  };
   ligne("Montant envoyé", montantTransfert(transfert.montantEnvoye, transfert.deviseEnvoi));
   ligne("Frais de transfert", montantTransfert(transfert.frais, transfert.deviseEnvoi));
-  ligne("TOTAL PAYÉ", montantTransfert(Number(transfert.montantEnvoye) + Number(transfert.frais), transfert.deviseEnvoi), true);
-  doc.setDrawColor(220); doc.line(M, y, W - M, y); y += 7;
-  ligne("Taux appliqué", `1 ${transfert.deviseEnvoi} = ${Number(transfert.taux).toLocaleString("fr-FR", { maximumFractionDigits: 4 })} ${transfert.deviseReception}`);
-  ligne("LE BÉNÉFICIAIRE REÇOIT", montantTransfert(transfert.montantARecevoir, transfert.deviseReception), true);
-  doc.setDrawColor(220); doc.line(M, y, W - M, y); y += 7;
-  ligne("Date", new Date(transfert.creeLe).toLocaleString("fr-FR"));
-  ligne("Agent / agence", `${transfert.creePar} — ${transfert.agenceEnvoi}`);
-  ligne("Valable jusqu’au", new Date(transfert.expireLe).toLocaleDateString("fr-FR"));
+  doc.setDrawColor(...RECU_TRAIT); doc.line(M + 4, y - 3, W - M - 4, y - 3); y += 2;
+  ligne("TOTAL PAYÉ PAR L’EXPÉDITEUR", montantTransfert(total, transfert.deviseEnvoi), { fort: true });
+  y += 3;
 
-  y = 178;
-  doc.setDrawColor(200); doc.line(M, y, W - M, y);
-  doc.setFontSize(7.6); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
-  const avis = doc.splitTextToSize(
-    "Ce code vaut paiement : ne le communiquez qu’au bénéficiaire. Toute personne le présentant avec une pièce d’identité au nom indiqué peut retirer les fonds.",
-    W - 2 * M);
-  doc.text(avis, M, y + 6);
-  const rccm = String(entreprise?.rccm || "").trim();
-  doc.setFontSize(7.2);
-  doc.text(`badiabyexpress.bde@gmail.com${rccm ? ` · RCCM ${rccm}` : ""}`, M, 200);
+  /*
+   * La conversion n'est montrée que s'il y en a une. Afficher « 1 EUR = 1 EUR » sur un transfert
+   * en même devise ferait douter d'un document dont tout l'objet est d'inspirer confiance.
+   */
+  if (transfert.deviseEnvoi !== transfert.deviseReception) {
+    doc.setFillColor(247, 249, 252);
+    doc.roundedRect(M, y, W - 2 * M, 15, 2, 2, "F");
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.4); doc.setTextColor(...RECU_GRIS);
+    doc.text("TAUX DE CHANGE APPLIQUÉ, FIGÉ À LA CRÉATION", M + 4, y + 5.5);
+    doc.setFont(undefined, "bold"); doc.setFontSize(9.5); doc.setTextColor(...RECU_ENCRE);
+    doc.text(tauxLisible(transfert.taux, transfert.deviseEnvoi, transfert.deviseReception),
+             M + 4, y + 11.5);
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.4); doc.setTextColor(...RECU_GRIS);
+    doc.text(`${transfert.deviseEnvoi} → ${transfert.deviseReception}`, W - M - 4, y + 11.5, { align: "right" });
+    y += 20;
+  }
 
-  openPdf(doc, `transfert-${transfert.reference}.pdf`);
+  doc.setFillColor(240, 249, 243);
+  doc.roundedRect(M, y, W - 2 * M, 18, 2.5, 2.5, "F");
+  doc.setDrawColor(...RECU_VERT); doc.setLineWidth(0.5);
+  doc.roundedRect(M, y, W - 2 * M, 18, 2.5, 2.5, "S");
+  doc.setFont(undefined, "bold"); doc.setFontSize(8); doc.setTextColor(...RECU_GRIS);
+  doc.text("LE BÉNÉFICIAIRE REÇOIT", M + 5, y + 7);
+  doc.setFontSize(15); doc.setTextColor(...RECU_VERT);
+  doc.text(montantTransfert(transfert.montantARecevoir, transfert.deviseReception), W - M - 5, y + 12, { align: "right" });
+  y += 25;
+
+  // L'avertissement n'a de sens que si le code est là : sur un duplicata il inquiéterait pour rien.
+  if (code) {
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.4); doc.setTextColor(...RECU_GRIS);
+    doc.text(doc.splitTextToSize(
+      "Ce code vaut paiement : ne le communiquez qu’au bénéficiaire. Toute personne le présentant avec une pièce d’identité au nom indiqué peut retirer les fonds.",
+      W - 2 * M), M, y);
+  }
+
+  piedRecu(doc, { entreprise, reference: transfert.reference, W, qr });
+  openPdf(doc, `recu-transfert-${transfert.reference}.pdf`);
 }
 
 /* ── LE REÇU DE PAIEMENT ───────────────────────────────────────────────────────
@@ -32713,52 +34693,464 @@ async function downloadRecuTransfert(transfert, code, entreprise = {}) {
  */
 async function downloadRecuPaiementTransfert(transfert, entreprise = {}) {
   const jspdf = await loadJsPDF();
-  const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a5" }));
-  const W = 148, M = 10;
-  const INK = [20, 22, 26], MUTED = [122, 130, 142], NAVY = [10, 38, 71], VERT = [22, 120, 70];
+  const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a4" }));
+  const W = 210, M = 14, COL = (W - 2 * M - 8) / 2;
 
-  doc.setDrawColor(20, 20, 20); doc.setLineWidth(0.5); doc.rect(3, 3, W - 6, 210 - 6);
-  doc.setFillColor(...NAVY); doc.rect(3, 3, W - 6, 26, "F");
-  doc.setFillColor(255, 255, 255); doc.roundedRect(8, 6, 20, 20, 2.5, 2.5, "F");
-  doc.addImage(DEFAULT_LOGO, "PNG", 9, 7, 18, 18);
-  doc.setTextColor(255, 255, 255); doc.setFontSize(13); doc.setFont(undefined, "bold");
-  doc.text("BA-DIABY EXPRESS", 31, 13);
-  doc.setFontSize(8.5); doc.setFont(undefined, "normal"); doc.setTextColor(180, 195, 220);
-  doc.text("Reçu de paiement — transfert d’argent", 31, 19);
-  doc.setFontSize(7.5); doc.text(transfert.reference, W - M, 19, { align: "right" });
+  let qr = null;
+  try { qr = await generateQRDataUrl(lienVerificationTransfert(transfert.reference), 240); }
+  catch (e) { console.error("QR indisponible — le reçu est imprimé sans.", e); }
 
-  let y = 42;
-  doc.setFontSize(8.5); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
-  doc.text("MONTANT REMIS", M, y);
-  doc.setTextColor(...VERT); doc.setFont(undefined, "bold"); doc.setFontSize(20);
-  doc.text(montantTransfert(transfert.montantRemis ?? transfert.montantARecevoir, transfert.deviseReception), M, y + 10);
-  y += 22;
-  doc.setDrawColor(220); doc.line(M, y, W - M, y); y += 8;
+  filigraneRecu(doc, "FONDS REMIS");
+  enteteRecu(doc, { titre: "Reçu de paiement — transfert d’argent",
+                    reference: transfert.reference, statut: "Payé", W });
 
-  const ligne = (libelle, valeur) => {
-    doc.setFontSize(8); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
-    doc.text(libelle, M, y);
-    doc.setFontSize(10); doc.setTextColor(...INK); doc.setFont(undefined, "bold");
-    doc.text(String(valeur ?? "—"), M, y + 5);
-    y += 12;
+  let y = 50;
+  doc.setFillColor(240, 249, 243);
+  doc.roundedRect(M, y, W - 2 * M - 34, 26, 2.5, 2.5, "F");
+  doc.setDrawColor(...RECU_VERT); doc.setLineWidth(0.6);
+  doc.roundedRect(M, y, W - 2 * M - 34, 26, 2.5, 2.5, "S");
+  doc.setFont(undefined, "normal"); doc.setFontSize(7.6); doc.setTextColor(...RECU_GRIS);
+  doc.text("MONTANT REMIS AU BÉNÉFICIAIRE", M + 7, y + 8);
+  doc.setFont(undefined, "bold"); doc.setFontSize(22); doc.setTextColor(...RECU_VERT);
+  doc.text(montantTransfert(transfert.montantRemis ?? transfert.montantARecevoir, transfert.deviseReception),
+           M + 7, y + 20);
+  if (qr) {
+    doc.addImage(qr, "PNG", W - M - 30, y - 2, 30, 30);
+    doc.setFont(undefined, "normal"); doc.setFontSize(6.2); doc.setTextColor(...RECU_GRIS);
+    doc.text("Vérifier ce reçu", W - M - 15, y + 31, { align: "center" });
+  }
+  y += 38;
+
+  const hautColonnes = y;
+  const champ = (libelle, valeur, x, yy, largeur) => {
+    doc.setFont(undefined, "normal"); doc.setFontSize(7.2); doc.setTextColor(...RECU_GRIS);
+    doc.text(libelle, x, yy);
+    doc.setFont(undefined, "bold"); doc.setFontSize(8.8); doc.setTextColor(...RECU_ENCRE);
+    doc.text(doc.splitTextToSize(String(valeur || "—"), largeur)[0] || "—", x, yy + 4.6);
+    return yy + 10.5;
   };
-  ligne("Bénéficiaire", transfert.beneficiaireNomVerifie || transfert.beneficiaire);
-  ligne("Pièce présentée", [transfert.beneficiairePiece, transfert.beneficiairePieceNumero].filter(Boolean).join(" — "));
-  ligne("Envoyé par", transfert.expediteur);
-  ligne("Payé le", new Date(transfert.payeLe).toLocaleString("fr-FR"));
-  ligne("Agent / agence", `${transfert.payePar} — ${transfert.agencePaiement}`);
 
-  y = 172;
-  doc.setDrawColor(200); doc.line(M, y, W - M, y);
-  doc.setFontSize(8.5); doc.setTextColor(90, 90, 90); doc.setFont(undefined, "normal");
-  doc.text("Signature du bénéficiaire :", M, y + 8);
-  doc.setDrawColor(150); doc.line(M, y + 20, 70, y + 20);
-  const rccm = String(entreprise?.rccm || "").trim();
-  doc.setFontSize(7.2); doc.setTextColor(140, 140, 140);
-  doc.text("Ce reçu atteste de la remise des fonds au bénéficiaire désigné.", M, 198);
-  doc.text(`badiabyexpress.bde@gmail.com${rccm ? ` · RCCM ${rccm}` : ""}`, M, 202);
+  let yG = sectionRecu(doc, "Bénéficiaire", M, y, COL);
+  yG = champ("Nom relevé sur la pièce", transfert.beneficiaireNomVerifie || transfert.beneficiaire, M, yG, COL);
+  yG = champ("Pièce présentée", [transfert.beneficiairePiece, transfert.beneficiairePieceNumero]
+        .filter(Boolean).join(" — "), M, yG, COL);
+  yG = champ("Téléphone", transfert.beneficiaireTelephoneVerifie || transfert.beneficiaireTelephone, M, yG, COL);
 
-  openPdf(doc, `paiement-${transfert.reference}.pdf`);
+  const xD = M + COL + 8;
+  let yD = sectionRecu(doc, "L’opération", xD, hautColonnes, COL);
+  yD = champ("Envoyé par", transfert.expediteur, xD, yD, COL);
+  yD = champ("Payé le", new Date(transfert.payeLe).toLocaleString("fr-FR"), xD, yD, COL);
+  yD = champ("Agent et agence payeuse", `${transfert.payePar} — ${transfert.agencePaiement}`, xD, yD, COL);
+
+  y = Math.max(yG, yD) + 6;
+
+  y = sectionRecu(doc, "Rappel de l’envoi", M, y, W - 2 * M);
+  const rappel = (libelle, valeur) => {
+    doc.setFont(undefined, "normal"); doc.setFontSize(8.4); doc.setTextColor(...RECU_GRIS);
+    doc.text(libelle, M + 4, y);
+    doc.setFont(undefined, "bold"); doc.setFontSize(9); doc.setTextColor(...RECU_ENCRE);
+    doc.text(String(valeur), W - M - 4, y, { align: "right" });
+    y += 7;
+  };
+  rappel("Montant envoyé", montantTransfert(transfert.montantEnvoye, transfert.deviseEnvoi));
+  rappel("Frais de transfert", montantTransfert(transfert.frais, transfert.deviseEnvoi));
+  if (transfert.deviseEnvoi !== transfert.deviseReception) {
+    rappel("Taux appliqué", tauxLisible(transfert.taux, transfert.deviseEnvoi, transfert.deviseReception));
+  }
+  rappel("Envoyé le", new Date(transfert.creeLe).toLocaleString("fr-FR"));
+  y += 6;
+
+  /*
+   * La signature reste. Le reçu est « généré électroniquement », mais c'est bien un billet qui
+   * passe de main en main : la seule preuve que le bénéficiaire l'a effectivement pris, c'est ce
+   * qu'il écrit là, sur le papier que l'agence garde.
+   */
+  doc.setFont(undefined, "normal"); doc.setFontSize(8.4); doc.setTextColor(...RECU_GRIS);
+  doc.text("Signature du bénéficiaire", M, y + 6);
+  doc.setDrawColor(170, 176, 186); doc.setLineWidth(0.4);
+  doc.line(M, y + 20, M + 70, y + 20);
+  doc.text("Cachet et signature de l’agence", W - M - 70, y + 6);
+  doc.line(W - M - 70, y + 20, W - M, y + 20);
+  doc.setFontSize(7.4);
+  doc.text("Ce reçu atteste de la remise des fonds au bénéficiaire désigné ci-dessus.", M, y + 28);
+
+  piedRecu(doc, { entreprise, reference: transfert.reference, W, qr });
+  openPdf(doc, `recu-paiement-${transfert.reference}.pdf`);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════════
+ * LE REÇU À L'ÉCRAN
+ *
+ * Le PDF reste la pièce d'archive : mis en page au millimètre, il ne se coupe pas et s'imprime
+ * partout pareil. Cet écran-ci sert à autre chose — c'est ce que l'agent montre au comptoir et ce
+ * qu'il envoie au bénéficiaire, souvent depuis un téléphone, souvent sans imprimante à portée.
+ *
+ * CE QUI NE PART PAS DANS UN MESSAGE
+ *
+ * Le partage — WhatsApp, SMS, feuille de partage du téléphone — n'emporte JAMAIS le code de
+ * retrait. Un message se transfère, s'affiche sur un écran verrouillé, se lit par-dessus une
+ * épaule ; le code, lui, vaut paiement. Ce qui part, c'est de quoi savoir qu'un transfert existe,
+ * combien il porte et où le retirer, plus le lien de vérification. Le code est remis à
+ * l'expéditeur en main propre, sur le papier.
+ *
+ * C'est aussi ce que demande le principe « ne jamais afficher de données sensibles inutiles » :
+ * le destinataire d'un SMS n'a pas besoin du code pour savoir qu'on lui a envoyé de l'argent.
+ */
+function RecuTransfert({ transfert, code, data, notify, onFermer, onNouveau, niveau = 1 }) {
+  const [qr, setQr] = useState(null);
+  const [travail, setTravail] = useState("");
+  const entreprise = data?.entreprise || {};
+  const lien = lienVerificationTransfert(transfert.reference);
+  const total = Number(transfert.montantEnvoye) + Number(transfert.frais);
+  const converti = transfert.deviseEnvoi !== transfert.deviseReception;
+  const paye = transfert.statut === "Payé";
+
+  useEffect(() => {
+    let vivant = true;
+    generateQRDataUrl(lien, 320)
+      .then((url) => { if (vivant) setQr(url); })
+      .catch((e) => console.error("QR indisponible à l’écran.", e));
+    return () => { vivant = false; };
+  }, [lien]);
+
+  /*
+   * Le message de partage. Il tient en quelques lignes parce qu'il est lu sur un téléphone, et il
+   * porte le lien de vérification plutôt qu'une promesse : le bénéficiaire peut contrôler
+   * lui-même que l'opération existe, sans appeler personne.
+   */
+  const message = [
+    `Ba-Diaby Express — transfert d’argent`,
+    ``,
+    `Bonjour ${transfert.beneficiaire}, un transfert vous attend.`,
+    `Montant à retirer : ${montantTransfert(transfert.montantARecevoir, transfert.deviseReception)}`,
+    `Retrait : ${[transfert.beneficiaireVille, paysLisible(transfert.beneficiairePays)].filter(Boolean).join(", ")}`,
+    `Référence : ${transfert.reference}`,
+    ``,
+    `Vérifier ce transfert : ${lien}`,
+    ``,
+    `Présentez-vous avec une pièce d’identité à votre nom et le code que l’expéditeur vous a communiqué.`,
+  ].join("\n");
+
+  function numeroPourLien(tel) {
+    return String(tel || "").replace(/[^\d]/g, "");
+  }
+
+  async function partager() {
+    const charge = { title: `Transfert ${transfert.reference}`, text: message, url: lien };
+    if (navigator.share) {
+      try { await navigator.share(charge); return; }
+      catch (e) { if (e?.name === "AbortError") return; }   // l’agent a refermé la feuille
+    }
+    try {
+      await navigator.clipboard.writeText(`${message}`);
+      notify?.("Partage indisponible sur cet appareil — le message a été copié.");
+    } catch (e) {
+      notify?.("Le partage n’est pas disponible sur cet appareil.");
+    }
+  }
+
+  function versWhatsApp() {
+    const numero = numeroPourLien(transfert.beneficiaireTelephone);
+    /*
+     * wa.me ouvre WhatsApp sur l'appareil de l'agent avec le message prérempli ; c'est lui qui
+     * appuie sur envoyer. Ce n'est pas l'envoi automatique par l'API de Meta : celui-là exige un
+     * modèle validé, et le module de transfert n'en a pas encore.
+     */
+    window.open(numero ? `https://wa.me/${numero}?text=${encodeURIComponent(message)}`
+                       : `https://wa.me/?text=${encodeURIComponent(message)}`, "_blank");
+  }
+
+  function versSMS() {
+    const numero = numeroPourLien(transfert.beneficiaireTelephone);
+    window.location.href = `sms:${numero ? `+${numero}` : ""}?&body=${encodeURIComponent(message)}`;
+  }
+
+  async function telecharger() {
+    setTravail("pdf");
+    try {
+      if (paye) await downloadRecuPaiementTransfert(transfert, entreprise);
+      else await downloadRecuTransfert(transfert, code, entreprise);
+    } catch (e) {
+      notify?.("Le PDF n’a pas pu être produit. Réessayez dans un instant.");
+    } finally { setTravail(""); }
+  }
+
+  const encre = "#11141a", gris = "#767e8c", trait = "#dee2e9";
+  const bloc = { background: "#fff", borderRadius: 0, breakInside: "avoid" };
+  const etiquette = { fontSize: 10, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", color: gris };
+  const valeur = { fontSize: 13.5, fontWeight: 700, color: encre, marginTop: 2, wordBreak: "break-word" };
+
+  const champ = (libelle, contenu) => (
+    <div style={{ marginBottom: 11 }}>
+      <div style={etiquette}>{libelle}</div>
+      <div style={valeur}>{contenu || "—"}</div>
+    </div>
+  );
+
+  const section = (titre) => (
+    <div style={{ ...etiquette, paddingBottom: 5, borderBottom: `1px solid ${trait}`, marginBottom: 11 }}>{titre}</div>
+  );
+
+  const bouton = (icone, libelle, action, principal) => {
+    const Icone = icone;
+    return (
+      <button onClick={action} disabled={travail === "pdf" && principal}
+        style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 7,
+                 background: principal ? "var(--brand-solid)" : "var(--surface)",
+                 color: principal ? "#fff" : "var(--text)",
+                 border: principal ? "none" : "1px solid var(--border)",
+                 borderRadius: 10, padding: "11px 15px", fontSize: 13, fontWeight: 700,
+                 cursor: "pointer", flex: "1 1 148px", minWidth: 0 }}>
+        <Icone size={15} /> {libelle}
+      </button>
+    );
+  };
+
+  return (
+    <Modal title={paye ? "Reçu de paiement" : "Reçu de transfert"} onClose={onFermer} wide niveau={niveau}>
+      {/*
+        * La feuille. Fond blanc et encre sombre quel que soit le thème de l'application : c'est
+        * un document, pas un écran. En thème sombre, un reçu sombre imprimé sortirait noir.
+        */}
+      <div className="bde-recu" style={{ background: "#fff", color: encre, borderRadius: 14,
+        border: `1px solid ${trait}`, overflow: "hidden", position: "relative",
+        boxShadow: "0 18px 48px rgba(8, 20, 42, 0.16)" }}>
+
+        {/* Le filigrane, sous le contenu. */}
+        <div aria-hidden="true" style={{ position: "absolute", inset: 0, pointerEvents: "none",
+          display: "grid", placeItems: "center", overflow: "hidden" }}>
+          <div style={{ transform: "rotate(-32deg)", fontSize: "clamp(30px, 8vw, 62px)", fontWeight: 800,
+            color: "rgba(17, 20, 26, 0.035)", letterSpacing: "0.06em", whiteSpace: "nowrap", lineHeight: 2.1,
+            textAlign: "center" }}>
+            {paye ? "FONDS REMIS" : "TRANSFERT D’ARGENT"}<br />
+            {paye ? "FONDS REMIS" : "TRANSFERT D’ARGENT"}<br />
+            {paye ? "FONDS REMIS" : "TRANSFERT D’ARGENT"}
+          </div>
+        </div>
+
+        <div style={{ position: "relative" }}>
+          {/* ── En-tête ── */}
+          <div className="bde-recu-bloc" style={{ background: "#0A2647", color: "#fff", padding: "18px 20px",
+            display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+            <div style={{ width: 46, height: 46, borderRadius: 12, background: "#fff", display: "grid",
+              placeItems: "center", flexShrink: 0, overflow: "hidden" }}>
+              <img src={DEFAULT_LOGO} alt="" style={{ width: 42, height: 42, objectFit: "contain" }} />
+            </div>
+            <div style={{ flex: "1 1 190px", minWidth: 0 }}>
+              <div style={{ fontSize: 16.5, fontWeight: 800, letterSpacing: "-0.01em" }}>BA-DIABY EXPRESS</div>
+              <div style={{ fontSize: 12, color: "#B0C2DC", marginTop: 2 }}>
+                {paye ? "Reçu de paiement — transfert d’argent" : "Reçu de transfert d’argent"}
+              </div>
+            </div>
+            <div style={{ textAlign: "right", flexShrink: 0 }}>
+              <div style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: "0.08em", color: "#96ACC9" }}>N° DE REÇU</div>
+              <div style={{ fontSize: 14, fontWeight: 800, fontVariantNumeric: "tabular-nums" }}>{transfert.reference}</div>
+              <div style={{ display: "inline-block", marginTop: 5, padding: "3px 10px", borderRadius: 999,
+                fontSize: 10, fontWeight: 800, letterSpacing: "0.05em", color: "#fff",
+                background: paye ? "#157A47" : (transfert.statut === "Annulé" || transfert.statut === "Expiré") ? "#D6273F" : "#B4740C" }}>
+                {String(transfert.statut || "Disponible au retrait").toUpperCase()}
+              </div>
+            </div>
+          </div>
+
+          <div style={{ padding: "18px 20px" }}>
+            {/* ── Le code, et le QR ── */}
+            <div className="bde-recu-bloc" style={{ display: "flex", gap: 14, flexWrap: "wrap",
+              alignItems: "stretch", marginBottom: 20 }}>
+              {!paye && code && (
+                <div style={{ flex: "1 1 240px", border: "1.6px solid #D6273F", borderRadius: 12, padding: "13px 15px" }}>
+                  <div style={{ ...etiquette, fontSize: 9.5 }}>Code de transaction</div>
+                  <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: "clamp(26px, 7vw, 34px)",
+                    fontWeight: 700, color: "#D6273F", letterSpacing: "0.04em", fontVariantNumeric: "tabular-nums",
+                    lineHeight: 1.15, marginTop: 4 }}>
+                    {codeLisible(code)}
+                  </div>
+                  <div style={{ fontSize: 11, color: gris, marginTop: 5, lineHeight: 1.45 }}>
+                    À communiquer au bénéficiaire uniquement.
+                  </div>
+                </div>
+              )}
+              {/* Rouvert depuis la fiche, le reçu ne réaffiche pas le code : il le dit, plutôt que de laisser un vide. */}
+              {!paye && !code && (
+                <div style={{ flex: "1 1 240px", border: `1px solid ${trait}`, borderRadius: 12,
+                  padding: "13px 15px", background: "#F7F9FC" }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 800, color: encre }}>Duplicata — sans code de retrait</div>
+                  <div style={{ fontSize: 11.5, color: gris, marginTop: 5, lineHeight: 1.5 }}>
+                    Le code n’est pas réaffiché. Pour le redonner à l’expéditeur, utilisez
+                    « Revoir le code » sur la fiche — ce geste est enregistré au journal.
+                  </div>
+                </div>
+              )}
+              {paye && (
+                <div style={{ flex: "1 1 240px", border: "1.6px solid #157A47", borderRadius: 12,
+                  padding: "13px 15px", background: "#F0F9F3" }}>
+                  <div style={{ ...etiquette, fontSize: 9.5 }}>Montant remis au bénéficiaire</div>
+                  <div style={{ fontSize: "clamp(24px, 6vw, 30px)", fontWeight: 800, color: "#157A47",
+                    lineHeight: 1.2, marginTop: 4 }}>
+                    {montantTransfert(transfert.montantRemis ?? transfert.montantARecevoir, transfert.deviseReception)}
+                  </div>
+                </div>
+              )}
+              <div style={{ flex: "0 0 auto", textAlign: "center", display: "grid", placeItems: "center",
+                minWidth: 104 }}>
+                {qr
+                  ? <img src={qr} alt={`QR de vérification du transfert ${transfert.reference}`}
+                      style={{ width: 96, height: 96, display: "block" }} />
+                  : <div style={{ width: 96, height: 96, border: `1px dashed ${trait}`, borderRadius: 8,
+                      display: "grid", placeItems: "center", fontSize: 10, color: gris, padding: 6,
+                      textAlign: "center" }}>QR indisponible</div>}
+                <div style={{ fontSize: 9.5, color: gris, marginTop: 4 }}>Vérifier ce reçu</div>
+              </div>
+            </div>
+
+            {/* ── L'opération ── */}
+            <div className="bde-recu-bloc" style={{ ...bloc, marginBottom: 16 }}>
+              {section("L’opération")}
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: "0 16px" }}>
+                {champ("Date et heure", new Date(transfert.creeLe).toLocaleString("fr-FR"))}
+                {!paye && champ("Valable jusqu’au", new Date(transfert.expireLe).toLocaleDateString("fr-FR"))}
+                {paye && champ("Payé le", new Date(transfert.payeLe).toLocaleString("fr-FR"))}
+                {champ("Agence émettrice", transfert.agenceEnvoi)}
+                {champ("Agent", paye ? transfert.payePar : transfert.creePar)}
+              </div>
+            </div>
+
+            {/* ── Les deux parties ── */}
+            <div className="bde-recu-bloc" style={{ display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 16, marginBottom: 16 }}>
+              <div style={bloc}>
+                {section("Expéditeur")}
+                {champ("Nom complet", transfert.expediteur)}
+                {champ("Téléphone", transfert.expediteurTelephone)}
+                {champ("Pays", paysLisible(transfert.expediteurPays))}
+              </div>
+              <div style={bloc}>
+                {section("Bénéficiaire")}
+                {champ("Nom complet", paye ? (transfert.beneficiaireNomVerifie || transfert.beneficiaire) : transfert.beneficiaire)}
+                {champ("Téléphone", transfert.beneficiaireTelephone)}
+                {champ("Pays et ville", [transfert.beneficiaireVille, paysLisible(transfert.beneficiairePays)].filter(Boolean).join(", "))}
+              </div>
+            </div>
+
+            {/* ── Les montants ── */}
+            <div className="bde-recu-bloc" style={{ ...bloc, marginBottom: 16 }}>
+              {section("Montants")}
+              {[["Montant envoyé", montantTransfert(transfert.montantEnvoye, transfert.deviseEnvoi)],
+                ["Frais de transfert", montantTransfert(transfert.frais, transfert.deviseEnvoi)]].map(([l, v]) => (
+                <div key={l} style={{ display: "flex", justifyContent: "space-between", gap: 12,
+                  alignItems: "baseline", padding: "5px 0", fontSize: 13 }}>
+                  <span style={{ color: gris }}>{l}</span>
+                  <strong style={{ color: encre, whiteSpace: "nowrap" }}>{v}</strong>
+                </div>
+              ))}
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline",
+                padding: "9px 0 0", marginTop: 5, borderTop: `1px solid ${trait}`, fontSize: 14 }}>
+                <strong style={{ color: encre }}>Total payé par l’expéditeur</strong>
+                <strong style={{ color: encre, whiteSpace: "nowrap", fontSize: 15.5 }}>
+                  {montantTransfert(total, transfert.deviseEnvoi)}
+                </strong>
+              </div>
+            </div>
+
+            {/* ── La conversion, seulement s'il y en a une ── */}
+            {converti && (
+              <div className="bde-recu-bloc" style={{ background: "#F7F9FC", border: `1px solid ${trait}`,
+                borderRadius: 10, padding: "12px 14px", marginBottom: 16 }}>
+                <div style={{ ...etiquette, fontSize: 9.5 }}>Taux de change appliqué, figé à la création</div>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "baseline",
+                  marginTop: 5, flexWrap: "wrap" }}>
+                  <strong style={{ fontSize: 14, color: encre }}>
+                    {tauxLisible(transfert.taux, transfert.deviseEnvoi, transfert.deviseReception)}
+                  </strong>
+                  <span style={{ fontSize: 12, color: gris }}>
+                    {transfert.deviseEnvoi} → {transfert.deviseReception}
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {!paye && (
+              <div className="bde-recu-bloc" style={{ background: "#F0F9F3", border: "1px solid #157A47",
+                borderRadius: 10, padding: "13px 15px", marginBottom: 16, display: "flex",
+                justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                <span style={{ ...etiquette, fontSize: 10 }}>Le bénéficiaire reçoit</span>
+                <strong style={{ fontSize: "clamp(18px, 5vw, 22px)", color: "#157A47", whiteSpace: "nowrap" }}>
+                  {montantTransfert(transfert.montantARecevoir, transfert.deviseReception)}
+                </strong>
+              </div>
+            )}
+
+            {/* ── Détails de vérification ── */}
+            <div className="bde-recu-bloc" style={{ borderTop: `1px solid ${trait}`, paddingTop: 12,
+              display: "flex", gap: 12, alignItems: "flex-start", flexWrap: "wrap" }}>
+              {qr && <img src={qr} alt="" style={{ width: 54, height: 54, flexShrink: 0 }} />}
+              <div style={{ flex: "1 1 210px", minWidth: 0, fontSize: 10.5, color: gris, lineHeight: 1.55 }}>
+                <div style={{ ...etiquette, fontSize: 9.5, marginBottom: 3 }}>Détails de vérification</div>
+                <div>Référence {transfert.reference} · Agence {transfert.agenceEnvoi || "—"}</div>
+                <div>Reçu généré le {new Date().toLocaleString("fr-FR")}</div>
+                <div style={{ wordBreak: "break-all" }}>Vérifiez en ligne : {lien}</div>
+                <div>Reçu généré électroniquement — valable sans signature ni cachet.</div>
+              </div>
+            </div>
+
+            {/* ── Service client ── */}
+            <div className="bde-recu-bloc" style={{ background: "#F9FAFB", border: `1px solid ${trait}`,
+              borderRadius: 10, padding: "12px 14px", marginTop: 14, fontSize: 11.5, color: gris, lineHeight: 1.6 }}>
+              <strong style={{ color: encre, fontSize: 12.5, display: "block", marginBottom: 3 }}>
+                Besoin d’aide ? Contactez notre service client
+              </strong>
+              {[entreprise.telephone, entreprise.telephone2].filter(Boolean).join("  ·  ")}
+              {(entreprise.telephone || entreprise.telephone2) && <br />}
+              {[entreprise.email, entreprise.siteWeb].filter(Boolean).join("  ·  ")}
+              {entreprise.adresseSiege && <><br />{entreprise.adresseSiege}</>}
+              {entreprise.rccm && <><br />RCCM {entreprise.rccm}</>}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Les gestes. Hors de la feuille : ils ne s'impriment pas. ── */}
+      <div className="bde-recu-actions" style={{ marginTop: 16 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {bouton(Download, travail === "pdf" ? "Génération…" : "Télécharger PDF", telecharger, true)}
+          {bouton(Printer, "Imprimer", () => window.print())}
+          {bouton(Send, "Partager", partager)}
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+          {bouton(MessageCircle, "WhatsApp", versWhatsApp)}
+          {bouton(Mail, "SMS", versSMS)}
+          {!paye && code && bouton(Copy, "Copier le code", () => {
+            navigator.clipboard?.writeText(codeACopier(code));
+            notify?.("Code copié — ne le collez que dans un message à l’expéditeur.");
+          })}
+        </div>
+
+        <div style={{ fontSize: 11.5, color: "var(--muted)", lineHeight: 1.55, marginTop: 12,
+          background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 9, padding: "10px 12px" }}>
+          Le message partagé annonce le transfert et porte le lien de vérification, <strong>jamais le
+          code de retrait</strong> : un message se transfère et s’affiche sur un écran verrouillé.
+          Le code se remet à l’expéditeur, sur le papier.
+        </div>
+
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+          {onNouveau && (
+            <button onClick={onNouveau}
+              style={{ flex: "1 1 170px", background: "var(--surface2)", border: "1px solid var(--border)",
+                color: "var(--text)", borderRadius: 10, padding: "11px 15px", fontSize: 13, fontWeight: 700,
+                cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
+              <Plus size={15} /> Nouveau transfert
+            </button>
+          )}
+          <button onClick={onFermer}
+            style={{ flex: "1 1 120px", background: "none", border: "1px solid var(--border)",
+              color: "var(--muted)", borderRadius: 10, padding: "11px 15px", fontSize: 13, fontWeight: 700,
+              cursor: "pointer" }}>
+            Terminer
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
 }
 
 /* ══════════════════════════════════════════════════════════════════════════════
@@ -32772,6 +35164,7 @@ function NouveauTransfert({ data, session, config, onFait, onFermer, notify }) {
   const [envoi, setEnvoi] = useState(false);
   const [erreur, setErreur] = useState("");
   const [resultat, setResultat] = useState(null);
+  const [recu, setRecu] = useState(false);
 
   const [exp, setExp] = useState({ nom: "", prenom: "", telephone: "", pieceType: PIECES_IDENTITE[0], pieceNumero: "", adresse: "", pays: session?.paysAutorises?.[0] || "GN" });
   const [ben, setBen] = useState({ nom: "", prenom: "", telephone: "", pays: "GN", ville: "", agence: "" });
@@ -32850,6 +35243,14 @@ function NouveauTransfert({ data, session, config, onFait, onFermer, notify }) {
       frais: t.frais, taux: t.taux,
       montantARecevoir: t.montant_a_recevoir, deviseReception: t.devise_reception,
       creeLe: t.cree_le, creePar: t.cree_par_nom, agenceEnvoi: t.agence_envoi, expireLe: t.expire_le,
+      /*
+       * Le reçu montre les téléphones et le pays de l'expéditeur ; l'écran de succès, lui, n'en
+       * avait pas besoin. Ils viennent de la réponse du serveur, jamais du formulaire : ce qui est
+       * imprimé doit être ce qui a été enregistré, pas ce qui a été tapé.
+       */
+      expediteurTelephone: t.exp_telephone, expediteurPays: t.exp_pays,
+      beneficiaireTelephone: t.ben_telephone,
+      statut: t.statut,
     };
     return (
       <Modal title="Transfert enregistré" onClose={onFermer} wide>
@@ -32867,7 +35268,7 @@ function NouveauTransfert({ data, session, config, onFait, onFermer, notify }) {
           <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 32, fontWeight: 700, color: "var(--brand-solid)", letterSpacing: "0.04em", fontVariantNumeric: "tabular-nums" }}>
             {codeLisible(resultat.code)}
           </div>
-          <button onClick={() => { navigator.clipboard?.writeText(resultat.code); notify?.("Code copié"); }}
+          <button onClick={() => { navigator.clipboard?.writeText(codeACopier(resultat.code)); notify?.("Code copié"); }}
             style={{ marginTop: 10, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 14px", fontSize: 12, fontWeight: 600, color: "var(--text)", cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 6 }}>
             <Copy size={13} /> Copier le code
           </button>
@@ -32886,15 +35287,24 @@ function NouveauTransfert({ data, session, config, onFait, onFermer, notify }) {
         </div>
 
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button onClick={() => downloadRecuTransfert(vue, resultat.code, data?.entreprise)}
+          <button onClick={() => setRecu(true)}
             style={{ flex: 1, minWidth: 160, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 10, padding: "12px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
-            <Printer size={16} /> Imprimer le reçu
+            <Receipt size={16} /> Voir le reçu
+          </button>
+          <button onClick={() => downloadRecuTransfert(vue, resultat.code, data?.entreprise)}
+            style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 10, padding: "12px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 7 }}>
+            <Printer size={16} /> PDF
           </button>
           <button onClick={onFermer}
-            style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 10, padding: "12px 20px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+            style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 10, padding: "12px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
             Terminer
           </button>
         </div>
+
+        {recu && (
+          <RecuTransfert transfert={vue} code={resultat.code} data={data} notify={notify}
+            onFermer={() => setRecu(false)} />
+        )}
       </Modal>
     );
   }
@@ -33003,7 +35413,7 @@ function NouveauTransfert({ data, session, config, onFait, onFermer, notify }) {
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11.5, color: "var(--muted)" }}>
                   <span>Taux appliqué</span>
-                  <span>1 {devis.deviseEnvoi} = {Number(devis.taux).toLocaleString("fr-FR", { maximumFractionDigits: 4 })} {devis.deviseReception}</span>
+                  <span>{tauxLisible(devis.taux, devis.deviseEnvoi, devis.deviseReception)}</span>
                 </div>
                 <div style={{ display: "flex", justifyContent: "space-between", borderTop: "1px solid var(--border)", paddingTop: 8 }}>
                   <span style={{ color: "var(--ok-fg)", fontWeight: 700 }}>Le bénéficiaire reçoit</span>
@@ -33036,7 +35446,7 @@ function NouveauTransfert({ data, session, config, onFait, onFermer, notify }) {
               <strong style={{ color: "var(--ok-fg)", fontSize: 16 }}>{montantTransfert(devis.montantARecevoir, devis.deviseReception)}</strong>
             </div>
             <div style={{ fontSize: 11.5, color: "var(--muted)", borderTop: "1px solid var(--info-border)", paddingTop: 7 }}>
-              Frais {montantTransfert(devis.frais, devis.deviseEnvoi)} · taux 1 {devis.deviseEnvoi} = {Number(devis.taux).toLocaleString("fr-FR", { maximumFractionDigits: 4 })} {devis.deviseReception}.
+              Frais {montantTransfert(devis.frais, devis.deviseEnvoi)} · taux {tauxLisible(devis.taux, devis.deviseEnvoi, devis.deviseReception)}.
               Le taux est figé à la création : il ne changera plus, quoi qu’il arrive d’ici au retrait.
             </div>
           </div>
@@ -33090,13 +35500,14 @@ function PayerTransfert({ data, onFait, onFermer, notify }) {
   const [confirmation, setConfirmation] = useState(false);
   const [paiement, setPaiement] = useState(false);
   const [paye, setPaye] = useState(null);
+  const [recu, setRecu] = useState(false);
 
   async function chercher() {
-    const chiffres = code.replace(/\D/g, "");
-    if (chiffres.length !== 8) { setErreur("Un code de transfert compte huit chiffres."); return; }
+    const saisi = codeTransfertSaisi(code);
+    if (saisi.length !== 8) { setErreur("Un code de transfert compte huit caractères — par exemple AB47 0309."); return; }
     setRecherche(true); setErreur(""); setDetailRefus(null); setTrouve(null);
     try {
-      const r = await appelTransferts(`?code=${encodeURIComponent(chiffres)}`);
+      const r = await appelTransferts(`?code=${encodeURIComponent(saisi)}`);
       setTrouve(r.transfert);
       // Le nom annoncé au départ pré-remplit la vérification : l'agent CORRIGE ce qu'il lit sur
       // la pièce, il ne le recopie pas — un champ vide se remplit sans regarder.
@@ -33117,7 +35528,7 @@ function PayerTransfert({ data, onFait, onFermer, notify }) {
         method: "POST",
         body: JSON.stringify({
           action: "payer",
-          code: code.replace(/\D/g, ""),
+          code: codeTransfertSaisi(code),
           benNomVerifie: verif.nom, benTelephoneVerifie: verif.telephone,
           benPieceType: verif.pieceType, benPieceNumero: verif.pieceNumero,
           montantRemis: montantSaisi(verif.montantRemis),
@@ -33162,14 +35573,24 @@ function PayerTransfert({ data, onFait, onFermer, notify }) {
           Le code est désormais inutilisable : toute nouvelle présentation sera refusée.
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button onClick={() => downloadRecuPaiementTransfert(paye, data?.entreprise)}
+          <button onClick={() => setRecu(true)}
             style={{ flex: 1, minWidth: 160, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 10, padding: "12px 16px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 7 }}>
-            <Printer size={16} /> Reçu de paiement
+            <Receipt size={16} /> Voir le reçu
           </button>
-          <button onClick={onFermer} style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 10, padding: "12px 20px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+          <button onClick={() => downloadRecuPaiementTransfert(paye, data?.entreprise)}
+            style={{ background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 10, padding: "12px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 7 }}>
+            <Printer size={16} /> PDF
+          </button>
+          <button onClick={onFermer} style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 10, padding: "12px 18px", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
             Terminer
           </button>
         </div>
+
+        {/* Le reçu de paiement ne porte pas de code : celui-ci a servi, il ne doit plus circuler. */}
+        {recu && (
+          <RecuTransfert transfert={paye} code={null} data={data} notify={notify}
+            onFermer={() => setRecu(false)} />
+        )}
       </Modal>
     );
   }
@@ -33179,7 +35600,7 @@ function PayerTransfert({ data, onFait, onFermer, notify }) {
       <Field label="Code de transfert présenté par le bénéficiaire">
         <div style={{ display: "flex", gap: 8 }}>
           <input aria-label="Code de transfert" value={code} onChange={(e) => setCode(e.target.value)} onKeyDown={(e) => e.key === "Enter" && chercher()}
-            placeholder="TRF 4827 3195" inputMode="numeric" autoFocus
+            placeholder="TRF AB47 0309" autoCapitalize="characters" spellCheck={false} autoFocus
             style={{ ...inputStyle, marginBottom: 0, fontSize: 18, fontWeight: 700, letterSpacing: "0.06em", fontVariantNumeric: "tabular-nums" }} />
           <button onClick={chercher} disabled={recherche}
             style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 10, padding: "0 20px", fontSize: 13.5, fontWeight: 700, cursor: recherche ? "wait" : "pointer", whiteSpace: "nowrap" }}>
@@ -33522,15 +35943,32 @@ function DetailTransfert({ transfert, data, session, notify, onFerme, onChange }
   const [code, setCode] = useState(null);
   const [motif, setMotif] = useState("");
   const [annulation, setAnnulation] = useState(false);
+  const [suppression, setSuppression] = useState(false);
+  const [motifSuppression, setMotifSuppression] = useState("");
+  const [recu, setRecu] = useState(false);
   const [travail, setTravail] = useState("");
   const [erreur, setErreur] = useState("");
   const annulable = !["Payé", "Annulé"].includes(transfert.statut);
+  /*
+   * Retirer un transfert des listes n'est pas une permission qu'on accorde : c'est le rôle. Une
+   * clé « supprimer un transfert » se donnerait un jour à quelqu'un pour dépanner, et resterait.
+   */
+  const estAdmin = session?.role === "Administrateur";
 
   async function revoirCode() {
     setTravail("code"); setErreur("");
     try {
       const r = await appelTransferts(`?revoir=${encodeURIComponent(transfert.id)}&motif=${encodeURIComponent("Reçu perdu par le client")}`);
       setCode(r.code);
+    } catch (e) { setErreur(e.message); } finally { setTravail(""); }
+  }
+
+  async function supprimer() {
+    setSuppression(false); setTravail("supprimer"); setErreur("");
+    try {
+      await appelTransferts("", { method: "POST", body: JSON.stringify({ action: "supprimer", id: transfert.id, motif: motifSuppression }) });
+      notify?.("Transfert retiré des listes — le journal en garde la trace.");
+      onChange?.(); onFerme();
     } catch (e) { setErreur(e.message); } finally { setTravail(""); }
   }
 
@@ -33565,7 +36003,7 @@ function DetailTransfert({ transfert, data, session, notify, onFerme, onChange }
         {ligne("Destination", [transfert.beneficiaireVille, paysLisible(transfert.beneficiairePays)].filter(Boolean).join(", "))}
         {ligne("Montant envoyé", montantTransfert(transfert.montantEnvoye, transfert.deviseEnvoi))}
         {ligne("Frais", montantTransfert(transfert.frais, transfert.deviseEnvoi))}
-        {ligne("Taux figé à la création", `1 ${transfert.deviseEnvoi} = ${Number(transfert.taux).toLocaleString("fr-FR", { maximumFractionDigits: 4 })} ${transfert.deviseReception}`)}
+        {ligne("Taux figé à la création", tauxLisible(transfert.taux, transfert.deviseEnvoi, transfert.deviseReception))}
         {ligne("Créé le", `${new Date(transfert.creeLe).toLocaleString("fr-FR")} — ${transfert.creePar} (${transfert.agenceEnvoi})`)}
         {ligne("Valable jusqu’au", new Date(transfert.expireLe).toLocaleDateString("fr-FR"))}
         {transfert.payeLe && ligne("Payé le", `${new Date(transfert.payeLe).toLocaleString("fr-FR")} — ${transfert.payePar} (${transfert.agencePaiement})`)}
@@ -33583,6 +36021,16 @@ function DetailTransfert({ transfert, data, session, notify, onFerme, onChange }
       {erreur && <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 10, padding: "10px 12px", marginBottom: 12, fontSize: 12.5, color: "var(--danger-fg)" }}>{erreur}</div>}
 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {/*
+          * Le reçu se rouvre à tout moment, quel que soit l'état du transfert — c'est la pièce
+          * qu'on ressort pour répondre à un client. Il ne porte le code que si l'agent vient de
+          * le redemander juste au-dessus : rouvrir une fiche ne doit pas faire réapparaître un
+          * code que l'écran avait justement cessé d'afficher.
+          */}
+        <button onClick={() => setRecu(true)}
+          style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--brand-solid)", border: "none", color: "#fff", borderRadius: 10, padding: "10px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+          <Receipt size={14} /> Voir le reçu
+        </button>
         {perm("transfert.revoir_code") && annulable && !code && (
           <button onClick={revoirCode} disabled={travail === "code"}
             style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 10, padding: "10px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
@@ -33595,7 +36043,48 @@ function DetailTransfert({ transfert, data, session, notify, onFerme, onChange }
             <Ban size={14} /> Annuler le transfert
           </button>
         )}
+        {estAdmin && (
+          <button onClick={() => setSuppression(true)}
+            title="Retirer ce transfert des listes. La ligne et le journal sont conservés."
+            style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 10, padding: "10px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+            <Trash2 size={14} /> Supprimer
+          </button>
+        )}
       </div>
+
+      {recu && (
+        <RecuTransfert transfert={transfert} code={code} data={data} notify={notify}
+          onFermer={() => setRecu(false)} />
+      )}
+
+      {suppression && (
+        <Modal title="Supprimer ce transfert ?" onClose={() => setSuppression(false)} niveau={1}>
+          <div style={{ fontSize: 13, color: "var(--text)", marginBottom: 12, lineHeight: 1.6 }}>
+            Il disparaîtra de toutes les listes et de tous les totaux. La ligne, elle, reste en
+            base et le journal garde tout : c’est ce qui permet de répondre à un client ou à un
+            contrôle dans six mois.
+          </div>
+          <div style={{ background: transfert.statut === "Payé" ? "var(--warn-bg)" : "var(--info-bg)",
+                        border: `1px solid ${transfert.statut === "Payé" ? "var(--warn-border)" : "var(--info-border)"}`,
+                        borderRadius: 10, padding: "11px 13px", fontSize: 12.5, color: "var(--text)", lineHeight: 1.55, marginBottom: 14 }}>
+            {transfert.statut === "Payé"
+              ? <>Ce transfert a <strong>déjà été payé</strong> : l’argent est réellement sorti du tiroir.
+                  La caisse n’est donc pas retouchée — le retirer des listes ne doit pas faire
+                  réapparaître des billets qui ne sont plus là.</>
+              : <>Il n’a pas été payé : une sortie de caisse de <strong>{montantTransfert(Number(transfert.montantEnvoye) + Number(transfert.frais), transfert.deviseEnvoi)}</strong> sera
+                  inscrite, comme pour une annulation. Assurez-vous que l’expéditeur a bien été remboursé.</>}
+          </div>
+          <Field label="Pourquoi le supprimer ? *">
+            <textarea value={motifSuppression} onChange={(e) => setMotifSuppression(e.target.value)} rows={3}
+              placeholder="Saisie de test, double saisie, erreur de manipulation…"
+              style={{ ...inputStyle, resize: "vertical" }} />
+          </Field>
+          <button onClick={supprimer} disabled={motifSuppression.trim().length < 3 || travail === "supprimer"}
+            style={{ width: "100%", background: motifSuppression.trim().length < 3 ? "var(--surface2)" : "var(--danger-fg)", color: motifSuppression.trim().length < 3 ? "var(--muted)" : "#fff", border: "none", borderRadius: 10, padding: "12px 0", fontSize: 13.5, fontWeight: 700, cursor: motifSuppression.trim().length < 3 ? "not-allowed" : "pointer" }}>
+            {travail === "supprimer" ? "Suppression…" : "Retirer des listes"}
+          </button>
+        </Modal>
+      )}
 
       {annulation && (
         <Modal title="Annuler ce transfert ?" onClose={() => setAnnulation(false)} niveau={1}>

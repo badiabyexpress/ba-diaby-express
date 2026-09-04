@@ -179,7 +179,12 @@ async function envoyerCodeWhatsApp(req, telephone, code) {
   return appelInterne(req, "/api/whatsapp", {
     to: telephone,
     message: `Ba-Diaby Express — votre code de réinitialisation est ${code}. Il expire dans ${MINUTES_VALIDITE} minutes. Si vous n’avez rien demandé, ignorez ce message.`,
-    ...(modele ? { modele, variables: [String(code)] } : { texteLibre: true }),
+    /*
+     * `otp` accompagne le modèle : Meta impose un bouton aux modèles d'authentification et exige
+     * qu'on le remplisse avec le code. Sans lui, un modèle pourtant validé se fait refuser pour
+     * « nombre de paramètres incorrect », et le code n'arrive pas davantage qu'avant.
+     */
+    ...(modele ? { modele, variables: [String(code)], otp: String(code) } : { texteLibre: true }),
   });
 }
 

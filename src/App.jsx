@@ -15590,6 +15590,8 @@ function MessagesWhatsAppPage({ data, persist, session, notify }) {
 function CentreClientsPage({ data, persist, notify, session }) {
   const [ongletActif, setOngletActif] = useState("messages");
   const [clientOuvert, setClientOuvert] = useState(null);
+  /* L'identifiant proposé quand le compte n'en a pas : rempli à l'ouverture de la fenêtre. */
+  const [identifiantNouveau, setIdentifiantNouveau] = useState("");
   const [reponse, setReponse] = useState("");
   const [reponsesSignalement, setReponsesSignalement] = useState({});
   const [filtrePreAlertes, setFiltrePreAlertes] = useState("en_attente");
@@ -15610,21 +15612,64 @@ function CentreClientsPage({ data, persist, notify, session }) {
    * de passe provisoire s'affiche une seule fois — ensuite il n'existe plus nulle part qu'en
    * empreinte, y compris pour nous.
    */
-  async function reinitialiserMotDePasseClient(compte) {
+  /**
+   * UN IDENTIFIANT PROPOSÉ À PARTIR DU NOM, ET LIBRE À TOUS.
+   *
+   * « Aïssatou Bah » devient « aissatou.bah », puis « aissatou.bah2 » si le premier est pris. Les
+   * accents et les espaces sautent : c'est une chaîne qu'on dicte au téléphone et qu'on retape sur
+   * un clavier de téléphone, pas une pièce d'état civil.
+   */
+  function identifiantPropose(compte, tousLesComptes) {
+    const propre = (v) => String(v || "").normalize("NFD").replace(/[̀-ͯ]/g, "")
+      .toLowerCase().replace(/[^a-z0-9]+/g, "");
+    const base = [propre(compte.prenom), propre(compte.nom)].filter(Boolean).join(".") || "client";
+    const pris = new Set((tousLesComptes || []).map((c) => String(c.identifiant || "").toLowerCase()).filter(Boolean));
+    if (!pris.has(base)) return base;
+    for (let n = 2; n < 200; n++) if (!pris.has(`${base}${n}`)) return `${base}${n}`;
+    return `${base}${Date.now().toString(36).slice(-4)}`;
+  }
+
+  /**
+   * DONNE À UN CLIENT DE QUOI SE CONNECTER — identifiant compris.
+   * ─────────────────────────────────────────────────────────────────────────────
+   * Cette fonction ne faisait que remplacer un mot de passe, et supposait donc un identifiant
+   * existant. Or aucun de vos comptes clients n'en a : ce sont des fiches ouvertes au comptoir, pas
+   * des inscriptions. Leur « redonner un mot de passe » ne servait à rien — il n'y avait rien à
+   * taper dans le premier champ, et « mot de passe oublié » ne pouvait rien retrouver non plus.
+   *
+   * Elle crée maintenant l'identifiant quand il manque, et laisse l'agent le corriger avant.
+   */
+  async function reinitialiserMotDePasseClient(compte, identifiantChoisi = "") {
+    const vise = String(identifiantChoisi || compte.identifiant || "").trim();
+    if (!vise) { notify?.("Indiquez un identifiant de connexion."); return; }
+    /*
+     * Deux comptes portant le même identifiant rendraient la connexion imprévisible : c'est le
+     * même refus que sur le serveur, et il vaut mieux ici, avant d'avoir dicté quoi que ce soit.
+     */
+    const doublon = (data.clientAccounts || []).some((c) => c.id !== compte.id
+      && String(c.identifiant || "").trim().toLowerCase() === vise.toLowerCase());
+    if (doublon) { notify?.("Cet identifiant est déjà pris par un autre compte."); return; }
+
     // Sans O/0 ni I/1 : ce mot de passe se dicte au téléphone, et une confusion coûte un appel.
     const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     const provisoire = Array.from({ length: 8 }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join("");
     const identifiants = await creerIdentifiantsMotDePasse(provisoire);
+    const nouveau = !compte.identifiant;
     const next = {
       ...data,
-      clientAccounts: (data.clientAccounts || []).map((c) => (c.id === compte.id ? { ...c, ...identifiants } : c)),
+      clientAccounts: (data.clientAccounts || []).map((c) => (c.id === compte.id
+        ? { ...c, identifiant: vise, ...identifiants, motDePasseProvisoire: true }
+        : c)),
     };
-    next.activityLog = pushActivity(data, session, "Mot de passe client réinitialisé",
-      `${compte.prenom} ${compte.nom} (${compte.identifiant})`);
+    next.activityLog = pushActivity(data, session,
+      nouveau ? "Accès client créé" : "Mot de passe client réinitialisé",
+      `${compte.prenom} ${compte.nom} (${vise})`);
     await persist(next);
     setCompteAReinit(null);
     setMdpClientTemporaire({
-      identifiant: compte.identifiant,
+      identifiant: vise,
+      nouveau,
+      telephone: compte.telephone || "",
       nom: `${compte.prenom || ""} ${compte.nom || ""}`.trim(),
       motdepasse: provisoire,
     });
@@ -15925,7 +15970,15 @@ function CentreClientsPage({ data, persist, notify, session }) {
                         <div style={{ minWidth: 0 }}>
                           <div style={{ fontSize: 13.5, fontWeight: 600, color: "var(--text)" }}>{c.prenom} {c.nom}</div>
                           <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
-                            {c.identifiant}{c.telephone ? ` · ${c.telephone}` : ""}{c.email ? ` · ${c.email}` : ""}
+                            {/*
+                              « Aucun accès » plutôt qu'un blanc : un identifiant vide se lisait
+                              comme un affichage cassé, alors que c'est un fait — cette fiche a été
+                              ouverte au comptoir, et cette personne ne peut pas se connecter.
+                            */}
+                            {c.identifiant
+                              ? c.identifiant
+                              : <span style={{ color: "var(--warn-fg)", fontWeight: 700 }}>Aucun accès — ne peut pas se connecter</span>}
+                            {c.telephone ? ` · ${c.telephone}` : ""}{c.email ? ` · ${c.email}` : ""}
                           </div>
                           <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 3 }}>
                             {sesColis.length} colis
@@ -15934,9 +15987,11 @@ function CentreClientsPage({ data, persist, notify, session }) {
                           </div>
                         </div>
                         <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
-                          <button onClick={() => setCompteAReinit(c)} title="Donner un nouveau mot de passe"
-                            style={{ background: "none", border: "1px solid var(--border)", color: "var(--text)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}>
-                            <Key size={13} /> Mot de passe
+                          <button
+                            onClick={() => { setIdentifiantNouveau(c.identifiant || identifiantPropose(c, data.clientAccounts)); setCompteAReinit(c); }}
+                            title={c.identifiant ? "Donner un nouveau mot de passe" : "Créer l’accès de ce client"}
+                            style={{ background: c.identifiant ? "none" : "var(--warn-bg)", border: "1px solid " + (c.identifiant ? "var(--border)" : "var(--warn-border)"), color: c.identifiant ? "var(--text)" : "var(--warn-fg)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 5 }}>
+                            <Key size={13} /> {c.identifiant ? "Mot de passe" : "Créer l’accès"}
                           </button>
                           <button onClick={() => setCompteASupprimer(c)} title="Supprimer ce compte"
                             style={{ background: "none", border: "1px solid var(--danger-border)", color: "var(--danger-fg)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
@@ -15954,11 +16009,27 @@ function CentreClientsPage({ data, persist, notify, session }) {
       )}
 
       {compteAReinit && (
-        <Modal onClose={() => setCompteAReinit(null)} title="Donner un nouveau mot de passe ?">
+        <Modal onClose={() => setCompteAReinit(null)}
+          title={compteAReinit.identifiant ? "Donner un nouveau mot de passe ?" : "Créer l’accès de ce client"}>
           <div style={{ fontSize: 13.5, color: "var(--text)", marginBottom: 12 }}>
-            <strong>{compteAReinit.prenom} {compteAReinit.nom}</strong> ({compteAReinit.identifiant})
-            ne pourra plus se connecter avec son mot de passe actuel.
+            <strong>{compteAReinit.prenom} {compteAReinit.nom}</strong>
+            {compteAReinit.identifiant
+              ? <> ({compteAReinit.identifiant}) ne pourra plus se connecter avec son mot de passe actuel.</>
+              : <> n’a aucun identifiant de connexion : sa fiche a été ouverte au comptoir, jamais par une inscription. Sans identifiant, il ne peut ni se connecter ni utiliser « mot de passe oublié ».</>}
           </div>
+          {/*
+            L'identifiant se choisit ici quand il manque : proposé d'après le nom, corrigeable.
+            L'imposer sans le montrer obligerait l'agent à le lire ailleurs pour le dicter.
+          */}
+          {!compteAReinit.identifiant && (
+            <Field label="Identifiant de connexion">
+              <input value={identifiantNouveau} onChange={(e) => setIdentifiantNouveau(e.target.value)}
+                style={inputStyle} placeholder="ex : aissatou.bah" autoCapitalize="off" autoCorrect="off" spellCheck={false} />
+              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>
+                C’est ce que le client tapera pour se connecter. Proposé d’après son nom — à vous de le changer si besoin.
+              </div>
+            </Field>
+          )}
           <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "11px 13px", marginBottom: 16 }}>
             <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.55 }}>
               <strong>Assurez-vous d’avoir bien cette personne au bout du fil.</strong> Le mot de passe
@@ -15967,9 +16038,9 @@ function CentreClientsPage({ data, persist, notify, session }) {
             </div>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={() => reinitialiserMotDePasseClient(compteAReinit)}
+            <button onClick={() => reinitialiserMotDePasseClient(compteAReinit, identifiantNouveau)}
               style={{ flex: 1, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
-              Générer le mot de passe
+              {compteAReinit.identifiant ? "Générer le mot de passe" : "Créer l’accès"}
             </button>
             <button onClick={() => setCompteAReinit(null)}
               style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "11px 18px", fontSize: 13, cursor: "pointer" }}>
@@ -15989,10 +16060,30 @@ function CentreClientsPage({ data, persist, notify, session }) {
               {mdpClientTemporaire.motdepasse}
             </div>
           </div>
-          <div style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.55, marginBottom: 16 }}>
+          <div style={{ fontSize: 12.5, color: "var(--muted)", lineHeight: 1.55, marginBottom: 14 }}>
             Ce mot de passe ne sera plus affiché. Invitez le client à le changer depuis son espace,
             dans son profil.
           </div>
+          {/*
+            LE PARTAGE PASSE PAR LE WHATSAPP DE L'AGENT, PAS PAR CELUI DE L'ENTREPRISE.
+
+            Un envoi automatique par le numéro professionnel n'aboutirait pas : Meta n'accepte un
+            message libre que dans les vingt-quatre heures suivant le dernier message du client, et
+            quelqu'un à qui l'on crée un accès ne vient, en général, pas d'écrire. Ce bouton ouvre
+            WhatsApp sur le téléphone de l'agent avec le message déjà écrit — cela marche toujours,
+            et l'agent voit partir ce qu'il envoie.
+          */}
+          {mdpClientTemporaire.telephone && (
+            <a href={waLink(mdpClientTemporaire.telephone,
+              `Bonjour ${mdpClientTemporaire.nom},\n\nVoici vos accès à votre Espace Client Ba-Diaby Express :\n`
+              + `Identifiant : ${mdpClientTemporaire.identifiant}\n`
+              + `Mot de passe provisoire : ${mdpClientTemporaire.motdepasse}\n\n`
+              + `Connectez-vous sur ${typeof window !== "undefined" ? window.location.origin : "badiabyexpress.com"}/?client et changez ce mot de passe dans votre profil.`)}
+              target="_blank" rel="noopener noreferrer"
+              style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 7, background: "var(--ok-bg-soft)", border: "1px solid var(--ok-fg)", color: "var(--ok-fg)", borderRadius: 8, padding: "11px 0", fontSize: 13, fontWeight: 700, textDecoration: "none", marginBottom: 8 }}>
+              <MessageCircle size={15} /> Envoyer sur WhatsApp
+            </a>
+          )}
           <button onClick={() => setMdpClientTemporaire(null)}
             style={{ width: "100%", background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
             J’ai noté

@@ -170,7 +170,7 @@ function formeDuModele(composants) {
  * `modele` déclenche l'envoi d'un modèle validé plutôt qu'un texte libre — la seule forme
  * acceptée hors des 24 h. Ses variables remplissent {{1}}, {{2}}… dans l'ordre.
  */
-async function envoyerParMeta({ meta, destinataire, message, modele, variables, document, boutonUrl }) {
+async function envoyerParMeta({ meta, destinataire, message, modele, variables, document, boutonUrl, otp, otpBouton }) {
   /*
    * Un modèle se remplit par « composants », dans un ordre que Meta impose : l'en-tête, puis le
    * corps, puis les boutons. Chacun doit correspondre EXACTEMENT à ce qui a été validé — envoyer
@@ -198,6 +198,26 @@ async function envoyerParMeta({ meta, destinataire, message, modele, variables, 
       type: "button", sub_type: "url", index: "0",
       parameters: [{ type: "text", text: String(boutonUrl) }],
     });
+  }
+
+  /*
+   * LE BOUTON D'UN MODÈLE D'AUTHENTIFICATION — SANS LUI, LE CODE NE PART PAS.
+   * ─────────────────────────────────────────────────────────────────────────────
+   * Un code de réinitialisation ne peut sortir de la fenêtre de vingt-quatre heures qu'avec un
+   * modèle de catégorie « authentification ». Or Meta impose à ces modèles-là d'avoir un bouton —
+   * « copier le code » ou remplissage automatique — et EXIGE qu'on le remplisse à l'envoi, avec le
+   * code répété. Un modèle validé, la variable d'environnement posée, et l'envoi serait quand même
+   * refusé pour « nombre de paramètres incorrect » : le code n'arriverait toujours pas, et rien
+   * dans le refus ne dirait qu'il manque un bouton.
+   *
+   * On ne devine pas le type de bouton : c'est celui que Meta a validé qui compte, et lui seul.
+   * WHATSAPP_TEMPLATE_CODE_BOUTON le déclare — « url » (remplissage automatique, le défaut),
+   * « copy_code » (bouton copier), ou « aucun » pour un modèle qui n'en porte pas.
+   */
+  if (otp && otpBouton !== "aucun") {
+    composants.push(otpBouton === "copy_code"
+      ? { type: "button", sub_type: "copy_code", index: "0", parameters: [{ type: "coupon_code", coupon_code: String(otp) }] }
+      : { type: "button", sub_type: "url", index: "0", parameters: [{ type: "text", text: String(otp) }] });
   }
 
   /*
@@ -751,7 +771,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { to, message, mediaUrl, modele, variables, document, boutonUrl, texteLibre } = req.body || {};
+    const { to, message, mediaUrl, modele, variables, document, boutonUrl, texteLibre, otp } = req.body || {};
     if (!to || !message) {
       return res.status(400).json({ error: "Paramètres 'to' et 'message' requis." });
     }
@@ -778,6 +798,13 @@ export default async function handler(req, res) {
          */
         modele: texteLibre ? null : (modele || meta.modele || null),
         variables,
+        /*
+         * Le code à usage unique, quand l'appelant en envoie un : il sert à remplir le bouton
+         * qu'un modèle d'authentification porte obligatoirement. Le type de bouton est celui que
+         * Meta a validé, déclaré une fois pour toutes côté serveur.
+         */
+        otp,
+        otpBouton: process.env.WHATSAPP_TEMPLATE_CODE_BOUTON || "url",
         // Le ticket d'envoi vient de la même URL publique que la pièce jointe Twilio : un seul
         // fichier déposé, servi par les deux voies.
         document: document || (mediaUrl ? { lien: mediaUrl, nom: "ticket.pdf" } : null),

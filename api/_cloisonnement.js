@@ -716,6 +716,15 @@ const SECTIONS_REGLAGES = [
   ["exchangeRates", "config.tarifs"],
   ["tauxMisAJourLe", "config.tarifs"],
   ["commissionConfig", "config.tarifs"],
+  /*
+   * LES VERSEMENTS DE COMMISSION — de l'argent qui sort vers une personne.
+   *
+   * Cette liste dit ce que l'entreprise a déjà payé à chacun. Sans garde, un agent pouvait s'y
+   * inscrire un versement depuis les outils de développement de son navigateur : son reste dû
+   * tombait à zéro, et rien n'aurait montré d'où venait le solde. La même permission que le barème
+   * les protège — celle qui décide déjà de ce que chacun gagne décide de ce qu'on lui a versé.
+   */
+  ["paiementsCommission", "config.tarifs"],
   ["paymentConfig", "config.tarifs"],
   ["expressTarifEurKg", "config.tarifs"],
   ["categories", "config.categories"],
@@ -974,7 +983,7 @@ function comptesDeLEquipe(base, envoye, moi, peut) {
 const COLLECTIONS_PROTEGEES = [
   "colis", "clientAccounts", "repertoire", "depenses",
   "bordereaux", "facturesPartenaire", "preAlertes", "remisesCaisse", "voyages",
-  "pointages", "factures", "demandesRegroupement",
+  "pointages", "factures", "demandesRegroupement", "paiementsCommission",
   "categories", "sites", "departs", "desabonnesMarketing",
 ];
 /*

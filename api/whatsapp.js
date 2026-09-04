@@ -91,6 +91,18 @@ const EXPLICATIONS_META = {
   131026: "Ce numéro ne peut pas recevoir de message WhatsApp. Vérifiez qu'il est bien sur WhatsApp, avec son indicatif pays.",
   131030: "Ce numéro n'est pas dans la liste des destinataires autorisés. Tant que l'application Meta n'est pas publiée, seuls les numéros de test peuvent être joints.",
   /*
+   * LA FACTURATION — le refus qui arrête TOUT, et que rien ne nommait.
+   *
+   * Sans moyen de paiement valide, Meta cesse de livrer les messages payants et ferme la création
+   * de modèles. Les envois gratuits — ceux qui répondent à un client dans les vingt-quatre heures —
+   * continuent de passer : le service paraît donc à moitié vivant, ce qui envoie chercher la panne
+   * partout sauf là où elle est.
+   *
+   * Le code brut, lui, ne dit rien : « 131042 » a coûté une soirée entière à comprendre.
+   */
+  131042: "Meta refuse l'envoi pour un problème de FACTURATION. Aucun message payant ne partira, et vous ne pourrez pas créer de modèle, tant qu'un moyen de paiement valide n'est pas rattaché au compte WhatsApp Business. Vérifiez la carte et les factures impayées dans Meta Business Suite → Facturation.",
+  131044: "Le message n'a pas pu être livré. Souvent un problème de facturation ou un numéro qui ne reçoit pas WhatsApp : vérifiez d'abord la facturation du compte Meta.",
+  /*
    * 132001 recouvre trois situations très différentes, et l'agent doit pouvoir les distinguer :
    * le modèle n'a jamais été déposé, il attend encore l'examen de Meta, ou il existe dans une
    * autre langue que celle demandée. Un modèle « En cours d'examen » est le cas le plus fréquent
@@ -715,6 +727,98 @@ export default async function handler(req, res) {
         actuel: meta.numeroId || null,
         /* Vrai quand la variable désigne une ligne qui n'est plus sur ce compte. */
         actuelInconnu: !!meta.numeroId && !numeros.some((n) => n.actif),
+      });
+    } catch (e) {
+      return res.status(502).json({ error: "Impossible de joindre Meta." });
+    }
+  }
+
+  /*
+   * CE QUE WHATSAPP VOUS COÛTE CE MOIS-CI.
+   * ─────────────────────────────────────────────────────────────────────────────
+   * CE QUE CETTE RÉPONSE EST, ET CE QU'ELLE N'EST PAS.
+   *
+   * Meta n'expose AUCUNE interface pour lire une facture, un solde ou un impayé : ces chiffres-là
+   * ne vivent que dans Meta Business Suite. Promettre « voici ce que vous devez » serait donc un
+   * mensonge, et le plus coûteux qui soit — on cesserait de regarder la vraie facture.
+   *
+   * Ce qu'il expose, en revanche, c'est le VOLUME et le COÛT ESTIMÉ des messages déjà envoyés. Cela
+   * suffit à ce qui est demandé : savoir où l'on en est avant la fin du mois, au lieu de découvrir
+   * la coupure quand plus rien ne part.
+   *
+   * DEUX INTERFACES, ET ON ESSAIE LES DEUX.
+   *
+   * Meta est passé d'une facturation à la conversation à une facturation au message. Les comptes ne
+   * basculent pas tous le même jour et l'ancienne interface survit un temps. On demande donc la
+   * nouvelle, et l'on retombe sur l'ancienne si elle n'existe pas encore ici — plutôt que de
+   * n'afficher rien du tout à cause d'un nom de champ.
+   */
+  if (req.method === "GET" && req.query?.consommation !== undefined) {
+    const waba = process.env.WHATSAPP_WABA_ID;
+    if (!metaPret) return res.status(501).json({ error: "Meta n'est pas configuré.", configure: false });
+    if (!waba) {
+      return res.status(501).json({
+        error: "Ajoutez WHATSAPP_WABA_ID dans Vercel — c'est l'« ID du compte WhatsApp Business », "
+          + "affiché au-dessus de vos numéros dans la console Meta.",
+        manquant: "WHATSAPP_WABA_ID",
+      });
+    }
+    /* Du premier jour du mois à maintenant : la période sur laquelle la facture se construit. */
+    const maintenant = new Date();
+    const debutMois = Date.UTC(maintenant.getUTCFullYear(), maintenant.getUTCMonth(), 1) / 1000;
+    const fin = Math.floor(maintenant.getTime() / 1000);
+
+    const demander = async (champ, dimensions) => {
+      const requete = `${champ}.start(${Math.floor(debutMois)}).end(${fin}).granularity(DAILY)`
+        + `.dimensions(${encodeURIComponent(JSON.stringify(dimensions))})`;
+      const reponse = await fetch(
+        `https://graph.facebook.com/${VERSION_GRAPH}/${waba}?fields=${requete}`,
+        { headers: { Authorization: `Bearer ${meta.jeton}` } },
+      );
+      const corps = await reponse.json();
+      return { ok: reponse.ok, statut: reponse.status, corps };
+    };
+
+    try {
+      let source = "pricing_analytics";
+      let r = await demander("pricing_analytics", ["PRICING_CATEGORY"]);
+      if (!r.ok) { source = "conversation_analytics"; r = await demander("conversation_analytics", ["CONVERSATION_CATEGORY"]); }
+      if (!r.ok) {
+        const code = r.corps?.error?.code;
+        return res.status(r.statut).json({
+          error: EXPLICATIONS_META[code] || r.corps?.error?.message || "Meta n'a pas répondu.",
+          code: code || null,
+        });
+      }
+      const bloc = r.corps?.[source]?.data?.[0]?.data_points || [];
+      /*
+       * On additionne par catégorie : « utilitaire » (vos notifications de colis),
+       * « authentification » (les codes), « marketing », « service » (gratuit). Le détail compte
+       * autant que le total : c'est lui qui dit où part l'argent.
+       */
+      const parCategorie = {};
+      let total = 0;
+      let messages = 0;
+      bloc.forEach((p) => {
+        const categorie = p.pricing_category || p.conversation_category || "autre";
+        const cout = Number(p.cost) || 0;
+        const volume = Number(p.volume ?? p.conversation ?? 0) || 0;
+        if (!parCategorie[categorie]) parCategorie[categorie] = { categorie, cout: 0, volume: 0 };
+        parCategorie[categorie].cout += cout;
+        parCategorie[categorie].volume += volume;
+        total += cout;
+        messages += volume;
+      });
+      return res.status(200).json({
+        source,
+        depuis: new Date(debutMois * 1000).toISOString().slice(0, 10),
+        jusqua: new Date(fin * 1000).toISOString().slice(0, 10),
+        total: +total.toFixed(2),
+        messages,
+        /* La devise n'est pas rendue par Meta : c'est celle du compte, et l'écran le dit. */
+        lignes: Object.values(parCategorie)
+          .map((l) => ({ ...l, cout: +l.cout.toFixed(2) }))
+          .sort((a, b) => b.cout - a.cout),
       });
     } catch (e) {
       return res.status(502).json({ error: "Impossible de joindre Meta." });

@@ -2628,6 +2628,24 @@ const EVENEMENTS_WHATSAPP = [
 const ETAPES_AVEC_SUIVI = ["enregistrement", "modification"];
 const ETAPES_AVEC_TICKET = ["enregistrement", "modification"];
 
+/*
+ * Les catégories de facturation de Meta, en français.
+ *
+ * « UTILITY », « AUTHENTICATION », « SERVICE » ne disent rien à qui lit une note de frais. Le mot
+ * juste importe ici plus qu'ailleurs : c'est en voyant « service » à zéro et « utilitaire » qui
+ * monte qu'on comprend d'où vient la dépense.
+ */
+const CATEGORIES_META = {
+  UTILITY: "Notifications de colis",
+  AUTHENTICATION: "Codes de vérification",
+  MARKETING: "Messages promotionnels",
+  SERVICE: "Réponses aux clients (gratuit)",
+  utility: "Notifications de colis",
+  authentication: "Codes de vérification",
+  marketing: "Messages promotionnels",
+  service: "Réponses aux clients (gratuit)",
+};
+
 const MODELES_WHATSAPP = {
   /*
    * « L'enregistrement de votre colis est confirmé.
@@ -29697,6 +29715,29 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
   }
   useEffect(() => { relireNumeros(); }, []);
 
+  /*
+   * CE QUE WHATSAPP COÛTE CE MOIS-CI — pour payer avant d'être coupé.
+   * ─────────────────────────────────────────────────────────────────────────────
+   * Un compte Meta sans moyen de paiement valide cesse de livrer les messages payants ET ferme la
+   * création de modèles. Les envois gratuits — ceux qui répondent à un client dans les vingt-quatre
+   * heures — continuent de passer : le service paraît à moitié vivant, et l'on cherche la panne
+   * partout sauf dans la facturation.
+   *
+   * CE CHIFFRE N'EST PAS UNE FACTURE, ET L'ÉCRAN LE DIT.
+   *
+   * Meta n'expose aucune interface pour lire un solde ou un impayé — cela ne vit que dans Business
+   * Suite. Ce qu'il donne, c'est le coût ESTIMÉ de ce qui est déjà parti. C'est ce qu'il faut pour
+   * ne pas découvrir la coupure le jour où plus rien ne part.
+   */
+  const [consommation, setConsommation] = useState(null);
+  function relireConsommation() {
+    return appelServeurQuiDepense("/api/whatsapp?consommation=1")
+      .then((r) => r.json().then((corps) => ({ ok: r.ok, corps })))
+      .then(({ ok, corps }) => setConsommation(ok ? corps : { erreur: corps?.error, manquant: corps?.manquant }))
+      .catch(() => setConsommation({ erreur: "indisponible" }));
+  }
+  useEffect(() => { relireConsommation(); }, []);
+
   const [modeles, setModeles] = useState(null);
   function relireModeles() {
     return appelServeurQuiDepense("/api/whatsapp?modeles=1")
@@ -30187,6 +30228,77 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
           </div>
         </div>
       )}
+
+      {/*
+        LA FACTURATION — ce qui coupe tout, et qu'aucun écran ne montrait.
+
+        Sans moyen de paiement valide, Meta cesse de livrer les messages payants et ferme la
+        création de modèles, tandis que les réponses gratuites continuent de passer. Le service
+        paraît à moitié vivant, et l'on cherche partout sauf là.
+
+        Le chiffre affiché est le coût ESTIMÉ de ce qui est déjà parti ce mois-ci — pas une
+        facture. Meta n'expose ni solde ni impayé : cela ne vit que dans Business Suite, et
+        prétendre le contraire ferait cesser d'y regarder.
+      */}
+      <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px", marginBottom: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ minWidth: 190, flex: "1 1 240px" }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>Ce que WhatsApp vous coûte ce mois-ci</div>
+            <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 }}>
+              Coût estimé des messages déjà envoyés. Sans paiement à temps, Meta cesse de livrer et
+              vous ne pouvez plus créer de modèle.
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexShrink: 0, flexWrap: "wrap" }}>
+            <button onClick={relireConsommation}
+              style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 12px", fontSize: 12, fontWeight: 700, color: "var(--text)", cursor: "pointer" }}>
+              Actualiser
+            </button>
+            <a href="https://business.facebook.com/billing_hub/payment_settings" target="_blank" rel="noopener noreferrer"
+              style={{ background: "var(--brand-solid)", color: "#fff", borderRadius: 8, padding: "8px 12px", fontSize: 12, fontWeight: 700, textDecoration: "none" }}>
+              Payer chez Meta
+            </a>
+          </div>
+        </div>
+
+        {consommation?.erreur && (
+          <div style={{ marginTop: 12, background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "10px 12px", fontSize: 12.5, color: "var(--warn-fg)", lineHeight: 1.55 }}>
+            {consommation.erreur === "indisponible" ? "Meta n’a pas répondu. Réessayez dans un instant." : consommation.erreur}
+          </div>
+        )}
+
+        {consommation && !consommation.erreur && (
+          <div style={{ marginTop: 12 }}>
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap", alignItems: "baseline" }}>
+              <div>
+                <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700 }}>DEPUIS LE 1{"\u1d49"}{"\u02b3"} DU MOIS</div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: "var(--text)", fontFamily: "'Space Grotesk',sans-serif" }}>
+                  {(consommation.total ?? 0).toFixed(2)} <span style={{ fontSize: 13, color: "var(--muted)" }}>dans la devise de votre compte Meta</span>
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700 }}>MESSAGES FACTURÉS</div>
+                <div style={{ fontSize: 18, fontWeight: 800, color: "var(--muted)" }}>{consommation.messages ?? 0}</div>
+              </div>
+            </div>
+            {(consommation.lignes || []).length > 0 && (
+              <div style={{ marginTop: 10, borderTop: "1px solid var(--surface2)", paddingTop: 8 }}>
+                {(consommation.lignes || []).map((l) => (
+                  <div key={l.categorie} style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: "var(--muted)", padding: "3px 0" }}>
+                    <span>{CATEGORIES_META[l.categorie] || l.categorie} · {l.volume}</span>
+                    <span style={{ color: "var(--text)", fontWeight: 600 }}>{l.cout.toFixed(2)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 }}>
+              Estimation de Meta sur ce qui est déjà parti — ce n’est pas votre facture. Le montant
+              réellement dû, les impayés et la carte enregistrée se voient uniquement dans Meta
+              Business Suite, par le bouton ci-dessus.
+            </div>
+          </div>
+        )}
+      </div>
 
       {modeles && !modeles.erreur && (
         <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "13px 16px", marginBottom: 16 }}>

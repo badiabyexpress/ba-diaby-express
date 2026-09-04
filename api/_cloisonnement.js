@@ -348,6 +348,12 @@ const MAX_EMPLOYES_PARTENAIRE = 5;
 
 /** Ce qu'une seule écriture peut ajouter au journal. De quoi tracer un geste, pas de quoi le noyer. */
 const MAX_ENTREES_JOURNAL = 20;
+/*
+ * Le plafond de la liste vivante. Il ne jette plus : au-delà, la tâche de nuit archive (voir
+ * api/_journal.js). Il reste large pour qu'un incident ne coure jamais après l'archivage, et
+ * borné parce que le document entier repart à chaque enregistrement, sur la 4G d'un dépôt.
+ */
+const MAX_JOURNAL_EN_LIGNE = 3000;
 
 /**
  * Le partenaire dont relève un compte : lui-même s'il est titulaire, sinon son employeur.
@@ -595,7 +601,8 @@ export function fusionnerEcriturePartenaire(actuel, propose, partenaireId, compt
     .filter((e) => e && e.id && !dejaJournal.has(e.id))
     .slice(0, MAX_ENTREES_JOURNAL)
     .map((e) => ({ ...e, utilisateur: signature, role: "Partenaire" }));
-  const activityLog = [...ajouts, ...liste(base.activityLog)].slice(0, 500);
+  /* Même règle que pour l'équipe : la coupe ne jette plus, l'archivage de nuit prend le relais. */
+  const activityLog = [...ajouts, ...liste(base.activityLog)].slice(0, MAX_JOURNAL_EN_LIGNE);
 
   return {
     ...base,
@@ -1377,7 +1384,14 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId, contexte = {}
   const ajouts = liste(envoye.activityLog)
     .filter((e) => e && e.id && !dejaLa.has(e.id))
     .slice(0, MAX_ENTREES_JOURNAL)
-    .map((e) => ({ ...e, utilisateur: signature, role: moi.role }));
+    /*
+     * La DATE aussi vient du serveur, comme l'auteur et le rôle.
+     *
+     * Elle arrivait du navigateur, où elle se change en une ligne. Une entrée antidatée se range
+     * au milieu de la liste et cesse d'être lue : on n'a rien effacé, on a seulement fait en sorte
+     * que personne ne regarde. L'heure du serveur ne se négocie pas.
+     */
+    .map((e) => ({ ...e, utilisateur: signature, role: moi.role, date: new Date().toISOString() }));
   /*
    * Un refus se consigne. Sans cela, l'appareil fautif continuerait d'essayer à chaque
    * enregistrement, et personne ne saurait qu'une page périmée tourne quelque part — jusqu'au jour
@@ -1400,7 +1414,23 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId, contexte = {}
     utilisateur: signature,
     role: moi.role,
   }];
-  sortie.activityLog = [...refus, ...ajouts, ...anciens].slice(0, 500);
+  /*
+   * LE JOURNAL NE SE COUPE PLUS À CINQ CENTS LIGNES.
+   *
+   * Il l'était, et la coupe JETAIT. Au 4 septembre 2026 il en comptait quatre cent soixante-quinze :
+   * vingt-cinq de plus et les plus anciennes disparaissaient, sans un mot. Or c'est lui qui dit qui
+   * a encaissé, qui a annulé, qui a supprimé — il n'a de valeur que s'il remonte plus loin que le
+   * souvenir des gens.
+   *
+   * C'était aussi une porte. Vingt lignes sont acceptées par enregistrement : vingt-cinq
+   * enregistrements de suite repoussaient dehors tout ce qui précédait. Effacer la trace d'un geste
+   * ne demandait pas de la modifier — il suffisait de travailler un moment.
+   *
+   * Le plafond d'ici ne sert plus qu'à borner un emballement le temps d'une écriture. Ce qui
+   * dépasse durablement n'est pas jeté : la tâche de nuit le dépose dans une archive par mois
+   * (api/_journal.js), et l'on n'en perd rien.
+   */
+  sortie.activityLog = [...refus, ...ajouts, ...anciens].slice(0, MAX_JOURNAL_EN_LIGNE);
 
   /*
    * L'alerte d'écrasement — la trace que quelqu'un doit VOIR, pas seulement retrouver.

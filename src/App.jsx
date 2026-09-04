@@ -2001,7 +2001,14 @@ function tarifAchatEnLigne(poidsTotal, tarifs) {
 /** Ajoute une entrée au journal d’activité global (les 500 dernières actions sont conservées). */
 function pushActivity(data, session, action, detail) {
   const entry = { id: `log${Date.now()}${Math.random().toString(36).slice(2,5)}`, action, detail, date: new Date().toISOString(), utilisateur: `${session.prenom} ${session.nom}`, role: session.role };
-  return [entry, ...(data.activityLog || [])].slice(0, 500);
+  /*
+   * Le même plafond que le serveur (MAX_JOURNAL_EN_LIGNE dans api/_cloisonnement.js).
+   *
+   * Il était à cinq cents ici alors que le serveur en garde bien davantage : l'écran cachait donc
+   * une partie de l'histoire qui existe pourtant. Rien n'était perdu — le serveur reconstruit la
+   * liste depuis la base à chaque enregistrement — mais on ne pouvait pas la lire.
+   */
+  return [entry, ...(data.activityLog || [])].slice(0, 3000);
 }
 /**
  * Redimensionne et compresse une photo avant de la stocker.

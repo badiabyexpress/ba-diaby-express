@@ -931,7 +931,9 @@ export function collectionsQuiFondent(base, envoye) {
      * Une vraie suppression en masse — réinitialiser, restaurer, importer — passe par l'intention
      * datée, et n'arrive jamais ici.
      */
-    if (perdus > PERTE_TOLEREE) perdues.push({ cle, avant: avant.length, apres: compte });
+    // Une collection existante ne peut jamais devenir vide par une écriture ordinaire.
+    // Une remise à zéro légitime doit porter CHAMP_INTENTION, contrôlé avant cet appel.
+    if (compte === 0 || perdus > PERTE_TOLEREE) perdues.push({ cle, avant: avant.length, apres: compte });
   }
   return perdues;
 }

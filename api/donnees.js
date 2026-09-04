@@ -331,7 +331,22 @@ export default async function handler(req, res) {
           const actuel = ligneActuelle?.value || null;
           versionActuelle = ligneActuelle?.updated_at || null;
 
-          if (cloisonne) {
+          // Refus strict : une page sans version fiable ou travaillant sur une version ancienne
+          // ne peut ni fusionner ni réécrire le document. On renvoie seulement la vue autorisée.
+          if (clef === "bde-data" && actuel && (!versionLue || versionLue !== versionActuelle)) {
+            const valeurActuelle = estClient ? vueClient(actuel, compteId)
+              : estPartenaire ? vuePartenaire(actuel, partenaireDuCompte(actuel, compteId))
+                : vueEquipeZone(actuel, compteId);
+            return res.status(409).json({
+              conflict: true,
+              conflit: true,
+              error: "Page périmée : les données ont changé. Elles ont été rechargées.",
+              value: valeurActuelle,
+              updated_at: versionActuelle,
+            });
+          }
+
+        if (cloisonne) {
             /*
              * Un compte cloisonné n'écrit jamais le document : il propose des modifications, et le
              * serveur ne retient que celles qui portent sur ce qui est à lui.
@@ -399,7 +414,8 @@ export default async function handler(req, res) {
           }
         }
 
-        const corpsEcriture = JSON.stringify({ value: aEcrire, updated_at: new Date().toISOString() });
+        const versionEcrite = new Date().toISOString();
+        const corpsEcriture = JSON.stringify({ value: aEcrire, updated_at: versionEcrite });
         if (versionActuelle) {
           /*
            * L'écriture conditionnelle : elle ne s'applique QUE si la ligne porte encore
@@ -433,7 +449,7 @@ export default async function handler(req, res) {
             {
               method: "POST",
               headers: { ...entetes, Prefer: "resolution=merge-duplicates,return=minimal" },
-              body: JSON.stringify({ key: clef, value: aEcrire, updated_at: new Date().toISOString() }),
+              body: JSON.stringify({ key: clef, value: aEcrire, updated_at: versionEcrite }),
             },
           );
           if (!reponse.ok) {
@@ -466,7 +482,7 @@ export default async function handler(req, res) {
         const envoi = await envoyerAlerteEcrasement(aEcrire, alerteAEnvoyer);
         if (!envoi.envoye) console.error("Alerte d'écrasement non envoyée :", envoi.raison, envoi.detail || "");
       }
-      return res.status(200).json({ ok: true, conflit: conflitVu });
+      return res.status(200).json({ ok: true, conflit: conflitVu, updated_at: versionEcrite });
     }
 
     if (req.method === "GET") {

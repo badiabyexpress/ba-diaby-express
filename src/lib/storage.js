@@ -296,7 +296,6 @@ export const storage = {
 
   async set(key, value, shared) {
     const parsed = typeof value === "string" ? JSON.parse(value) : value;
-    ecrireCache(key, parsed);
     try {
       const parServeur = await appelServeur(`?cle=${encodeURIComponent(key)}`, {
         /*
@@ -307,15 +306,27 @@ export const storage = {
         method: "PUT", body: JSON.stringify({ value: parsed, baseVersion: versionsLues.get(key) || null }),
       });
       if (!parServeur.indisponible) {
-        if (!parServeur.ok) throw new Error(parServeur.corps?.error || "Enregistrement impossible");
+        if (!parServeur.ok) {
+          if (parServeur.corps?.conflit || parServeur.corps?.conflict) {
+            const latest = parServeur.corps?.value;
+            if (latest !== undefined) {
+              versionsLues.set(key, parServeur.corps?.updated_at || null);
+              ecrireCache(key, latest);
+            }
+            return { key, conflict: true, latest, updated_at: parServeur.corps?.updated_at || null, shared: !!shared };
+          }
+          throw new Error(parServeur.corps?.error || "Enregistrement impossible");
+        }
         /*
          * Le document vient de changer : la version que nous avions n'est plus la bonne. On
          * l'oublie plutôt que d'annoncer au prochain enregistrement une version dépassée — le
          * serveur la relira de toute façon, et une version fausse ferait crier au conflit à tort.
          */
-        versionsLues.delete(key);
-        return { key, value, shared: !!shared };
+        versionsLues.set(key, parServeur.corps?.updated_at || null);
+        ecrireCache(key, parsed);
+        return { key, value, updated_at: parServeur.corps?.updated_at || null, shared: !!shared };
       }
+      if (jetonSession) throw new Error("API sécurisée indisponible — écriture différée");
       const { error } = await client.from(TABLE).upsert({ key, value: parsed, updated_at: new Date().toISOString() });
       if (error) throw error;
       return { key, value, shared: !!shared };

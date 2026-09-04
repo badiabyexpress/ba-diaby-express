@@ -98,6 +98,55 @@ export default async function handler(req, res) {
   if (!session) return res.status(401).json({ error: "Session absente ou expirée." });
 
   /*
+   * UN LIEN SIGNÉ POUR OUVRIR UNE PIÈCE D'IDENTITÉ.
+   * ─────────────────────────────────────────────────────────────────────────────
+   * Les pièces vivent dans un coffre à part, `pieces-identite`, qui n'est PAS public : aucune
+   * adresse directe n'y donne accès. Seule la clé de service peut fabriquer un lien, il ne vaut
+   * que quelques minutes, et il n'est fabriqué que pour un administrateur.
+   *
+   * POURQUOI CETTE ACTION VIT ICI ET NON DANS SA PROPRE FONCTION.
+   *
+   * L'hébergement plafonne à douze fonctions publiées, et les douze sont prises. Une treizième
+   * n'aurait pas été déployée — et l'écran aurait affiché « lien indisponible » sans que rien
+   * n'explique pourquoi.
+   *
+   * LE CHEMIN EST VÉRIFIÉ, PAS SEULEMENT TRANSMIS.
+   *
+   * Un chemin est une chaîne venue du navigateur. Sans contrôle, « ../../colis-documents/… » ou un
+   * nom fabriqué ouvrirait autre chose que ce que l'écran croit demander. On n'accepte donc que
+   * des caractères ordinaires, et jamais deux points de suite.
+   */
+  if (req.method === "GET" && req.query?.piece !== undefined) {
+    if (session.role !== "Administrateur") {
+      return res.status(403).json({ error: "Seul un administrateur peut ouvrir une pièce d’identité." });
+    }
+    const chemin = String(req.query.piece || "");
+    if (!chemin || chemin.length > 300 || chemin.includes("..") || !/^[A-Za-z0-9/_.-]+$/.test(chemin)) {
+      return res.status(400).json({ error: "Chemin de pièce invalide." });
+    }
+    try {
+      const reponse = await fetch(`${url}/storage/v1/object/sign/pieces-identite/${chemin}`, {
+        method: "POST",
+        headers: { apikey: cle, Authorization: `Bearer ${cle}`, "Content-Type": "application/json" },
+        /* Cinq minutes : le temps de regarder la pièce, pas celui de la faire circuler. */
+        body: JSON.stringify({ expiresIn: 300 }),
+      });
+      if (!reponse.ok) {
+        const detail = await reponse.text().catch(() => "");
+        console.error("Signature de pièce refusée", reponse.status, detail.slice(0, 200));
+        return res.status(404).json({ error: "Cette pièce est introuvable." });
+      }
+      const corps = await reponse.json();
+      const relatif = corps?.signedURL || corps?.signedUrl;
+      if (!relatif) return res.status(502).json({ error: "Lien non fourni par le stockage." });
+      return res.status(200).json({ lien: `${url}/storage/v1${relatif}`, expireDans: 300 });
+    } catch (e) {
+      console.error("Lien de pièce impossible", e);
+      return res.status(502).json({ error: "Lien indisponible pour le moment." });
+    }
+  }
+
+  /*
    * Seules les clés de l'application sont accessibles ici : le document vivant et ses sauvegardes.
    *
    * Sans cette limite, toute personne connectée — y compris un client, et n'importe qui peut

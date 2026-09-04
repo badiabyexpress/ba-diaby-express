@@ -2402,6 +2402,48 @@ function recompresserLogo(dataUrl, maxWidth = 320) {
   });
 }
 
+/**
+ * DÉPOSE UNE PIÈCE D'IDENTITÉ DANS LE COFFRE PRIVÉ.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Pas dans `colis-documents` : ce bucket-là est PUBLIC, et tout fichier qui s'y trouve est lisible
+ * par quiconque connaît son adresse. Une adresse de fichier se retrouve dans un historique de
+ * navigateur, un message, un journal de serveur — et il s'agit ici de passeports.
+ *
+ * `pieces-identite` n'est pas public. Le navigateur peut y écrire, il ne peut pas y lire : la
+ * lecture passe par un lien signé que seul le serveur fabrique, et seulement pour un
+ * administrateur (voir api/donnees.js).
+ *
+ * ON REND UN CHEMIN, PAS UNE ADRESSE.
+ *
+ * Il n'existe aucune adresse publique à rendre — c'est le but. Le chemin sert à demander un lien
+ * le jour où quelqu'un a le droit de regarder.
+ */
+async function deposerPieceIdentite(fichier, compteId) {
+  if (!fichier) return null;
+  const extension = (fichier.name || "").split(".").pop()?.toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
+  const chemin = `identites/${String(compteId || "inconnu").replace(/[^A-Za-z0-9_-]/g, "")}/`
+    + `${Date.now()}${Math.random().toString(36).slice(2, 7)}.${extension.slice(0, 5)}`;
+  const { error } = await clientSupabase().storage
+    .from("pieces-identite")
+    .upload(chemin, fichier, { contentType: fichier.type || "image/jpeg", upsert: false });
+  if (error) throw error;
+  return { chemin, nomFichier: String(fichier.name || "").slice(0, 120), type: fichier.type || "", taille: fichier.size || 0 };
+}
+
+/**
+ * Demande au serveur un lien pour ouvrir une pièce. Il ne vaut que cinq minutes.
+ *
+ * Le refus est rendu tel quel plutôt que résumé : « pièce introuvable » et « réservé à
+ * l'administrateur » appellent deux gestes très différents, et un message unique enverrait
+ * chercher au mauvais endroit.
+ */
+async function lienPieceIdentite(chemin) {
+  const reponse = await appelServeurQuiDepense(`/api/donnees?piece=${encodeURIComponent(chemin)}`);
+  const corps = await reponse.json().catch(() => ({}));
+  if (!reponse.ok) throw new Error(corps?.error || "Lien indisponible.");
+  return corps.lien;
+}
+
 async function deposerImage(dataUrl, dossier, nom) {
   if (!estImageEmbarquee(dataUrl)) return dataUrl;
   try {
@@ -32573,6 +32615,122 @@ function PerformanceAgentsPage({ data, onBack }) {
 }
 
 /**
+ * LA PIÈCE D'IDENTITÉ D'UN COMPTE, ET LA DÉCISION D'OUVRIR L'ACCÈS.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * LA PIÈCE NE S'AFFICHE PAS TOUTE SEULE, ET C'EST VOULU.
+ *
+ * Une carte d'identité affichée dès l'ouverture de la fiche se retrouve dans une capture d'écran,
+ * un partage d'écran, un téléphone posé sur un comptoir. Il faut un geste pour la voir, et ce
+ * geste demande un lien au serveur — qui vérifie que celui qui le demande est administrateur, et
+ * qui ne le fait valoir que cinq minutes.
+ *
+ * LE REFUS DEMANDE UN MOTIF.
+ *
+ * Un accès refusé sans raison écrite est une décision que personne ne peut plus expliquer, ni à la
+ * personne qui l'a subie, ni six mois plus tard.
+ */
+function BlocPieceIdentite({ user, peutValider, onDecision }) {
+  const [etat, setEtat] = useState("idle");
+  const [erreur, setErreur] = useState("");
+  const [refusOuvert, setRefusOuvert] = useState(false);
+  const [motif, setMotif] = useState("");
+  const piece = user.pieceIdentite || null;
+  const statut = user.accesStatut || "actif";
+
+  const ETIQUETTES = {
+    actif: { texte: "Accès ouvert", fond: "var(--ok-bg-soft)", encre: "var(--ok-fg)" },
+    en_attente: { texte: "En attente de validation", fond: "var(--warn-bg)", encre: "var(--warn-fg)" },
+    refuse: { texte: "Demande refusée", fond: "var(--danger-bg)", encre: "var(--danger-fg)" },
+  };
+  const et = ETIQUETTES[statut] || ETIQUETTES.actif;
+
+  async function ouvrirLaPiece() {
+    if (!piece?.chemin) return;
+    setEtat("chargement"); setErreur("");
+    try {
+      const lien = await lienPieceIdentite(piece.chemin);
+      window.open(lien, "_blank", "noopener");
+      setEtat("idle");
+    } catch (e) {
+      /* La raison exacte est montrée : « introuvable » et « réservé » appellent deux gestes différents. */
+      setErreur(e?.message || "Lien indisponible.");
+      setEtat("erreur");
+    }
+  }
+
+  return (
+    <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: 14, margin: "18px 0" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text)" }}>Pièce d’identité &amp; accès</div>
+        <span style={{ background: et.fond, color: et.encre, padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>{et.texte}</span>
+      </div>
+
+      {piece?.chemin ? (
+        <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.6 }}>
+          {piece.nomFichier || "Pièce déposée"}
+          {piece.deposeLe ? ` · déposée le ${new Date(piece.deposeLe).toLocaleDateString("fr-FR")}` : ""}
+          {piece.valideeLe && (
+            <div>
+              {piece.statut === "refusee" ? "Refusée" : "Validée"} le {new Date(piece.valideeLe).toLocaleDateString("fr-FR")}
+              {piece.valideePar ? ` par ${piece.valideePar}` : ""}
+              {piece.motifRefus ? ` — ${piece.motifRefus}` : ""}
+            </div>
+          )}
+          <button onClick={ouvrirLaPiece} disabled={etat === "chargement"}
+            style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 700, color: "var(--text)", cursor: etat === "chargement" ? "wait" : "pointer" }}>
+            <Eye size={13} /> {etat === "chargement" ? "Ouverture…" : "Voir la pièce"}
+          </button>
+          {erreur && <div style={{ color: "var(--danger-fg)", fontSize: 11.5, marginTop: 6 }}>{erreur}</div>}
+          <div style={{ fontSize: 10.5, marginTop: 6 }}>
+            Le lien ne vaut que cinq minutes et n’est délivré qu’à un administrateur. La pièce n’est
+            pas accessible par une adresse publique.
+          </div>
+        </div>
+      ) : (
+        <div style={{ fontSize: 12, color: "var(--warn-fg)", lineHeight: 1.55 }}>
+          Aucune pièce d’identité n’a été déposée pour ce compte. Sans pièce, l’accès ne peut pas
+          être ouvert — demandez une photo de la carte d’identité ou du passeport.
+        </div>
+      )}
+
+      {peutValider && statut !== "actif" && (
+        <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+          {/* Sans pièce, la demande ne peut qu'être refusée : c'était la règle posée. */}
+          <button onClick={() => onDecision("actif")} disabled={!piece?.chemin}
+            style={{ background: piece?.chemin ? "var(--ok-fg)" : "var(--surface)", color: piece?.chemin ? "#fff" : "var(--muted)", border: piece?.chemin ? "none" : "1px solid var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: piece?.chemin ? "pointer" : "not-allowed" }}>
+            Ouvrir l’accès
+          </button>
+          <button onClick={() => setRefusOuvert((o) => !o)}
+            style={{ background: "none", border: "1px solid var(--danger-border)", color: "var(--danger-fg)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+            Refuser
+          </button>
+        </div>
+      )}
+      {peutValider && statut === "actif" && piece?.chemin && (
+        <button onClick={() => setRefusOuvert((o) => !o)}
+          style={{ marginTop: 12, background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+          Suspendre cet accès
+        </button>
+      )}
+
+      {refusOuvert && (
+        <div style={{ marginTop: 10 }}>
+          <Field label="Motif (obligatoire)">
+            <input value={motif} onChange={(e) => setMotif(e.target.value)} style={inputStyle}
+              placeholder="ex : pièce illisible, ou identité qui ne correspond pas" />
+          </Field>
+          <button onClick={() => { if (motif.trim()) { onDecision("refuse", motif.trim()); setRefusOuvert(false); setMotif(""); } }}
+            disabled={!motif.trim()}
+            style={{ background: motif.trim() ? "var(--danger-fg)" : "var(--surface)", color: motif.trim() ? "#fff" : "var(--muted)", border: motif.trim() ? "none" : "1px solid var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: motif.trim() ? "pointer" : "not-allowed" }}>
+            Confirmer le refus
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * MON ÉQUIPE — ce que chaque agent rattaché a produit, et ce qu'il rapporte à son responsable.
  *
  * Le même bloc sert au responsable dans sa caisse et à l'administrateur dans l'écran des
@@ -35228,6 +35386,22 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
                 <td style={{ padding: "12px 16px", fontSize: 13, whiteSpace: "nowrap" }}>
                   <span style={{ background: "var(--surface2)", color: "var(--text)", padding: "4px 10px", borderRadius: 20, fontSize: 11.5, fontWeight: 600 }}>{u.role}</span>
                   {u.role !== "Administrateur" && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>{FLAGS[u.paysOperation || "GN"] || ""} basé {(COUNTRIES.find((c) => c.code === (u.paysOperation || "GN"))?.name) || "Guinée"}</div>}
+                  {/*
+                    UN ACCÈS EN ATTENTE SE VOIT DEPUIS LA LISTE.
+                    Une demande qu'il faut ouvrir une fiche pour découvrir est une demande qui
+                    attend une semaine — et la personne, elle, croit son compte cassé.
+                  */}
+                  {u.accesStatut && u.accesStatut !== "actif" && (
+                    <div style={{ display: "inline-block", marginTop: 4,
+                      background: u.accesStatut === "refuse" ? "var(--danger-bg)" : "var(--warn-bg)",
+                      color: u.accesStatut === "refuse" ? "var(--danger-fg)" : "var(--warn-fg)",
+                      padding: "2px 8px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>
+                      {u.accesStatut === "refuse" ? "ACCÈS REFUSÉ" : "À VALIDER"}
+                    </div>
+                  )}
+                  {u.remuneration === "salaire" && (
+                    <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 3 }}>Salarié — sans commission</div>
+                  )}
                 </td>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{u.role === "Administrateur" ? "Tous les pays" : (u.paysAutorises?.length ? u.paysAutorises.map((c) => FLAGS[c]).join(" ") : "Tous les pays")}</td>
                 {/*
@@ -35560,6 +35734,34 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
             </Field>
           )}
 
+          {/*
+            LA PIÈCE D'IDENTITÉ ET L'OUVERTURE DE L'ACCÈS.
+
+            L'examen se fait ici, sur la fiche, parce que c'est là qu'on a sous les yeux tout le
+            reste : le rôle, la zone, le rattachement. Valider un accès depuis une liste où l'on ne
+            voit qu'un nom revient à valider sans regarder.
+
+            Le refus n'efface rien. Une demande refusée qui disparaît ne laisse aucune trace de la
+            décision, et la même personne peut redéposer indéfiniment.
+          */}
+          {role !== "Partenaire" && (user.pieceIdentite || (user.accesStatut && user.accesStatut !== "actif")) && (
+            <BlocPieceIdentite
+              user={user}
+              peutValider={session?.role === "Administrateur"}
+              onDecision={(statut, motif) => onSave({
+                ...user,
+                accesStatut: statut,
+                pieceIdentite: {
+                  ...(user.pieceIdentite || {}),
+                  statut: statut === "actif" ? "validee" : "refusee",
+                  valideePar: `${session.prenom} ${session.nom}`.trim(),
+                  valideeLe: new Date().toISOString(),
+                  motifRefus: statut === "refuse" ? String(motif || "").slice(0, 300) : "",
+                },
+              })}
+            />
+          )}
+
           <div style={{ fontSize: 12, fontWeight: 600, color: "var(--muted)", margin: "18px 0 8px" }}>PAYS DE DESTINATION AUTORISÉS</div>
           {isAdmin ? (
             <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "10px 12px", fontSize: 13, color: "var(--text)" }}>🌍 Tous les pays (Administrateur)</div>
@@ -35726,7 +35928,17 @@ function UserForm({ onClose, onSave, existing, sites }) {
    * c'est ce nom-là qui devient son nom commercial, dès la création du compte.
    */
   const [nomEntreprise, setNomEntreprise] = useState("");
+  /*
+   * LA PIÈCE D'IDENTITÉ, EXIGÉE À LA CRÉATION.
+   *
+   * Un accès à l'application donne les colis, les clients, la caisse. L'ouvrir à quelqu'un dont on
+   * n'a rien vérifié, c'est le faire entrer sur parole. La demande sans pièce est refusée — c'est
+   * la règle posée — et l'accès n'est pas ouvert avant que l'administrateur ait regardé.
+   */
+  const [piece, setPiece] = useState(null);
+  const [envoiPiece, setEnvoiPiece] = useState("idle");
   const estPartenaire = role === "Partenaire";
+  const pieceRequise = ["Agent", "Responsable de zone", "Chauffeur"].includes(role);
   function toggleCountry(code) {
     setPaysAutorises((list) => (list.includes(code) ? list.filter((c) => c !== code) : [...list, code]));
   }
@@ -35743,6 +35955,8 @@ function UserForm({ onClose, onSave, existing, sites }) {
     }
     if (!email || !telephone || !identifiant || !motdepasse) { setErr("Merci de renseigner tous les champs."); return; }
     if (["Agent", "Responsable de zone", "Chauffeur"].includes(role) && !agence) { setErr("Sélectionnez une ville de la zone opérationnelle."); return; }
+    /* Sans pièce, la demande est refusée : c'est le sens même de l'exigence. */
+    if (pieceRequise && !piece) { setErr("Ajoutez une photo de la carte d’identité ou du passeport : sans pièce, l’accès ne peut pas être créé."); return; }
     if (!/^\S+@\S+\.\S+$/.test(email)) { setErr("Adresse email invalide."); return; }
     if (existing.some((u) => u.identifiant === identifiant.trim())) { setErr("Cet identifiant existe déjà."); return; }
     const identifiants = await creerIdentifiantsMotDePasse(motdepasse);
@@ -35754,6 +35968,11 @@ function UserForm({ onClose, onSave, existing, sites }) {
       email: email.trim(), telephone, identifiant: identifiant.trim(), ...identifiants, role, paysOperation,
       agence: role === "Administrateur" || role === "Comptable" ? "" : agence, zoneOperation: role === "Administrateur" || role === "Comptable" ? "" : agence, twoFA,
       paysAutorises: role === "Administrateur" ? [] : paysAutorises,
+      /*
+       * L'accès n'est pas ouvert d'office : il attend l'examen. Le serveur refuse la connexion
+       * tant que ce champ ne vaut pas « actif » (voir api/login.js) — l'écran ne fait que le dire.
+       */
+      ...(pieceRequise ? { accesStatut: "en_attente", pieceIdentite: { ...piece, deposeLe: new Date().toISOString(), statut: "en_attente" } } : {}),
       // Le contrat s'ouvre ensuite déjà rempli de ce que l'administrateur vient de saisir.
       ...(estPartenaire ? { partenaire: { nomCommercial: nomEntreprise.trim(), telephone, email: email.trim() } } : {}),
     });
@@ -35816,6 +36035,41 @@ function UserForm({ onClose, onSave, existing, sites }) {
               </select>
             </Field>
             <div style={{ fontSize: 11, color: "var(--muted)", marginTop: -8, marginBottom: 10 }}>Si une agence est choisie, cet utilisateur ne verra que les colis, statistiques et bordereaux de cette agence.</div>
+          </div>
+        )}
+        {/*
+          LA PIÈCE D'IDENTITÉ — OBLIGATOIRE, ET DÉPOSÉE AVANT L'ENREGISTREMENT.
+
+          Elle part tout de suite dans un coffre à part, non public : la garder dans le formulaire
+          en attendant l'enregistrement l'aurait fait voyager avec le reste du document, où elle
+          n'a rien à faire. Ce que le compte retient n'est qu'un chemin — il ne s'ouvre qu'avec un
+          lien signé, délivré au seul administrateur.
+        */}
+        {pieceRequise && (
+          <div style={{ gridColumn: "1 / -1" }}>
+            <Field label="Pièce d’identité ou passeport *">
+              <input type="file" accept="image/*,application/pdf" capture="environment"
+                onChange={async (e) => {
+                  const fichier = e.target.files?.[0];
+                  if (!fichier) return;
+                  if (fichier.size > 8 * 1024 * 1024) { setErr("La pièce dépasse 8 Mo — prenez une photo moins lourde."); return; }
+                  setEnvoiPiece("envoi"); setErr("");
+                  try {
+                    setPiece(await deposerPieceIdentite(fichier, `n${Date.now()}`));
+                    setEnvoiPiece("fait");
+                  } catch (err) {
+                    console.error(err);
+                    setEnvoiPiece("erreur");
+                    setErr("La pièce n’a pas pu être déposée. Vérifiez la connexion et réessayez.");
+                  }
+                }}
+                style={{ ...inputStyle, padding: "8px 10px" }} />
+            </Field>
+            <div style={{ fontSize: 11, color: envoiPiece === "fait" ? "var(--ok-fg)" : "var(--muted)", marginTop: -8, marginBottom: 10, lineHeight: 1.55 }}>
+              {envoiPiece === "envoi" ? "Dépôt en cours…"
+                : envoiPiece === "fait" ? `✓ ${piece?.nomFichier || "Pièce"} déposée. L’accès s’ouvrira après votre validation.`
+                : "Photo de la carte d’identité ou du passeport. Sans pièce, la demande est refusée. Le fichier est rangé dans un coffre non public : il ne s’ouvre qu’avec un lien signé, valable cinq minutes, réservé à l’administrateur."}
+            </div>
           </div>
         )}
         {role !== "Administrateur" && (

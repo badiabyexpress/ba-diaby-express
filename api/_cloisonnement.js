@@ -665,7 +665,13 @@ const CHAMPS_SOI_MEME = [
  * régler les droits des autres.
  */
 const CHAMPS_DE_POUVOIR = ["role", "permissionsOverride", "paysAutorises", "agence", "zoneOperation", "partenaireParent",
-  "remuneration", "responsableId", "historiqueRattachement", "rattacheLe"];
+  "remuneration", "responsableId", "historiqueRattachement", "rattacheLe",
+  /*
+   * `accesStatut` décide si la porte s'ouvre : c'est le champ que quelqu'un dont la demande vient
+   * d'être refusée essaierait de remettre à « actif ». `pieceIdentite` désigne la photo examinée —
+   * la remplacer après validation reviendrait à faire valider une pièce et à en montrer une autre.
+   */
+  "accesStatut", "pieceIdentite"];
 
 /*
  * Les sections de réglages, et la permission qu'il faut pour y toucher — les mêmes que celles qui

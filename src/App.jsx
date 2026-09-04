@@ -13256,7 +13256,7 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
         {ouvrable("categories") && <Card icon={Receipt} tint="#E0794E" title="Catégories de Produits" desc="Configuration des types de marchandises et taxes." onClick={() => setSub("categories")} />}
         {ouvrable("devises") && <Card icon={RefreshCw} tint="#0EA5E9" title="Gestion des devises" desc="Un taux par devise, partagé automatiquement par tous les pays concernés." onClick={() => setSub("devises")} />}
         {ouvrable("reception") && <Card icon={Package} tint="var(--danger-fg)" title="Tarifs de réception client" desc="Le tarif au kg appliqué sur les bordereaux de réception, selon le poids du lot." onClick={() => setSub("reception")} />}
-        {ouvrable("commissions") && <Card icon={Users} tint="#16A163" title="Commissions par Agence" desc="Définissez combien chaque agence gagne par kg et par unité vendue." onClick={() => setSub("commissions")} />}
+        {ouvrable("commissions") && <Card icon={Users} tint="#16A163" title="Commissions" desc="Ce que gagne l’agent au kilo et à l’unité, ce que gagne le responsable sur son équipe, et ce qui reste à verser à chacun." onClick={() => setSub("commissions")} />}
         {ouvrable("paiement") && <Card icon={Wallet} tint="#5B8DEF" title="Paiement" desc="Configurez vos numéros pour accepter les paiements de vos clients." onClick={() => setSub("paiement")} />}
         {ouvrable("parrainages") && <Card icon={HandCoins} tint="#8B5CF6" title="Programme de parrainage" desc="Qui a parrainé qui, quelles récompenses sont acquises, lesquelles ont déjà été déduites." onClick={() => setSub("parrainages")} />}
       </div>
@@ -13763,13 +13763,22 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
       : `${ligne.nom} est soldé : ${fmt(versement.montant, "EUR")} versés.`);
   }
 
-  // Aperçu : simulateur simple
+  /*
+   * Aperçu : ce que rapporte un poids donné, à l'agent et à son responsable.
+   *
+   * Le simulateur ne lisait qu'un seul taux, et il portait encore le nom d'une variable d'état qui
+   * n'existe plus : l'écran entier tombait sur « parKg is not defined » dès qu'on l'ouvrait. Il lit
+   * maintenant les mêmes taux que le calcul réel, et il montre les DEUX parts — c'est la question
+   * qu'on se pose devant ce champ.
+   */
   const [simPoids, setSimPoids] = useState("5");
-  const simCommission = (Number(simPoids) || 0) * (Number(parKg) || 0);
+  const simKg = Number(String(simPoids).replace(",", ".")) || 0;
+  const simAgent = simKg * (Number(String(agentKg).replace(",", ".")) || 0);
+  const simSuperviseur = simKg * (Number(String(superviseurKg).replace(",", ".")) || 0);
 
   return (
     <div>
-      <ConfigPageHeader title="Commissions par Agence" desc="Combien chaque agence gagne sur chaque colis traité — modifiable uniquement par l’Administrateur." onBack={onBack} />
+      <ConfigPageHeader title="Commissions" desc="Ce que gagne l’agent au kilo et à l’unité, ce que gagne le responsable sur son équipe, et ce qui reste à verser à chacun." onBack={onBack} />
 
       {!isAdmin && (
         <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "10px 12px", fontSize: 12.5, color: "var(--muted)", marginBottom: 18, maxWidth: 560 }}>
@@ -13860,7 +13869,7 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
         </div>
         {gains.length === 0 ? (
           <div style={{ padding: 18, fontSize: 13, color: "var(--muted)" }}>
-            Aucune commission pour l’instant. Le forfait s’applique aux colis enregistrés à partir de maintenant.
+            Aucune commission pour l’instant. Chaque colis enregistré en produira une, au poids et à l’unité.
           </div>
         ) : (
           <div style={{ overflowX: "auto" }}>
@@ -14013,7 +14022,7 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
                       value={catEdits[c.id] !== undefined ? catEdits[c.id] : (c.commissionRate ?? "")}
                       onChange={(e) => setCatEdits((s) => ({ ...s, [c.id]: e.target.value }))}
                       onKeyDown={(e) => e.key === "Enter" && saveCategoryRate(c)}
-                      placeholder={`défaut : ${c.type === "kg" ? parKg : parUnite}`}
+                      placeholder={`défaut : ${c.type === "kg" ? agentKg : agentUnite}`}
                       style={{ ...inputStyle, width: 120 }}
                     />
                   ) : (
@@ -14030,11 +14039,19 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
         </div>
       </div>
 
-      <div style={{ background: "var(--surface)", borderRadius: 14, padding: 20, border: "1px solid var(--border)", maxWidth: 320 }}>
+      <div style={{ background: "var(--surface)", borderRadius: 14, padding: 20, border: "1px solid var(--border)", maxWidth: 340 }}>
         <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 12 }}>Exemple rapide</div>
         <Field label="Poids simulé (kg)"><input value={simPoids} onChange={(e) => setSimPoids(e.target.value)} style={inputStyle} /></Field>
-        <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "10px 12px", fontSize: 14, fontWeight: 700, color: "var(--text)", textAlign: "center" }}>
-          L’agence gagne {fmt(simCommission, "EUR")}
+        {/*
+          Les deux parts, et pas seulement celle de l'agent : « combien ça me coûte, ce colis ? »
+          est une question qui porte sur le total, et un seul chiffre y répond de travers.
+        */}
+        <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "12px 14px", fontSize: 13.5, color: "var(--text)", lineHeight: 1.7 }}>
+          <div>L’agent gagne <strong>{fmt(simAgent, "EUR")}</strong></div>
+          <div style={{ color: "var(--muted)" }}>Son responsable {fmt(simSuperviseur, "EUR")}</div>
+          <div style={{ borderTop: "1px solid var(--border)", marginTop: 8, paddingTop: 8, fontWeight: 700 }}>
+            Coût total {fmt(simAgent + simSuperviseur, "EUR")}
+          </div>
         </div>
       </div>
     </div>

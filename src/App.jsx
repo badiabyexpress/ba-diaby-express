@@ -7,6 +7,17 @@ import { ROLES, PERMISSIONS_SCHEMA, ROLE_DEFAULT_PERMISSIONS, effectivePermissio
  * variable d'environnement.
  */
 import { signauxDeFraude } from "../api/_fraude.js";
+import { bilanParrainage, creditDisponible, consommerCredit, MONTANT_RECOMPENSE_GNF } from "../api/_parrainage.js";
+/*
+ * Les taux de commission et la façon de les appliquer viennent du serveur, comme les permissions et
+ * les règles de parrainage. Le montant que l'agent lit à l'écran et celui que la caisse accepte
+ * sont ainsi calculés par le même code — c'est la seule façon qu'ils ne divergent jamais.
+ */
+import {
+  commissionDuColis, commissionAgent, commissionSuperviseur, basesDuColis,
+  tauxCommission, responsableDe, equipeDe, estSalarie, bilanEquipe, responsableAuMoment,
+  TAUX_PAR_DEFAUT,
+} from "../api/_commissions.js";
 import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree, relireDuServeur, oublierCacheLocal } from "./lib/storage.js";
 import { VILLES_PAR_PAYS } from "./data/villesParPays.js";
 
@@ -941,6 +952,48 @@ function libelleCategoriePrix(c, ...devises) {
  */
 function estColisPartenaire(colis) {
   return !!colis?.partenaireId;
+}
+
+/**
+ * LE PAYS DEPUIS LEQUEL CETTE PERSONNE TRAVAILLE — QUEL QUE SOIT SON TYPE DE COMPTE.
+ *
+ * Il y a deux champs pour dire la même chose, et c'est historique, pas fantaisiste :
+ *
+ *   `paysOperation`  — les comptes de l'entreprise (agent, comptable, responsable). C'est le champ
+ *                      que remplit la fiche employé de l'administrateur.
+ *   `lieuOperation`  — les accès qu'un PARTENAIRE crée pour ses propres collaborateurs. Sa fiche à
+ *                      lui est ailleurs, et elle nomme le champ autrement.
+ *
+ * CE QUE COÛTAIT DE N'EN LIRE QU'UN.
+ *
+ * Le formulaire de colis partenaire ne lisait que `lieuOperation` — un champ qu'aucun compte de
+ * l'entreprise ne porte. Le sens par défaut retombait donc toujours sur « Conakry → Paris », y
+ * compris pour un agent basé à Paris, qui dépose pourtant des colis qui QUITTENT la France. Le
+ * colis partait enregistré à l'envers : l'expéditeur inscrit du côté guinéen, le destinataire du
+ * côté français, et le bordereau de départ de Paris ne le voyait pas — il cherchait des colis au
+ * départ de Paris, et celui-là se disait au départ de Conakry.
+ *
+ * EN DERNIER RECOURS SEULEMENT, LA VILLE — ET UNIQUEMENT SI ELLE NE DÉSIGNE QU'UN PAYS.
+ *
+ * « Conakry » ne se trouve qu'en Guinée : elle tranche. « Paris » existe aussi au Canada et aux
+ * États-Unis : elle ne tranche pas, et deviner ici mettrait un colis sur la mauvaise route sans
+ * que personne ne l'ait demandé. Mieux vaut retomber sur la Guinée, qui est visible et corrigible,
+ * qu'une supposition qui a l'air juste.
+ */
+function paysDeLOperateur(session) {
+  if (!session) return "GN";
+  return session.paysOperation || session.lieuOperation
+    || paysDeLaVille(session.zoneOperation) || paysDeLaVille(session.agence) || "GN";
+}
+
+/** Le pays d'une ville, quand une seule réponse est possible. Sinon null. */
+function paysDeLaVille(ville) {
+  const cherche = String(ville || "").trim().toLowerCase();
+  if (!cherche) return null;
+  const trouves = Object.entries(VILLES_PAR_PAYS || {})
+    .filter(([, villes]) => (villes || []).some((v) => String(v).toLowerCase() === cherche))
+    .map(([code]) => code);
+  return trouves.length === 1 ? trouves[0] : null;
 }
 
 /**
@@ -1880,40 +1933,83 @@ function calcCommission(colis, commissionConfig, categories) {
  * ne voit passer aucun encaissement au comptoir, et payer une commission dessus serait de l'argent
  * sorti sur une recette qui n'existe pas ici. C'est déjà la règle de calcCommission.
  */
+/**
+ * 🎁 LA RÉDUCTION DE PARRAINAGE APPLICABLE À CE COLIS, AU COMPTOIR.
+ *
+ * Rend `null` quand il n'y a rien à déduire — c'est le cas de l'immense majorité des colis, et
+ * l'appelant n'a alors rien de particulier à faire.
+ *
+ * POURQUOI ICI, ET PAS À L'ENREGISTREMENT DU COLIS.
+ *
+ * Le crédit se consomme là où l'argent change de mains. À l'enregistrement, le prix n'est pas
+ * encore certain (poids à confirmer, express, catégorie) et le colis peut encore être annulé : une
+ * récompense marquée « utilisée » sur un colis qui ne partira jamais serait perdue pour de bon.
+ *
+ * DEUX UNITÉS, ET UNE SEULE VÉRITÉ.
+ *
+ * La récompense est libellée en francs guinéens — c'est ce que le client lit dans son espace et ce
+ * que le règlement du programme annonce. Les colis, eux, se comptent en euros dans toute
+ * l'application. La conversion se fait ici, au taux du jour, et dans ce sens-là uniquement : on
+ * convertit ce qui est dû en francs pour interroger le crédit, puis on reconvertit ce qui a été
+ * réellement déduit. Convertir la récompense elle-même l'aurait arrondie deux fois.
+ *
+ * `consommerCredit` ne coupe jamais une récompense en deux : si la somme due est inférieure à
+ * 50 000 GNF, rien n'est déduit et le crédit attend le colis suivant, entier.
+ */
+function reductionParrainage(colis, data) {
+  if (!colis || estColisPartenaire(colis)) return null;
+  const clientId = colis.clientAccountId;
+  if (!clientId) return null;
+  const taux = LIVE_RATES.GNF || CURRENCIES.GNF || 0;
+  if (!taux) return null;
+  const duEUR = Math.max(+(((colis.prix || 0) - (colis.paye || 0))).toFixed(2), 0);
+  if (duEUR <= 0.005) return null;
+  const r = consommerCredit(data?.parrainages || [], {
+    clientId,
+    montantDu: duEUR * taux,
+    reference: colis.tracking,
+  });
+  if (!r.deduit) return null;
+  return {
+    montantGNF: r.deduit,
+    montantEUR: +(r.deduit / taux).toFixed(2),
+    parrainages: r.parrainages,
+    utilises: r.utilises,
+  };
+}
+
+/**
+ * CE QU'UN COLIS PRODUIT POUR CELUI QUI L'A ENREGISTRÉ, ET POUR CELUI QUI L'ENCADRE.
+ *
+ * Les règles vivent dans api/_commissions.js — le même fichier que lit le serveur. Cette fonction
+ * n'est plus qu'un guichet : elle traduit le résultat dans la forme qu'attendaient déjà les écrans.
+ *
+ * CE QUI A CHANGÉ, ET POURQUOI.
+ *
+ * L'agent était payé UN EURO PAR COLIS, quel qu'en soit le poids. Il l'est désormais au travail
+ * réel : deux euros le kilo, et le taux d'unité pour ce qui se facture à l'unité. Un carton de
+ * deux kilos et un de cinquante ne se portent pas de la même façon, et ne se paient plus pareil.
+ *
+ * `forfait` demeure dans la forme rendue, à zéro : plusieurs écrans le lisent, et le retirer d'un
+ * coup les aurait fait afficher « undefined » là où ils annonçaient un montant.
+ */
 function commissionColis(colis, auteur, data) {
-  const vide = { forfait: 0, bareme: 0, total: 0 };
-  if (!colis || estColisPartenaire(colis)) return vide;
-  const cfg = data?.commissionConfig || {};
-  /*
-   * UN EURO PAR DÉFAUT, ET NON ZÉRO.
-   *
-   * L'écran de configuration affiche « 1 » quand le réglage n'a jamais été enregistré. Calculer
-   * zéro pendant ce temps-là aurait donné un tableau vide sous un champ qui annonce un euro : de
-   * quoi croire le calcul cassé, et chercher longtemps. Le chiffre affiché et le chiffre versé
-   * doivent être le même.
-   *
-   * Un forfait explicitement mis à zéro reste zéro : c'est un geste, pas une absence.
-   */
-  const forfait = cfg.parColis === undefined || cfg.parColis === null || cfg.parColis === ""
-    ? 1
-    : Number(cfg.parColis);
-  const part = Number.isFinite(forfait) && forfait > 0 ? forfait : 0;
-  if (!auteur) return { ...vide, forfait: part, total: part };
-
-  const estResponsable = auteur.role === "Responsable de zone";
-  if (!estResponsable) return { forfait: part, bareme: 0, total: part };
-
-  /*
-   * Un colis sans site est compté comme sien : il a été enregistré par lui, et refuser sur une
-   * information manquante retirerait de l'argent pour un champ vide plutôt que pour un fait.
-   */
-  const zone = String(auteur.zoneOperation || auteur.agence || "").trim().toLowerCase();
-  const site = String(colis.site || "").trim().toLowerCase();
-  const dansSaZone = !site || !zone || site === zone;
-  if (!dansSaZone) return { forfait: part, bareme: 0, total: part };
-
-  const bareme = calcCommission(colis, data?.commissionConfig, data?.categories);
-  return { forfait: part, bareme, total: +(part + bareme).toFixed(2) };
+  const part = commissionDuColis(colis, {
+    users: data?.users,
+    config: data?.commissionConfig,
+    categories: data?.categories,
+    auteur,
+  });
+  return {
+    forfait: 0,
+    bareme: part.agentMontant,
+    total: part.agentMontant,
+    supervision: part.superviseurMontant,
+    superviseurId: part.superviseurId,
+    salarie: part.salarie,
+    kg: part.kg,
+    unites: part.unites,
+  };
 }
 
 /**
@@ -1957,7 +2053,8 @@ function commissionsDues(data) {
         nom: `${compte.prenom || ""} ${compte.nom || ""}`.trim() || compte.identifiant || "Compte supprimé",
         role: compte.role || "—",
         agence: compte.zoneOperation || compte.agence || "—",
-        colis: 0, forfait: 0, bareme: 0, gagne: 0, paye: 0,
+        salarie: estSalarie(compte),
+        colis: 0, kg: 0, unites: 0, forfait: 0, bareme: 0, supervision: 0, colisEquipe: 0, gagne: 0, paye: 0,
       });
     }
     return parPersonne.get(compte.id);
@@ -1968,12 +2065,36 @@ function commissionsDues(data) {
     const auteur = auteurDuColis(c, equipe);
     if (!auteur) return;
     const part = commissionColis(c, auteur, data);
-    if (part.total <= 0) return;
-    const ligne = ligneDe(auteur);
-    ligne.colis += 1;
-    ligne.forfait += part.forfait;
-    ligne.bareme += part.bareme;
-    ligne.gagne += part.total;
+    /*
+     * La ligne est ouverte même à zéro, et c'est délibéré pour les salariés : un agent absent du
+     * tableau se lit comme un agent oublié, et l'on cherche l'erreur. Présent à zéro avec la
+     * mention « Salarié », il se lit comme une décision.
+     */
+    if (part.total > 0 || part.salarie) {
+      const ligne = ligneDe(auteur);
+      ligne.colis += 1;
+      ligne.kg += part.kg;
+      ligne.unites += part.unites;
+      ligne.bareme += part.bareme;
+      ligne.gagne += part.total;
+    }
+    /*
+     * LA SUPERVISION VA AU RESPONSABLE, PAS À CELUI QUI A ENREGISTRÉ.
+     *
+     * C'est la ligne qui distingue ce système du précédent : le responsable est payé pour l'équipe
+     * qu'il tient, sur des colis qu'il n'a pas touchés. Elle ne se déclenche que s'il existe un
+     * rattachement — aujourd'hui il n'y en a aucun, et cette part vaut donc zéro partout, tant que
+     * personne n'a été désigné responsable de zone.
+     */
+    if (part.supervision > 0 && part.superviseurId) {
+      const chef = equipe.find((u) => u && u.id === part.superviseurId);
+      if (chef) {
+        const ligneChef = ligneDe(chef);
+        ligneChef.supervision += part.supervision;
+        ligneChef.colisEquipe += 1;
+        ligneChef.gagne += part.supervision;
+      }
+    }
   });
 
   (data?.paiementsCommission || []).forEach((p) => {
@@ -1991,8 +2112,10 @@ function commissionsDues(data) {
   return [...parPersonne.values()]
     .map((l) => ({
       ...l,
+      kg: +l.kg.toFixed(1),
       forfait: +l.forfait.toFixed(2),
       bareme: +l.bareme.toFixed(2),
+      supervision: +l.supervision.toFixed(2),
       gagne: +l.gagne.toFixed(2),
       paye: +l.paye.toFixed(2),
       reste: +(l.gagne - l.paye).toFixed(2),
@@ -6847,6 +6970,12 @@ function ClientRegisterForm({ data, persist, onRegistered, onCancel }) {
   const [email, setEmail] = useState("");
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
+  /*
+   * Le code de parrainage est FACULTATIF, et il le reste jusqu'au bout : un code mal recopié ne
+   * doit jamais empêcher quelqu'un d'ouvrir son compte. Le serveur crée le compte, refuse le
+   * rattachement, et dit pourquoi — dans cet ordre.
+   */
+  const [codeParrainage, setCodeParrainage] = useState("");
   const { honeypotField, isSpam } = useAntiSpam();
 
   async function submit(e) {
@@ -6871,11 +7000,16 @@ function ClientRegisterForm({ data, persist, onRegistered, onCancel }) {
        * faite ici portait sur une copie des données qui pouvait avoir des minutes de retard, et
        * deux personnes pouvaient prendre le même identifiant sans que rien ne s'y oppose.
        */
-      const serveur = await inscriptionServeur({ nom, prenom, identifiant, motdepasse, telephone, adresse, email });
+      const serveur = await inscriptionServeur({ nom, prenom, identifiant, motdepasse, telephone, adresse, email, codeParrainage });
       if (serveur?.refus) { setErr(serveur.refus); setLoading(false); return; }
       if (serveur?.utilisateur) {
         if (serveur.session) ecrireJetonSession(serveur.session, serveur.sessionExpireA);
-        onRegistered(serveur.utilisateur);
+        /*
+         * Un code refusé ne doit pas disparaître en silence : le client croirait avoir parrainé
+         * quelqu'un et attendrait une récompense qui ne viendra jamais. Le compte est créé, on le
+         * dit, et l'on dit aussi ce qui n'a pas marché.
+         */
+        onRegistered(serveur.utilisateur, serveur.parrainage || null);
         setLoading(false);
         return;
       }
@@ -6957,6 +7091,18 @@ function ClientRegisterForm({ data, persist, onRegistered, onCancel }) {
         </Field>
         <Field label={tcx("Téléphone *")}><PhoneInput value={telephone} onChange={setTelephone} /></Field>
         <Field label={tcx("Adresse (optionnel)")}><input value={adresse} onChange={(e) => setAdresse(e.target.value)} style={inputStyle} /></Field>
+        {/*
+          Le code d'un proche, s'il en a reçu un. Il est écrit en majuscules à la saisie parce
+          qu'il se recopie d'une capture d'écran ou se prend sous la dictée, et qu'un code refusé
+          pour une histoire de casse serait refusé pour rien.
+        */}
+        <Field label={tcx("Code de parrainage (facultatif)")}>
+          <input value={codeParrainage} onChange={(e) => setCodeParrainage(e.target.value.toUpperCase())}
+            style={inputStyle} placeholder="ex : MARIAB2C4" autoCapitalize="characters" autoCorrect="off" spellCheck={false} />
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -6 }}>
+            Si un proche vous a donné son code, saisissez-le : il recevra une réduction après votre première réception de colis.
+          </div>
+        </Field>
         <Field label={`${tcx("E-mail")} *`}>
           <input value={email} onChange={(e) => setEmail(e.target.value)} inputMode="email" style={inputStyle} />
         </Field>
@@ -8084,6 +8230,24 @@ function calculerNotificationsClient(acc, data) {
   (data.demandesRegroupement || []).filter((dm) => dm.clientAccountId === acc.id).forEach((dm) => {
     if (dm.dateMaj && new Date(dm.dateMaj) > seuil && dm.statut !== "En attente") notifs.push({ icone: "\ud83d\udcec", texte: `Demande de regroupement : ${dm.statut}`, date: dm.dateMaj });
   });
+  /*
+   * \ud83c\udf81 LE PARRAINAGE SE DIT AU CLIENT, IL NE SE DEVINE PAS DANS UN COMPTEUR.
+   *
+   * Une r\u00e9compense acquise sans un mot, c'est un client qui ne sait pas qu'il a gagn\u00e9 \u2014 et le
+   * programme ne sert plus \u00e0 rien. Une r\u00e9duction utilis\u00e9e sans un mot, c'est pire : il croit avoir
+   * encore son cr\u00e9dit, et il le r\u00e9clame au comptoir.
+   *
+   * Les deux annonces s'adressent \u00e0 celui qui PARRAINE : c'est lui qui re\u00e7oit, et lui seul.
+   */
+  (data.parrainages || []).filter((p) => p && p.parrainId === acc.id && p.statut !== "annule").forEach((p) => {
+    const r = p.recompense || {};
+    if (r.crediteeLe && new Date(r.crediteeLe) > seuil) {
+      notifs.push({ icone: "\ud83c\udf81", texte: `Votre récompense de parrainage de ${fmtGNF(r.montant)} est acquise — elle sera déduite de votre prochaine réception`, date: r.crediteeLe });
+    }
+    if (r.utiliseeLe && new Date(r.utiliseeLe) > seuil) {
+      notifs.push({ icone: "\ud83c\udf81", texte: `${fmtGNF(r.montant)} de réduction de parrainage ont été déduits${r.utiliseeSur ? ` du colis ${r.utiliseeSur}` : ""}`, date: r.utiliseeLe });
+    }
+  });
   return notifs.sort((a, b) => new Date(b.date) - new Date(a.date));
 }
 
@@ -8093,7 +8257,140 @@ function calculerNotificationsClient(acc, data) {
  * identifiant est libre, et l'espace lui-même une fois le client identifié. Chacun la réclame au
  * moment où il s'ouvre, plutôt que tout le monde d'avance.
  */
+/**
+ * 🎁 LA CARTE DE PARRAINAGE, DANS L'ESPACE DU CLIENT.
+ *
+ * Elle ne demande rien et ne peut rien casser : elle lit. Le client ne peut pas s'attribuer une
+ * récompense depuis cet écran — ni depuis aucun autre — parce que le serveur ne l'accepterait pas
+ * (voir reconcilierParrainages dans api/_cloisonnement.js). Ce qui est montré ici est donc, à la
+ * lettre, ce que le serveur a calculé.
+ *
+ * CE QU'ELLE MONTRE EN PREMIER : ce qui reste à faire.
+ *
+ * Un parrainage « en attente » n'est pas un échec, c'est une étape — la personne s'est inscrite,
+ * elle n'a pas encore retiré son premier colis. Le dire évite l'appel à l'agence pour réclamer une
+ * récompense qui n'est simplement pas encore due.
+ */
+function CarteParrainage({ compte, data, T, deviseClient }) {
+  const [copie, setCopie] = useState(false);
+  const parrainages = data?.parrainages || [];
+  const bilan = bilanParrainage(parrainages, compte.id);
+  const code = compte.codeParrainage || "";
+  const lien = `${typeof window !== "undefined" ? window.location.origin : ""}/?client=1&parrain=${encodeURIComponent(code)}`;
+  const invitation = `Bonjour ! J’utilise Ba-Diaby Express pour envoyer et recevoir mes colis. `
+    + `Ouvre ton compte avec mon code ${code} : ${lien}`;
+
+  const miens = parrainages
+    .filter((p) => p && p.parrainId === compte.id)
+    .sort((a, b) => String(b.creeLe || "").localeCompare(String(a.creeLe || "")));
+  const nomDuFilleul = (p) => {
+    const c = (data?.clientAccounts || []).find((x) => x && x.id === p.filleulId);
+    if (!c) return "Un filleul";
+    /* Prénom et initiale : le filleul est un client, pas une ligne de tableau public. */
+    return `${c.prenom || ""} ${String(c.nom || "").charAt(0)}${c.nom ? "." : ""}`.trim() || "Un filleul";
+  };
+  const ETAPES = {
+    en_attente: { texte: "Inscrit — en attente de sa première réception", part: 50, teinte: "var(--warn-fg)" },
+    recompense_validee: { texte: "Récompense acquise", part: 100, teinte: "var(--ok-fg)" },
+    reduction_utilisee: { texte: "Réduction utilisée", part: 100, teinte: "var(--muted)" },
+    annule: { texte: "Annulé", part: 0, teinte: "var(--danger-fg)" },
+  };
+
+  async function copier() {
+    try { await navigator.clipboard?.writeText(code); setCopie(true); setTimeout(() => setCopie(false), 2000); }
+    catch (e) { /* le code reste affiché, il se recopie à la main */ }
+  }
+
+  return (
+    <div style={{
+      background: "linear-gradient(135deg, #0A2647 0%, #131A6B 100%)", color: "#fff",
+      borderRadius: 16, padding: 22, marginBottom: 20, boxShadow: "0 8px 26px rgba(10,38,71,0.28)",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 6 }}>
+        <span style={{ fontSize: 20 }}>🎁</span>
+        <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 17, fontWeight: 700 }}>{T("Parrainage")}</span>
+      </div>
+      <div style={{ fontSize: 13.5, color: "rgba(255,255,255,0.82)", lineHeight: 1.55, marginBottom: 16, maxWidth: 560 }}>
+        Invitez vos proches et recevez {fmt(MONTANT_RECOMPENSE_GNF, "GNF")} de réduction après leur première réception de colis.
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
+        <div style={{ background: "rgba(255,255,255,0.12)", border: "1px dashed rgba(255,255,255,0.35)", borderRadius: 10, padding: "10px 18px", fontSize: 19, fontWeight: 800, letterSpacing: 2 }}>
+          {code}
+        </div>
+        <button onClick={copier} style={{ background: "#fff", color: "#0A2647", border: "none", borderRadius: 9, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
+          <Copy size={14} /> {copie ? T("Copié") : T("Copier mon code")}
+        </button>
+        {/*
+          On ouvre un brouillon WhatsApp plutôt que d'envoyer à la place du client : le message
+          part de SON numéro, à qui il veut, et il peut le relire avant. Envoyer pour lui aurait
+          demandé son carnet d'adresses.
+        */}
+        <a href={`https://wa.me/?text=${encodeURIComponent(invitation)}`} target="_blank" rel="noopener noreferrer"
+          style={{ background: "#25D366", color: "#fff", borderRadius: 9, padding: "10px 16px", fontSize: 13, fontWeight: 700, textDecoration: "none", display: "flex", alignItems: "center", gap: 6 }}>
+          <MessageCircle size={14} /> {T("Partager sur WhatsApp")}
+        </a>
+      </div>
+
+      <div style={{ fontSize: 11.5, color: "rgba(255,255,255,0.6)", marginBottom: 16, wordBreak: "break-all" }}>
+        {lien}
+      </div>
+
+      <div style={{ display: "flex", gap: 20, flexWrap: "wrap", borderTop: "1px solid rgba(255,255,255,0.16)", paddingTop: 14 }}>
+        {[[T("Invités"), bilan.invites, "#fff"],
+          [T("En attente"), bilan.enAttente, "#E0A63A"],
+          [T("Validés"), bilan.valides, "#3ECB84"],
+          [T("Réduction disponible"), fmt(bilan.creditDisponible, "GNF"), "#3ECB84"],
+          [T("Déjà utilisée"), fmt(bilan.creditUtilise, "GNF"), "rgba(255,255,255,0.6)"]].map(([label, valeur, teinte]) => (
+          <div key={label}>
+            <div style={{ fontSize: 10, color: "rgba(255,255,255,0.55)", fontWeight: 700, letterSpacing: 0.4 }}>{String(label).toUpperCase()}</div>
+            <div style={{ fontSize: 17, fontWeight: 800, color: teinte, whiteSpace: "nowrap" }}>{valeur}</div>
+          </div>
+        ))}
+      </div>
+
+      {miens.length > 0 && (
+        <div style={{ marginTop: 16, borderTop: "1px solid rgba(255,255,255,0.16)", paddingTop: 14 }}>
+          <div style={{ fontSize: 10.5, color: "rgba(255,255,255,0.55)", fontWeight: 700, letterSpacing: 0.4, marginBottom: 10 }}>
+            {String(T("Mes parrainages")).toUpperCase()}
+          </div>
+          {miens.slice(0, 8).map((p) => {
+            const etape = ETAPES[p.statut] || ETAPES.en_attente;
+            return (
+              <div key={p.id} style={{ marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12.5, marginBottom: 5 }}>
+                  <span style={{ fontWeight: 600 }}>{nomDuFilleul(p)}</span>
+                  <span style={{ color: etape.teinte, fontWeight: 600, textAlign: "right" }}>{etape.texte}</span>
+                </div>
+                {/*
+                  La barre dit où en est CE parrainage — inscrit, puis récompensé. Deux étapes
+                  seulement : en inventer davantage donnerait l'impression d'un chemin plus long
+                  qu'il ne l'est.
+                */}
+                <div style={{ height: 5, borderRadius: 3, background: "rgba(255,255,255,0.16)", overflow: "hidden" }}>
+                  <div style={{ width: `${etape.part}%`, height: "100%", background: etape.teinte, transition: "width .4s" }} />
+                </div>
+              </div>
+            );
+          })}
+          {miens.length > 8 && (
+            <div style={{ fontSize: 11.5, color: "rgba(255,255,255,0.55)" }}>
+              … et {miens.length - 8} de plus.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
+  /*
+   * Ce que le serveur a répondu sur le code de parrainage saisi à l'inscription — accepté, ou
+   * refusé avec sa raison. Il ne vit que le temps de la session : c'est une confirmation, pas un
+   * état du compte.
+   */
+  const [messageParrainage, setMessageParrainage] = useState(null);
   const [lang, setLang] = useClientLang();
   const T = (x) => tc(x, lang);
   const [mode, setMode] = useState("login"); // login | inscription | reset
@@ -8453,7 +8750,7 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
             </button>
           </form>
         ) : mode === "inscription" ? (
-          <ClientRegisterForm data={data} persist={persist} onRegistered={(acc) => { ecrireSessionClient(acc.id); setCompte(acc); onBesoinBase?.(); }} onCancel={() => setMode("login")} />
+          <ClientRegisterForm data={data} persist={persist} onRegistered={(acc, parrainage) => { ecrireSessionClient(acc.id); setCompte(acc); setMessageParrainage(parrainage || null); onBesoinBase?.(); }} onCancel={() => setMode("login")} />
         ) : mode === "reset" ? (
           <ClientResetPasswordForm data={data} persist={persist} onDone={() => { setMode("login"); setErr(""); }} onCancel={() => setMode("login")} />
         ) : (
@@ -8506,6 +8803,27 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
             <button onClick={() => { oublierCacheLocal(); ecrireSessionClient(null); setCompte(null); setIdentifiant(""); setMotdepasse(""); setMode("login"); }} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--muted)", fontWeight: 600, cursor: "pointer" }}>{T("Déconnexion")}</button>
           </div>
         </div>
+        {/*
+          LE PARRAINAGE — ce que le client peut faire pour l'entreprise, et ce qu'il y gagne.
+
+          La carte n'apparaît que s'il a un code : un bouton « Copier mon code » sur un code
+          inexistant serait pire que pas de carte du tout. Les comptes ouverts avant cette version
+          reçoivent le leur au premier passage de la tâche de nuit.
+        */}
+        {messageParrainage && (
+          <div style={{
+            background: messageParrainage.etat === "refuse" ? "var(--warn-bg)" : "var(--ok-bg)",
+            border: "1px solid " + (messageParrainage.etat === "refuse" ? "var(--warn-border)" : "var(--ok-fg)"),
+            borderRadius: 12, padding: "12px 16px", marginBottom: 16, fontSize: 13.5,
+            color: messageParrainage.etat === "refuse" ? "var(--warn-fg)" : "var(--ok-fg)", fontWeight: 600,
+          }}>
+            {messageParrainage.etat === "refuse" ? messageParrainage.raison : messageParrainage.message}
+          </div>
+        )}
+        {compte.codeParrainage && (
+          <CarteParrainage compte={compte} data={data} T={T} deviseClient={deviseClient} />
+        )}
+
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 24 }}>
           <div style={{ fontSize: 14.5, color: "var(--muted)" }}>{T(salutationSelonHeure())} {compte.prenom} {compte.nom}</div>
           <div style={{ display: "flex", alignItems: "center", gap: 8, background: remiseActuelle >= 12 ? "var(--warn-bg)" : remiseActuelle > 0 ? "var(--surface2)" : "var(--bronze-bg)", border: "1px solid " + (remiseActuelle >= 12 ? "var(--warn-border)" : "var(--border)"), borderRadius: 20, padding: "6px 14px" }}>
@@ -12172,8 +12490,17 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
    * Un employé basé à Paris dépose des colis qui quittent la France : lui présenter « Conakry →
    * Paris » par défaut, c'est le faire corriger à chaque colis, et se tromper un jour sur deux.
    * Un agent de l'entreprise ou le titulaire du compte partent de Guinée, comme avant.
+   *
+   * ON NE LISAIT QU'UN SEUL DES DEUX CHAMPS QUI DISENT CE LIEU.
+   *
+   * `lieuOperation` n'existe que sur les accès créés par un partenaire ; aucun compte de
+   * l'entreprise ne le porte. La condition était donc TOUJOURS fausse pour nos agents, et le sens
+   * retombait sur « Conakry → Paris » même pour un agent basé à Paris. Le colis NY030901 en est la
+   * trace : enregistré à Paris le 3 septembre, il est parti inscrit au départ de Conakry, avec le
+   * partenaire en expéditeur et le client parisien en destinataire — les deux à l'envers — et le
+   * bordereau de départ de Paris ne l'a jamais vu. `paysDeLOperateur` lit les deux champs.
    */
-  const [sens, setSens] = useState(() => (session?.lieuOperation && session.lieuOperation !== "GN" ? "import" : "export"));
+  const [sens, setSens] = useState(() => (paysDeLOperateur(session) !== "GN" ? "import" : "export"));
   /* Aérien tant que la voie maritime n'est pas ouverte — voir le champ « Mode de transport ». */
   const mode = "air";
   const [articles, setArticles] = useState(() => [{ ...emptyProduit(), tarification: "kg", categoriePartenaire: "" }]);
@@ -12244,8 +12571,8 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
   const [destPaysAjuste, setDestPaysAjuste] = useState(false);
   useEffect(() => {
     // La route par défaut est celle du lieu d'opération : on n'y revient pas si l'agent en change.
-    const lieu = session?.lieuOperation;
-    if (lieu && lieu !== "GN" && paysDisponibles.some((c) => c.code === lieu)) setDestPays(lieu);
+    const lieu = paysDeLOperateur(session);
+    if (lieu !== "GN" && paysDisponibles.some((c) => c.code === lieu)) setDestPays(lieu);
   }, []);
   /*
    * L'agent que nous avons placé chez ce partenaire.
@@ -12858,6 +13185,11 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
     sauvegarde: { permission: "stats.exporter", rendu: () => <SauvegardePage data={data} persist={persist} notify={notify} session={session} onBack={back} /> },
     users: { permission: "users.consulter", rendu: () => <UtilisateursPage data={data} persist={persist} notify={notify} onBack={back} session={session} /> },
     performance: { permission: "stats.globales", rendu: () => <PerformanceAgentsPage data={data} onBack={back} /> },
+    /*
+     * Consulter le programme demande seulement de voir les clients ; c'est l'annulation qui est
+     * gardée à part, dans l'écran comme sur le serveur.
+     */
+    parrainages: { permission: "clients.consulter", rendu: () => <ParrainagesPage data={data} persist={persist} session={session} notify={notify} onBack={back} /> },
     /* Ouverte à tous : celui qui ne tient pas la fiche de l'équipe voit la sienne, en lecture. */
     pointage: { permission: null, rendu: () => <PointagePage data={data} persist={persist} notify={notify} onBack={back} session={session} /> },
   };
@@ -12925,8 +13257,9 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
         {ouvrable("categories") && <Card icon={Receipt} tint="#E0794E" title="Catégories de Produits" desc="Configuration des types de marchandises et taxes." onClick={() => setSub("categories")} />}
         {ouvrable("devises") && <Card icon={RefreshCw} tint="#0EA5E9" title="Gestion des devises" desc="Un taux par devise, partagé automatiquement par tous les pays concernés." onClick={() => setSub("devises")} />}
         {ouvrable("reception") && <Card icon={Package} tint="var(--danger-fg)" title="Tarifs de réception client" desc="Le tarif au kg appliqué sur les bordereaux de réception, selon le poids du lot." onClick={() => setSub("reception")} />}
-        {ouvrable("commissions") && <Card icon={Users} tint="#16A163" title="Commissions par Agence" desc="Définissez combien chaque agence gagne par kg et par unité vendue." onClick={() => setSub("commissions")} />}
+        {ouvrable("commissions") && <Card icon={Users} tint="#16A163" title="Commissions" desc="Ce que gagne l’agent au kilo et à l’unité, ce que gagne le responsable sur son équipe, et ce qui reste à verser à chacun." onClick={() => setSub("commissions")} />}
         {ouvrable("paiement") && <Card icon={Wallet} tint="#5B8DEF" title="Paiement" desc="Configurez vos numéros pour accepter les paiements de vos clients." onClick={() => setSub("paiement")} />}
+        {ouvrable("parrainages") && <Card icon={HandCoins} tint="#8B5CF6" title="Programme de parrainage" desc="Qui a parrainé qui, quelles récompenses sont acquises, lesquelles ont déjà été déduites." onClick={() => setSub("parrainages")} />}
       </div>
 
       <SectionLabel>VOTRE ÉQUIPE</SectionLabel>
@@ -13312,25 +13645,42 @@ function ReceptionTarifsPage({ data, persist, notify, onBack }) {
 
 function CommissionsPage({ data, persist, session, notify, onBack }) {
   const isAdmin = session?.role === "Administrateur";
-  const cfg = data.commissionConfig || { parKg: 2, parUnite: 5, parColis: 1 };
   const categories = data.categories || [];
-  const [parKg, setParKg] = useState(String(cfg.parKg));
-  const [parUnite, setParUnite] = useState(String(cfg.parUnite));
-  const [parColis, setParColis] = useState(String(cfg.parColis ?? 1));
+  /* Les quatre taux, lus par la même fonction que le serveur — jamais recopiés ici. */
+  const taux = tauxCommission(data.commissionConfig);
+  const [agentKg, setAgentKg] = useState(String(taux.agentKg));
+  const [agentUnite, setAgentUnite] = useState(String(taux.agentUnite));
+  const [superviseurKg, setSuperviseurKg] = useState(String(taux.superviseurKg));
+  const [superviseurUnite, setSuperviseurUnite] = useState(String(taux.superviseurUnite));
   const [catEdits, setCatEdits] = useState({});
 
   function saveGeneral() {
-    const k = Number(String(parKg).replace(",", "."));
-    const u = Number(String(parUnite).replace(",", "."));
-    const c = Number(String(parColis).replace(",", "."));
-    if (isNaN(k) || isNaN(u) || k < 0 || u < 0) return;
-    if (isNaN(c) || c < 0) return;
+    const lu = (v) => Number(String(v).replace(",", "."));
+    const ak = lu(agentKg); const au = lu(agentUnite);
+    const sk = lu(superviseurKg); const su = lu(superviseurUnite);
+    /* Un taux négatif retirerait de l'argent à quelqu'un qui a travaillé : il n'existe pas. */
+    if ([ak, au, sk, su].some((n) => !Number.isFinite(n) || n < 0)) {
+      notify?.("Chaque taux doit être un nombre positif.");
+      return;
+    }
     persist({
       ...data,
-      commissionConfig: { parKg: k, parUnite: u, parColis: c },
-      activityLog: pushActivity(data, session, "Taux de commission modifié", `${k} €/kg, ${u} €/unité, ${c} €/colis enregistré`),
+      /*
+       * `parKg` et `parUnite` sont conservés, à la même valeur que les taux d'agent.
+       *
+       * Ce ne sont pas des doublons oubliés : d'autres écrans plus anciens les lisent encore pour
+       * afficher un barème d'agence. Les effacer aurait mis ces écrans à zéro sans que le geste
+       * « modifier un taux » ait rien annoncé de tel. `parColis`, en revanche, disparaît — le
+       * forfait par colis n'existe plus, et le laisser traîner aurait fini par être relu un jour.
+       */
+      commissionConfig: {
+        agentKg: ak, agentUnite: au, superviseurKg: sk, superviseurUnite: su,
+        parKg: ak, parUnite: au,
+      },
+      activityLog: pushActivity(data, session, "Taux de commission modifié",
+        `agent ${ak} €/kg et ${au} €/unité · responsable ${sk} €/kg et ${su} €/unité`),
     });
-    notify?.("Taux de commission mis à jour pour toutes les agences");
+    notify?.("Taux de commission mis à jour");
   }
 
   /*
@@ -13414,13 +13764,22 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
       : `${ligne.nom} est soldé : ${fmt(versement.montant, "EUR")} versés.`);
   }
 
-  // Aperçu : simulateur simple
+  /*
+   * Aperçu : ce que rapporte un poids donné, à l'agent et à son responsable.
+   *
+   * Le simulateur ne lisait qu'un seul taux, et il portait encore le nom d'une variable d'état qui
+   * n'existe plus : l'écran entier tombait sur « parKg is not defined » dès qu'on l'ouvrait. Il lit
+   * maintenant les mêmes taux que le calcul réel, et il montre les DEUX parts — c'est la question
+   * qu'on se pose devant ce champ.
+   */
   const [simPoids, setSimPoids] = useState("5");
-  const simCommission = (Number(simPoids) || 0) * (Number(parKg) || 0);
+  const simKg = Number(String(simPoids).replace(",", ".")) || 0;
+  const simAgent = simKg * (Number(String(agentKg).replace(",", ".")) || 0);
+  const simSuperviseur = simKg * (Number(String(superviseurKg).replace(",", ".")) || 0);
 
   return (
     <div>
-      <ConfigPageHeader title="Commissions par Agence" desc="Combien chaque agence gagne sur chaque colis traité — modifiable uniquement par l’Administrateur." onBack={onBack} />
+      <ConfigPageHeader title="Commissions" desc="Ce que gagne l’agent au kilo et à l’unité, ce que gagne le responsable sur son équipe, et ce qui reste à verser à chacun." onBack={onBack} />
 
       {!isAdmin && (
         <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "10px 12px", fontSize: 12.5, color: "var(--muted)", marginBottom: 18, maxWidth: 560 }}>
@@ -13429,36 +13788,68 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
       )}
 
       <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, maxWidth: 460, border: "1px solid var(--border)", marginBottom: 20 }}>
-        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Taux généraux</div>
-        <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 2, marginBottom: 16 }}>S’appliquent à toutes les catégories, sauf si une catégorie a son propre taux ci-dessous.</p>
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Ce que touche l’agent</div>
+        <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 2, marginBottom: 16 }}>
+          Celui qui enregistre le colis, payé sur le travail réel. S’applique à toutes les catégories,
+          sauf si une catégorie a son propre taux ci-dessous.
+        </p>
         <Field label="Commission par kg (produits facturés au poids)">
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input value={parKg} onChange={(e) => setParKg(e.target.value)} disabled={!isAdmin} style={{ ...inputStyle, opacity: isAdmin ? 1 : 0.6 }} />
+            <input value={agentKg} onChange={(e) => setAgentKg(e.target.value)} disabled={!isAdmin} style={{ ...inputStyle, opacity: isAdmin ? 1 : 0.6 }} />
             <span style={{ fontSize: 12.5, color: "var(--muted)" }}>€ / kg</span>
           </div>
         </Field>
         <Field label="Commission par unité (produits facturés à l’unité)">
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input value={parUnite} onChange={(e) => setParUnite(e.target.value)} disabled={!isAdmin} style={{ ...inputStyle, opacity: isAdmin ? 1 : 0.6 }} />
+            <input value={agentUnite} onChange={(e) => setAgentUnite(e.target.value)} disabled={!isAdmin} style={{ ...inputStyle, opacity: isAdmin ? 1 : 0.6 }} />
             <span style={{ fontSize: 12.5, color: "var(--muted)" }}>€ / unité</span>
           </div>
         </Field>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 18, lineHeight: 1.55 }}>
+          10 kg à {agentKg || 0} €/kg = <strong>{fmt((Number(String(agentKg).replace(",", ".")) || 0) * 10, "EUR")}</strong> pour l’agent.
+          Un agent <strong>salarié</strong> ne touche aucune commission : cela se règle sur sa fiche,
+          dans Gestion Utilisateurs. Aucune commission sur un colis partenaire.
+        </div>
+
         {/*
-          Ce troisième taux ne va pas à l'agence mais à UNE PERSONNE : celle qui a enregistré le
-          colis. Il est au forfait et non au poids, parce que c'est le geste qui est payé — un
-          carton de deux kilos demande le même travail qu'un de cinquante.
+          LA SUPERVISION — une part plus petite, sur le travail des AUTRES.
+
+          Elle ne récompense pas un geste : elle récompense le fait d'avoir amené et d'encadrer
+          quelqu'un qui fait le geste. C'est pourquoi elle ne se déclenche jamais sur un colis que
+          le responsable enregistre lui-même : il gagnerait alors plus en travaillant seul qu'en
+          formant quelqu'un.
         */}
-        <Field label="Forfait à celui qui enregistre un colis">
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4, paddingTop: 14, borderTop: "1px solid var(--border)" }}>
+          Ce que touche le Responsable de zone
+        </div>
+        <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 2, marginBottom: 16 }}>
+          Sur les colis enregistrés par <strong>les agents de son équipe</strong>. Jamais sur les siens.
+        </p>
+        <Field label="Supervision par kg">
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input value={parColis} onChange={(e) => setParColis(e.target.value)} disabled={!isAdmin} style={{ ...inputStyle, opacity: isAdmin ? 1 : 0.6 }} />
-            <span style={{ fontSize: 12.5, color: "var(--muted)" }}>€ / colis</span>
+            <input value={superviseurKg} onChange={(e) => setSuperviseurKg(e.target.value)} disabled={!isAdmin} style={{ ...inputStyle, opacity: isAdmin ? 1 : 0.6 }} />
+            <span style={{ fontSize: 12.5, color: "var(--muted)" }}>€ / kg</span>
+          </div>
+        </Field>
+        <Field label="Supervision par unité">
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input value={superviseurUnite} onChange={(e) => setSuperviseurUnite(e.target.value)} disabled={!isAdmin} style={{ ...inputStyle, opacity: isAdmin ? 1 : 0.6 }} />
+            <span style={{ fontSize: 12.5, color: "var(--muted)" }}>€ / unité</span>
           </div>
         </Field>
         <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.55 }}>
-          Versé à l’agent comme au responsable de zone : c’est le même geste. Un responsable ne
-          touche rien sur les colis pris par ses agents. En revanche, sur un colis de sa zone qu’il
-          enregistre lui-même, il reçoit <strong>en plus</strong> le barème d’agence ci-dessus.
-          Aucune commission sur un colis partenaire.
+          Un agent de son équipe enregistre 10 kg : l’agent touche {fmt((Number(String(agentKg).replace(",", ".")) || 0) * 10, "EUR")},
+          le responsable {fmt((Number(String(superviseurKg).replace(",", ".")) || 0) * 10, "EUR")}.
+          <br />
+          S’il enregistre ce colis <strong>lui-même</strong>, il touche {fmt((Number(String(agentKg).replace(",", ".")) || 0) * 10, "EUR")} comme un agent,
+          et <strong>rien</strong> en supervision.
+          {(data.users || []).every((u) => u?.role !== "Responsable de zone") && (
+            <div style={{ background: "var(--warn-bg)", color: "var(--warn-fg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "9px 11px", marginTop: 10 }}>
+              Aucun compte n’a aujourd’hui le rôle « Responsable de zone », et aucun agent n’est rattaché :
+              cette part vaut donc zéro pour tout le monde. Elle s’activera d’elle-même dès qu’un
+              responsable sera désigné et qu’un agent lui sera rattaché, dans Gestion Utilisateurs.
+            </div>
+          )}
         </div>
         {isAdmin && <button onClick={saveGeneral} style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>}
       </div>
@@ -13479,15 +13870,15 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
         </div>
         {gains.length === 0 ? (
           <div style={{ padding: 18, fontSize: 13, color: "var(--muted)" }}>
-            Aucune commission pour l’instant. Le forfait s’applique aux colis enregistrés à partir de maintenant.
+            Aucune commission pour l’instant. Chaque colis enregistré en produira une, au poids et à l’unité.
           </div>
         ) : (
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", minWidth: 620, borderCollapse: "collapse" }}>
               <thead>
                 <tr style={{ textAlign: "left", background: "var(--surface2)" }}>
-                  {["PERSONNE", "AGENCE", "COLIS", "GAGNÉ", "VERSÉ", "RESTE DÛ", ""].map((t, i) => (
-                    <th key={t || "actions"} style={{ padding: "10px 16px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, textAlign: i >= 2 && i <= 5 ? "right" : "left", whiteSpace: "nowrap" }}>{t}</th>
+                  {["PERSONNE", "AGENCE", "COLIS", "KG", "GAGNÉ", "VERSÉ", "RESTE DÛ", ""].map((t, i) => (
+                    <th key={t || "actions"} style={{ padding: "10px 16px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, textAlign: i >= 2 && i <= 6 ? "right" : "left", whiteSpace: "nowrap" }}>{t}</th>
                   ))}
                 </tr>
               </thead>
@@ -13499,12 +13890,22 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
                       {g.nom}
                       <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>
                         {g.role}
-                        {/* Le barème d'agence ne concerne que les responsables de zone. */}
-                        {g.bareme > 0 && ` · dont ${fmt(g.bareme, "EUR")} de barème d’agence`}
+                        {/*
+                          Les deux parts sont nommées séparément dès qu'il y en a deux : « gagné »
+                          seul ne dit pas si l'on est payé pour son propre travail ou pour celui de
+                          son équipe, et c'est la première question qu'on pose devant un total.
+                        */}
+                        {g.supervision > 0 && ` · dont ${fmt(g.supervision, "EUR")} de supervision sur ${g.colisEquipe} colis de son équipe`}
                       </div>
+                      {g.salarie && (
+                        <div style={{ display: "inline-block", marginTop: 4, background: "var(--surface2)", color: "var(--muted)", padding: "2px 8px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>
+                          SALARIÉ — aucune commission
+                        </div>
+                      )}
                     </td>
                     <td style={{ padding: "10px 16px", fontSize: 12.5, color: "var(--muted)" }}>{g.agence}</td>
                     <td style={{ padding: "10px 16px", fontSize: 12.5, color: "var(--text)", textAlign: "right" }}>{g.colis}</td>
+                    <td style={{ padding: "10px 16px", fontSize: 12.5, color: "var(--muted)", textAlign: "right", whiteSpace: "nowrap" }}>{g.kg ? `${g.kg} kg` : "—"}</td>
                     <td style={{ padding: "10px 16px", fontSize: 12.5, color: "var(--muted)", textAlign: "right", whiteSpace: "nowrap" }}>{fmt(g.gagne, "EUR")}</td>
                     <td style={{ padding: "10px 16px", fontSize: 12.5, color: "var(--ok-fg)", textAlign: "right", whiteSpace: "nowrap" }}>{g.paye > 0 ? fmt(g.paye, "EUR") : "—"}</td>
                     {/*
@@ -13530,7 +13931,7 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
                   </tr>
                   {versementPour === g.id && (
                     <tr style={{ background: "var(--surface2)" }}>
-                      <td colSpan={7} style={{ padding: "12px 16px" }}>
+                      <td colSpan={8} style={{ padding: "12px 16px" }}>
                         <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10 }}>
                           Reste dû à {g.nom} : <strong style={{ color: "var(--text)" }}>{fmt(g.reste, "EUR")}</strong>.
                           Versez la totalité, ou une tranche.
@@ -13596,6 +13997,29 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
         )}
       </div>
 
+      {/*
+        LES RESPONSABLES DE ZONE, VUS DE L'ENTREPRISE.
+
+        Pour chacun : ce qu'il a fait de sa main, ce que son équipe lui rapporte, et le détail
+        jusqu'à l'agent. C'est ce qu'il faut avoir sous les yeux avant de signer un versement —
+        sinon on paie un total qu'on n'a pas pu vérifier.
+
+        Le bloc ne s'affiche pas tant qu'aucun compte ne porte ce rôle : une section vide sur un
+        écran de réglages se lit comme une fonction cassée.
+      */}
+      {(data.users || []).some((u) => u?.role === "Responsable de zone") && (
+        <div style={{ marginBottom: 20, maxWidth: 900 }}>
+          <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Responsables de zone</div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>
+            Leur activité personnelle, celle de leur équipe, et le détail agent par agent.
+          </div>
+          {(data.users || []).filter((u) => u?.role === "Responsable de zone").map((u) => (
+            <BlocEquipe key={u.id} compact titre="Équipe"
+              bilan={bilanEquipe(u.id, { users: data.users, colis: data.colis, categories: data.categories, config: data.commissionConfig })} />
+          ))}
+        </div>
+      )}
+
       <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", maxWidth: 640, marginBottom: 20 }}>
         <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)" }}>
           <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14 }}>Taux personnalisés par catégorie</div>
@@ -13622,7 +14046,7 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
                       value={catEdits[c.id] !== undefined ? catEdits[c.id] : (c.commissionRate ?? "")}
                       onChange={(e) => setCatEdits((s) => ({ ...s, [c.id]: e.target.value }))}
                       onKeyDown={(e) => e.key === "Enter" && saveCategoryRate(c)}
-                      placeholder={`défaut : ${c.type === "kg" ? parKg : parUnite}`}
+                      placeholder={`défaut : ${c.type === "kg" ? agentKg : agentUnite}`}
                       style={{ ...inputStyle, width: 120 }}
                     />
                   ) : (
@@ -13639,11 +14063,19 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
         </div>
       </div>
 
-      <div style={{ background: "var(--surface)", borderRadius: 14, padding: 20, border: "1px solid var(--border)", maxWidth: 320 }}>
+      <div style={{ background: "var(--surface)", borderRadius: 14, padding: 20, border: "1px solid var(--border)", maxWidth: 340 }}>
         <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 12 }}>Exemple rapide</div>
         <Field label="Poids simulé (kg)"><input value={simPoids} onChange={(e) => setSimPoids(e.target.value)} style={inputStyle} /></Field>
-        <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "10px 12px", fontSize: 14, fontWeight: 700, color: "var(--text)", textAlign: "center" }}>
-          L’agence gagne {fmt(simCommission, "EUR")}
+        {/*
+          Les deux parts, et pas seulement celle de l'agent : « combien ça me coûte, ce colis ? »
+          est une question qui porte sur le total, et un seul chiffre y répond de travers.
+        */}
+        <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "12px 14px", fontSize: 13.5, color: "var(--text)", lineHeight: 1.7 }}>
+          <div>L’agent gagne <strong>{fmt(simAgent, "EUR")}</strong></div>
+          <div style={{ color: "var(--muted)" }}>Son responsable {fmt(simSuperviseur, "EUR")}</div>
+          <div style={{ borderTop: "1px solid var(--border)", marginTop: 8, paddingTop: 8, fontWeight: 700 }}>
+            Coût total {fmt(simAgent + simSuperviseur, "EUR")}
+          </div>
         </div>
       </div>
     </div>
@@ -16249,14 +16681,98 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
       : `Réparti sur ${nbColis} colis`);
   }
 
+  /**
+   * 🎁 POSE LA RÉDUCTION DE PARRAINAGE SUR UN COLIS, DANS UN DOCUMENT DONNÉ.
+   *
+   * Rend `{ doc, applique }` sans rien enregistrer : c'est l'appelant qui persiste, une seule fois,
+   * avec le reste de son écriture. Sans cela, encaisser aurait produit deux enregistrements
+   * successifs — et entre les deux, une seconde où la réduction est posée et le paiement non.
+   *
+   * ELLE BAISSE LE PRIX, ELLE NE SE FAIT PAS PASSER POUR UN PAIEMENT.
+   *
+   * L'inscrire en ligne de paiement aurait été plus court, et faux : le tableau de bord additionne
+   * les paiements pour annoncer ce qui a été encaissé, et l'entreprise aurait lu comme recette
+   * cinquante mille francs que personne ne lui a remis. Une réduction diminue la recette — c'est
+   * exactement ce que fait la baisse du prix, et c'est ce que la comptabilité doit voir.
+   *
+   * Le prix d'origine reste lisible dans `remiseParrainage.prixAvant` : la facture peut donc
+   * montrer le tarif, la réduction, puis le net — au lieu d'un prix mystérieusement plus bas.
+   */
+  function appliquerParrainage(courant, tracking) {
+    const colis = (courant.colis || []).find((c) => c.tracking === tracking);
+    const calc = reductionParrainage(colis, courant);
+    if (!calc) return { doc: courant, applique: null };
+    const deja = colis.remiseParrainage;
+    const prix = Math.max(+((colis.prix || 0) - calc.montantEUR).toFixed(2), 0);
+    const paye = colis.paye || 0;
+    const doc = {
+      ...courant,
+      parrainages: calc.parrainages,
+      colis: courant.colis.map((c) => (c.tracking !== tracking ? c : {
+        ...c,
+        prix,
+        reste: Math.max(+(prix - paye).toFixed(2), 0),
+        remiseParrainage: {
+          /* Le tarif d'avant la toute première réduction — pas celui d'avant la dernière. */
+          prixAvant: deja?.prixAvant ?? (colis.prix || 0),
+          montant: +(((deja?.montant) || 0) + calc.montantEUR).toFixed(2),
+          montantGNF: ((deja?.montantGNF) || 0) + calc.montantGNF,
+          parrainages: [...((deja?.parrainages) || []), ...calc.utilises.map((u) => u.parrainageId)],
+          le: new Date().toISOString(),
+          par: `${session?.prenom || ""} ${session?.nom || ""}`.trim(),
+        },
+      })),
+    };
+    return { doc, applique: calc };
+  }
+
+  /**
+   * La réduction appliquée seule, sans encaissement.
+   *
+   * Indispensable quand elle solde le colis : il n'y a plus rien à encaisser, donc plus aucun geste
+   * par lequel la réduction serait passée si elle n'avait vécu que dans `encaisser`.
+   */
+  function offrirReductionParrainage(tracking) {
+    const { doc, applique } = appliquerParrainage(data, tracking);
+    if (!applique) { notify?.("Aucune réduction de parrainage disponible sur ce colis"); return; }
+    const apres = doc.colis.find((c) => c.tracking === tracking);
+    doc.activityLog = logActivity("Réduction parrainage appliquée",
+      `${tracking} — ${fmtGNF(applique.montantGNF)} (${fmt(applique.montantEUR, "EUR")}) · reste ${fmt(apres.reste, "EUR")}`);
+    persist(doc);
+    notify?.(`Réduction de ${fmtGNF(applique.montantGNF)} appliquée — reste ${fmt(apres.reste, "EUR")}`);
+    setSelected(apres);
+  }
+
   function encaisser(tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId) {
     const receveur = receveurPaiement(session, data.users, details?.percuPar);
+    /*
+     * LA RÉDUCTION DE PARRAINAGE S'APPLIQUE AVANT L'ARGENT.
+     *
+     * Un agent pressé ne pense pas à un bouton ; il tape le montant que le client lui tend. Poser
+     * la réduction ici, dans le geste même de l'encaissement, est la seule façon qu'elle ne soit
+     * jamais oubliée — et le montant reçu est ensuite plafonné au NOUVEAU reste dû, si bien que le
+     * client ne paie pas une somme déjà couverte par sa réduction.
+     */
+    const { doc: base, applique: remise } = appliquerParrainage(data, tracking);
     // Un encaissement ne peut jamais être négatif, ni dépasser le montant restant dû : sinon une
     // faute de frappe (un zéro de trop) gonflerait le chiffre d’affaires, car la comptabilité
     // additionne le champ « payé ». Si le client remet davantage, la différence est de la monnaie
     // à lui rendre — pas une recette. On prévient l’agent quand le montant a été ajusté.
-    const cible = data.colis.find((c) => c.tracking === tracking);
+    const cible = base.colis.find((c) => c.tracking === tracking);
     const duRestant = cible ? Math.max(+(cible.prix - cible.paye).toFixed(2), 0) : 0;
+
+    /*
+     * La réduction a tout soldé : il n'y a plus rien à encaisser, mais il y a tout à enregistrer.
+     * Sortir sans persister ici aurait perdu la réduction ET marqué le colis impayé.
+     */
+    if (remise && duRestant <= 0.005) {
+      base.activityLog = logActivity("Réduction parrainage appliquée",
+        `${tracking} — ${fmtGNF(remise.montantGNF)} (${fmt(remise.montantEUR, "EUR")}) · colis soldé`);
+      persist(base);
+      notify?.(`Réduction de ${fmtGNF(remise.montantGNF)} appliquée — le colis est entièrement réglé`);
+      setSelected(base.colis.find((c) => c.tracking === tracking));
+      return;
+    }
 
     /*
      * Protection contre un double encaissement.
@@ -16275,7 +16791,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
 
     const applique = Math.min(Math.max(montant, 0), duRestant);
     const ajuste = Math.abs(applique - montant) > 0.005;
-    const next = { ...data, colis: data.colis.map((c) => {
+    const next = { ...base, colis: base.colis.map((c) => {
       if (c.tracking !== tracking) return c;
       const paye = +(c.paye + applique).toFixed(2);
       const reste = Math.max(+(c.prix - paye).toFixed(2), 0);
@@ -16288,8 +16804,23 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
       return { ...c, paye, reste, paiements: [...(c.paiements || []), paiement], declarationsPaiement };
     }) };
     next.activityLog = logActivity("Paiement encaissé", `${tracking} — ${montantSaisi} ${deviseSaisie} (${mode})${details?.reference ? ` réf. ${details.reference}` : ""}${receveur.saisiPar ? ` — argent reçu par ${receveur.par}` : ""}`);
+    /*
+     * Deux lignes de journal quand il y a eu réduction, et non une seule qui mélange tout : la
+     * réduction n'est pas un encaissement, et une caisse relue trois mois plus tard doit pouvoir
+     * distinguer les francs reçus des francs offerts.
+     */
+    if (remise) {
+      /*
+       * `pushActivity` et non `logActivity` : ce dernier repart toujours de `data.activityLog`, et
+       * la seconde ligne aurait donc effacé la première au lieu de s'y ajouter.
+       */
+      next.activityLog = pushActivity({ activityLog: next.activityLog }, session, "Réduction parrainage appliquée",
+        `${tracking} — ${fmtGNF(remise.montantGNF)} (${fmt(remise.montantEUR, "EUR")})`);
+    }
     persist(next);
-    notify(ajuste ? `Encaissement limité au solde dû (${fmt(applique, "EUR")}) — pensez à rendre la monnaie` : "Paiement encaissé");
+    notify(remise
+      ? `Réduction de ${fmtGNF(remise.montantGNF)} appliquée, puis paiement encaissé`
+      : ajuste ? `Encaissement limité au solde dû (${fmt(applique, "EUR")}) — pensez à rendre la monnaie` : "Paiement encaissé");
     const colisPaye = next.colis.find((c) => c.tracking === tracking);
     if (colisPaye) {
       /*
@@ -16593,7 +17124,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
         onClose={() => setRemiseEnCours(null)} />}
       {showEncaisseGroupe && <EncaisserGroupeModal data={data} session={session} onEncaisser={encaisserGroupe} onClose={() => setShowEncaisseGroupe(false)} />}
       {showReception && <ReceptionBordereauModal onClose={() => setShowReception(false)} data={data} persist={persist} notify={notify} session={session} />}
-      {selected && <ColisDetail colis={selected} onClose={() => setSelected(null)} onAdvance={() => advance(selected.tracking)} onDelete={() => remove(selected.tracking)} onCancel={(motif) => annuler(selected.tracking, motif)} onRefuser={(motif) => refuser(selected.tracking, motif)} onDeclarerLitige={(t, d) => declarerLitige(selected.tracking, t, d)} onResoudreLitige={(r, i) => resoudreLitige(selected.tracking, r, i)} onMajRetour={(statutRetour) => majRetour(selected.tracking, statutRetour)} onUpdate={(patch) => updateColis(selected.tracking, patch)} onEncaisser={(montant, mode, montantSaisi, deviseSaisie, details, declarationId) => encaisser(selected.tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId)} onTrace={(trace) => persist((courant) => ({ ...courant, messagesWhatsApp: avecTraces(courant, [trace]) }))} canManage={!isChauffeur} isAdmin={session.role === "Administrateur"} isChauffeur={isChauffeur} data={data} session={session} notify={notify} />}
+      {selected && <ColisDetail colis={selected} onClose={() => setSelected(null)} onAdvance={() => advance(selected.tracking)} onDelete={() => remove(selected.tracking)} onCancel={(motif) => annuler(selected.tracking, motif)} onRefuser={(motif) => refuser(selected.tracking, motif)} onDeclarerLitige={(t, d) => declarerLitige(selected.tracking, t, d)} onResoudreLitige={(r, i) => resoudreLitige(selected.tracking, r, i)} onMajRetour={(statutRetour) => majRetour(selected.tracking, statutRetour)} onUpdate={(patch) => updateColis(selected.tracking, patch)} onEncaisser={(montant, mode, montantSaisi, deviseSaisie, details, declarationId) => encaisser(selected.tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId)} onAppliquerParrainage={() => offrirReductionParrainage(selected.tracking)} onTrace={(trace) => persist((courant) => ({ ...courant, messagesWhatsApp: avecTraces(courant, [trace]) }))} canManage={!isChauffeur} isAdmin={session.role === "Administrateur"} isChauffeur={isChauffeur} data={data} session={session} notify={notify} />}
     </div>
   );
 }
@@ -21959,7 +22490,7 @@ function ImpressionDirecteModal({ colis, onClose, data }) {
   );
 }
 
-function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser, onDeclarerLitige, onResoudreLitige, onMajRetour, onUpdate, onEncaisser, canManage, isAdmin, isChauffeur, data, session, notify, onTrace }) {
+function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser, onDeclarerLitige, onResoudreLitige, onMajRetour, onUpdate, onEncaisser, onAppliquerParrainage, canManage, isAdmin, isChauffeur, data, session, notify, onTrace }) {
   const [cancelling, setCancelling] = useState(false);
   const [refusing, setRefusing] = useState(false);
   const [motifRefus, setMotifRefus] = useState("");
@@ -22648,6 +23179,41 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
           </div>
         )}
         <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>Payé : {fmt(colis.paye, "EUR")} sur {fmt(colis.prix, "EUR")}</div>
+
+        {/*
+          * 🎁 CE QUI A DÉJÀ ÉTÉ OFFERT, ET CE QUI PEUT ENCORE L'ÊTRE.
+          *
+          * Un prix plus bas que le tarif, sans un mot pour l'expliquer, est une question posée à
+          * l'agent au moment le plus mauvais — le client devant lui. La ligne dit d'où vient
+          * l'écart, et le montant en francs, qui est celui que le client connaît.
+          */}
+        {colis.remiseParrainage && (
+          <div style={{ background: "var(--ok-bg-soft)", border: "1px solid var(--ok-fg)", borderRadius: 10, padding: "10px 12px", marginBottom: 12, fontSize: 12.5, color: "var(--ok-fg)", lineHeight: 1.5 }}>
+            🎁 Réduction de parrainage déjà appliquée : <strong>{fmtGNF(colis.remiseParrainage.montantGNF)}</strong> ({fmt(colis.remiseParrainage.montant, "EUR")}).
+            Tarif avant réduction : {fmt(colis.remiseParrainage.prixAvant, "EUR")}.
+          </div>
+        )}
+        {(() => {
+          /*
+           * L'offre ne s'affiche que s'il y a réellement quelque chose à déduire. `reductionParrainage`
+           * répond exactement à cette question — la même fonction que celle qui applique, pour que
+           * l'écran ne puisse pas promettre ce que l'enregistrement refuserait.
+           */
+          if (!onAppliquerParrainage || !effectivePermission(session, "colis.enregistrer_paiement")) return null;
+          const offre = reductionParrainage(colis, data);
+          if (!offre) return null;
+          return (
+            <div style={{ background: "var(--surface2)", border: "1.5px solid #8B5CF6", borderRadius: 10, padding: "12px 14px", marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+              <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.5, minWidth: 180, flex: "1 1 200px" }}>
+                🎁 Ce client a <strong>{fmtGNF(offre.montantGNF)}</strong> de réduction de parrainage disponible.
+                <div style={{ color: "var(--muted)", marginTop: 3 }}>Elle est déduite automatiquement au moment de l’encaissement.</div>
+              </div>
+              <button onClick={onAppliquerParrainage} style={{ background: "#8B5CF6", color: "#fff", border: "none", borderRadius: 8, padding: "9px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>
+                Appliquer maintenant
+              </button>
+            </div>
+          );
+        })()}
 
         {colis.reste > 0 && effectivePermission(session, "colis.enregistrer_paiement") && (
           payerOuvert ? (
@@ -24640,6 +25206,16 @@ function CaissePage({ data, persist, session, notify }) {
         Il ne peut rien y écrire : le versement s'enregistre en Configuration, par quelqu'un qui en
         a le droit, et le serveur refuse cette liste à tout autre (voir api/_cloisonnement.js).
       */}
+      {/*
+        MON ÉQUIPE — seulement pour un responsable de zone, et seulement s'il en a une.
+        L'afficher vide à un agent lui poserait une question qui ne le concerne pas.
+      */}
+      {session?.role === "Responsable de zone" && (
+        <BlocEquipe bilan={bilanEquipe(session.id, {
+          users: data.users, colis: data.colis, categories: data.categories, config: data.commissionConfig,
+        })} />
+      )}
+
       {(() => {
         const mien = commissionDuCompte(data, session?.id);
         if (!mien || (mien.gagne <= 0 && mien.paye <= 0)) return null;
@@ -31835,6 +32411,301 @@ function PerformanceAgentsPage({ data, onBack }) {
 }
 
 /**
+ * MON ÉQUIPE — ce que chaque agent rattaché a produit, et ce qu'il rapporte à son responsable.
+ *
+ * Le même bloc sert au responsable dans sa caisse et à l'administrateur dans l'écran des
+ * commissions. Deux versions auraient fini par ne plus dire la même chose, et la première fois
+ * que cela arrive, c'est devant la personne qu'on doit payer.
+ *
+ * CE QUE MONTRE LA PREMIÈRE LIGNE : LES DEUX NATURES DE REVENU, SÉPARÉES.
+ *
+ * « Gagné » tout court ne dit pas si l'on est payé pour son propre travail ou pour celui de son
+ * équipe. C'est pourtant la première question qu'on pose devant un total, et la seule qui permette
+ * de vérifier le calcul.
+ *
+ * LES AGENTS INACTIFS SONT AFFICHÉS, PAS OMIS.
+ *
+ * Un agent rattaché qui n'a rien enregistré ce mois-ci n'est pas absent de l'équipe : il est
+ * inactif. Le masquer donnerait une équipe qui rétrécit toute seule — et cacherait justement
+ * l'information qui intéresse un responsable.
+ */
+function BlocEquipe({ bilan, compact = false, titre = "Mon équipe" }) {
+  if (!bilan || !bilan.responsable) return null;
+  const cellule = { padding: "9px 12px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" };
+  const lignes = [...bilan.agents, ...bilan.agentsInactifs];
+
+  return (
+    <div style={{ background: "var(--surface)", border: "1.5px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>
+          {titre}{compact ? ` — ${bilan.responsableNom}` : ""}
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--muted)" }}>
+          Zone {bilan.zone} · {bilan.agentsRattaches} agent{bilan.agentsRattaches > 1 ? "s" : ""} rattaché{bilan.agentsRattaches > 1 ? "s" : ""}
+          {bilan.agentsRattaches > 0 && ` · ${bilan.agentsActifs} actif${bilan.agentsActifs > 1 ? "s" : ""}`}
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: lignes.length ? 14 : 0 }}>
+        {[["Mon activité", fmt(bilan.personnel.montant, "EUR"), "var(--text)", `${bilan.personnel.colis} colis · ${bilan.personnel.kg} kg`],
+          ["Mon équipe", fmt(bilan.commissionEquipe, "EUR"), "#8B5CF6", `${bilan.equipeColis} colis · ${bilan.equipeKg} kg`],
+          ["Total gagné", fmt(bilan.total, "EUR"), "var(--ok-fg)", "les deux réunis"]].map(([label, valeur, teinte, sous]) => (
+          <div key={label}>
+            <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.3 }}>{label.toUpperCase()}</div>
+            <div style={{ fontSize: 17, fontWeight: 800, color: teinte }}>{valeur}</div>
+            <div style={{ fontSize: 10.5, color: "var(--muted)" }}>{sous}</div>
+          </div>
+        ))}
+      </div>
+
+      {lignes.length === 0 ? (
+        <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.55, borderTop: "1px solid var(--border)", paddingTop: 10 }}>
+          Aucun agent ne vous est rattaché pour l’instant. Un agent se rattache depuis sa fiche,
+          dans Configuration → Gestion Utilisateurs.
+        </div>
+      ) : (
+        <div style={{ overflowX: "auto", borderTop: "1px solid var(--border)", paddingTop: 4 }}>
+          <table style={{ width: "100%", minWidth: 620, borderCollapse: "collapse" }}>
+            <thead><tr style={{ textAlign: "left" }}>
+              {["AGENT", "ZONE", "COLIS", "KG", "UNITÉS", "IL GAGNE", "JE GAGNE"].map((h, i) => (
+                <th key={h} style={{ padding: "8px 12px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, textAlign: i >= 2 ? "right" : "left", whiteSpace: "nowrap" }}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {lignes.map((a) => (
+                <tr key={a.id} style={{ borderTop: "1px solid var(--surface2)", opacity: a.colis === 0 ? 0.55 : 1 }}>
+                  <td style={{ ...cellule, color: "var(--text)", fontWeight: 600 }}>
+                    {a.nom}
+                    {a.salarie && <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 400 }}>Salarié — ne produit aucune commission</div>}
+                    {!a.salarie && a.colis === 0 && <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 400 }}>Aucun colis sur la période</div>}
+                  </td>
+                  <td style={cellule}>{a.zone}</td>
+                  <td style={{ ...cellule, textAlign: "right", color: "var(--text)" }}>{a.colis}</td>
+                  <td style={{ ...cellule, textAlign: "right" }}>{a.kg ? `${a.kg}` : "—"}</td>
+                  <td style={{ ...cellule, textAlign: "right" }}>{a.unites || "—"}</td>
+                  <td style={{ ...cellule, textAlign: "right" }}>{a.commissionAgent ? fmt(a.commissionAgent, "EUR") : "—"}</td>
+                  <td style={{ ...cellule, textAlign: "right", color: a.commissionResponsable > 0 ? "#8B5CF6" : "var(--muted)", fontWeight: 700 }}>
+                    {a.commissionResponsable ? fmt(a.commissionResponsable, "EUR") : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 🎁 LE PROGRAMME DE PARRAINAGE, VU DE L'ENTREPRISE.
+ *
+ * Tout le monde peut le lire ; seul un compte portant `clients.parrainage` peut annuler. La
+ * distinction n'est pas décorative : lire ne coûte rien à personne, annuler retire une récompense
+ * à un client qui l'attend. Et l'écran ne fait pas foi — le serveur revérifie la permission avant
+ * d'accepter une annulation (voir reconcilierParrainages dans api/_cloisonnement.js).
+ *
+ * CE QUI EST MONTRÉ, ET POURQUOI CHAQUE COLONNE EXISTE.
+ *
+ * Le parrain, le filleul, le code employé, la date de l'inscription, l'état, la première réception
+ * qui a déclenché la récompense, ce qu'elle vaut, et si elle a déjà servi. Ce sont exactement les
+ * huit faits qu'il faut avoir sous les yeux pour trancher un litige — « on m'a promis une
+ * réduction » — sans ouvrir trois autres écrans.
+ *
+ * L'ANNULATION EXIGE UN MOTIF ÉCRIT.
+ *
+ * Une récompense retirée sans raison consignée est une décision que personne ne peut plus
+ * expliquer six mois plus tard, ni au client qui la conteste, ni à l'agent qui l'a prononcée.
+ */
+function ParrainagesPage({ data, persist, session, notify, onBack }) {
+  const [recherche, setRecherche] = useState("");
+  const [filtre, setFiltre] = useState("tous");
+  const [aAnnuler, setAAnnuler] = useState(null);
+  const [motif, setMotif] = useState("");
+
+  const peutAnnuler = effectivePermission(session, "clients.parrainage");
+  const parrainages = data?.parrainages || [];
+  const comptes = data?.clientAccounts || [];
+  const nomDu = (id) => {
+    const c = comptes.find((x) => x && x.id === id);
+    return c ? `${c.prenom || ""} ${c.nom || ""}`.trim() || c.identifiant || "—" : "Compte supprimé";
+  };
+  const telDu = (id) => (comptes.find((x) => x && x.id === id) || {}).telephone || "";
+
+  const ETIQUETTES = {
+    en_attente: { texte: "En attente de la 1re réception", fond: "var(--warn-bg)", encre: "var(--warn-fg)" },
+    recompense_validee: { texte: "Récompense acquise", fond: "var(--ok-bg-soft)", encre: "var(--ok-fg)" },
+    reduction_utilisee: { texte: "Réduction utilisée", fond: "var(--surface2)", encre: "var(--muted)" },
+    annule: { texte: "Annulé", fond: "var(--danger-bg)", encre: "var(--danger-fg)" },
+  };
+
+  const q = recherche.trim().toLowerCase();
+  const lignes = parrainages
+    .filter((p) => p && p.id)
+    .filter((p) => (filtre === "tous" ? true : p.statut === filtre))
+    .filter((p) => !q
+      || String(p.code || "").toLowerCase().includes(q)
+      || nomDu(p.parrainId).toLowerCase().includes(q)
+      || nomDu(p.filleulId).toLowerCase().includes(q))
+    .sort((a, b) => String(b.creeLe || "").localeCompare(String(a.creeLe || "")));
+
+  const vivants = parrainages.filter((p) => p && p.statut !== "annule");
+  const acquises = vivants.filter((p) => p.recompense?.crediteeLe);
+  const utilisees = acquises.filter((p) => p.recompense?.utiliseeLe);
+  const totaux = [
+    ["Parrainages", String(vivants.length), "var(--text)"],
+    ["En attente", String(vivants.filter((p) => p.statut === "en_attente").length), "var(--warn-fg)"],
+    ["Récompenses acquises", String(acquises.length), "var(--ok-fg)"],
+    ["Déjà déduites", fmtGNF(utilisees.reduce((s, p) => s + (Number(p.recompense?.montant) || 0), 0)), "var(--muted)"],
+    ["Restant à déduire", fmtGNF(acquises.filter((p) => !p.recompense?.utiliseeLe).reduce((s, p) => s + (Number(p.recompense?.montant) || 0), 0)), "#8B5CF6"],
+  ];
+
+  function confirmerAnnulation() {
+    const raison = motif.trim();
+    if (!raison) { notify?.("Indiquez le motif de l’annulation"); return; }
+    /*
+     * L'auteur et la date sont écrits ici pour que l'écran les affiche tout de suite, mais le
+     * serveur les réinscrit depuis la session : c'est lui qui fait foi sur qui a annulé.
+     */
+    persist({
+      ...data,
+      parrainages: parrainages.map((p) => (p.id === aAnnuler.id
+        ? { ...p, statut: "annule", annuleLe: new Date().toISOString(), annulePar: `${session.prenom} ${session.nom}`.trim(), motifAnnulation: raison.slice(0, 300) }
+        : p)),
+      activityLog: pushActivity(data, session, "Parrainage annulé",
+        `${nomDu(aAnnuler.parrainId)} → ${nomDu(aAnnuler.filleulId)} (code ${aAnnuler.code || "—"}) — ${raison.slice(0, 300)}`),
+    });
+    notify?.("Parrainage annulé");
+    setAAnnuler(null); setMotif("");
+  }
+
+  const cellule = { padding: "12px 14px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" };
+
+  return (
+    <div>
+      <ConfigPageHeader title="Programme de parrainage" desc={`Qui a parrainé qui, où en est chaque récompense, et laquelle a déjà été déduite. Chaque parrainage abouti vaut ${fmtGNF(MONTANT_RECOMPENSE_GNF)} pour le parrain.`} onBack={onBack} />
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12, marginBottom: 18 }}>
+        {totaux.map(([label, valeur, teinte]) => (
+          <div key={label} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px" }}>
+            <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.3 }}>{label.toUpperCase()}</div>
+            <div style={{ fontSize: 19, fontWeight: 800, color: teinte, fontFamily: "'Space Grotesk',sans-serif", marginTop: 5 }}>{valeur}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
+        <input value={recherche} onChange={(e) => setRecherche(e.target.value)} placeholder="Nom, ou code de parrainage…"
+          style={{ ...inputStyle, maxWidth: 280, flex: "1 1 200px" }} />
+        {[["tous", "Tous"], ["en_attente", "En attente"], ["recompense_validee", "Acquises"], ["reduction_utilisee", "Utilisées"], ["annule", "Annulés"]].map(([k, label]) => (
+          <button key={k} onClick={() => setFiltre(k)} style={{ padding: "7px 14px", borderRadius: 20, border: "1.5px solid " + (filtre === k ? "var(--brand-solid)" : "var(--border)"), background: filtre === k ? "var(--brand-solid)" : "var(--surface)", color: filtre === k ? "#fff" : "var(--muted)", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>{label}</button>
+        ))}
+      </div>
+
+      {lignes.length === 0 ? (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>
+          {parrainages.length === 0
+            ? "Aucun parrainage pour l’instant. Chaque client dispose d’un code dans son espace : il lui suffit de le partager."
+            : "Aucun parrainage ne correspond à cette recherche."}
+        </div>
+      ) : (
+        <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden" }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", minWidth: 960, borderCollapse: "collapse" }}>
+              <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>
+                {["PARRAIN", "FILLEUL", "CODE", "INSCRIT LE", "ÉTAT", "1RE RÉCEPTION", "RÉCOMPENSE", "DÉDUITE", ""].map((h) => (
+                  <th key={h} style={{ padding: "12px 14px", fontSize: 11, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>
+                ))}
+              </tr></thead>
+              <tbody>
+                {lignes.map((p) => {
+                  const et = ETIQUETTES[p.statut] || ETIQUETTES.en_attente;
+                  const r = p.recompense || {};
+                  return (
+                    <tr key={p.id} style={{ borderTop: "1px solid var(--surface2)", opacity: p.statut === "annule" ? 0.62 : 1 }}>
+                      <td style={{ ...cellule, color: "var(--text)", fontWeight: 600 }}>
+                        {nomDu(p.parrainId)}
+                        {telDu(p.parrainId) && <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>{telDu(p.parrainId)}</div>}
+                      </td>
+                      <td style={{ ...cellule, color: "var(--text)" }}>
+                        {nomDu(p.filleulId)}
+                        {telDu(p.filleulId) && <div style={{ fontSize: 11, color: "var(--muted)" }}>{telDu(p.filleulId)}</div>}
+                      </td>
+                      <td style={{ ...cellule, fontFamily: "monospace", letterSpacing: 0.6 }}>{p.code || "—"}</td>
+                      <td style={cellule}>{p.creeLe ? new Date(p.creeLe).toLocaleDateString("fr-FR") : "—"}</td>
+                      <td style={cellule}>
+                        <span style={{ background: et.fond, color: et.encre, padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>{et.texte}</span>
+                        {p.statut === "annule" && p.motifAnnulation && (
+                          <div style={{ fontSize: 11, color: "var(--danger-fg)", marginTop: 4, whiteSpace: "normal", maxWidth: 230 }}>
+                            {p.motifAnnulation}{p.annulePar ? ` — ${p.annulePar}` : ""}
+                          </div>
+                        )}
+                      </td>
+                      <td style={cellule}>
+                        {p.receptionLe ? new Date(p.receptionLe).toLocaleDateString("fr-FR") : "—"}
+                        {p.receptionTracking && <div style={{ fontSize: 11, color: "var(--muted)" }}>{p.receptionTracking}</div>}
+                      </td>
+                      <td style={{ ...cellule, color: r.crediteeLe ? "var(--ok-fg)" : "var(--muted)", fontWeight: r.crediteeLe ? 700 : 400 }}>
+                        {r.crediteeLe ? fmtGNF(r.montant) : "—"}
+                      </td>
+                      <td style={cellule}>
+                        {r.utiliseeLe
+                          ? <>{new Date(r.utiliseeLe).toLocaleDateString("fr-FR")}{r.utiliseeSur ? <div style={{ fontSize: 11, color: "var(--muted)" }}>{r.utiliseeSur}</div> : null}</>
+                          : "—"}
+                      </td>
+                      <td style={{ ...cellule, textAlign: "right" }}>
+                        {peutAnnuler && p.statut !== "annule" && (
+                          <button onClick={() => { setAAnnuler(p); setMotif(""); }}
+                            style={{ background: "none", border: "1px solid var(--danger-border)", color: "var(--danger-fg)", borderRadius: 7, padding: "6px 12px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>
+                            Annuler
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 14, lineHeight: 1.6 }}>
+        La récompense n’est acquise qu’à la <strong>première réception du filleul</strong>, enregistrée par un agent —
+        jamais à la simple inscription. Elle se déduit ensuite automatiquement au comptoir, sur un colis du parrain,
+        et n’est jamais coupée en deux : si la somme due est inférieure à {fmtGNF(MONTANT_RECOMPENSE_GNF)}, elle attend le colis suivant.
+        {!peutAnnuler && " L’annulation d’un parrainage est réservée aux comptes qui en ont la permission."}
+      </div>
+
+      {aAnnuler && (
+        <Modal onClose={() => setAAnnuler(null)} title="Annuler ce parrainage">
+          <div style={{ fontSize: 13.5, color: "var(--text)", lineHeight: 1.6, marginBottom: 14 }}>
+            {nomDu(aAnnuler.parrainId)} → {nomDu(aAnnuler.filleulId)} (code {aAnnuler.code || "—"}).
+          </div>
+          <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 10, padding: "11px 13px", fontSize: 12.5, color: "var(--warn-fg)", lineHeight: 1.55, marginBottom: 14 }}>
+            {aAnnuler.recompense?.utiliseeLe
+              ? "La réduction a déjà été déduite d’un colis : l’annulation ne la reprend pas. Elle marque le parrainage comme frauduleux et empêche toute suite."
+              : "La récompense cessera immédiatement de compter dans le crédit du parrain. Un parrainage annulé ne redevient jamais valide."}
+          </div>
+          <Field label="Motif de l’annulation (obligatoire)">
+            <textarea value={motif} onChange={(e) => setMotif(e.target.value)} rows={3}
+              placeholder="ex : comptes ouverts par la même personne avec deux numéros"
+              style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }} />
+          </Field>
+          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
+            <button onClick={() => setAAnnuler(null)} style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "10px 16px", fontSize: 13, cursor: "pointer" }}>Retour</button>
+            <button onClick={confirmerAnnulation} disabled={!motif.trim()}
+              style={{ background: motif.trim() ? "var(--danger-fg)" : "var(--surface2)", color: motif.trim() ? "#fff" : "var(--muted)", border: "none", borderRadius: 8, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: motif.trim() ? "pointer" : "not-allowed" }}>
+              Annuler le parrainage
+            </button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/**
  * Redimensionne un logo de partenaire pour l'impression.
  *
  * Fond blanc appliqué avant le dessin : un PNG transparent exporté tel quel ressortirait noir sur
@@ -34143,7 +35014,7 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
     setMdpTemporaire({ identifiant: u.identifiant, nom: `${u.prenom} ${u.nom}`.trim(), motdepasse: provisoire });
   }
 
-  if (editingUser) return <UserProfilePage user={editingUser} onSave={saveUser} onBack={() => setEditingUser(null)} sites={data.sites} session={session} tousLesComptes={data.users || []} />;
+  if (editingUser) return <UserProfilePage user={editingUser} onSave={saveUser} onBack={() => setEditingUser(null)} sites={data.sites} session={session} tousLesComptes={data.users || []} commissionConfig={data.commissionConfig} />;
 
   return (
     <div>
@@ -34244,7 +35115,7 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
   );
 }
 
-function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes = [] }) {
+function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes = [], commissionConfig = null }) {
   const [tab, setTab] = useState("profil");
   /*
    * L'IDENTIFIANT EST LA CLÉ DE CONNEXION, PAS UN LIBELLÉ.
@@ -34271,6 +35142,9 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
   const [agence, setAgence] = useState(user.zoneOperation || user.agence || "");
   const [paysAutorises, setPaysAutorises] = useState(user.paysAutorises || COUNTRIES.filter((c) => c.code !== "GN").map((c) => c.code));
   const [permissionsOverride, setPermissionsOverride] = useState(user.permissionsOverride || {});
+  /* Aucune fiche ne porte ce réglage aujourd'hui : le défaut est « commissionné », comme avant. */
+  const [remuneration, setRemuneration] = useState(user.remuneration || "commission");
+  const [responsableId, setResponsableId] = useState(user.responsableId || "");
   const isAdmin = role === "Administrateur";
   const totalPermCount = PERMISSIONS_SCHEMA.reduce((s, g) => s + g.permissions.length, 0);
   /*
@@ -34332,6 +35206,29 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
       zoneOperation: role === "Administrateur" || role === "Comptable" ? "" : agence,
       paysAutorises: isAdmin ? [] : paysAutorises,
       permissionsOverride: isAdmin ? {} : permissionsOverride,
+      remuneration: role === "Partenaire" ? undefined : remuneration,
+      /*
+       * Seul un agent se rattache. Un responsable rattaché à un autre responsable ferait remonter
+       * la supervision de deux crans, et personne n'a demandé une pyramide.
+       */
+      responsableId: role === "Agent" ? (responsableId || null) : null,
+      /*
+       * LE CHANGEMENT D'ÉQUIPE EST DATÉ, IL N'EFFACE PAS LE PASSÉ.
+       *
+       * Sans cette trace, un agent qui change de responsable le 15 fait basculer d'un coup au
+       * nouveau toutes les commissions du mois — y compris celles des colis pris sous l'ancien. Le
+       * nouveau serait payé pour un travail qu'il n'a pas encadré, et l'ancien perdrait ce qui lui
+       * était dû sans qu'aucun écran ne le dise.
+       */
+      historiqueRattachement: role === "Agent" && (responsableId || "") !== (user.responsableId || "")
+        ? [
+            ...(user.historiqueRattachement || []).map((h) => (h && !h.au ? { ...h, au: new Date().toISOString() } : h)),
+            ...(responsableId ? [{ responsableId, du: new Date().toISOString(), au: null, par: `${session.prenom} ${session.nom}`.trim() }] : []),
+          ]
+        : user.historiqueRattachement,
+      rattacheLe: role === "Agent" && (responsableId || "") !== (user.responsableId || "")
+        ? (responsableId ? new Date().toISOString() : null)
+        : user.rattacheLe,
     });
   }
 
@@ -34423,6 +35320,54 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
                 <option value="">Sélectionner une ville</option>
                 {villesPourPays(paysOperation).map((ville) => <option key={ville} value={ville}>{ville}</option>)}
               </select>
+            </Field>
+          )}
+
+          {/*
+            SALARIÉ OU COMMISSIONNÉ — la question qui décide de sa paie.
+
+            Une partie de l'équipe reçoit un salaire, et rien au colis ; le reste est payé à la
+            commission. Verser les deux paierait deux fois le même travail, et le tableau des
+            commissions annoncerait tous les mois une dette qui n'en est pas une.
+
+            Le défaut reste « commissionné » : mettre le salaire par défaut aurait fait tomber à
+            zéro, du jour au lendemain, la commission de toute l'équipe, sans que personne ne
+            comprenne pourquoi.
+          */}
+          {role !== "Partenaire" && (
+            <Field label="Mode de rémunération">
+              <select value={remuneration} onChange={(e) => setRemuneration(e.target.value)} style={inputStyle}>
+                <option value="commission">Commissionné — payé au kg et à l’unité</option>
+                <option value="salaire">Salarié — aucune commission</option>
+              </select>
+              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4, lineHeight: 1.5 }}>
+                {remuneration === "salaire"
+                  ? "Cette personne apparaîtra dans le tableau des commissions à zéro, avec la mention « Salarié » — pour qu’on ne la croie pas oubliée."
+                  : `Touchera ${fmt(tauxCommission(commissionConfig).agentKg, "EUR")} par kg sur les colis qu’elle enregistre.`}
+              </div>
+            </Field>
+          )}
+
+          {/*
+            LE RATTACHEMENT — de qui cette personne dépend.
+
+            C'est lui, et rien d'autre, qui déclenche la commission de supervision : ni la zone, ni
+            l'agence. Deux responsables peuvent travailler dans la même ville, et la ville ne dit
+            pas qui encadre qui.
+          */}
+          {role === "Agent" && (
+            <Field label="Rattaché à quel Responsable de zone ?">
+              <select value={responsableId} onChange={(e) => setResponsableId(e.target.value)} style={inputStyle}>
+                <option value="">Personne — aucune commission de supervision</option>
+                {tousLesComptes.filter((u) => u?.role === "Responsable de zone" && u.id !== user.id).map((u) => (
+                  <option key={u.id} value={u.id}>{`${u.prenom || ""} ${u.nom || ""}`.trim()} — {u.zoneOperation || u.agence || "sans zone"}</option>
+                ))}
+              </select>
+              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4, lineHeight: 1.5 }}>
+                {tousLesComptes.some((u) => u?.role === "Responsable de zone")
+                  ? `Sur chaque colis de cet agent, son responsable touchera ${fmt(tauxCommission(commissionConfig).superviseurKg, "EUR")} par kg — même s’il n’était pas là.`
+                  : "Aucun compte n’a encore le rôle « Responsable de zone » : changez le rôle de quelqu’un d’abord, puis revenez ici."}
+              </div>
             </Field>
           )}
 

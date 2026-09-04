@@ -18,7 +18,7 @@ import {
   tauxCommission, responsableDe, equipeDe, estSalarie, bilanEquipe, responsableAuMoment,
   TAUX_PAR_DEFAUT,
 } from "../api/_commissions.js";
-import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree, relireDuServeur, oublierCacheLocal } from "./lib/storage.js";
+import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, detailFileAttente, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree, relireDuServeur, oublierCacheLocal } from "./lib/storage.js";
 import { VILLES_PAR_PAYS } from "./data/villesParPays.js";
 
 /* ---------- design tokens ----------
@@ -4629,6 +4629,16 @@ function App() {
   const [modeSecours, setModeSecours] = useState(false);
   const [isOnline, setIsOnline] = useState(typeof navigator !== "undefined" ? navigator.onLine : true);
   const [pendingSync, setPendingSync] = useState(0);
+  /*
+   * La première écriture qui échoue depuis assez longtemps pour que ce ne soit plus du réseau.
+   * Trois tentatives : la file repart toutes les vingt secondes, donc au-delà d'une minute
+   * d'échecs répétés, c'est un refus, pas une coupure.
+   */
+  const [fileBloquee, setFileBloquee] = useState(null);
+  const rafraichirFile = useCallback(() => {
+    setPendingSync(pendingSyncCount());
+    setFileBloquee(detailFileAttente().find((f) => f.essais >= 3) || null);
+  }, []);
   const [syncing, setSyncing] = useState(false);
   const [showLogin, setShowLogin] = useState(() => pageDemandee("connexion"));
 
@@ -4896,7 +4906,7 @@ function App() {
       setTheme(d.theme || "dark");
       if (d.exchangeRates) LIVE_RATES = { ...CURRENCIES, ...d.exchangeRates };
       setLoading(false);
-      setPendingSync(pendingSyncCount());
+      rafraichirFile();
       /*
        * UN DOCUMENT VENU DU CACHE N'EST PAS UN CHARGEMENT RÉUSSI.
        *
@@ -5047,7 +5057,7 @@ function App() {
         const { flushed } = await flushOutbox();
         if (flushed > 0) notify(`Connexion rétablie — ${flushed} modification(s) synchronisée(s)`);
       } catch (e) { console.error("Échec de la synchronisation à la reconnexion.", e); }
-      setPendingSync(pendingSyncCount());
+      rafraichirFile();
       setSyncing(false);
     }
     function handleOffline() { setIsOnline(false); }
@@ -5075,9 +5085,9 @@ function App() {
       if (!navigator.onLine || pendingSyncCount() === 0) return;
       try {
         const { flushed } = await flushOutbox();
-        if (flushed > 0) setPendingSync(pendingSyncCount());
+        if (flushed > 0) rafraichirFile();
       } catch (e) { /* on retentera au prochain passage */ }
-      setPendingSync(pendingSyncCount());
+      rafraichirFile();
     }, 20000);
 
     /*
@@ -5181,7 +5191,7 @@ function App() {
     }
     return saveData(next)
       .then((r) => {
-        setPendingSync(pendingSyncCount());
+        rafraichirFile();
         if (r && r.conflict && r.latest) {
           documentCourant.current = r.latest;
           setData(r.latest);
@@ -5199,7 +5209,7 @@ function App() {
       })
       .catch((e) => {
         console.error("Échec de l'enregistrement", e);
-        setPendingSync(pendingSyncCount());
+        rafraichirFile();
         if (e?.conflit || e?.conflict) {
           setToast("Conflit détecté : rechargez les données avant de reprendre votre opération.");
           setTimeout(() => setToast(null), 8000);
@@ -5209,7 +5219,7 @@ function App() {
         setTimeout(() => setToast(null), 5000);
         return { queued: true, error: e };
       });
-  }, [modeSecours]);
+  }, [modeSecours, rafraichirFile]);
   /**
    * Enregistrer, PUIS relire le serveur pour vérifier que c'est bien arrivé.
    *
@@ -5653,7 +5663,18 @@ function App() {
           {isOnline ? <RefreshCw size={12} /> : <AlertTriangle size={12} />}
           {!isOnline
             ? "Hors ligne — vos modifications partiront au retour de la connexion"
-            : syncing ? "Enregistrement…" : `${pendingSync} en attente d’enregistrement`}
+            : syncing ? "Enregistrement…" : (() => {
+              /*
+               * « 1 en attente » ne disait pas la différence entre une seconde de réseau et un
+               * refus qui dure depuis le matin. Passé trois tentatives, on donne l'heure et le
+               * motif : c'est ce qui manquait pour comprendre qu'il ne s'agissait pas d'attendre.
+               */
+              const base = `${pendingSync} en attente d’enregistrement`;
+              const bloque = fileBloquee;
+              if (!bloque) return base;
+              const heure = bloque.depuis ? new Date(bloque.depuis).toLocaleString("fr-FR", { hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" }) : null;
+              return `${base} — bloqué${heure ? ` depuis le ${heure}` : ""}${bloque.erreur ? ` : ${bloque.erreur}` : ""}`;
+            })()}
         </div>
       )}
       {toast && <div className="bde-toast" style={{ position: "fixed", bottom: 24, insetInlineEnd: 24, insetInlineStart: isMobile ? 24 : "auto", zIndex: 300, background: "rgba(10,38,71,0.94)", color: "#fff", padding: "13px 20px", borderRadius: 14, fontSize: 13.5, fontWeight: 500, boxShadow: "0 18px 44px -14px rgba(3,10,24,0.72)", textAlign: "center" }}>{toast}</div>}

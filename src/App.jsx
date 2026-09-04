@@ -1936,6 +1936,89 @@ function auteurDuColis(colis, users) {
 }
 
 /**
+ * CE QUE L'ENTREPRISE DOIT À CHACUN, ET CE QU'ELLE LUI A DÉJÀ VERSÉ.
+ *
+ * Une commission gagnée n'est pas une commission payée. Tant que les deux ne sont pas tenus
+ * séparément, personne ne peut répondre à la seule question qui compte en fin de mois : combien
+ * reste-t-il à verser ? On additionne donc ce que les colis ont produit, on retranche les
+ * versements réellement faits, et l'on rend les trois chiffres — jamais un seul.
+ *
+ * QUELQU'UN QUI A ÉTÉ PAYÉ FIGURE TOUJOURS DANS LA LISTE, même s'il n'a plus de colis à son nom.
+ * De l'argent est sorti : le cacher parce que le compte est soldé reviendrait à effacer la trace
+ * d'un versement. Un reste négatif se lit alors comme un trop-versé, et c'est une information.
+ */
+function commissionsDues(data) {
+  const equipe = data?.users || [];
+  const parPersonne = new Map();
+  const ligneDe = (compte) => {
+    if (!parPersonne.has(compte.id)) {
+      parPersonne.set(compte.id, {
+        id: compte.id,
+        nom: `${compte.prenom || ""} ${compte.nom || ""}`.trim() || compte.identifiant || "Compte supprimé",
+        role: compte.role || "—",
+        agence: compte.zoneOperation || compte.agence || "—",
+        colis: 0, forfait: 0, bareme: 0, gagne: 0, paye: 0,
+      });
+    }
+    return parPersonne.get(compte.id);
+  };
+
+  (data?.colis || []).forEach((c) => {
+    if (estColisPartenaire(c)) return;
+    const auteur = auteurDuColis(c, equipe);
+    if (!auteur) return;
+    const part = commissionColis(c, auteur, data);
+    if (part.total <= 0) return;
+    const ligne = ligneDe(auteur);
+    ligne.colis += 1;
+    ligne.forfait += part.forfait;
+    ligne.bareme += part.bareme;
+    ligne.gagne += part.total;
+  });
+
+  (data?.paiementsCommission || []).forEach((p) => {
+    const montant = Number(p?.montant) || 0;
+    if (!p || !p.beneficiaireId || montant <= 0) return;
+    /*
+     * Un compte supprimé garde sa ligne : l'argent est sorti, et une somme versée ne disparaît pas
+     * parce qu'on a fermé un compte.
+     */
+    const compte = equipe.find((u) => u && u.id === p.beneficiaireId)
+      || { id: p.beneficiaireId, prenom: "", nom: p.beneficiaireNom || "", role: "—" };
+    ligneDe(compte).paye += montant;
+  });
+
+  return [...parPersonne.values()]
+    .map((l) => ({
+      ...l,
+      forfait: +l.forfait.toFixed(2),
+      bareme: +l.bareme.toFixed(2),
+      gagne: +l.gagne.toFixed(2),
+      paye: +l.paye.toFixed(2),
+      reste: +(l.gagne - l.paye).toFixed(2),
+    }))
+    .sort((a, b) => b.reste - a.reste || b.gagne - a.gagne);
+}
+
+/** La ligne d'une seule personne — ce que son propre écran lui montre. */
+function commissionDuCompte(data, compteId) {
+  if (!compteId) return null;
+  return commissionsDues(data).find((l) => l.id === compteId) || null;
+}
+
+/*
+ * Les versements de commission d'une personne, du plus récent au plus ancien.
+ *
+ * L'historique compte autant que le solde : « il reste 12 € » ne se discute pas de la même façon
+ * selon qu'on a versé une fois ou six.
+ */
+function versementsCommission(data, compteId) {
+  return (data?.paiementsCommission || [])
+    .filter((p) => p && p.beneficiaireId === compteId)
+    .sort((a, b) => String(b.le || "").localeCompare(String(a.le || "")));
+}
+
+/**
  * Frais de réception/récupération à l’agence, calculés sur le poids TOTAL des colis
  * sélectionnés pour un même bordereau de réception client. Tarif par paliers (ex : 1-10 kg,
  * 11-40 kg, 41-100 kg) : le palier atteint par le poids total du lot s’applique à tout le lot.
@@ -13251,37 +13334,17 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
   }
 
   /*
-   * CE QUE CHACUN A GAGNÉ — et pourquoi cet écran doit exister.
+   * CE QUE CHACUN A GAGNÉ, CE QU'IL A REÇU, CE QUI RESTE.
    *
    * Un barème qu'on ne peut pas vérifier ne se discute pas : il se subit. Un agent qui ne voit
    * pas ce que ses colis lui ont rapporté n'a aucun moyen de signaler une erreur, et une erreur
-   * qu'on ne signale pas se répète tous les mois. On montre donc le compte, colis par colis
-   * additionnés, et la part qui vient de chaque règle.
+   * qu'on ne signale pas se répète tous les mois.
    *
-   * Les colis partenaires n'y figurent pas : ils ne donnent aucune commission, et les compter
-   * dans le nombre de colis laisserait croire à un oubli de calcul.
+   * Le calcul vit dans commissionsDues() — la même fonction sert ici et sur l'écran de l'agent.
+   * En recopier une moitié aurait marché le premier jour et divergé le second, et une divergence
+   * ici s'appelle « on ne s'entend pas sur ce qui a été payé ».
    */
-  const gains = useMemo(() => {
-    const equipe = data.users || [];
-    const parPersonne = new Map();
-    (data.colis || []).forEach((c) => {
-      if (estColisPartenaire(c)) return;
-      const auteur = auteurDuColis(c, equipe);
-      if (!auteur) return;
-      const part = commissionColis(c, auteur, data);
-      if (part.total <= 0) return;
-      const ligne = parPersonne.get(auteur.id)
-        || { id: auteur.id, nom: `${auteur.prenom || ""} ${auteur.nom || ""}`.trim() || auteur.identifiant, role: auteur.role, agence: auteur.zoneOperation || auteur.agence || "—", colis: 0, forfait: 0, bareme: 0, total: 0 };
-      ligne.colis += 1;
-      ligne.forfait += part.forfait;
-      ligne.bareme += part.bareme;
-      ligne.total += part.total;
-      parPersonne.set(auteur.id, ligne);
-    });
-    return [...parPersonne.values()]
-      .map((l) => ({ ...l, forfait: +l.forfait.toFixed(2), bareme: +l.bareme.toFixed(2), total: +l.total.toFixed(2) }))
-      .sort((a, b) => b.total - a.total);
-  }, [data]);
+  const gains = useMemo(() => commissionsDues(data), [data]);
 
   /*
    * Les colis dont on ne sait pas qui les a enregistrés. On ne les cache pas : un total juste qui
@@ -13289,14 +13352,66 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
    */
   const sansAuteur = useMemo(() => (data.colis || [])
     .filter((c) => !estColisPartenaire(c) && !auteurDuColis(c, data.users || [])).length, [data]);
-  function saveCategoryRate(cat) {
-    const raw = catEdits[cat.id];
-    if (raw === undefined) return;
-    const n = raw.trim() === "" ? null : Number(String(raw).replace(",", "."));
-    if (n !== null && (isNaN(n) || n < 0)) return;
-    persist({ ...data, categories: categories.map((c) => (c.id === cat.id ? { ...c, commissionRate: n } : c)) });
-    setCatEdits((e) => { const n2 = { ...e }; delete n2[cat.id]; return n2; });
-    notify?.(`Commission personnalisée mise à jour pour "${cat.nom}"`);
+
+  /*
+   * LE VERSEMENT — par tranche ou en totalité.
+   *
+   * L'entreprise ne solde pas toujours d'un coup : elle verse ce qu'elle peut, quand elle peut. Un
+   * bouton « payer » unique aurait obligé à mentir sur le montant pour enregistrer un acompte. Le
+   * champ est donc libre, prérempli avec le reste dû — le cas le plus fréquent — et l'on peut
+   * verser moins.
+   */
+  const [versementPour, setVersementPour] = useState(null);
+  const [montantVerse, setMontantVerse] = useState("");
+  const [modeVerse, setModeVerse] = useState("Espèces");
+  const [noteVerse, setNoteVerse] = useState("");
+
+  function ouvrirVersement(ligne) {
+    setVersementPour(ligne.id);
+    setMontantVerse(String(Math.max(0, ligne.reste).toFixed(2)));
+    setModeVerse("Espèces");
+    setNoteVerse("");
+  }
+
+  function enregistrerVersement(ligne) {
+    const montant = Number(String(montantVerse).replace(",", "."));
+    if (!Number.isFinite(montant) || montant <= 0) {
+      notify?.("Indiquez un montant supérieur à zéro.");
+      return;
+    }
+    /*
+     * On ne verse pas plus que ce qui est dû. Sans ce garde-fou, une faute de frappe — un zéro de
+     * trop — sortait de l'argent que rien ne signalait ensuite, puisque le reste devenait négatif
+     * et se lisait comme une avance.
+     */
+    if (montant > ligne.reste + 0.005) {
+      notify?.(`Le reste dû à ${ligne.nom} est de ${fmt(ligne.reste, "EUR")}. Versez ce montant ou moins.`);
+      return;
+    }
+    const versement = {
+      id: `vc${Date.now()}${Math.random().toString(36).slice(2, 5)}`,
+      beneficiaireId: ligne.id,
+      /* Le nom est copié pour que l'historique reste lisible si le compte est supprimé un jour. */
+      beneficiaireNom: ligne.nom,
+      montant: +montant.toFixed(2),
+      devise: "EUR",
+      le: new Date().toISOString(),
+      parId: session?.id || null,
+      parNom: `${session?.prenom || ""} ${session?.nom || ""}`.trim() || session?.identifiant || "",
+      mode: modeVerse,
+      note: String(noteVerse || "").slice(0, 200),
+    };
+    const restant = +(ligne.reste - montant).toFixed(2);
+    persist({
+      ...data,
+      paiementsCommission: [versement, ...(data.paiementsCommission || [])],
+      activityLog: pushActivity(data, session, "Commission versée",
+        `${ligne.nom} — ${fmt(versement.montant, "EUR")} (${modeVerse}) · reste ${fmt(restant, "EUR")}`),
+    });
+    setVersementPour(null);
+    notify?.(restant > 0.005
+      ? `${fmt(versement.montant, "EUR")} versés à ${ligne.nom}. Reste ${fmt(restant, "EUR")}.`
+      : `${ligne.nom} est soldé : ${fmt(versement.montant, "EUR")} versés.`);
   }
 
   // Aperçu : simulateur simple
@@ -13371,27 +13486,96 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
             <table style={{ width: "100%", minWidth: 620, borderCollapse: "collapse" }}>
               <thead>
                 <tr style={{ textAlign: "left", background: "var(--surface2)" }}>
-                  {["PERSONNE", "AGENCE", "COLIS", "FORFAIT", "BARÈME D’AGENCE", "TOTAL"].map((t, i) => (
-                    <th key={t} style={{ padding: "10px 16px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, textAlign: i >= 2 ? "right" : "left", whiteSpace: "nowrap" }}>{t}</th>
+                  {["PERSONNE", "AGENCE", "COLIS", "GAGNÉ", "VERSÉ", "RESTE DÛ", ""].map((t, i) => (
+                    <th key={t || "actions"} style={{ padding: "10px 16px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, textAlign: i >= 2 && i <= 5 ? "right" : "left", whiteSpace: "nowrap" }}>{t}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {gains.map((g) => (
-                  <tr key={g.id} style={{ borderTop: "1px solid var(--border)" }}>
+                  <React.Fragment key={g.id}>
+                  <tr style={{ borderTop: "1px solid var(--border)" }}>
                     <td style={{ padding: "10px 16px", fontSize: 13, color: "var(--text)", fontWeight: 600 }}>
                       {g.nom}
-                      <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>{g.role}</div>
+                      <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>
+                        {g.role}
+                        {/* Le barème d'agence ne concerne que les responsables de zone. */}
+                        {g.bareme > 0 && ` · dont ${fmt(g.bareme, "EUR")} de barème d’agence`}
+                      </div>
                     </td>
                     <td style={{ padding: "10px 16px", fontSize: 12.5, color: "var(--muted)" }}>{g.agence}</td>
                     <td style={{ padding: "10px 16px", fontSize: 12.5, color: "var(--text)", textAlign: "right" }}>{g.colis}</td>
-                    <td style={{ padding: "10px 16px", fontSize: 12.5, color: "var(--muted)", textAlign: "right", whiteSpace: "nowrap" }}>{fmt(g.forfait, "EUR")}</td>
-                    {/* Le barème d'agence ne concerne que les responsables de zone : un tiret dit « sans objet », pas « zéro ». */}
-                    <td style={{ padding: "10px 16px", fontSize: 12.5, color: "var(--muted)", textAlign: "right", whiteSpace: "nowrap" }}>
-                      {g.role === "Responsable de zone" ? fmt(g.bareme, "EUR") : "—"}
+                    <td style={{ padding: "10px 16px", fontSize: 12.5, color: "var(--muted)", textAlign: "right", whiteSpace: "nowrap" }}>{fmt(g.gagne, "EUR")}</td>
+                    <td style={{ padding: "10px 16px", fontSize: 12.5, color: "var(--ok-fg)", textAlign: "right", whiteSpace: "nowrap" }}>{g.paye > 0 ? fmt(g.paye, "EUR") : "—"}</td>
+                    {/*
+                      Un reste négatif est un TROP-VERSÉ. On l'affiche en rouge plutôt que de le
+                      ramener à zéro : de l'argent est sorti en trop, et l'arrondir à zéro
+                      effacerait exactement ce qu'il faut voir.
+                    */}
+                    <td style={{ padding: "10px 16px", fontSize: 13, fontWeight: 700, textAlign: "right", whiteSpace: "nowrap",
+                      color: g.reste < -0.005 ? "var(--danger-fg)" : (g.reste > 0.005 ? "var(--text)" : "var(--muted)") }}>
+                      {g.reste < -0.005 ? `trop-versé ${fmt(-g.reste, "EUR")}` : fmt(g.reste, "EUR")}
                     </td>
-                    <td style={{ padding: "10px 16px", fontSize: 13, color: "var(--text)", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap" }}>{fmt(g.total, "EUR")}</td>
+                    <td style={{ padding: "10px 16px", textAlign: "right", whiteSpace: "nowrap" }}>
+                      {isAdmin && g.reste > 0.005 && versementPour !== g.id && (
+                        <button onClick={() => ouvrirVersement(g)}
+                          style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 7, padding: "6px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+                          Payer
+                        </button>
+                      )}
+                      {g.reste <= 0.005 && g.gagne > 0 && (
+                        <span style={{ fontSize: 11.5, color: "var(--ok-fg)", fontWeight: 700 }}>Soldé</span>
+                      )}
+                    </td>
                   </tr>
+                  {versementPour === g.id && (
+                    <tr style={{ background: "var(--surface2)" }}>
+                      <td colSpan={7} style={{ padding: "12px 16px" }}>
+                        <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10 }}>
+                          Reste dû à {g.nom} : <strong style={{ color: "var(--text)" }}>{fmt(g.reste, "EUR")}</strong>.
+                          Versez la totalité, ou une tranche.
+                        </div>
+                        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
+                          <div>
+                            <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>Montant (EUR)</div>
+                            <input value={montantVerse} onChange={(e) => setMontantVerse(e.target.value)}
+                              inputMode="decimal" style={{ ...inputStyle, marginBottom: 0, width: 130 }} />
+                          </div>
+                          <div>
+                            <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>Mode</div>
+                            <select value={modeVerse} onChange={(e) => setModeVerse(e.target.value)} style={{ ...inputStyle, marginBottom: 0, width: 150 }}>
+                              {["Espèces", "Orange Money", "Virement", "Autre"].map((m) => <option key={m} value={m}>{m}</option>)}
+                            </select>
+                          </div>
+                          <div style={{ flex: 1, minWidth: 180 }}>
+                            <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 4 }}>Note (facultatif)</div>
+                            <input value={noteVerse} onChange={(e) => setNoteVerse(e.target.value)}
+                              placeholder="ex : acompte de septembre" style={{ ...inputStyle, marginBottom: 0, width: "100%" }} />
+                          </div>
+                          <button onClick={() => enregistrerVersement(g)}
+                            style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                            Enregistrer le versement
+                          </button>
+                          <button onClick={() => setVersementPour(null)}
+                            style={{ background: "none", border: "1px solid var(--border)", borderRadius: 8, padding: "9px 14px", fontSize: 12.5, color: "var(--muted)", cursor: "pointer" }}>
+                            Annuler
+                          </button>
+                        </div>
+                        {versementsCommission(data, g.id).length > 0 && (
+                          <div style={{ marginTop: 12, fontSize: 11.5, color: "var(--muted)", lineHeight: 1.7 }}>
+                            <strong style={{ color: "var(--text)" }}>Versements déjà faits</strong>
+                            {versementsCommission(data, g.id).map((v) => (
+                              <div key={v.id}>
+                                {new Date(v.le).toLocaleDateString("fr-FR")} · {fmt(Number(v.montant) || 0, "EUR")} · {v.mode || "—"}
+                                {v.parNom ? ` · par ${v.parNom}` : ""}{v.note ? ` · ${v.note}` : ""}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  )}
+                  </React.Fragment>
                 ))}
               </tbody>
             </table>
@@ -24444,6 +24628,62 @@ function CaissePage({ data, persist, session, notify }) {
           <Download size={16} /> Exporter (Excel)
         </button>
       </div>
+
+      {/*
+        MES COMMISSIONS — l'autre sens de la caisse.
+        ─────────────────────────────────────────────────────────────────────────────
+        Tout le reste de cet écran dit ce que l'agent doit REMETTRE à l'entreprise. Ceci dit ce que
+        l'entreprise lui doit, à lui. Les deux se lisent au même endroit parce qu'ils se règlent
+        souvent dans la même conversation, et qu'un agent qui ne voit que sa dette n'a jamais le
+        compte entier sous les yeux.
+
+        Il ne peut rien y écrire : le versement s'enregistre en Configuration, par quelqu'un qui en
+        a le droit, et le serveur refuse cette liste à tout autre (voir api/_cloisonnement.js).
+      */}
+      {(() => {
+        const mien = commissionDuCompte(data, session?.id);
+        if (!mien || (mien.gagne <= 0 && mien.paye <= 0)) return null;
+        const verses = versementsCommission(data, session.id);
+        const dernier = verses[0];
+        /* Un versement de moins de sept jours est annoncé : c'est le message qu'on attend. */
+        const recent = dernier && (Date.now() - new Date(dernier.le).getTime()) < 7 * 86400000;
+        return (
+          <div style={{ background: "var(--surface)", border: "1.5px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)", marginBottom: 10 }}>
+              Mes commissions{voitTousLesAgents ? "" : ""}
+            </div>
+            {recent && (
+              <div style={{ background: "var(--ok-bg)", border: "1px solid var(--ok-fg)", borderRadius: 9, padding: "9px 12px", marginBottom: 12, fontSize: 12.5, color: "var(--ok-fg)", fontWeight: 600 }}>
+                {fmt(Number(dernier.montant) || 0, "EUR")} vous ont été versés le {new Date(dernier.le).toLocaleDateString("fr-FR")}
+                {dernier.mode ? ` (${dernier.mode})` : ""}
+                {mien.reste > 0.005 ? ` — il reste ${fmt(mien.reste, "EUR")} à venir.` : " — votre compte est soldé."}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 22, flexWrap: "wrap" }}>
+              {[["Gagné", fmt(mien.gagne, "EUR"), "var(--text)"],
+                ["Déjà versé", mien.paye > 0 ? fmt(mien.paye, "EUR") : "—", "var(--ok-fg)"],
+                ["Reste dû", fmt(Math.max(0, mien.reste), "EUR"), mien.reste > 0.005 ? "var(--warn-fg)" : "var(--muted)"],
+                [`Colis enregistrés`, String(mien.colis), "var(--muted)"]].map(([label, valeur, teinte]) => (
+                <div key={label}>
+                  <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.3 }}>{label.toUpperCase()}</div>
+                  <div style={{ fontSize: 17, fontWeight: 800, color: teinte }}>{valeur}</div>
+                </div>
+              ))}
+            </div>
+            {verses.length > 0 && (
+              <div style={{ marginTop: 12, borderTop: "1px solid var(--border)", paddingTop: 10, fontSize: 11.5, color: "var(--muted)", lineHeight: 1.7 }}>
+                {verses.slice(0, 6).map((v) => (
+                  <div key={v.id}>
+                    {new Date(v.le).toLocaleDateString("fr-FR")} · {fmt(Number(v.montant) || 0, "EUR")} · {v.mode || "—"}
+                    {v.note ? ` · ${v.note}` : ""}
+                  </div>
+                ))}
+                {verses.length > 6 && <div>… et {verses.length - 6} versement{verses.length - 6 > 1 ? "s" : ""} plus ancien{verses.length - 6 > 1 ? "s" : ""}.</div>}
+              </div>
+            )}
+          </div>
+        );
+      })()}
 
       {!voitTousLesAgents && (
         <div style={{ background: "var(--info-bg)", border: "1px solid var(--info-border)", borderRadius: 10, padding: "10px 14px", marginBottom: 16, fontSize: 12.5, color: "var(--info-fg)" }}>

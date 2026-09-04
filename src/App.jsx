@@ -3249,8 +3249,20 @@ async function envoyerWhatsApp(telephone, message, mediaUrl, gabarit, options = 
      * L'identifiant que Meta donne au message revient avec la réponse. C'est la seule clé qui
      * permettra de rattacher plus tard son accusé — parti, remis, lu, échoué. Sans lui, on saurait
      * qu'un message est parti sans jamais savoir s'il est arrivé.
+     *
+     * ON LISAIT `data.id`. LE SERVEUR L'APPELLE `sid`.
+     *
+     * Le champ lu n'existait donc jamais, et TOUTES les traces d'envoi de l'application portaient
+     * un identifiant vide — vérifié en base : pas un seul message sortant n'en avait. Les accusés
+     * de réception que Meta renvoie ensuite sont classés par cet identifiant : n'en ayant aucun à
+     * rattacher, ils étaient tous ignorés en silence.
+     *
+     * Conséquence exacte, et c'est celle qu'on observe : l'historique des envois affichait
+     * « Envoyés » et jamais « Remis », « Lus » ni « Échecs ». Un message que Meta refuse ensuite —
+     * numéro qui n'est pas sur WhatsApp, modèle non validé, fenêtre de 24 h dépassée — restait
+     * affiché comme parti. L'application était incapable de montrer un échec.
      */
-    if (reponse.ok) return { envoye: true, id: data?.id || null };
+    if (reponse.ok) return { envoye: true, id: data?.sid || data?.id || null };
     // 501 = Twilio pas encore configuré : cas normal, on ne parle pas d'erreur à l'agent.
     if (reponse.status === 501) return { envoye: false, raison: null };
     return { envoye: false, raison: data.error || "L’envoi automatique a échoué." };
@@ -16869,7 +16881,9 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
       // Le détail voyage avec le colis : c'est {{3}} du modèle, et le modèle n'a pas d'autre
       // moyen de savoir ce qui vient de changer.
       notifierEvenement(next, "modification", { ...apres, detailsModification: details },
-        `Bonjour ${apres.destinataire}, les informations de votre colis ${nomExpediteurPourClient(data, apres)} ${tracking} ont été mises à jour — ${details}.`);
+        `Bonjour ${apres.destinataire}, les informations de votre colis ${nomExpediteurPourClient(data, apres)} ${tracking} ont été mises à jour — ${details}.`)
+      .then(({ traces }) => { if (traces?.length) persist((courant) => ({ ...courant, messagesWhatsApp: avecTraces(courant, traces) })); })
+      .catch(() => { /* une notification ne bloque jamais l’action en cours */ });
     }
   }
   const [remiseEnCours, setRemiseEnCours] = useState(null);
@@ -16905,7 +16919,9 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
     const colisMaj = next.colis.find((c) => c.tracking === tracking);
     if (colisMaj) {
       notifierEvenement(next, "livre", colisMaj,
-        `Bonjour ${colisMaj.destinataire}, votre colis ${nomExpediteurPourClient(data, colisMaj)} ${tracking} a bien été remis à ${preuve.nom}. Merci de votre confiance !`);
+        `Bonjour ${colisMaj.destinataire}, votre colis ${nomExpediteurPourClient(data, colisMaj)} ${tracking} a bien été remis à ${preuve.nom}. Merci de votre confiance !`)
+      .then(({ traces }) => { if (traces?.length) persist((courant) => ({ ...courant, messagesWhatsApp: avecTraces(courant, traces) })); })
+      .catch(() => { /* une notification ne bloque jamais l’action en cours */ });
     }
   }
 
@@ -16945,7 +16961,9 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
           + (colisMaj.codeRetrait ? ` Votre code de retrait : ${colisMaj.codeRetrait} — présentez-le à l’agence.` : ""),
         livre: `Bonjour ${colisMaj.destinataire}, votre colis ${nomExpediteurPourClient(data, colisMaj)} ${tracking} vous a bien été remis. Merci de votre confiance !`,
       };
-      notifierEvenement(next, evt, colisMaj, messages[evt]);
+      notifierEvenement(next, evt, colisMaj, messages[evt])
+      .then(({ traces }) => { if (traces?.length) persist((courant) => ({ ...courant, messagesWhatsApp: avecTraces(courant, traces) })); })
+      .catch(() => { /* une notification ne bloque jamais l’action en cours */ });
     }
     if (data.notificationSettings?.ouvertureAutoWhatsApp && current.telephone) {
       const msg = `Bonjour ${current.destinataire}, votre colis ${nomExpediteurPourClient(data, current)} (${tracking}) est maintenant : ${nextStatus}. Merci de votre confiance.`;
@@ -17275,7 +17293,9 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
         + `${fmtGNF(applique * (LIVE_RATES.GNF || CURRENCIES.GNF))} pour le colis ${tracking}.`
         + (colisPaye.reste > 0
             ? ` Reste à régler : ${fmtGNF(colisPaye.reste * (LIVE_RATES.GNF || CURRENCIES.GNF))}.`
-            : " Votre colis est entièrement réglé. Merci !"));
+            : " Votre colis est entièrement réglé. Merci !"))
+        .then(({ traces }) => { if (traces?.length) persist((courant) => ({ ...courant, messagesWhatsApp: avecTraces(courant, traces) })); })
+        .catch(() => { /* une notification ne bloque jamais l’encaissement */ });
     }
     setSelected(next.colis.find((c) => c.tracking === tracking));
   }
@@ -17533,7 +17553,9 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
         onConfirmer={(preuve) => confirmerRemise(remiseEnCours.tracking, preuve)}
         onRenvoyerCode={(c) => {
           notifierEvenement(data, "retrait", c,
-            `Bonjour ${c.destinataire}, votre code de retrait pour le colis ${c.tracking} est ${c.codeRetrait}. Présentez-le à notre agence.`);
+            `Bonjour ${c.destinataire}, votre code de retrait pour le colis ${c.tracking} est ${c.codeRetrait}. Présentez-le à notre agence.`)
+      .then(({ traces }) => { if (traces?.length) persist((courant) => ({ ...courant, messagesWhatsApp: avecTraces(courant, traces) })); })
+      .catch(() => { /* une notification ne bloque jamais l’action en cours */ });
           notify?.("Code renvoyé au client");
         }}
         onClose={() => setRemiseEnCours(null)} />}
@@ -33850,6 +33872,7 @@ function PartenairesPage({ data, persist, notify, onBack, session }) {
     const verifie = colisMaj.find((c) => c.tracking === tracking);
     if (verifie) {
       notifierEvenement({ ...data, colis: colisMaj }, "verification", verifie, "")
+        .then(({ traces }) => { if (traces?.length) persist((courant) => ({ ...courant, messagesWhatsApp: avecTraces(courant, traces) })); })
         .catch(() => { /* un colis reste vérifié même si le message ne part pas */ });
     }
     notify?.(`Colis ${tracking} vérifié`);

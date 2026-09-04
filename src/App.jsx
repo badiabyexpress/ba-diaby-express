@@ -3123,6 +3123,49 @@ function trackingUrlFor(tracking) {
  */
 const LIEN_PDF = [22, 92, 170];
 
+/**
+ * LE PIED DE PAGE D'UN DOCUMENT — l'entreprise telle qu'elle est enregistrée, et non recopiée.
+ *
+ * Il était écrit en dur sur le bordereau : le nom, puis une adresse électronique tapée à la main
+ * dans le code. Changer le courriel dans Configuration ne changeait donc rien au bas des
+ * documents — on continuait d'imprimer une adresse à laquelle plus personne ne répond, sans que
+ * rien ne le signale.
+ *
+ * ET IL MANQUAIT LE RCCM.
+ *
+ * Un document qui sort de l'entreprise — un bordereau remis à un transporteur, une fiche de
+ * voyage présentée pour arrêter des comptes — vaut d'abord par ce qui prouve que l'entreprise
+ * existe légalement. Le numéro du registre du commerce le dit en une ligne. Sans lui, la pièce
+ * n'est qu'un tableau imprimé.
+ *
+ * Chaque morceau ne paraît que s'il est renseigné : un pied qui annonce « RCCM » suivi de rien
+ * inspire moins confiance qu'un pied qui n'en parle pas.
+ */
+function piedEntreprise(doc, entreprise, { y = 288, nom = "Ba-Diaby Express", mention = "" } = {}) {
+  const e = entreprise || {};
+  const propre = (v) => String(v ?? "").trim();
+  const telephones = [propre(e.telephone), propre(e.telephone2)].filter(Boolean).join(" / ");
+  const morceaux = [
+    propre(nom) || "Ba-Diaby Express",
+    propre(e.rccm) ? `RCCM ${propre(e.rccm)}` : "",
+    propre(e.adresseSiege),
+    telephones,
+    propre(e.email),
+  ].filter(Boolean);
+
+  doc.setFont(undefined, "normal");
+  doc.setFontSize(7.3);
+  doc.setTextColor(150, 150, 150);
+  /*
+   * Deux lignes au plus, et coupées à la largeur utile. Un pied qui déborde de la page s'imprime
+   * à moitié — pire qu'un pied court, parce qu'on ne voit pas qu'il manque quelque chose.
+   */
+  const lignes = doc.splitTextToSize(morceaux.join(" · "), 182).slice(0, 2);
+  const toutes = propre(mention) ? [propre(mention), ...lignes] : lignes;
+  /* On empile vers le haut : la dernière ligne reste exactement à la hauteur demandée. */
+  toutes.forEach((ligne, i) => doc.text(ligne, 14, y - (toutes.length - 1 - i) * 3.4));
+}
+
 function poserLiensSuivi(doc, donnees, colonne = 0) {
   const cellule = donnees?.cell;
   if (!cellule || donnees.section !== "body") return;
@@ -8375,7 +8418,7 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
             {statsClient.recusEntrepot > 1 && <button onClick={() => setShowRegroupement(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Regrouper mes colis")}</button>}
             <button onClick={() => setShowPaiements(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Mes paiements")}</button>
             <button onClick={() => setShowProfil(true)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Mon profil")}</button>
-            {mesColis.length > 0 && <button onClick={() => downloadClientManifest(compte, mesColis, deviseClient)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Mon bordereau (PDF)")}</button>}
+            {mesColis.length > 0 && <button onClick={() => downloadClientManifest(compte, mesColis, deviseClient, data?.entreprise, data?.branding?.companyName)} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--text)", fontWeight: 600, cursor: "pointer" }}>{T("Mon bordereau (PDF)")}</button>}
             <ClientLangSwitch lang={lang} onChange={setLang} />
             <button onClick={() => { oublierCacheLocal(); ecrireSessionClient(null); setCompte(null); setIdentifiant(""); setMotdepasse(""); setMode("login"); }} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--muted)", fontWeight: 600, cursor: "pointer" }}>{T("Déconnexion")}</button>
           </div>
@@ -16825,7 +16868,7 @@ function BordereauDetail({ bordereau, data, persist, session, notify, onBack, on
     setGenPdf(true);
     try {
       const depensesLiees = (data.depenses || []).filter((d) => d.bordereauId === bordereau.id || d.bordereauNumero === bordereau.numero || String(d.nom || "").endsWith(`(${bordereau.numero})`));
-      await downloadRouteManifest(colisInclus, country, bordereau.direction, bordereau, devise, depensesLiees, data.facturesPartenaire);
+      await downloadRouteManifest(colisInclus, country, bordereau.direction, bordereau, devise, depensesLiees, data.facturesPartenaire, data.entreprise, data.branding?.companyName);
     }
     catch (e) { console.error(e); notify?.("Échec de génération du PDF"); }
     setGenPdf(false);
@@ -18044,7 +18087,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
  * poids total du lot, avec le tarif dégressif au kg configuré (moins cher au-delà du seuil).
  */
 /** Bordereau personnel PDF pour un client — récapitulatif de tous ses colis, à télécharger depuis son espace. */
-async function downloadClientManifest(compte, colisListe, devise = "GNF") {
+async function downloadClientManifest(compte, colisListe, devise = "GNF", entreprise = null, nomEntreprise = "") {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF());
   const W = 210, H = 297, M = 14;
@@ -18073,9 +18116,10 @@ async function downloadClientManifest(compte, colisListe, devise = "GNF") {
 
   const piedDePage = (numPage, total) => {
     doc.setDrawColor(...LINE); doc.setLineWidth(0.3); doc.line(M, H - 16, W - M, H - 16);
+    /* Le numéro de page d'abord : le pied de l'entreprise s'empile au-dessus de sa hauteur. */
     doc.setFontSize(7.3); doc.setTextColor(...MUTED); doc.setFont(undefined, "normal");
-    doc.text("Ba-Diaby Express — Transport de colis Conakry - Monde · badiabyexpress.bde@gmail.com", M, H - 11);
     doc.text(`Page ${numPage} / ${total}`, W - M, H - 11, { align: "right" });
+    piedEntreprise(doc, entreprise, { y: H - 11, nom: nomEntreprise || "Ba-Diaby Express" });
   };
 
   const enTeteTableau = (y) => {
@@ -18152,7 +18196,7 @@ async function downloadClientManifest(compte, colisListe, devise = "GNF") {
   openPdf(doc, `mon-bordereau-${compte.nom}.pdf`);
 }
 
-async function downloadReceptionBordereau(compte, colisSelectionnes, tarifs) {
+async function downloadReceptionBordereau(compte, colisSelectionnes, tarifs, entreprise = null, nomEntreprise = "") {
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF());
   const poidsTotal = colisSelectionnes.reduce((s, c) => s + (Number(c.poids) || 0), 0);
@@ -18232,12 +18276,12 @@ async function downloadReceptionBordereau(compte, colisSelectionnes, tarifs) {
 
   doc.setFontSize(7.5); doc.setTextColor(140, 140, 140); doc.setFont(undefined, "normal");
   doc.text("Ce bordereau récapitule les colis disponibles à la récupération et le montant à régler à l’agence.", 14, y);
-  doc.text("Ba-Diaby Express — Transport de colis Conakry - Monde · badiabyexpress.bde@gmail.com", 14, y + 5);
+  piedEntreprise(doc, entreprise, { y: y + 5, nom: nomEntreprise || "Ba-Diaby Express" });
 
   openPdf(doc, `bordereau-reception-${compte.nom}-${numero}.pdf`);
 }
 
-async function downloadRouteManifest(colisRoute, country, direction, bordereau, deviseAffichage, depensesLiees = [], facturesPartenaire = []) {
+async function downloadRouteManifest(colisRoute, country, direction, bordereau, deviseAffichage, depensesLiees = [], facturesPartenaire = [], entreprise = null, nomEntreprise = "") {
   const cur = deviseAffichage || country.currency;
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF());
@@ -18531,8 +18575,7 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   doc.text("Signature du transporteur :", 110, sigY);
   doc.line(110, sigY + 14, 181, sigY + 14);
 
-  doc.setFontSize(7.3); doc.setTextColor(150, 150, 150);
-  doc.text("Ba-Diaby Express — Transport de colis Conakry - Monde · badiabyexpress.bde@gmail.com", 14, 288);
+  piedEntreprise(doc, entreprise, { nom: nomEntreprise || "Ba-Diaby Express" });
 
   openPdf(doc, `bordereau-${bordereau?.numero || `${country.code}-${direction}`}-${new Date().toISOString().slice(0, 10)}.pdf`);
 }
@@ -25372,8 +25415,10 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data, devis
   doc.text("Signature du responsable :", 14, y);
   doc.setDrawColor(180); doc.line(14, y + 11, 85, y + 11);
 
-  doc.setFontSize(7.3); doc.setTextColor(150, 150, 150);
-  doc.text(`Édité le ${new Date().toLocaleString("fr-FR")} — Ba-Diaby Express`, 14, 288);
+  piedEntreprise(doc, data?.entreprise, {
+    nom: data?.branding?.companyName || "Ba-Diaby Express",
+    mention: `Édité le ${new Date().toLocaleString("fr-FR")}`,
+  });
 }
 
 /**
@@ -27176,7 +27221,7 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
 
   async function generer() {
     setGeneration(true);
-    try { await downloadReceptionBordereau(compte, colisSelectionnes, tarifs); }
+    try { await downloadReceptionBordereau(compte, colisSelectionnes, tarifs, data?.entreprise, data?.branding?.companyName); }
     catch (e) { console.error(e); }
     setGeneration(false);
   }

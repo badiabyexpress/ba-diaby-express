@@ -23698,7 +23698,7 @@ function genNumeroRemise(remisesExistantes, rang) {
  * pour une seule somme, que ni l'agent ni le comptable ne pouvaient pointer. Tout est désormais
  * converti dans la devise choisie à l'écran, et le taux appliqué est écrit sur le bon.
  */
-function dessinerBonRemise(doc, remise, lignes, hasAutoTable, devise = "GNF") {
+function dessinerBonRemise(doc, remise, lignes, hasAutoTable, devise = "GNF", entreprise = {}) {
   const INK = [26, 30, 38], MUTED = [122, 130, 142], RED = [214, 39, 63], NAVY = [10, 38, 71];
   let y = 20;
   doc.addImage(DEFAULT_LOGO, "PNG", 14, y - 6, 16, 16);
@@ -23706,13 +23706,18 @@ function dessinerBonRemise(doc, remise, lignes, hasAutoTable, devise = "GNF") {
   doc.text("BA-DIABY EXPRESS", 34, y);
   doc.setFont(undefined, "normal"); doc.setFontSize(10); doc.setTextColor(...MUTED);
   doc.text("Bon de remise en caisse", 34, y + 6);
+  const rccmCaisse = String(entreprise?.rccm || "").trim();
+  if (rccmCaisse) {
+    doc.setFont(undefined, "bold"); doc.setFontSize(8.5); doc.setTextColor(...NAVY);
+    doc.text(`RCCM ${rccmCaisse}`, 34, y + 12);
+  }
   doc.setFont(undefined, "bold"); doc.setFontSize(11); doc.setTextColor(...INK);
   doc.text(remise.numero, 196, y, { align: "right" });
   if (remise.provisoire) {
     doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(...RED);
     doc.text("À FAIRE VALIDER", 196, y + 6, { align: "right" });
   }
-  y += 20;
+  y += rccmCaisse ? 26 : 20;
   doc.setDrawColor(...RED); doc.setLineWidth(0.6); doc.line(14, y, 196, y);
   y += 10;
 
@@ -23783,10 +23788,10 @@ function dessinerBonRemise(doc, remise, lignes, hasAutoTable, devise = "GNF") {
   doc.text("Signature du caissier :", 110, y);
   doc.line(110, y + 16, 181, y + 16);
 
-  doc.setFontSize(7.3); doc.setTextColor(150, 150, 150);
-  doc.text(`Édité le ${new Date().toLocaleString("fr-FR")} — Ba-Diaby Express`, 14, 288);
+    doc.setFontSize(7.3); doc.setTextColor(150, 150, 150);
+  const piedRccm = rccmCaisse ? ` — RCCM ${rccmCaisse}` : "";
+  doc.text(`Édité le ${new Date().toLocaleString("fr-FR")} — Ba-Diaby Express${piedRccm}`, 14, 288);
 }
-
 /**
  * Caisse — qui a encaissé quoi, et combien chaque agent doit remettre.
  *
@@ -24000,7 +24005,7 @@ function CaissePage({ data, persist, session, notify }) {
       const hasAutoTable = await ensureAutoTable();
       listeRemises.forEach((r, i) => {
         if (i > 0) doc.addPage();
-        dessinerBonRemise(doc, r, r.lignesPdf || lignesDeRemise(r), hasAutoTable, deviseBon);
+        dessinerBonRemise(doc, r, r.lignesPdf || lignesDeRemise(r), hasAutoTable, deviseBon, data.entreprise || {});
       });
       openPdf(doc, `bon-remise-${listeRemises.map((r) => r.numero).join("-")}-${new Date().toISOString().slice(0, 10)}.pdf`);
     } catch (e) {

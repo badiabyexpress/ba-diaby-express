@@ -15,7 +15,8 @@ import { bilanParrainage, creditDisponible, consommerCredit, MONTANT_RECOMPENSE_
  */
 import {
   commissionDuColis, commissionAgent, commissionSuperviseur, basesDuColis,
-  tauxCommission, responsableDe, equipeDe, estSalarie, TAUX_PAR_DEFAUT,
+  tauxCommission, responsableDe, equipeDe, estSalarie, bilanEquipe, responsableAuMoment,
+  TAUX_PAR_DEFAUT,
 } from "../api/_commissions.js";
 import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree, relireDuServeur, oublierCacheLocal } from "./lib/storage.js";
 import { VILLES_PAR_PAYS } from "./data/villesParPays.js";
@@ -13996,6 +13997,29 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
         )}
       </div>
 
+      {/*
+        LES RESPONSABLES DE ZONE, VUS DE L'ENTREPRISE.
+
+        Pour chacun : ce qu'il a fait de sa main, ce que son équipe lui rapporte, et le détail
+        jusqu'à l'agent. C'est ce qu'il faut avoir sous les yeux avant de signer un versement —
+        sinon on paie un total qu'on n'a pas pu vérifier.
+
+        Le bloc ne s'affiche pas tant qu'aucun compte ne porte ce rôle : une section vide sur un
+        écran de réglages se lit comme une fonction cassée.
+      */}
+      {(data.users || []).some((u) => u?.role === "Responsable de zone") && (
+        <div style={{ marginBottom: 20, maxWidth: 900 }}>
+          <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Responsables de zone</div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>
+            Leur activité personnelle, celle de leur équipe, et le détail agent par agent.
+          </div>
+          {(data.users || []).filter((u) => u?.role === "Responsable de zone").map((u) => (
+            <BlocEquipe key={u.id} compact titre="Équipe"
+              bilan={bilanEquipe(u.id, { users: data.users, colis: data.colis, categories: data.categories, config: data.commissionConfig })} />
+          ))}
+        </div>
+      )}
+
       <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", maxWidth: 640, marginBottom: 20 }}>
         <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)" }}>
           <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14 }}>Taux personnalisés par catégorie</div>
@@ -25182,6 +25206,16 @@ function CaissePage({ data, persist, session, notify }) {
         Il ne peut rien y écrire : le versement s'enregistre en Configuration, par quelqu'un qui en
         a le droit, et le serveur refuse cette liste à tout autre (voir api/_cloisonnement.js).
       */}
+      {/*
+        MON ÉQUIPE — seulement pour un responsable de zone, et seulement s'il en a une.
+        L'afficher vide à un agent lui poserait une question qui ne le concerne pas.
+      */}
+      {session?.role === "Responsable de zone" && (
+        <BlocEquipe bilan={bilanEquipe(session.id, {
+          users: data.users, colis: data.colis, categories: data.categories, config: data.commissionConfig,
+        })} />
+      )}
+
       {(() => {
         const mien = commissionDuCompte(data, session?.id);
         if (!mien || (mien.gagne <= 0 && mien.paye <= 0)) return null;
@@ -32372,6 +32406,93 @@ function PerformanceAgentsPage({ data, onBack }) {
         </div>
       )}
       <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 14 }}>Les colis créés avant cette mise à jour n’ont pas d’agent enregistré et apparaissent sous "Non renseigné". De même, le temps de réponse ne peut être calculé que pour les messages envoyés depuis cette mise à jour.</div>
+    </div>
+  );
+}
+
+/**
+ * MON ÉQUIPE — ce que chaque agent rattaché a produit, et ce qu'il rapporte à son responsable.
+ *
+ * Le même bloc sert au responsable dans sa caisse et à l'administrateur dans l'écran des
+ * commissions. Deux versions auraient fini par ne plus dire la même chose, et la première fois
+ * que cela arrive, c'est devant la personne qu'on doit payer.
+ *
+ * CE QUE MONTRE LA PREMIÈRE LIGNE : LES DEUX NATURES DE REVENU, SÉPARÉES.
+ *
+ * « Gagné » tout court ne dit pas si l'on est payé pour son propre travail ou pour celui de son
+ * équipe. C'est pourtant la première question qu'on pose devant un total, et la seule qui permette
+ * de vérifier le calcul.
+ *
+ * LES AGENTS INACTIFS SONT AFFICHÉS, PAS OMIS.
+ *
+ * Un agent rattaché qui n'a rien enregistré ce mois-ci n'est pas absent de l'équipe : il est
+ * inactif. Le masquer donnerait une équipe qui rétrécit toute seule — et cacherait justement
+ * l'information qui intéresse un responsable.
+ */
+function BlocEquipe({ bilan, compact = false, titre = "Mon équipe" }) {
+  if (!bilan || !bilan.responsable) return null;
+  const cellule = { padding: "9px 12px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" };
+  const lignes = [...bilan.agents, ...bilan.agentsInactifs];
+
+  return (
+    <div style={{ background: "var(--surface)", border: "1.5px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>
+          {titre}{compact ? ` — ${bilan.responsableNom}` : ""}
+        </div>
+        <div style={{ fontSize: 11.5, color: "var(--muted)" }}>
+          Zone {bilan.zone} · {bilan.agentsRattaches} agent{bilan.agentsRattaches > 1 ? "s" : ""} rattaché{bilan.agentsRattaches > 1 ? "s" : ""}
+          {bilan.agentsRattaches > 0 && ` · ${bilan.agentsActifs} actif${bilan.agentsActifs > 1 ? "s" : ""}`}
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 22, flexWrap: "wrap", marginBottom: lignes.length ? 14 : 0 }}>
+        {[["Mon activité", fmt(bilan.personnel.montant, "EUR"), "var(--text)", `${bilan.personnel.colis} colis · ${bilan.personnel.kg} kg`],
+          ["Mon équipe", fmt(bilan.commissionEquipe, "EUR"), "#8B5CF6", `${bilan.equipeColis} colis · ${bilan.equipeKg} kg`],
+          ["Total gagné", fmt(bilan.total, "EUR"), "var(--ok-fg)", "les deux réunis"]].map(([label, valeur, teinte, sous]) => (
+          <div key={label}>
+            <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.3 }}>{label.toUpperCase()}</div>
+            <div style={{ fontSize: 17, fontWeight: 800, color: teinte }}>{valeur}</div>
+            <div style={{ fontSize: 10.5, color: "var(--muted)" }}>{sous}</div>
+          </div>
+        ))}
+      </div>
+
+      {lignes.length === 0 ? (
+        <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.55, borderTop: "1px solid var(--border)", paddingTop: 10 }}>
+          Aucun agent ne vous est rattaché pour l’instant. Un agent se rattache depuis sa fiche,
+          dans Configuration → Gestion Utilisateurs.
+        </div>
+      ) : (
+        <div style={{ overflowX: "auto", borderTop: "1px solid var(--border)", paddingTop: 4 }}>
+          <table style={{ width: "100%", minWidth: 620, borderCollapse: "collapse" }}>
+            <thead><tr style={{ textAlign: "left" }}>
+              {["AGENT", "ZONE", "COLIS", "KG", "UNITÉS", "IL GAGNE", "JE GAGNE"].map((h, i) => (
+                <th key={h} style={{ padding: "8px 12px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, textAlign: i >= 2 ? "right" : "left", whiteSpace: "nowrap" }}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {lignes.map((a) => (
+                <tr key={a.id} style={{ borderTop: "1px solid var(--surface2)", opacity: a.colis === 0 ? 0.55 : 1 }}>
+                  <td style={{ ...cellule, color: "var(--text)", fontWeight: 600 }}>
+                    {a.nom}
+                    {a.salarie && <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 400 }}>Salarié — ne produit aucune commission</div>}
+                    {!a.salarie && a.colis === 0 && <div style={{ fontSize: 10.5, color: "var(--muted)", fontWeight: 400 }}>Aucun colis sur la période</div>}
+                  </td>
+                  <td style={cellule}>{a.zone}</td>
+                  <td style={{ ...cellule, textAlign: "right", color: "var(--text)" }}>{a.colis}</td>
+                  <td style={{ ...cellule, textAlign: "right" }}>{a.kg ? `${a.kg}` : "—"}</td>
+                  <td style={{ ...cellule, textAlign: "right" }}>{a.unites || "—"}</td>
+                  <td style={{ ...cellule, textAlign: "right" }}>{a.commissionAgent ? fmt(a.commissionAgent, "EUR") : "—"}</td>
+                  <td style={{ ...cellule, textAlign: "right", color: a.commissionResponsable > 0 ? "#8B5CF6" : "var(--muted)", fontWeight: 700 }}>
+                    {a.commissionResponsable ? fmt(a.commissionResponsable, "EUR") : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

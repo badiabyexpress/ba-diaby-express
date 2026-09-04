@@ -222,18 +222,33 @@ export function commissionDuColis(colis, { users, config, categories, auteur } =
   if (!agent) return { ...vide, agentMontant: montantAgent, kg: bases.kg, unites: bases.unites };
 
   /*
-   * UN SALARIÉ NE TOUCHE RIEN AU COLIS. Sa paie ne dépend pas du nombre de kilos qu'il a portés.
+   * UN COLIS DE SALARIÉ NE PRODUIT RIEN — NI POUR LUI, NI POUR SON RESPONSABLE.
    *
-   * La supervision, elle, n'est pas touchée : elle rémunère celui qui ENCADRE, et il encadre le
-   * même travail que l'agent soit salarié ou non. Si vous voulez qu'un colis de salarié ne
-   * produise rien du tout, dites-le — c'est une ligne à changer, et elle est ici.
+   * « Un salarié est un salarié : il est seulement payé en salaire. » Le travail est déjà payé, une
+   * fois, par la paie du mois. Verser en plus une supervision dessus reviendrait à le payer une
+   * seconde fois par un autre chemin — et l'entreprise n'aurait aucun moyen de s'en apercevoir,
+   * puisque le salaire et les commissions ne se lisent pas au même endroit.
+   *
+   * On rend tout de même le poids et les unités : l'écran « Mon équipe » doit pouvoir montrer ce
+   * qu'un salarié a traité. Ne pas le payer n'est pas une raison de ne pas compter son travail.
    */
+  if (estSalarie(agent)) {
+    return {
+      ...vide,
+      agentId: agent.id || null,
+      agentNom: `${agent.prenom || ""} ${agent.nom || ""}`.trim(),
+      salarie: true,
+      kg: bases.kg,
+      unites: bases.unites,
+    };
+  }
+
   const chef = responsableDe(agent, equipe);
   return {
     agentId: agent.id || null,
     agentNom: `${agent.prenom || ""} ${agent.nom || ""}`.trim(),
-    agentMontant: estSalarie(agent) ? 0 : montantAgent,
-    salarie: estSalarie(agent),
+    agentMontant: montantAgent,
+    salarie: false,
     superviseurId: chef ? chef.id : null,
     superviseurNom: chef ? `${chef.prenom || ""} ${chef.nom || ""}`.trim() : "",
     superviseurMontant: chef ? commissionSuperviseur(colis, config, categories) : 0,
@@ -252,6 +267,102 @@ export function commissionDuColis(colis, { users, config, categories, auteur } =
 export function equipeDe(responsableId, users) {
   if (!responsableId) return [];
   return liste(users).filter((u) => u && u.responsableId === responsableId && u.id !== responsableId);
+}
+
+/**
+ * LE COMPTE RENDU D'UNE ÉQUIPE — ce que chaque agent a produit, et ce qu'il rapporte au responsable.
+ *
+ * Une seule fonction pour les trois écrans qui en ont besoin : celui du responsable, celui de
+ * l'administrateur, et la fiche PDF. Trois calculs séparés finissent toujours par ne plus dire la
+ * même chose, et la première fois que cela arrive, c'est devant la personne qu'on doit payer.
+ *
+ * `du` et `au` bornent une période — c'est ce que demande une fiche mensuelle. Sans bornes, tout
+ * est compté depuis le début.
+ *
+ * L'ACTIVITÉ PERSONNELLE DU RESPONSABLE EST À PART.
+ *
+ * Elle ne se mélange pas à celle de l'équipe : ce sont deux natures de revenu, et les additionner
+ * sans les nommer rend impossible de vérifier l'une ou l'autre. La fiche doit pouvoir dire « vous
+ * avez gagné tant en travaillant, et tant en encadrant ».
+ */
+export function bilanEquipe(responsableId, { users, colis, categories, config, du = null, au = null } = {}) {
+  const equipe = liste(users);
+  const chef = equipe.find((u) => u && u.id === responsableId) || null;
+  const debut = du ? new Date(du).getTime() : -Infinity;
+  const fin = au ? new Date(au).getTime() : Infinity;
+  const dansLaPeriode = (c) => {
+    const d = c?.createdAt ? new Date(c.createdAt).getTime() : NaN;
+    if (!Number.isFinite(d)) return debut === -Infinity && fin === Infinity;
+    return d >= debut && d <= fin;
+  };
+
+  const parAgent = new Map();
+  const perso = { colis: 0, kg: 0, unites: 0, montant: 0 };
+
+  liste(colis).forEach((c) => {
+    if (!c || estColisPartenaireCommission(c) || !dansLaPeriode(c)) return;
+    const agent = equipe.find((u) => u && (u.id === c.agentCreationId
+      || (!c.agentCreationId && `${u.prenom || ""} ${u.nom || ""}`.trim().toLowerCase() === String(c.agentCreation || "").trim().toLowerCase())));
+    if (!agent) return;
+
+    /* Ce que le responsable a fait de sa main. */
+    if (agent.id === responsableId) {
+      const p = commissionDuColis(c, { users: equipe, config, categories, auteur: agent });
+      perso.colis += 1; perso.kg += p.kg; perso.unites += p.unites; perso.montant += p.agentMontant;
+      return;
+    }
+
+    /*
+     * Ce que son équipe a fait. On demande qui l'encadrait LE JOUR DU COLIS, et non aujourd'hui :
+     * sans cela, un agent qui change d'équipe le 15 ferait basculer d'un coup tout le mois.
+     */
+    const chefDuJour = responsableAuMoment(agent, c.createdAt, equipe);
+    if (!chefDuJour || chefDuJour.id !== responsableId) return;
+    const p = commissionDuColis(c, { users: equipe, config, categories, auteur: agent });
+    const ligne = parAgent.get(agent.id) || {
+      id: agent.id,
+      nom: `${agent.prenom || ""} ${agent.nom || ""}`.trim() || agent.identifiant || "—",
+      zone: agent.zoneOperation || agent.agence || "—",
+      salarie: estSalarie(agent),
+      colis: 0, kg: 0, unites: 0, commissionAgent: 0, commissionResponsable: 0,
+    };
+    ligne.colis += 1;
+    ligne.kg += p.kg;
+    ligne.unites += p.unites;
+    ligne.commissionAgent += p.agentMontant;
+    ligne.commissionResponsable += p.superviseurMontant;
+    parAgent.set(agent.id, ligne);
+  });
+
+  const agents = [...parAgent.values()]
+    .map((l) => ({ ...l, kg: +l.kg.toFixed(1), commissionAgent: +l.commissionAgent.toFixed(2), commissionResponsable: +l.commissionResponsable.toFixed(2) }))
+    .sort((a, b) => b.commissionResponsable - a.commissionResponsable);
+
+  /*
+   * `rattaches` compte l'équipe TELLE QU'ELLE EST, et non celle qui a produit quelque chose. Un
+   * agent rattaché qui n'a rien enregistré ce mois-ci n'est pas absent de l'équipe : il est
+   * inactif, et c'est une information différente — c'est même celle qui intéresse le responsable.
+   */
+  const rattaches = equipeDe(responsableId, equipe);
+  return {
+    responsable: chef,
+    responsableNom: chef ? `${chef.prenom || ""} ${chef.nom || ""}`.trim() : "",
+    zone: chef ? (chef.zoneOperation || chef.agence || "—") : "—",
+    agentsRattaches: rattaches.length,
+    agentsActifs: agents.filter((a) => a.colis > 0).length,
+    agentsInactifs: rattaches.filter((u) => !agents.some((a) => a.id === u.id)).map((u) => ({
+      id: u.id, nom: `${u.prenom || ""} ${u.nom || ""}`.trim() || u.identifiant || "—",
+      zone: u.zoneOperation || u.agence || "—", salarie: estSalarie(u),
+      colis: 0, kg: 0, unites: 0, commissionAgent: 0, commissionResponsable: 0,
+    })),
+    agents,
+    personnel: { ...perso, kg: +perso.kg.toFixed(1), montant: +perso.montant.toFixed(2) },
+    equipeColis: agents.reduce((s, a) => s + a.colis, 0),
+    equipeKg: +agents.reduce((s, a) => s + a.kg, 0).toFixed(1),
+    equipeUnites: agents.reduce((s, a) => s + a.unites, 0),
+    commissionEquipe: +agents.reduce((s, a) => s + a.commissionResponsable, 0).toFixed(2),
+    total: +(perso.montant + agents.reduce((s, a) => s + a.commissionResponsable, 0)).toFixed(2),
+  };
 }
 
 /**

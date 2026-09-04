@@ -8,6 +8,15 @@ import { ROLES, PERMISSIONS_SCHEMA, ROLE_DEFAULT_PERMISSIONS, effectivePermissio
  */
 import { signauxDeFraude } from "../api/_fraude.js";
 import { bilanParrainage, creditDisponible, consommerCredit, MONTANT_RECOMPENSE_GNF } from "../api/_parrainage.js";
+/*
+ * Les taux de commission et la façon de les appliquer viennent du serveur, comme les permissions et
+ * les règles de parrainage. Le montant que l'agent lit à l'écran et celui que la caisse accepte
+ * sont ainsi calculés par le même code — c'est la seule façon qu'ils ne divergent jamais.
+ */
+import {
+  commissionDuColis, commissionAgent, commissionSuperviseur, basesDuColis,
+  tauxCommission, responsableDe, equipeDe, estSalarie, TAUX_PAR_DEFAUT,
+} from "../api/_commissions.js";
 import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree, relireDuServeur, oublierCacheLocal } from "./lib/storage.js";
 import { VILLES_PAR_PAYS } from "./data/villesParPays.js";
 
@@ -1968,40 +1977,38 @@ function reductionParrainage(colis, data) {
   };
 }
 
+/**
+ * CE QU'UN COLIS PRODUIT POUR CELUI QUI L'A ENREGISTRÉ, ET POUR CELUI QUI L'ENCADRE.
+ *
+ * Les règles vivent dans api/_commissions.js — le même fichier que lit le serveur. Cette fonction
+ * n'est plus qu'un guichet : elle traduit le résultat dans la forme qu'attendaient déjà les écrans.
+ *
+ * CE QUI A CHANGÉ, ET POURQUOI.
+ *
+ * L'agent était payé UN EURO PAR COLIS, quel qu'en soit le poids. Il l'est désormais au travail
+ * réel : deux euros le kilo, et le taux d'unité pour ce qui se facture à l'unité. Un carton de
+ * deux kilos et un de cinquante ne se portent pas de la même façon, et ne se paient plus pareil.
+ *
+ * `forfait` demeure dans la forme rendue, à zéro : plusieurs écrans le lisent, et le retirer d'un
+ * coup les aurait fait afficher « undefined » là où ils annonçaient un montant.
+ */
 function commissionColis(colis, auteur, data) {
-  const vide = { forfait: 0, bareme: 0, total: 0 };
-  if (!colis || estColisPartenaire(colis)) return vide;
-  const cfg = data?.commissionConfig || {};
-  /*
-   * UN EURO PAR DÉFAUT, ET NON ZÉRO.
-   *
-   * L'écran de configuration affiche « 1 » quand le réglage n'a jamais été enregistré. Calculer
-   * zéro pendant ce temps-là aurait donné un tableau vide sous un champ qui annonce un euro : de
-   * quoi croire le calcul cassé, et chercher longtemps. Le chiffre affiché et le chiffre versé
-   * doivent être le même.
-   *
-   * Un forfait explicitement mis à zéro reste zéro : c'est un geste, pas une absence.
-   */
-  const forfait = cfg.parColis === undefined || cfg.parColis === null || cfg.parColis === ""
-    ? 1
-    : Number(cfg.parColis);
-  const part = Number.isFinite(forfait) && forfait > 0 ? forfait : 0;
-  if (!auteur) return { ...vide, forfait: part, total: part };
-
-  const estResponsable = auteur.role === "Responsable de zone";
-  if (!estResponsable) return { forfait: part, bareme: 0, total: part };
-
-  /*
-   * Un colis sans site est compté comme sien : il a été enregistré par lui, et refuser sur une
-   * information manquante retirerait de l'argent pour un champ vide plutôt que pour un fait.
-   */
-  const zone = String(auteur.zoneOperation || auteur.agence || "").trim().toLowerCase();
-  const site = String(colis.site || "").trim().toLowerCase();
-  const dansSaZone = !site || !zone || site === zone;
-  if (!dansSaZone) return { forfait: part, bareme: 0, total: part };
-
-  const bareme = calcCommission(colis, data?.commissionConfig, data?.categories);
-  return { forfait: part, bareme, total: +(part + bareme).toFixed(2) };
+  const part = commissionDuColis(colis, {
+    users: data?.users,
+    config: data?.commissionConfig,
+    categories: data?.categories,
+    auteur,
+  });
+  return {
+    forfait: 0,
+    bareme: part.agentMontant,
+    total: part.agentMontant,
+    supervision: part.superviseurMontant,
+    superviseurId: part.superviseurId,
+    salarie: part.salarie,
+    kg: part.kg,
+    unites: part.unites,
+  };
 }
 
 /**
@@ -2045,7 +2052,8 @@ function commissionsDues(data) {
         nom: `${compte.prenom || ""} ${compte.nom || ""}`.trim() || compte.identifiant || "Compte supprimé",
         role: compte.role || "—",
         agence: compte.zoneOperation || compte.agence || "—",
-        colis: 0, forfait: 0, bareme: 0, gagne: 0, paye: 0,
+        salarie: estSalarie(compte),
+        colis: 0, kg: 0, unites: 0, forfait: 0, bareme: 0, supervision: 0, colisEquipe: 0, gagne: 0, paye: 0,
       });
     }
     return parPersonne.get(compte.id);
@@ -2056,12 +2064,36 @@ function commissionsDues(data) {
     const auteur = auteurDuColis(c, equipe);
     if (!auteur) return;
     const part = commissionColis(c, auteur, data);
-    if (part.total <= 0) return;
-    const ligne = ligneDe(auteur);
-    ligne.colis += 1;
-    ligne.forfait += part.forfait;
-    ligne.bareme += part.bareme;
-    ligne.gagne += part.total;
+    /*
+     * La ligne est ouverte même à zéro, et c'est délibéré pour les salariés : un agent absent du
+     * tableau se lit comme un agent oublié, et l'on cherche l'erreur. Présent à zéro avec la
+     * mention « Salarié », il se lit comme une décision.
+     */
+    if (part.total > 0 || part.salarie) {
+      const ligne = ligneDe(auteur);
+      ligne.colis += 1;
+      ligne.kg += part.kg;
+      ligne.unites += part.unites;
+      ligne.bareme += part.bareme;
+      ligne.gagne += part.total;
+    }
+    /*
+     * LA SUPERVISION VA AU RESPONSABLE, PAS À CELUI QUI A ENREGISTRÉ.
+     *
+     * C'est la ligne qui distingue ce système du précédent : le responsable est payé pour l'équipe
+     * qu'il tient, sur des colis qu'il n'a pas touchés. Elle ne se déclenche que s'il existe un
+     * rattachement — aujourd'hui il n'y en a aucun, et cette part vaut donc zéro partout, tant que
+     * personne n'a été désigné responsable de zone.
+     */
+    if (part.supervision > 0 && part.superviseurId) {
+      const chef = equipe.find((u) => u && u.id === part.superviseurId);
+      if (chef) {
+        const ligneChef = ligneDe(chef);
+        ligneChef.supervision += part.supervision;
+        ligneChef.colisEquipe += 1;
+        ligneChef.gagne += part.supervision;
+      }
+    }
   });
 
   (data?.paiementsCommission || []).forEach((p) => {
@@ -2079,8 +2111,10 @@ function commissionsDues(data) {
   return [...parPersonne.values()]
     .map((l) => ({
       ...l,
+      kg: +l.kg.toFixed(1),
       forfait: +l.forfait.toFixed(2),
       bareme: +l.bareme.toFixed(2),
+      supervision: +l.supervision.toFixed(2),
       gagne: +l.gagne.toFixed(2),
       paye: +l.paye.toFixed(2),
       reste: +(l.gagne - l.paye).toFixed(2),
@@ -13610,25 +13644,42 @@ function ReceptionTarifsPage({ data, persist, notify, onBack }) {
 
 function CommissionsPage({ data, persist, session, notify, onBack }) {
   const isAdmin = session?.role === "Administrateur";
-  const cfg = data.commissionConfig || { parKg: 2, parUnite: 5, parColis: 1 };
   const categories = data.categories || [];
-  const [parKg, setParKg] = useState(String(cfg.parKg));
-  const [parUnite, setParUnite] = useState(String(cfg.parUnite));
-  const [parColis, setParColis] = useState(String(cfg.parColis ?? 1));
+  /* Les quatre taux, lus par la même fonction que le serveur — jamais recopiés ici. */
+  const taux = tauxCommission(data.commissionConfig);
+  const [agentKg, setAgentKg] = useState(String(taux.agentKg));
+  const [agentUnite, setAgentUnite] = useState(String(taux.agentUnite));
+  const [superviseurKg, setSuperviseurKg] = useState(String(taux.superviseurKg));
+  const [superviseurUnite, setSuperviseurUnite] = useState(String(taux.superviseurUnite));
   const [catEdits, setCatEdits] = useState({});
 
   function saveGeneral() {
-    const k = Number(String(parKg).replace(",", "."));
-    const u = Number(String(parUnite).replace(",", "."));
-    const c = Number(String(parColis).replace(",", "."));
-    if (isNaN(k) || isNaN(u) || k < 0 || u < 0) return;
-    if (isNaN(c) || c < 0) return;
+    const lu = (v) => Number(String(v).replace(",", "."));
+    const ak = lu(agentKg); const au = lu(agentUnite);
+    const sk = lu(superviseurKg); const su = lu(superviseurUnite);
+    /* Un taux négatif retirerait de l'argent à quelqu'un qui a travaillé : il n'existe pas. */
+    if ([ak, au, sk, su].some((n) => !Number.isFinite(n) || n < 0)) {
+      notify?.("Chaque taux doit être un nombre positif.");
+      return;
+    }
     persist({
       ...data,
-      commissionConfig: { parKg: k, parUnite: u, parColis: c },
-      activityLog: pushActivity(data, session, "Taux de commission modifié", `${k} €/kg, ${u} €/unité, ${c} €/colis enregistré`),
+      /*
+       * `parKg` et `parUnite` sont conservés, à la même valeur que les taux d'agent.
+       *
+       * Ce ne sont pas des doublons oubliés : d'autres écrans plus anciens les lisent encore pour
+       * afficher un barème d'agence. Les effacer aurait mis ces écrans à zéro sans que le geste
+       * « modifier un taux » ait rien annoncé de tel. `parColis`, en revanche, disparaît — le
+       * forfait par colis n'existe plus, et le laisser traîner aurait fini par être relu un jour.
+       */
+      commissionConfig: {
+        agentKg: ak, agentUnite: au, superviseurKg: sk, superviseurUnite: su,
+        parKg: ak, parUnite: au,
+      },
+      activityLog: pushActivity(data, session, "Taux de commission modifié",
+        `agent ${ak} €/kg et ${au} €/unité · responsable ${sk} €/kg et ${su} €/unité`),
     });
-    notify?.("Taux de commission mis à jour pour toutes les agences");
+    notify?.("Taux de commission mis à jour");
   }
 
   /*
@@ -13727,36 +13778,68 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
       )}
 
       <div style={{ background: "var(--surface)", borderRadius: 14, padding: 22, maxWidth: 460, border: "1px solid var(--border)", marginBottom: 20 }}>
-        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Taux généraux</div>
-        <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 2, marginBottom: 16 }}>S’appliquent à toutes les catégories, sauf si une catégorie a son propre taux ci-dessous.</p>
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4 }}>Ce que touche l’agent</div>
+        <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 2, marginBottom: 16 }}>
+          Celui qui enregistre le colis, payé sur le travail réel. S’applique à toutes les catégories,
+          sauf si une catégorie a son propre taux ci-dessous.
+        </p>
         <Field label="Commission par kg (produits facturés au poids)">
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input value={parKg} onChange={(e) => setParKg(e.target.value)} disabled={!isAdmin} style={{ ...inputStyle, opacity: isAdmin ? 1 : 0.6 }} />
+            <input value={agentKg} onChange={(e) => setAgentKg(e.target.value)} disabled={!isAdmin} style={{ ...inputStyle, opacity: isAdmin ? 1 : 0.6 }} />
             <span style={{ fontSize: 12.5, color: "var(--muted)" }}>€ / kg</span>
           </div>
         </Field>
         <Field label="Commission par unité (produits facturés à l’unité)">
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input value={parUnite} onChange={(e) => setParUnite(e.target.value)} disabled={!isAdmin} style={{ ...inputStyle, opacity: isAdmin ? 1 : 0.6 }} />
+            <input value={agentUnite} onChange={(e) => setAgentUnite(e.target.value)} disabled={!isAdmin} style={{ ...inputStyle, opacity: isAdmin ? 1 : 0.6 }} />
             <span style={{ fontSize: 12.5, color: "var(--muted)" }}>€ / unité</span>
           </div>
         </Field>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 18, lineHeight: 1.55 }}>
+          10 kg à {agentKg || 0} €/kg = <strong>{fmt((Number(String(agentKg).replace(",", ".")) || 0) * 10, "EUR")}</strong> pour l’agent.
+          Un agent <strong>salarié</strong> ne touche aucune commission : cela se règle sur sa fiche,
+          dans Gestion Utilisateurs. Aucune commission sur un colis partenaire.
+        </div>
+
         {/*
-          Ce troisième taux ne va pas à l'agence mais à UNE PERSONNE : celle qui a enregistré le
-          colis. Il est au forfait et non au poids, parce que c'est le geste qui est payé — un
-          carton de deux kilos demande le même travail qu'un de cinquante.
+          LA SUPERVISION — une part plus petite, sur le travail des AUTRES.
+
+          Elle ne récompense pas un geste : elle récompense le fait d'avoir amené et d'encadrer
+          quelqu'un qui fait le geste. C'est pourquoi elle ne se déclenche jamais sur un colis que
+          le responsable enregistre lui-même : il gagnerait alors plus en travaillant seul qu'en
+          formant quelqu'un.
         */}
-        <Field label="Forfait à celui qui enregistre un colis">
+        <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14, marginBottom: 4, paddingTop: 14, borderTop: "1px solid var(--border)" }}>
+          Ce que touche le Responsable de zone
+        </div>
+        <p style={{ fontSize: 12, color: "var(--muted)", marginTop: 2, marginBottom: 16 }}>
+          Sur les colis enregistrés par <strong>les agents de son équipe</strong>. Jamais sur les siens.
+        </p>
+        <Field label="Supervision par kg">
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <input value={parColis} onChange={(e) => setParColis(e.target.value)} disabled={!isAdmin} style={{ ...inputStyle, opacity: isAdmin ? 1 : 0.6 }} />
-            <span style={{ fontSize: 12.5, color: "var(--muted)" }}>€ / colis</span>
+            <input value={superviseurKg} onChange={(e) => setSuperviseurKg(e.target.value)} disabled={!isAdmin} style={{ ...inputStyle, opacity: isAdmin ? 1 : 0.6 }} />
+            <span style={{ fontSize: 12.5, color: "var(--muted)" }}>€ / kg</span>
+          </div>
+        </Field>
+        <Field label="Supervision par unité">
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input value={superviseurUnite} onChange={(e) => setSuperviseurUnite(e.target.value)} disabled={!isAdmin} style={{ ...inputStyle, opacity: isAdmin ? 1 : 0.6 }} />
+            <span style={{ fontSize: 12.5, color: "var(--muted)" }}>€ / unité</span>
           </div>
         </Field>
         <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.55 }}>
-          Versé à l’agent comme au responsable de zone : c’est le même geste. Un responsable ne
-          touche rien sur les colis pris par ses agents. En revanche, sur un colis de sa zone qu’il
-          enregistre lui-même, il reçoit <strong>en plus</strong> le barème d’agence ci-dessus.
-          Aucune commission sur un colis partenaire.
+          Un agent de son équipe enregistre 10 kg : l’agent touche {fmt((Number(String(agentKg).replace(",", ".")) || 0) * 10, "EUR")},
+          le responsable {fmt((Number(String(superviseurKg).replace(",", ".")) || 0) * 10, "EUR")}.
+          <br />
+          S’il enregistre ce colis <strong>lui-même</strong>, il touche {fmt((Number(String(agentKg).replace(",", ".")) || 0) * 10, "EUR")} comme un agent,
+          et <strong>rien</strong> en supervision.
+          {(data.users || []).every((u) => u?.role !== "Responsable de zone") && (
+            <div style={{ background: "var(--warn-bg)", color: "var(--warn-fg)", border: "1px solid var(--warn-border)", borderRadius: 8, padding: "9px 11px", marginTop: 10 }}>
+              Aucun compte n’a aujourd’hui le rôle « Responsable de zone », et aucun agent n’est rattaché :
+              cette part vaut donc zéro pour tout le monde. Elle s’activera d’elle-même dès qu’un
+              responsable sera désigné et qu’un agent lui sera rattaché, dans Gestion Utilisateurs.
+            </div>
+          )}
         </div>
         {isAdmin && <button onClick={saveGeneral} style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>}
       </div>
@@ -13784,8 +13867,8 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
             <table style={{ width: "100%", minWidth: 620, borderCollapse: "collapse" }}>
               <thead>
                 <tr style={{ textAlign: "left", background: "var(--surface2)" }}>
-                  {["PERSONNE", "AGENCE", "COLIS", "GAGNÉ", "VERSÉ", "RESTE DÛ", ""].map((t, i) => (
-                    <th key={t || "actions"} style={{ padding: "10px 16px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, textAlign: i >= 2 && i <= 5 ? "right" : "left", whiteSpace: "nowrap" }}>{t}</th>
+                  {["PERSONNE", "AGENCE", "COLIS", "KG", "GAGNÉ", "VERSÉ", "RESTE DÛ", ""].map((t, i) => (
+                    <th key={t || "actions"} style={{ padding: "10px 16px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, textAlign: i >= 2 && i <= 6 ? "right" : "left", whiteSpace: "nowrap" }}>{t}</th>
                   ))}
                 </tr>
               </thead>
@@ -13797,12 +13880,22 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
                       {g.nom}
                       <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>
                         {g.role}
-                        {/* Le barème d'agence ne concerne que les responsables de zone. */}
-                        {g.bareme > 0 && ` · dont ${fmt(g.bareme, "EUR")} de barème d’agence`}
+                        {/*
+                          Les deux parts sont nommées séparément dès qu'il y en a deux : « gagné »
+                          seul ne dit pas si l'on est payé pour son propre travail ou pour celui de
+                          son équipe, et c'est la première question qu'on pose devant un total.
+                        */}
+                        {g.supervision > 0 && ` · dont ${fmt(g.supervision, "EUR")} de supervision sur ${g.colisEquipe} colis de son équipe`}
                       </div>
+                      {g.salarie && (
+                        <div style={{ display: "inline-block", marginTop: 4, background: "var(--surface2)", color: "var(--muted)", padding: "2px 8px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>
+                          SALARIÉ — aucune commission
+                        </div>
+                      )}
                     </td>
                     <td style={{ padding: "10px 16px", fontSize: 12.5, color: "var(--muted)" }}>{g.agence}</td>
                     <td style={{ padding: "10px 16px", fontSize: 12.5, color: "var(--text)", textAlign: "right" }}>{g.colis}</td>
+                    <td style={{ padding: "10px 16px", fontSize: 12.5, color: "var(--muted)", textAlign: "right", whiteSpace: "nowrap" }}>{g.kg ? `${g.kg} kg` : "—"}</td>
                     <td style={{ padding: "10px 16px", fontSize: 12.5, color: "var(--muted)", textAlign: "right", whiteSpace: "nowrap" }}>{fmt(g.gagne, "EUR")}</td>
                     <td style={{ padding: "10px 16px", fontSize: 12.5, color: "var(--ok-fg)", textAlign: "right", whiteSpace: "nowrap" }}>{g.paye > 0 ? fmt(g.paye, "EUR") : "—"}</td>
                     {/*
@@ -13828,7 +13921,7 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
                   </tr>
                   {versementPour === g.id && (
                     <tr style={{ background: "var(--surface2)" }}>
-                      <td colSpan={7} style={{ padding: "12px 16px" }}>
+                      <td colSpan={8} style={{ padding: "12px 16px" }}>
                         <div style={{ fontSize: 12.5, color: "var(--muted)", marginBottom: 10 }}>
                           Reste dû à {g.nom} : <strong style={{ color: "var(--text)" }}>{fmt(g.reste, "EUR")}</strong>.
                           Versez la totalité, ou une tranche.
@@ -34783,7 +34876,7 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
     setMdpTemporaire({ identifiant: u.identifiant, nom: `${u.prenom} ${u.nom}`.trim(), motdepasse: provisoire });
   }
 
-  if (editingUser) return <UserProfilePage user={editingUser} onSave={saveUser} onBack={() => setEditingUser(null)} sites={data.sites} session={session} tousLesComptes={data.users || []} />;
+  if (editingUser) return <UserProfilePage user={editingUser} onSave={saveUser} onBack={() => setEditingUser(null)} sites={data.sites} session={session} tousLesComptes={data.users || []} commissionConfig={data.commissionConfig} />;
 
   return (
     <div>
@@ -34884,7 +34977,7 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
   );
 }
 
-function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes = [] }) {
+function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes = [], commissionConfig = null }) {
   const [tab, setTab] = useState("profil");
   /*
    * L'IDENTIFIANT EST LA CLÉ DE CONNEXION, PAS UN LIBELLÉ.
@@ -34911,6 +35004,9 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
   const [agence, setAgence] = useState(user.zoneOperation || user.agence || "");
   const [paysAutorises, setPaysAutorises] = useState(user.paysAutorises || COUNTRIES.filter((c) => c.code !== "GN").map((c) => c.code));
   const [permissionsOverride, setPermissionsOverride] = useState(user.permissionsOverride || {});
+  /* Aucune fiche ne porte ce réglage aujourd'hui : le défaut est « commissionné », comme avant. */
+  const [remuneration, setRemuneration] = useState(user.remuneration || "commission");
+  const [responsableId, setResponsableId] = useState(user.responsableId || "");
   const isAdmin = role === "Administrateur";
   const totalPermCount = PERMISSIONS_SCHEMA.reduce((s, g) => s + g.permissions.length, 0);
   /*
@@ -34972,6 +35068,29 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
       zoneOperation: role === "Administrateur" || role === "Comptable" ? "" : agence,
       paysAutorises: isAdmin ? [] : paysAutorises,
       permissionsOverride: isAdmin ? {} : permissionsOverride,
+      remuneration: role === "Partenaire" ? undefined : remuneration,
+      /*
+       * Seul un agent se rattache. Un responsable rattaché à un autre responsable ferait remonter
+       * la supervision de deux crans, et personne n'a demandé une pyramide.
+       */
+      responsableId: role === "Agent" ? (responsableId || null) : null,
+      /*
+       * LE CHANGEMENT D'ÉQUIPE EST DATÉ, IL N'EFFACE PAS LE PASSÉ.
+       *
+       * Sans cette trace, un agent qui change de responsable le 15 fait basculer d'un coup au
+       * nouveau toutes les commissions du mois — y compris celles des colis pris sous l'ancien. Le
+       * nouveau serait payé pour un travail qu'il n'a pas encadré, et l'ancien perdrait ce qui lui
+       * était dû sans qu'aucun écran ne le dise.
+       */
+      historiqueRattachement: role === "Agent" && (responsableId || "") !== (user.responsableId || "")
+        ? [
+            ...(user.historiqueRattachement || []).map((h) => (h && !h.au ? { ...h, au: new Date().toISOString() } : h)),
+            ...(responsableId ? [{ responsableId, du: new Date().toISOString(), au: null, par: `${session.prenom} ${session.nom}`.trim() }] : []),
+          ]
+        : user.historiqueRattachement,
+      rattacheLe: role === "Agent" && (responsableId || "") !== (user.responsableId || "")
+        ? (responsableId ? new Date().toISOString() : null)
+        : user.rattacheLe,
     });
   }
 
@@ -35063,6 +35182,54 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
                 <option value="">Sélectionner une ville</option>
                 {villesPourPays(paysOperation).map((ville) => <option key={ville} value={ville}>{ville}</option>)}
               </select>
+            </Field>
+          )}
+
+          {/*
+            SALARIÉ OU COMMISSIONNÉ — la question qui décide de sa paie.
+
+            Une partie de l'équipe reçoit un salaire, et rien au colis ; le reste est payé à la
+            commission. Verser les deux paierait deux fois le même travail, et le tableau des
+            commissions annoncerait tous les mois une dette qui n'en est pas une.
+
+            Le défaut reste « commissionné » : mettre le salaire par défaut aurait fait tomber à
+            zéro, du jour au lendemain, la commission de toute l'équipe, sans que personne ne
+            comprenne pourquoi.
+          */}
+          {role !== "Partenaire" && (
+            <Field label="Mode de rémunération">
+              <select value={remuneration} onChange={(e) => setRemuneration(e.target.value)} style={inputStyle}>
+                <option value="commission">Commissionné — payé au kg et à l’unité</option>
+                <option value="salaire">Salarié — aucune commission</option>
+              </select>
+              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4, lineHeight: 1.5 }}>
+                {remuneration === "salaire"
+                  ? "Cette personne apparaîtra dans le tableau des commissions à zéro, avec la mention « Salarié » — pour qu’on ne la croie pas oubliée."
+                  : `Touchera ${fmt(tauxCommission(commissionConfig).agentKg, "EUR")} par kg sur les colis qu’elle enregistre.`}
+              </div>
+            </Field>
+          )}
+
+          {/*
+            LE RATTACHEMENT — de qui cette personne dépend.
+
+            C'est lui, et rien d'autre, qui déclenche la commission de supervision : ni la zone, ni
+            l'agence. Deux responsables peuvent travailler dans la même ville, et la ville ne dit
+            pas qui encadre qui.
+          */}
+          {role === "Agent" && (
+            <Field label="Rattaché à quel Responsable de zone ?">
+              <select value={responsableId} onChange={(e) => setResponsableId(e.target.value)} style={inputStyle}>
+                <option value="">Personne — aucune commission de supervision</option>
+                {tousLesComptes.filter((u) => u?.role === "Responsable de zone" && u.id !== user.id).map((u) => (
+                  <option key={u.id} value={u.id}>{`${u.prenom || ""} ${u.nom || ""}`.trim()} — {u.zoneOperation || u.agence || "sans zone"}</option>
+                ))}
+              </select>
+              <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4, lineHeight: 1.5 }}>
+                {tousLesComptes.some((u) => u?.role === "Responsable de zone")
+                  ? `Sur chaque colis de cet agent, son responsable touchera ${fmt(tauxCommission(commissionConfig).superviseurKg, "EUR")} par kg — même s’il n’était pas là.`
+                  : "Aucun compte n’a encore le rôle « Responsable de zone » : changez le rôle de quelqu’un d’abord, puis revenez ici."}
+              </div>
             </Field>
           )}
 

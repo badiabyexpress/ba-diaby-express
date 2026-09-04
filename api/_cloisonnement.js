@@ -652,7 +652,20 @@ const CHAMPS_SOI_MEME = [
  * administrateur, qui les a déjà tous et n'a donc rien à y gagner : la règle vaut surtout pour
  * celui qui n'en a pas.
  */
-const CHAMPS_DE_POUVOIR = ["role", "permissionsOverride", "paysAutorises", "agence", "zoneOperation", "partenaireParent"];
+/*
+ * `remuneration`, `responsableId` et `historiqueRattachement` sont ici pour une raison d'argent.
+ *
+ * Un agent salarié qui se remettrait « commissionné » depuis les outils de développement de son
+ * navigateur se fabriquerait une dette de l'entreprise envers lui — plusieurs centaines d'euros sur
+ * les colis qu'il a déjà enregistrés, calculés rétroactivement. Et un compte qui se rattacherait à
+ * un responsable, ou réécrirait l'historique de ses rattachements, déplacerait la commission de
+ * supervision d'une personne vers une autre.
+ *
+ * Ces trois champs ne se règlent donc que depuis la fiche employé, par un compte qui a le droit de
+ * régler les droits des autres.
+ */
+const CHAMPS_DE_POUVOIR = ["role", "permissionsOverride", "paysAutorises", "agence", "zoneOperation", "partenaireParent",
+  "remuneration", "responsableId", "historiqueRattachement", "rattacheLe"];
 
 /*
  * Les sections de réglages, et la permission qu'il faut pour y toucher — les mêmes que celles qui

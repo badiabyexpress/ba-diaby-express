@@ -19104,78 +19104,97 @@ async function downloadBonSortie(colis) {
    * normale depuis l'ajout du contrôle), ou l'ancien bon de sortie rempli à la main. On accepte
    * les deux pour ne pas perdre les colis déjà traités avant ce changement.
    */
-  const remise = colis.remise || colis.bonSortie;
+    const remise = colis.remise || colis.bonSortie;
   if (!remise) return;
   const jspdf = await loadJsPDF();
   const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a5" }));
-  doc.setFillColor(10, 38, 71); doc.rect(0, 0, 148, 22, "F");
-  doc.setFillColor(255, 255, 255); doc.roundedRect(8, 3.5, 16, 16, 2, 2, "F");
-  doc.addImage(DEFAULT_LOGO, "PNG", 9, 4.5, 14, 14);
-  doc.setTextColor(255, 255, 255); doc.setFontSize(13); doc.setFont(undefined, "bold");
-  doc.text("BA-DIABY EXPRESS", 27, 11);
-  doc.setFontSize(8.5); doc.setFont(undefined, "normal"); doc.text("Bon de sortie", 27, 16.5);
-
-  doc.setTextColor(20, 20, 20);
-  /*
-   * Positions fixes. Auparavant les sept lignes descendaient jusqu'à 122 mm alors que le trait
-   * de pied de page était figé à 128 mm : il traversait la dernière ligne, et le bloc signature
-   * (140 mm) se retrouvait imprimé APRÈS le pied de page. La page A5 fait 210 mm : il y avait
-   * largement la place, la mise en page était simplement héritée d'un format plus court.
-   */
-  const ZB = { debut: 32, pas: 11, sepBas: 112, signature: 120, traitSignature: 136, sepPied: 190, pied: 196 };
-  const largeurBS = 148 - 20;
-  let y = ZB.debut;
-  const line = (label, value) => {
-    doc.setFontSize(9); doc.setTextColor(120, 120, 120); doc.text(label, 10, y);
-    doc.setFontSize(11); doc.setTextColor(20, 20, 20);
-    let v = String(value || "—");
-    if (doc.getTextWidth(v) > largeurBS) {
-      while (v.length > 3 && doc.getTextWidth(v + "\u2026") > largeurBS) v = v.slice(0, -1);
-      v += "\u2026";
-    }
-    doc.text(v, 10, y + 6);
-    y += ZB.pas;
+  const W = 148; const H = 210; const M = 11;
+  const NAVY = [7, 31, 58]; const BLUE = [38, 92, 154]; const RED = [198, 16, 46];
+  const INK = [24, 31, 42]; const MUTED = [103, 116, 132]; const LINE = [218, 225, 234]; const PALE = [243, 247, 252];
+  const safe = (v, fallback = "Non renseigné") => { const s = String(v ?? "").trim(); return s || fallback; };
+  const dateFr = (v, avecHeure = true) => {
+    if (!v) return "Non renseignée";
+    const d = new Date(v); if (Number.isNaN(d.getTime())) return safe(v);
+    return d.toLocaleString("fr-FR", avecHeure ? { dateStyle: "short", timeStyle: "short" } : { dateStyle: "long" });
   };
-  line("Colis", `${colis.tracking}`);
-  line("Destinataire prévu", colis.destinataire);
-  line("Récupéré par", remise.nom);
-  line("Emplacement en entrepôt", colis.emplacement);
-  line("Pièce d’identité", remise.piece || (remise.typePiece ? `${remise.typePiece}${remise.numeroPiece ? " " + remise.numeroPiece : ""}` : ""));
-  line("Date de remise", remise.date ? new Date(remise.date).toLocaleString("fr-FR") : "—");
-  line("Enregistré par", remise.enregistrePar || remise.agent);
+  const nomAgent = safe(remise.enregistrePar || remise.agent || colis.agentCreation);
+  const nomRecuperateur = safe(remise.nom);
+  const piece = remise.piece || (remise.typePiece ? `${remise.typePiece}${remise.numeroPiece ? ` — ${remise.numeroPiece}` : ""}` : "");
+  const qualite = remise.lien === "proche" ? "Proche du destinataire" : remise.lien === "mandataire" ? "Mandataire autorisé" : "Destinataire / personne désignée";
+  const statutRemise = colis.remise ? "Remise enregistrée" : "Bon préparé avant remise";
+  const refBon = `BS-${safe(colis.tracking, "SANS-REFERENCE")}`;
+  const tracking = safe(colis.tracking); const destinataire = safe(colis.destinataire);
+  const telephone = colis.telephone || colis.destinataireTelephone || colis.telephoneDestinataire;
+  const adresse = colis.destinataireAdresse || colis.adresseDestinataire;
+  const lieu = colis.agence || colis.site || colis.emplacement;
+  const wrap = (text, maxWidth, fontSize = 9) => { doc.setFontSize(fontSize); return doc.splitTextToSize(safe(text), maxWidth).slice(0, 3); };
+  const field = (label, value, x, y, width, accent = false) => {
+    doc.setFont(undefined, "bold"); doc.setFontSize(7.2); doc.setTextColor(...MUTED); doc.text(label.toUpperCase(), x, y);
+    doc.setFont(undefined, accent ? "bold" : "normal"); doc.setFontSize(accent ? 11.5 : 9.2); doc.setTextColor(...(accent ? NAVY : INK));
+    const words = wrap(value, width, accent ? 11.5 : 9.2); doc.text(words, x, y + 5.5, { lineHeightFactor: 1.15 });
+    return y + 5.5 + words.length * (accent ? 4.7 : 4.1);
+  };
+  const card = (x, y, w, h, fill = [255, 255, 255]) => { doc.setFillColor(...fill); doc.setDrawColor(...LINE); doc.setLineWidth(0.3); doc.roundedRect(x, y, w, h, 2.5, 2.5, "FD"); };
 
-  doc.setDrawColor(220); doc.line(10, ZB.sepBas, 138, ZB.sepBas);
-  doc.setFontSize(9); doc.setTextColor(90, 90, 90);
-  /*
-   * Si la remise a déjà été enregistrée dans l'application, on imprime la personne, sa qualité
-   * et sa pièce d'identité : le bon devient une vraie preuve, pas seulement une case à signer.
-   * Sinon on garde la ligne vierge, pour le cas où l'agent imprime avant de remettre.
-   */
-  if (colis.remise) {
-    doc.setFontSize(8); doc.setTextColor(120, 120, 120);
-    doc.text("Remis à", 10, ZB.signature - 8);
-    doc.setFontSize(9.5); doc.setTextColor(30, 30, 30); doc.setFont(undefined, "bold");
-    const qualite = colis.remise.lien === "proche" ? " (un proche)" : colis.remise.lien === "mandataire" ? " (mandataire)" : "";
-    doc.text(`${colis.remise.nom}${qualite}`, 10, ZB.signature - 3);
-    doc.setFont(undefined, "normal"); doc.setFontSize(8.5); doc.setTextColor(90, 90, 90);
-    const piece = colis.remise.typePiece
-      ? `${colis.remise.typePiece}${colis.remise.numeroPiece ? " " + colis.remise.numeroPiece : ""}`
-      : "Aucune pièce présentée";
-    doc.text(piece, 10, ZB.signature + 2);
-    doc.text(`Le ${new Date(colis.remise.date).toLocaleString("fr-FR")} · agent : ${colis.remise.agent}`, 10, ZB.signature + 7);
-    doc.setFontSize(9); doc.setTextColor(120, 120, 120);
-    doc.text("Signature :", 10, ZB.signature + 15);
-    doc.setDrawColor(150); doc.line(10, ZB.traitSignature + 8, 90, ZB.traitSignature + 8);
-  } else {
-  doc.text("Signature de la personne qui récupère :", 10, ZB.signature);
-  doc.setDrawColor(150); doc.line(10, ZB.traitSignature, 90, ZB.traitSignature);
-  }
+  doc.setFillColor(...NAVY); doc.rect(0, 0, W, 27, "F");
+  doc.setFillColor(255, 255, 255); doc.roundedRect(M, 4, 19, 19, 2.5, 2.5, "F");
+  try { doc.addImage(DEFAULT_LOGO, "PNG", M + 1.5, 5.5, 16, 16); } catch (e) { /* logo facultatif */ }
+  doc.setFont(undefined, "bold"); doc.setFontSize(13.5); doc.setTextColor(255, 255, 255); doc.text("BA-DIABY EXPRESS", 34, 11);
+  doc.setFont(undefined, "normal"); doc.setFontSize(8); doc.setTextColor(210, 222, 238); doc.text("Logistique · Transport · Livraison", 34, 17);
+  doc.setFont(undefined, "bold"); doc.setFontSize(10.5); doc.setTextColor(255, 255, 255); doc.text("BON DE SORTIE", W - M, 10, { align: "right" });
+  doc.setFont(undefined, "normal"); doc.setFontSize(7.5); doc.setTextColor(210, 222, 238); doc.text(refBon, W - M, 16, { align: "right" });
+  doc.text(`Émis le ${dateFr(remise.date, false)}`, W - M, 22, { align: "right" });
 
-  doc.setDrawColor(200); doc.line(10, ZB.sepPied, 138, ZB.sepPied);
-  doc.setFontSize(7.5); doc.setTextColor(120, 120, 120);
-  doc.text("Ce document atteste la remise du colis. À conserver avec les pièces comptables.", 10, ZB.pied);
-  openPdf(doc, `bon-de-sortie-${colis.tracking}.pdf`);
+  let y = 33;
+  doc.setFillColor(...PALE); doc.roundedRect(M, y, W - 2 * M, 16, 3, 3, "F");
+  doc.setFont(undefined, "bold"); doc.setFontSize(7.2); doc.setTextColor(...MUTED); doc.text("IDENTIFIANT DE SUIVI", M + 6, y + 5.5);
+  doc.setFont(undefined, "bold"); doc.setFontSize(15); doc.setTextColor(...NAVY); doc.text(tracking, M + 6, y + 12.5);
+  doc.setFillColor(...(colis.remise ? [225, 247, 235] : [255, 244, 220])); doc.roundedRect(W - M - 48, y + 3.5, 42, 9, 4.5, 4.5, "F");
+  doc.setFont(undefined, "bold"); doc.setFontSize(6.8); doc.setTextColor(...(colis.remise ? [24, 117, 68] : [151, 91, 13])); doc.text(statutRemise.toUpperCase(), W - M - 27, y + 9, { align: "center" });
+  y += 21;
+
+  doc.setFont(undefined, "bold"); doc.setFontSize(8.5); doc.setTextColor(...NAVY); doc.text("IDENTIFICATION ET REMISE", M, y);
+  doc.setDrawColor(...RED); doc.setLineWidth(1); doc.line(M, y + 2.5, M + 21, y + 2.5); y += 7;
+  const cardW = (W - 2 * M - 5) / 2; const left = M; const right = M + cardW + 5; const hCard = 58;
+  card(left, y, cardW, hCard); card(right, y, cardW, hCard);
+  let yl = y + 8; let yr = y + 8;
+  yl = field("Destinataire prévu", destinataire, left + 6, yl, cardW - 12, true) + 5;
+  yl = field("Téléphone", telephone, left + 6, yl, cardW - 12) + 5;
+  yl = field("Adresse / destination", adresse, left + 6, yl, cardW - 12) + 5;
+  field("Emplacement / agence", lieu, left + 6, yl, cardW - 12);
+  yr = field("Récupéré par", nomRecuperateur, right + 6, yr, cardW - 12, true) + 5;
+  yr = field("Qualité", qualite, right + 6, yr, cardW - 12) + 5;
+  yr = field("Pièce d’identité", piece, right + 6, yr, cardW - 12) + 5;
+  field("Date et heure de remise", dateFr(remise.date), right + 6, yr, cardW - 12);
+  y += hCard + 7;
+
+  doc.setFont(undefined, "bold"); doc.setFontSize(8.5); doc.setTextColor(...NAVY); doc.text("TRAÇABILITÉ DE L’OPÉRATION", M, y);
+  doc.setDrawColor(...RED); doc.setLineWidth(1); doc.line(M, y + 2.5, M + 21, y + 2.5); y += 7;
+  card(M, y, W - 2 * M, 22, [250, 251, 253]);
+  field("Référence comptable", refBon, M + 6, y + 8, 53, true);
+  field("Enregistré par", nomAgent, M + 67, y + 8, 59);
+  doc.setDrawColor(...LINE); doc.setLineWidth(0.3); doc.line(M + 63, y + 5, M + 63, y + 23);
+  doc.setFont(undefined, "normal"); doc.setFontSize(7.2); doc.setTextColor(...MUTED);
+  doc.text("Sortie physique à rapprocher du dossier client, du suivi et des pièces de paiement.", M + 6, y + 19);
+  y += 29;
+
+  doc.setFont(undefined, "bold"); doc.setFontSize(8.5); doc.setTextColor(...NAVY); doc.text("VALIDATION ET SIGNATURES", M, y);
+  doc.setDrawColor(...RED); doc.setLineWidth(1); doc.line(M, y + 2.5, M + 21, y + 2.5); y += 7;
+  const sigW = (W - 2 * M - 5) / 2; card(M, y, sigW, 28); card(M + sigW + 5, y, sigW, 28);
+  doc.setFont(undefined, "bold"); doc.setFontSize(7.5); doc.setTextColor(...MUTED);
+  doc.text("SIGNATURE DU RÉCUPÉRATEUR", M + 6, y + 8); doc.text("VISA / CACHET DE L’AGENCE", M + sigW + 11, y + 8);
+  doc.setDrawColor(145); doc.setLineWidth(0.45);   doc.line(M + 6, y + 20, M + sigW - 6, y + 20); doc.line(M + sigW + 11, y + 20, W - M - 6, y + 20);
+  doc.setFont(undefined, "normal"); doc.setFontSize(6.4); doc.setTextColor(...MUTED);
+  doc.text(colis.remise ? "Signature apposée lors de la remise" : "Signature à recueillir lors de la remise", M + 6, y + 25);
+  doc.text("Nom, signature et cachet", M + sigW + 11, y + 25);
+
+  doc.setDrawColor(...LINE); doc.setLineWidth(0.35); doc.line(M, H - 17, W - M, H - 17);
+  doc.setFont(undefined, "normal"); doc.setFontSize(6.8); doc.setTextColor(...MUTED);
+  doc.text("Document interne — à conserver avec les pièces comptables et le dossier du colis.", M, H - 11);
+  doc.text("BA-DIABY EXPRESS · Bon de sortie · Référence " + refBon, M, H - 6);
+    openPdf(doc, `bon-de-sortie-${colis.tracking}.pdf`);
 }
+
 
 /**
  * Ticket d’envoi A4 — design premium (bleu ciel / rouge / blanc / gris clair), plus de bandeau

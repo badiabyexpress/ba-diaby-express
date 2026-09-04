@@ -3129,6 +3129,13 @@ function poserLiensSuivi(doc, donnees, colonne = 0) {
   if (donnees.column?.index !== colonne) return;
   const code = String(cellule.raw ?? "").trim();
   if (!code) return;
+  /*
+   * Un numéro de suivi ne contient jamais d'espace. Depuis que la fiche de voyage réunit les colis
+   * d'un partenaire sur une ligne, cette colonne peut porter « 7 colis » : en faire un lien
+   * mènerait à une page « colis introuvable », et un lien mort dans un document qu'on envoie vaut
+   * moins que pas de lien du tout.
+   */
+  if (/\s/.test(code)) return;
   doc.link(cellule.x, cellule.y, cellule.width, cellule.height, { url: trackingUrlFor(code) });
 }
 
@@ -3136,6 +3143,8 @@ function poserLiensSuivi(doc, donnees, colonne = 0) {
 function texteAvecLienSuivi(doc, code, x, y) {
   const texte = String(code ?? "");
   if (!texte) return;
+  /* Même garde que poserLiensSuivi : « 7 colis » n'est pas un numéro de suivi. */
+  if (/\s/.test(texte.trim())) { doc.text(texte, x, y); return; }
   doc.setTextColor(...LIEN_PDF);
   doc.textWithLink(texte, x, y, { url: trackingUrlFor(texte) });
 }
@@ -25089,8 +25098,64 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data, devis
   });
   y += 3;
 
+  /*
+   * LES COLIS D'UN MÊME PARTENAIRE TIENNENT SUR UNE SEULE LIGNE.
+   *
+   * Sept colis d'un même partenaire, c'était sept lignes qui répétaient sept fois le même nom et
+   * sept montants à additionner de tête. Or cette fiche n'est pas un document de remise : c'est la
+   * pièce qui ARRÊTE LES COMPTES d'une rotation. Ce qu'on y cherche d'un partenaire tient en trois
+   * chiffres — combien de colis, quel poids, quelle somme — et non le détail de chaque carton, qui
+   * appartient au bordereau d'expédition.
+   *
+   * Le nom affiché est celui de SON ENTREPRISE, pas celui de ses destinataires. Le destinataire
+   * d'un colis partenaire est le client DU PARTENAIRE : le répéter ligne après ligne apprend le
+   * carnet d'adresses d'un tiers à qui lit la fiche, sans rien apporter au compte.
+   *
+   * Les colis clients, eux, ne se regroupent pas : chacun a son règlement propre, et c'est
+   * précisément ce qu'on vient vérifier ligne par ligne.
+   */
+  const lignesFiche = [];
+  const groupesPartenaire = new Map();
+  colisInclus.forEach((c) => {
+    if (!estColisPartenaire(c)) { lignesFiche.push({ partenaireId: null, colis: [c] }); return; }
+    const cle = String(c.partenaireId);
+    if (!groupesPartenaire.has(cle)) {
+      /* Le groupe prend la place de son premier colis : l'ordre de la fiche ne saute pas. */
+      const groupe = {
+        partenaireId: cle,
+        partenaire: (data?.users || []).find((u) => u && u.id === c.partenaireId) || null,
+        colis: [],
+      };
+      groupesPartenaire.set(cle, groupe);
+      lignesFiche.push(groupe);
+    }
+    groupesPartenaire.get(cle).colis.push(c);
+  });
+
   const head = ["N° de suivi", "Destinataire", "Sens", "Poids", `Facturé (${devise})`, `Payé (${devise})`, "Reste"];
-  const body = colisInclus.map((c) => [
+  const body = lignesFiche.map((ligne) => {
+    if (ligne.partenaireId) {
+      const lot = ligne.colis;
+      const facture = lot.reduce((n, c) => n + duPartenaire(c).facture, 0);
+      const paye = lot.reduce((n, c) => n + duPartenaire(c).paye, 0);
+      const reste = lot.reduce((n, c) => n + duPartenaire(c).reste, 0);
+      const sens = [...new Set(lot.map((c) => ((c.direction || "export") === "export" ? "Aller" : "Retour")))];
+      return [
+        /*
+         * Un seul numéro serait un mensonge, et sept en feraient sept lignes. On dit le nombre :
+         * le détail est sur le bordereau, qui est fait pour ça.
+         */
+        `${lot.length} colis`,
+        nomPartenaire(ligne.partenaire),
+        sens.length === 1 ? sens[0] : "Aller/Retour",
+        `${lot.reduce((n, c) => n + (Number(c.poids) || 0), 0).toFixed(1)} kg`,
+        fmt(facture, devise),
+        fmt(paye, devise),
+        reste > 0.005 ? fmt(reste, devise) : "Réglé",
+      ];
+    }
+    const c = ligne.colis[0];
+    return [
     c.tracking, c.destinataire || "—",
     (c.direction || "export") === "export" ? "Aller" : "Retour",
     `${(Number(c.poids) || 0).toFixed(1)} kg`,
@@ -25105,12 +25170,12 @@ function dessinerFicheVoyage(doc, voyage, colisInclus, hasAutoTable, data, devis
      * payé, reste dû. « Sur facture » était exact mais ne se totalisait pas — celui qui arrête
      * les comptes veut savoir COMBIEN le partenaire doit encore à la caisse, pas où le chercher.
      */
-    estColisPartenaire(c) ? fmt(duPartenaire(c).facture, devise) : fmt(c.prix, devise),
-    estColisPartenaire(c) ? fmt(duPartenaire(c).paye, devise) : fmt(c.paye, devise),
-    estColisPartenaire(c)
-      ? (duPartenaire(c).reste > 0.005 ? fmt(duPartenaire(c).reste, devise) : "Réglé")
-      : ((Number(c.reste) || 0) > 0 ? fmt(c.reste, devise) : "Payé"),
-  ]);
+    /* Un colis partenaire ne passe plus par ici : il est compté dans la ligne de son entreprise. */
+    fmt(c.prix, devise),
+    fmt(c.paye, devise),
+    (Number(c.reste) || 0) > 0 ? fmt(c.reste, devise) : "Payé",
+    ];
+  });
   if (hasAutoTable && doc.autoTable && body.length > 0) {
     doc.autoTable({
       startY: y, head: [head], body,

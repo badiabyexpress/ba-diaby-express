@@ -14199,6 +14199,60 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
       </div>
 
       {/*
+        LES AJUSTEMENTS — POURQUOI UNE COMMISSION A CHANGÉ.
+
+        « J'avais quarante euros la semaine dernière et vingt aujourd'hui » est la question qui
+        empoisonne une fin de mois, et elle ne se répond pas de mémoire. Chaque colis annulé,
+        corrigé ou supprimé laisse ici les deux montants, l'écart, le motif, l'auteur et l'heure.
+
+        Les deux montants et pas seulement l'écart : une suite de différences ne se recompose pas,
+        il suffit d'une écriture manquée pour que tout le reste devienne faux.
+      */}
+      {(data.ajustementsCommission || []).length > 0 && (
+        <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", maxWidth: 900, marginBottom: 20 }}>
+          <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)" }}>
+            <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14 }}>Ajustements de commission</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
+              Ce qui a fait varier une commission après coup — et pourquoi. Rien n’est effacé.
+            </div>
+          </div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", minWidth: 760, borderCollapse: "collapse" }}>
+              <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>
+                {["QUAND", "COLIS", "PERSONNE", "AVANT", "APRÈS", "ÉCART", "MOTIF"].map((h, i) => (
+                  <th key={h} style={{ padding: "10px 14px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap", textAlign: i >= 3 && i <= 5 ? "right" : "left" }}>{h}</th>
+                ))}
+              </tr></thead>
+              <tbody>
+                {(data.ajustementsCommission || []).slice(0, 40).map((a) => (
+                  <tr key={a.id} style={{ borderTop: "1px solid var(--surface2)" }}>
+                    <td style={{ padding: "10px 14px", fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap" }}>
+                      {new Date(a.le).toLocaleDateString("fr-FR")}
+                      <div style={{ fontSize: 10.5 }}>{a.par}</div>
+                    </td>
+                    <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", fontWeight: 600, whiteSpace: "nowrap" }}>{a.colisTracking}</td>
+                    <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--text)", whiteSpace: "nowrap" }}>{a.beneficiaireNom || "—"}</td>
+                    <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", textAlign: "right", whiteSpace: "nowrap" }}>{fmt(a.avant, "EUR")}</td>
+                    <td style={{ padding: "10px 14px", fontSize: 12.5, color: "var(--muted)", textAlign: "right", whiteSpace: "nowrap" }}>{fmt(a.apres, "EUR")}</td>
+                    <td style={{ padding: "10px 14px", fontSize: 12.5, fontWeight: 700, textAlign: "right", whiteSpace: "nowrap",
+                      color: a.difference < 0 ? "var(--danger-fg)" : "var(--ok-fg)" }}>
+                      {a.difference > 0 ? "+" : ""}{fmt(a.difference, "EUR")}
+                    </td>
+                    <td style={{ padding: "10px 14px", fontSize: 12, color: "var(--muted)", maxWidth: 240 }}>{a.motif}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {(data.ajustementsCommission || []).length > 40 && (
+            <div style={{ padding: "10px 18px", fontSize: 11.5, color: "var(--muted)", borderTop: "1px solid var(--border)" }}>
+              Les 40 plus récents sur {(data.ajustementsCommission || []).length}.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/*
         LES RESPONSABLES DE ZONE, VUS DE L'ENTREPRISE.
 
         Pour chacun : ce qu'il a fait de sa main, ce que son équipe lui rapporte, et le détail
@@ -16652,9 +16706,62 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
       : [`${nouveaux.length} colis importés — en attente de synchronisation, ne fermez pas cette page`, 9000]));
     return suite.etat;
   }
+  /**
+   * L'AJUSTEMENT DE COMMISSION — CE QUI A CHANGÉ, ET POURQUOI.
+   * ─────────────────────────────────────────────────────────────────────────────
+   * Une commission ne disparaît jamais en silence. Un colis annulé, un poids corrigé de douze
+   * kilos à deux, un colis supprimé : à chaque fois de l'argent cesse d'être dû à quelqu'un — et
+   * si rien ne l'écrit, personne ne peut répondre à « pourquoi j'avais quarante euros la semaine
+   * dernière et vingt aujourd'hui ? ». C'est la question qui empoisonne une fin de mois.
+   *
+   * ON ENREGISTRE LES DEUX MONTANTS, PAS SEULEMENT LA DIFFÉRENCE.
+   *
+   * La différence seule ne dit pas d'où l'on partait, et une suite de différences ne se recompose
+   * pas — il suffit d'une écriture manquée pour que tout le reste devienne faux.
+   *
+   * Rend le document augmenté de l'ajustement, ou tel quel s'il n'y a rien à écrire. On n'écrit
+   * jamais une ligne à zéro : un journal plein de « aucun changement » ne se lit plus.
+   */
+  function avecAjustementCommission(doc, avant, apres, motif) {
+    if (!avant) return doc;
+    const contexte = { users: doc.users, config: doc.commissionConfig, categories: doc.categories };
+    const auteur = auteurDuColis(avant, doc.users || []);
+    const partAvant = commissionDuColis(avant, { ...contexte, auteur });
+    const partApres = apres ? commissionDuColis(apres, { ...contexte, auteur }) : { agentMontant: 0, superviseurMontant: 0, superviseurId: null };
+    const lignes = [];
+    const pousser = (beneficiaireId, nom, montantAvant, montantApres) => {
+      const ecart = +(montantApres - montantAvant).toFixed(2);
+      if (Math.abs(ecart) < 0.005) return;
+      lignes.push({
+        id: `aj${Date.now()}${Math.random().toString(36).slice(2, 5)}`,
+        colisTracking: avant.tracking,
+        beneficiaireId: beneficiaireId || null,
+        beneficiaireNom: nom || "",
+        avant: montantAvant, apres: montantApres, difference: ecart,
+        motif: String(motif || "").slice(0, 300),
+        par: `${session.prenom} ${session.nom}`.trim() || session.identifiant || "",
+        parId: session?.id || null,
+        le: new Date().toISOString(),
+      });
+    };
+    pousser(partAvant.agentId, partAvant.agentNom, partAvant.agentMontant, partApres.agentMontant);
+    /*
+     * La supervision est suivie à part, et pour son propre bénéficiaire : c'est un autre compte
+     * que celui de l'agent, et le rattachement a pu changer entre les deux mesures.
+     */
+    if (partAvant.superviseurId || partApres.superviseurId) {
+      pousser(partAvant.superviseurId || partApres.superviseurId,
+        partAvant.superviseurNom || partApres.superviseurNom,
+        partAvant.superviseurMontant, partApres.superviseurMontant);
+    }
+    if (lignes.length === 0) return doc;
+    return { ...doc, ajustementsCommission: [...lignes, ...(doc.ajustementsCommission || [])].slice(0, 2000) };
+  }
+
   function updateColis(tracking, patch) {
     const avant = data.colis.find((c) => c.tracking === tracking);
-    const next = { ...data, colis: data.colis.map((c) => (c.tracking === tracking ? { ...c, ...patch } : c)) };
+    let next = { ...data, colis: data.colis.map((c) => (c.tracking === tracking ? { ...c, ...patch } : c)) };
+    next = avecAjustementCommission(next, avant, next.colis.find((c) => c.tracking === tracking), "Colis modifié");
     persist(next);
     const apres = next.colis.find((c) => c.tracking === tracking);
     setSelected(apres);
@@ -16797,7 +16904,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
   }
 
   function annuler(tracking, motif) {
-    const next = { ...data, colis: data.colis.map((c) => {
+    let next = { ...data, colis: data.colis.map((c) => {
       if (c.tracking !== tracking) return c;
       return { ...c, status: "Annulé", historique: [...c.historique, {
         status: "Annulé", date: new Date().toISOString(),
@@ -16805,12 +16912,15 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
       }] };
     }) };
     next.activityLog = logActivity("Colis annulé", `${tracking}${motif ? ` — ${motif}` : ""}`);
+    /* Le colis n'a pas voyagé : la commission cesse d'être due, et on écrit pourquoi. */
+    next = avecAjustementCommission(next, data.colis.find((c) => c.tracking === tracking),
+      next.colis.find((c) => c.tracking === tracking), `Colis annulé${motif ? ` — ${motif}` : ""}`);
     persist(next);
     notify("Colis annulé");
     setSelected(next.colis.find((c) => c.tracking === tracking));
   }
   function refuser(tracking, motif) {
-    const next = { ...data, colis: data.colis.map((c) => {
+    let next = { ...data, colis: data.colis.map((c) => {
       if (c.tracking !== tracking) return c;
       return { ...c, status: "Refusé", retour: { motif, date: new Date().toISOString(), statutRetour: "En attente de décision" }, historique: [...c.historique, {
         status: "Refusé", date: new Date().toISOString(),
@@ -16818,6 +16928,8 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
       }] };
     }) };
     next.activityLog = logActivity("Colis refusé par le destinataire", `${tracking}${motif ? ` — ${motif}` : ""}`);
+    next = avecAjustementCommission(next, data.colis.find((c) => c.tracking === tracking),
+      next.colis.find((c) => c.tracking === tracking), `Colis refusé${motif ? ` — ${motif}` : ""}`);
     persist(next);
     notify("Colis marqué comme refusé");
     setSelected(next.colis.find((c) => c.tracking === tracking));
@@ -16828,7 +16940,17 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
     persist(next);
     setSelected(next.colis.find((c) => c.tracking === tracking));
   }
-  function remove(tracking) { persist({ ...data, colis: data.colis.filter((c) => c.tracking !== tracking), activityLog: logActivity("Colis supprimé", tracking) }); setSelected(null); }
+  function remove(tracking) {
+    /*
+     * Le colis disparaît ; la commission qu'il avait produite, non. Sans cette ligne, un colis
+     * supprimé retirait de l'argent à quelqu'un sans laisser la moindre trace de l'opération.
+     */
+    const avant = data.colis.find((c) => c.tracking === tracking);
+    let next = { ...data, colis: data.colis.filter((c) => c.tracking !== tracking), activityLog: logActivity("Colis supprimé", tracking) };
+    next = avecAjustementCommission(next, avant, null, "Colis supprimé");
+    persist(next);
+    setSelected(null);
+  }
   /**
    * Encaissement groupé : le client se présente au comptoir avec plusieurs colis et règle une
    * seule somme. Elle est répartie automatiquement sur les colis sélectionnés, du plus ancien au

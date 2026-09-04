@@ -945,6 +945,48 @@ function estColisPartenaire(colis) {
 }
 
 /**
+ * LE PAYS DEPUIS LEQUEL CETTE PERSONNE TRAVAILLE — QUEL QUE SOIT SON TYPE DE COMPTE.
+ *
+ * Il y a deux champs pour dire la même chose, et c'est historique, pas fantaisiste :
+ *
+ *   `paysOperation`  — les comptes de l'entreprise (agent, comptable, responsable). C'est le champ
+ *                      que remplit la fiche employé de l'administrateur.
+ *   `lieuOperation`  — les accès qu'un PARTENAIRE crée pour ses propres collaborateurs. Sa fiche à
+ *                      lui est ailleurs, et elle nomme le champ autrement.
+ *
+ * CE QUE COÛTAIT DE N'EN LIRE QU'UN.
+ *
+ * Le formulaire de colis partenaire ne lisait que `lieuOperation` — un champ qu'aucun compte de
+ * l'entreprise ne porte. Le sens par défaut retombait donc toujours sur « Conakry → Paris », y
+ * compris pour un agent basé à Paris, qui dépose pourtant des colis qui QUITTENT la France. Le
+ * colis partait enregistré à l'envers : l'expéditeur inscrit du côté guinéen, le destinataire du
+ * côté français, et le bordereau de départ de Paris ne le voyait pas — il cherchait des colis au
+ * départ de Paris, et celui-là se disait au départ de Conakry.
+ *
+ * EN DERNIER RECOURS SEULEMENT, LA VILLE — ET UNIQUEMENT SI ELLE NE DÉSIGNE QU'UN PAYS.
+ *
+ * « Conakry » ne se trouve qu'en Guinée : elle tranche. « Paris » existe aussi au Canada et aux
+ * États-Unis : elle ne tranche pas, et deviner ici mettrait un colis sur la mauvaise route sans
+ * que personne ne l'ait demandé. Mieux vaut retomber sur la Guinée, qui est visible et corrigible,
+ * qu'une supposition qui a l'air juste.
+ */
+function paysDeLOperateur(session) {
+  if (!session) return "GN";
+  return session.paysOperation || session.lieuOperation
+    || paysDeLaVille(session.zoneOperation) || paysDeLaVille(session.agence) || "GN";
+}
+
+/** Le pays d'une ville, quand une seule réponse est possible. Sinon null. */
+function paysDeLaVille(ville) {
+  const cherche = String(ville || "").trim().toLowerCase();
+  if (!cherche) return null;
+  const trouves = Object.entries(VILLES_PAR_PAYS || {})
+    .filter(([, villes]) => (villes || []).some((v) => String(v).toLowerCase() === cherche))
+    .map(([code]) => code);
+  return trouves.length === 1 ? trouves[0] : null;
+}
+
+/**
  * CE QU'UNE LIGNE DE LA LISTE DOIT AFFICHER SOUS « FRAIS D'EXPÉDITION » — ET DE QUI C'EST DÛ.
  *
  * Sur un colis partenaire, `prix` vaut zéro par construction, et c'est voulu : ce n'est pas le
@@ -12413,8 +12455,17 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
    * Un employé basé à Paris dépose des colis qui quittent la France : lui présenter « Conakry →
    * Paris » par défaut, c'est le faire corriger à chaque colis, et se tromper un jour sur deux.
    * Un agent de l'entreprise ou le titulaire du compte partent de Guinée, comme avant.
+   *
+   * ON NE LISAIT QU'UN SEUL DES DEUX CHAMPS QUI DISENT CE LIEU.
+   *
+   * `lieuOperation` n'existe que sur les accès créés par un partenaire ; aucun compte de
+   * l'entreprise ne le porte. La condition était donc TOUJOURS fausse pour nos agents, et le sens
+   * retombait sur « Conakry → Paris » même pour un agent basé à Paris. Le colis NY030901 en est la
+   * trace : enregistré à Paris le 3 septembre, il est parti inscrit au départ de Conakry, avec le
+   * partenaire en expéditeur et le client parisien en destinataire — les deux à l'envers — et le
+   * bordereau de départ de Paris ne l'a jamais vu. `paysDeLOperateur` lit les deux champs.
    */
-  const [sens, setSens] = useState(() => (session?.lieuOperation && session.lieuOperation !== "GN" ? "import" : "export"));
+  const [sens, setSens] = useState(() => (paysDeLOperateur(session) !== "GN" ? "import" : "export"));
   /* Aérien tant que la voie maritime n'est pas ouverte — voir le champ « Mode de transport ». */
   const mode = "air";
   const [articles, setArticles] = useState(() => [{ ...emptyProduit(), tarification: "kg", categoriePartenaire: "" }]);
@@ -12485,8 +12536,8 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
   const [destPaysAjuste, setDestPaysAjuste] = useState(false);
   useEffect(() => {
     // La route par défaut est celle du lieu d'opération : on n'y revient pas si l'agent en change.
-    const lieu = session?.lieuOperation;
-    if (lieu && lieu !== "GN" && paysDisponibles.some((c) => c.code === lieu)) setDestPays(lieu);
+    const lieu = paysDeLOperateur(session);
+    if (lieu !== "GN" && paysDisponibles.some((c) => c.code === lieu)) setDestPays(lieu);
   }, []);
   /*
    * L'agent que nous avons placé chez ce partenaire.

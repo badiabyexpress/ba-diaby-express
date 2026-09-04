@@ -529,6 +529,18 @@ function abonnementTempsReel(key, callback) {
  * parfaite serait impossible sans horodater chaque champ ; celle-ci garantit au moins qu'on ne
  * perd rien, ce qui est le seul point qui compte.
  */
+/*
+ * Passé quelques heures, ce n'est plus « le travail d'une coupure » : c'est une vieille copie.
+ *
+ * La règle ci-dessus — l'agent qui revient a raison — vaut pour une coupure de quelques minutes.
+ * Une écriture restée en file depuis le matin, elle, porte l'état du matin : la rejouer telle
+ * quelle remettrait chaque colis dans l'étape où il était à ce moment-là, en effaçant tout ce qui
+ * a été fait depuis par les collègues. Passé ce délai, on inverse donc la priorité : ce que la
+ * file est SEULE à connaître est ajouté, et ce que le serveur connaît déjà garde sa version — elle
+ * est forcément plus fraîche. Rien n'est perdu, rien n'est remonté dans le temps.
+ */
+const AGE_REJEU_SUR_PLACE_MS = 2 * 60 * 60 * 1000;
+
 const CLES_IDENTITE = ["id", "tracking", "numero", "cle", "key"];
 function identiteDe(element) {
   if (!element || typeof element !== "object" || Array.isArray(element)) return null;
@@ -538,10 +550,11 @@ function identiteDe(element) {
 function listeIdentifiable(valeur) {
   return Array.isArray(valeur) && valeur.length > 0 && valeur.every((x) => identiteDe(x) !== null);
 }
-export function fusionnerDocuments(serveur, local) {
+export function fusionnerDocuments(serveur, local, options = {}) {
   if (!serveur || typeof serveur !== "object" || Array.isArray(serveur)) return local;
   if (!local || typeof local !== "object" || Array.isArray(local)) return local;
-  const sortie = { ...serveur, ...local };
+  const serveurPrioritaire = !!options.serveurPrioritaire;
+  const sortie = serveurPrioritaire ? { ...local, ...serveur } : { ...serveur, ...local };
   Object.keys(sortie).forEach((cle) => {
     const cotéServeur = serveur[cle];
     const cotéLocal = local[cle];
@@ -560,8 +573,13 @@ export function fusionnerDocuments(serveur, local) {
     }
     if (!listeIdentifiable(cotéServeur) || !listeIdentifiable(cotéLocal)) return;
     const parIdentite = new Map();
-    cotéServeur.forEach((x) => parIdentite.set(identiteDe(x), x));
-    cotéLocal.forEach((x) => parIdentite.set(identiteDe(x), x));
+    if (serveurPrioritaire) {
+      cotéLocal.forEach((x) => parIdentite.set(identiteDe(x), x));
+      cotéServeur.forEach((x) => parIdentite.set(identiteDe(x), x));
+    } else {
+      cotéServeur.forEach((x) => parIdentite.set(identiteDe(x), x));
+      cotéLocal.forEach((x) => parIdentite.set(identiteDe(x), x));
+    }
     /*
      * L'ordre suit la version locale — c'est celle que l'agent a sous les yeux — et ce que le
      * serveur avait en plus vient ensuite, sans quoi ces lignes se retrouveraient reléguées.
@@ -596,21 +614,39 @@ export async function flushOutbox() {
        * ne pousse rien — mieux vaut retenter plus tard que remplacer à l'aveugle.
        */
       let surLeServeur = null;
+      /*
+       * LA VERSION RELUE DOIT REPARTIR AVEC L'ÉCRITURE.
+       *
+       * Sans elle, le serveur refuse net : « une page sans version fiable ne peut pas réécrire le
+       * document » (api/donnees.js). La file ne l'envoyait pas — si bien que TOUTE écriture tombée
+       * dedans était refusée à chaque tentative, indéfiniment. Le bandeau « en attente
+       * d'enregistrement » ne s'éteignait plus, et le travail qu'il portait n'atteignait jamais la
+       * base : ce n'était pas une attente, c'était une impasse.
+       *
+       * Le rejeu est pourtant parfaitement légitime : on vient de lire le document, on fusionne
+       * dessus, on écrit à la condition qu'il n'ait pas rebougé entre les deux. C'est exactement ce
+       * que la version sert à dire.
+       */
+      let versionServeur = null;
       const lecture = await appelServeur(`?cle=${encodeURIComponent(item.key)}`);
       if (!lecture.indisponible) {
         if (!lecture.ok && !lecture.corps?.cleAbsente) throw new Error("Relecture impossible");
         surLeServeur = lecture.corps?.value ?? null;
+        versionServeur = lecture.corps?.updated_at || null;
       } else {
         const { data: actuel, error: erreurLecture } = await client.from(TABLE).select("value").eq("key", item.key).maybeSingle();
         if (erreurLecture) throw erreurLecture;
         surLeServeur = actuel?.value ?? null;
       }
-      const valeur = surLeServeur ? fusionnerDocuments(surLeServeur, item.value) : item.value;
+      const vieille = typeof item.ts === "number" && Date.now() - item.ts > AGE_REJEU_SUR_PLACE_MS;
+      const valeur = surLeServeur
+        ? fusionnerDocuments(surLeServeur, item.value, { serveurPrioritaire: vieille })
+        : item.value;
       const ecriture = await appelServeur(`?cle=${encodeURIComponent(item.key)}`, {
-        method: "PUT", body: JSON.stringify({ value: valeur }),
+        method: "PUT", body: JSON.stringify({ value: valeur, baseVersion: versionServeur }),
       });
       if (!ecriture.indisponible) {
-        if (!ecriture.ok) throw new Error("Enregistrement impossible");
+        if (!ecriture.ok) throw new Error(ecriture.corps?.error || "Enregistrement impossible");
       } else {
         const { error } = await client.from(TABLE).upsert({ key: item.key, value: valeur, updated_at: new Date().toISOString() });
         if (error) throw error;
@@ -618,7 +654,19 @@ export async function flushOutbox() {
       ecrireCache(item.key, valeur);
       flushed++;
     } catch (e) {
-      stillFailed.push(item); // toujours hors ligne ou erreur ponctuelle : on retente au prochain retour de connexion
+      /*
+       * On retente au prochain passage — mais on garde trace de l'échec.
+       *
+       * Sans cela, une écriture définitivement refusée et une coupure de réseau d'une seconde se
+       * ressemblaient exactement : un bandeau, un chiffre, et rien d'autre. Le blocage de la file
+       * a duré une journée entière sans que personne puisse dire ce qui coinçait, ni depuis quand.
+       */
+      stillFailed.push({
+        ...item,
+        essais: (item.essais || 0) + 1,
+        dernierEssai: Date.now(),
+        derniereErreur: String(e?.message || e || "").slice(0, 200),
+      });
     }
   }
   setQueue(stillFailed);
@@ -628,6 +676,21 @@ export async function flushOutbox() {
 /** Nombre d'écritures en attente de synchronisation — utilisé pour afficher le badge dans l'interface. */
 export function pendingSyncCount() {
   return getQueue().length;
+}
+
+/**
+ * Ce que la file porte, et pourquoi elle ne se vide pas.
+ *
+ * Le nombre seul ne dit rien : « 1 en attente » peut être une seconde de réseau comme un refus
+ * qui dure depuis le matin. L'interface a besoin de la différence pour la dire à l'agent.
+ */
+export function detailFileAttente() {
+  return getQueue().map((i) => ({
+    cle: i.key,
+    depuis: typeof i.ts === "number" ? i.ts : null,
+    essais: i.essais || 0,
+    erreur: i.derniereErreur || null,
+  }));
 }
 
 /**

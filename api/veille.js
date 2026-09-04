@@ -34,6 +34,7 @@ import { envoyerCopieHorsBase } from "./_copie.js";
 import { releveDeFraude, signauxDeFraude, corpsAlerteFraude } from "./_fraude.js";
 import { destinataireAlerte } from "./_alerte.js";
 import { purgerDocumentsDevinables } from "./_documents.js";
+import { archiverJournal } from "./_journal.js";
 import crypto from "node:crypto";
 import { expediteurCourriel, enteteCourriel, reponseCourriel } from "./_expediteur.js";
 
@@ -334,6 +335,21 @@ export default async function handler(req, res) {
   }
 
   /*
+   * L'ARCHIVAGE DU JOURNAL — avant tout, parce qu'il garde une trace qu'on ne rattrape pas.
+   *
+   * Le journal était coupé à cinq cents lignes, et la coupe jetait : au 4 septembre il en comptait
+   * quatre cent soixante-quinze. Ce qui dépasse est désormais déposé dans une clé par mois, et
+   * l'application n'en garde à l'écran que ce qui sert. Rien n'est perdu — et surtout, plus
+   * personne ne peut effacer la trace d'un geste en travaillant assez pour la repousser dehors.
+   */
+  let journal = null;
+  try {
+    journal = await archiverJournal();
+  } catch (e) {
+    journal = { fait: false, raison: "exception", detail: String(e?.message || e).slice(0, 160) };
+  }
+
+  /*
    * Les compteurs d'essais périmés. Une ligne dont la fenêtre s'est refermée hier n'apprend plus
    * rien à personne, et laisser grandir cette table indéfiniment finirait par coûter en lecture
    * ce qu'elle fait gagner en protection.
@@ -417,7 +433,7 @@ export default async function handler(req, res) {
       const veillePrecedente = (await lireCle("bde-data")).valeur?.veille || null;
       if (veillePrecedente?.horsBase?.envoyee === true) {
         await noterVeille({ etat: "deja-faite", clef });
-        return res.status(200).json({ ok: true, etat: "deja-faite", clef, ecrite: false, documents });
+        return res.status(200).json({ ok: true, etat: "deja-faite", clef, ecrite: false, documents, journal });
       }
 
       let reprise = null;
@@ -439,7 +455,7 @@ export default async function handler(req, res) {
           },
       });
       return res.status(200).json({
-        ok: true, etat: "deja-faite", clef, ecrite: false, documents, copieHorsBase: reprise,
+        ok: true, etat: "deja-faite", clef, ecrite: false, documents, journal, copieHorsBase: reprise,
       });
     }
 
@@ -585,6 +601,13 @@ export default async function handler(req, res) {
         ? { effaces: documents.effaces }
         : { effaces: 0, raison: documents?.raison || "inconnue" },
       /*
+       * L'archivage est noté dans la veille pour la même raison que le reste : un ménage dont on
+       * ne sait pas s'il a eu lieu ne protège de rien.
+       */
+      journal: journal?.fait
+        ? { archivees: journal.archivees || 0, enLigne: journal.enLigne }
+        : { archivees: 0, raison: journal?.raison || "inconnue" },
+      /*
        * L'ÉTAT DU BILAN, AVEC SES MOTIFS — pas seulement deux booléens.
        *
        * On gardait « email: false, whatsapp: false » et rien d'autre : impossible de distinguer
@@ -607,7 +630,7 @@ export default async function handler(req, res) {
         : bilan,
     };
     await noterVeille(compte);
-    return res.status(200).json({ ok: true, ...compte, ecrite: true, bilan, copieHorsBase, documents });
+    return res.status(200).json({ ok: true, ...compte, ecrite: true, bilan, copieHorsBase, documents, journal });
   } catch (e) {
     await noterVeille({ etat: "echec", clef, raison: String(e?.message || e).slice(0, 120) });
     return res.status(502).json({ ok: false, etat: "echec", error: "Sauvegarde impossible.", detail: String(e?.message || e).slice(0, 200) });

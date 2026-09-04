@@ -83,6 +83,12 @@ export const PERMISSIONS_SCHEMA = [
      * fois parti. Il reste donc à l'administrateur, sauf désignation expresse.
      */
     { key: "clients.campagnes", label: "Envoyer des campagnes marketing aux clients" },
+    /*
+     * Annuler un parrainage, c'est retirer une récompense déjà acquise à un client qui l'attend.
+     * La consultation du programme n'est pas gardée — elle ne coûte rien à personne ; c'est
+     * l'annulation qui l'est, et elle reste à l'administrateur sauf désignation expresse.
+     */
+    { key: "clients.parrainage", label: "Annuler un parrainage frauduleux" },
   ]},
   /*
    * L'Espace Client est un circuit à part : commandes annoncées, réception et pesée, messages,

@@ -24,6 +24,7 @@ import { baseConfiguree, modifierDocument } from "./_base.js";
 import { identifiantsMotDePasse } from "./_motdepasse.js";
 import { signerSession, empreinteDuCompte } from "./_session.js";
 import { passage, adresseDe, refuser } from "./_verrou.js";
+import { genererCodeParrainage, peutRattacher, creerParrainage, normaliserCodeParrainage } from "./_parrainage.js";
 
 /**
  * Le numéro de téléphone réduit à ce qui l'identifie, pour rapprocher deux écritures du même
@@ -100,7 +101,18 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: `Choisissez un mot de passe d’au moins ${LONGUEUR_MOT_DE_PASSE} caractères.` });
     }
 
+    /*
+     * LE CODE DE PARRAINAGE — FACULTATIF, ET VÉRIFIÉ ICI.
+     *
+     * Il ne peut pas être vérifié dans le navigateur : la page ne connaît pas la liste des codes,
+     * et si elle la connaissait, chacun pourrait lire celui des autres. Le rattachement se décide
+     * donc sur le serveur, au moment même où le compte naît — sans quoi il faudrait un second
+     * appel, et un compte créé entre les deux resterait sans parrain sans que personne le sache.
+     */
+    const codeParraine = normaliserCodeParrainage(corps.codeParrainage);
+
     let conflit = false;
+    let refusParrainage = null;
     const compte = await modifierDocument((document) => {
       const comptes = document.clientAccounts || [];
       if (comptes.some((c) => String(c.identifiant || "").toLowerCase() === identifiant.toLowerCase())) {
@@ -138,10 +150,18 @@ export default async function handler(req, res) {
           email: propre(corps.email, 160) || aReprendre.email || "",
           compteOuvert: true,
           ouvertLe: new Date().toISOString(),
+          /* Une fiche ouverte au comptoir n'avait pas de code : elle en reçoit un en s'ouvrant. */
+          codeParrainage: aReprendre.codeParrainage
+            || genererCodeParrainage(prenom, comptes.map((c) => c?.codeParrainage)),
           ...identifiantsMotDePasse(motdepasse),
         };
+        const comptesRepris = comptes.map((c) => (c.id === aReprendre.id ? repris : c));
         return {
-          document: { ...document, clientAccounts: comptes.map((c) => (c.id === aReprendre.id ? repris : c)) },
+          document: {
+            ...document,
+            clientAccounts: comptesRepris,
+            parrainages: avecParrainage(document, comptesRepris, repris),
+          },
           retour: repris,
         };
       }
@@ -153,12 +173,34 @@ export default async function handler(req, res) {
         adresse: propre(corps.adresse, 200),
         email,
         createdAt: new Date().toISOString(),
+        /* Chacun repart avec son code : sans lui, il ne pourrait jamais parrainer personne. */
+        codeParrainage: genererCodeParrainage(prenom, comptes.map((c) => c?.codeParrainage)),
         ...identifiantsMotDePasse(motdepasse),
       };
+      const avecLui = [...comptes, nouveau];
       return {
-        document: { ...document, clientAccounts: [...comptes, nouveau] },
+        document: {
+          ...document,
+          clientAccounts: avecLui,
+          parrainages: avecParrainage(document, avecLui, nouveau),
+        },
         retour: nouveau,
       };
+
+      /*
+       * Le rattachement, s'il y a un code. Un code refusé n'empêche JAMAIS la création du compte :
+       * quelqu'un qui s'inscrit avec un code mal recopié doit repartir avec son compte, pas avec un
+       * écran d'erreur. La raison du refus lui est dite ensuite, et il peut demander le bon code.
+       */
+      function avecParrainage(doc, tousLesComptes, moi) {
+        const existants = Array.isArray(doc.parrainages) ? doc.parrainages : [];
+        if (!codeParraine) return existants;
+        const verdict = peutRattacher({
+          clients: tousLesComptes, parrainages: existants, code: codeParraine, filleulId: moi.id,
+        });
+        if (!verdict.ok) { refusParrainage = verdict.raison; return existants; }
+        return [creerParrainage({ parrainId: verdict.parrain.id, filleulId: moi.id, code: codeParraine }), ...existants];
+      }
     });
 
     if (conflit) {
@@ -174,7 +216,23 @@ export default async function handler(req, res) {
       motdepasseSecure: _s, motdepasseSalt: _sel, motdepasseIter: _i, motdepasseAlgo: _a, ...compteSur
     } = compte;
 
-    return res.status(200).json({ ...session, utilisateur: compteSur });
+    /*
+     * L'état du parrainage repart avec la réponse. Sans lui, un code refusé disparaîtrait en
+     * silence : le client croirait avoir parrainé quelqu'un et attendrait une récompense qui ne
+     * viendra pas. Et un code accepté doit être annoncé, avec ce qui reste à faire pour qu'il
+     * rapporte.
+     */
+    const parrainage = codeParraine
+      ? (refusParrainage
+        ? { etat: "refuse", raison: refusParrainage }
+        : {
+          etat: "enregistre",
+          message: "Votre parrainage a bien été enregistré. La récompense sera débloquée après votre"
+            + " première réception de colis.",
+        })
+      : null;
+
+    return res.status(200).json({ ...session, utilisateur: compteSur, ...(parrainage ? { parrainage } : {}) });
   } catch (e) {
     console.error("Échec de la création du compte client", e);
     return res.status(502).json({ error: "Création impossible pour le moment." });

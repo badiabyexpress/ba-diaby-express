@@ -35,6 +35,7 @@
  */
 
 import { effectivePermission } from "./_permissions.js";
+import { crediterSurReception, MONTANT_RECOMPENSE_GNF } from "./_parrainage.js";
 import { CHAMPS_TOTP_SECRETS, codesSecoursRestants } from "./_totp.js";
 
 /*
@@ -983,7 +984,7 @@ function comptesDeLEquipe(base, envoye, moi, peut) {
 const COLLECTIONS_PROTEGEES = [
   "colis", "clientAccounts", "repertoire", "depenses",
   "bordereaux", "facturesPartenaire", "preAlertes", "remisesCaisse", "voyages",
-  "pointages", "factures", "demandesRegroupement", "paiementsCommission",
+  "pointages", "factures", "demandesRegroupement", "paiementsCommission", "parrainages",
   "categories", "sites", "departs", "desabonnesMarketing",
 ];
 /*
@@ -1246,6 +1247,128 @@ export function reconstituerHorsZone(base, envoye, compteId) {
   return sortie;
 }
 
+/*
+ * LES PARRAINAGES — CE QU'UN NAVIGATEUR PEUT EN DIRE, ET CE QU'IL NE PEUT PAS.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Une récompense de parrainage vaut 50 000 GNF. Si la page pouvait l'écrire, il suffirait d'ouvrir
+ * les outils de développement pour s'en fabriquer autant qu'on veut : « modification manuelle non
+ * autorisée des récompenses » et « attribution avant la première réception réelle » sont deux des
+ * fraudes que ce système doit empêcher, et elles se ramènent toutes deux à cette question.
+ *
+ * LA RÈGLE TIENT EN TROIS LIGNES.
+ *
+ *   — Le RATTACHEMENT peut venir de la page. Il ne vaut rien : il dit seulement que deux comptes
+ *     se connaissent. On le force donc en « en attente », récompense à zéro, quoi qu'on nous
+ *     envoie.
+ *   — Le CRÉDIT ne vient jamais de la page. Le serveur le calcule lui-même, à partir des colis
+ *     qu'il voit passer en « Livré » — c'est-à-dire d'une remise faite et signée par un agent.
+ *   — La CONSOMMATION peut venir de la page, mais dans un seul sens : une récompense non utilisée
+ *     peut devenir utilisée, jamais l'inverse. Consommer son propre crédit ne crée pas d'argent ;
+ *     le ressusciter, si.
+ *
+ * ET RIEN NE DISPARAÎT. Une ligne présente en base est toujours rendue : une page périmée ne peut
+ * pas effacer un parrainage, pas plus qu'une annulation ne peut être défaite depuis un navigateur.
+ *
+ * LA QUATRIÈME LIGNE, RÉSERVÉE : L'ANNULATION POUR FRAUDE.
+ *
+ * Elle retire une récompense à quelqu'un qui l'attend. Elle n'est donc acceptée que de l'équipe, et
+ * seulement du compte qui porte `clients.parrainage` — `peutAnnuler` le dit, et il est calculé au
+ * seul endroit qui connaît la session. Elle ne va, elle aussi, que dans un sens : un parrainage
+ * annulé ne redevient jamais valide, et l'annulation est signée du compte qui l'a prononcée plutôt
+ * que du nom que la page a bien voulu écrire.
+ */
+export function reconcilierParrainages(base, envoye, colisApres, options = {}) {
+  const peutAnnuler = options.peutAnnuler === true;
+  const auteurAnnulation = options.auteur || null;
+  const enBase = liste(base?.parrainages);
+  const propose = liste(envoye?.parrainages);
+  const parId = new Map(enBase.map((p) => [p?.id, p]).filter(([id]) => id));
+
+  /* 1. Les rattachements nouveaux — acceptés, mais sans le moindre franc. */
+  const nouveaux = propose
+    .filter((p) => p && p.id && !parId.has(p.id) && p.parrainId && p.filleulId && p.parrainId !== p.filleulId)
+    .map((p) => ({
+      id: p.id,
+      code: p.code || null,
+      parrainId: p.parrainId,
+      filleulId: p.filleulId,
+      creeLe: p.creeLe || new Date().toISOString(),
+      statut: "en_attente",
+      receptionLe: null,
+      receptionTracking: null,
+      receptionBordereau: null,
+      recompense: { montant: 0, crediteeLe: null, utiliseeLe: null, utiliseeSur: null },
+    }));
+
+  /* 2. Les lignes existantes — la base fait foi, sauf pour la consommation. */
+  const proposeParId = new Map(propose.map((p) => [p?.id, p]).filter(([id]) => id));
+  let sortie = enBase.map((ancien) => {
+    if (!ancien || !ancien.id) return ancien;
+    const envoyeP = proposeParId.get(ancien.id);
+    const r = ancien.recompense || {};
+    /*
+     * L'annulation passe avant tout le reste : un parrainage écarté pour fraude ne doit pas, dans
+     * la même écriture, se voir aussi accorder ou consommer sa récompense.
+     *
+     * Elle ne reprend pas une réduction déjà utilisée — l'argent est parti, et le prétendre
+     * récupéré serait plus faux encore que de l'avoir accordé.
+     */
+    if (peutAnnuler && envoyeP?.statut === "annule" && ancien.statut !== "annule") {
+      return {
+        ...ancien,
+        statut: "annule",
+        annuleLe: new Date().toISOString(),
+        annulePar: auteurAnnulation,
+        motifAnnulation: String(envoyeP.motifAnnulation || "").slice(0, 300),
+      };
+    }
+    if (ancien.statut === "annule") return ancien;
+    /*
+     * Le seul changement qu'une page peut apporter : marquer une récompense comme utilisée. Elle
+     * doit être créditée, pas encore utilisée, et la page doit dire sur quoi.
+     */
+    const veutConsommer = envoyeP?.recompense?.utiliseeLe && r.crediteeLe && !r.utiliseeLe;
+    if (!veutConsommer) return ancien;
+    return {
+      ...ancien,
+      statut: "reduction_utilisee",
+      recompense: {
+        ...r,
+        utiliseeLe: envoyeP.recompense.utiliseeLe,
+        utiliseeSur: envoyeP.recompense.utiliseeSur || null,
+      },
+    };
+  });
+  sortie = [...nouveaux, ...sortie];
+
+  /*
+   * 3. LE CRÉDIT, CALCULÉ ICI ET NULLE PART AILLEURS.
+   *
+   * On regarde les colis tels qu'ils sortent de cette écriture : ceux qui sont remis — « Livré » —
+   * désignent les clients qui ont réellement reçu. Un parrainage en attente dont la personne
+   * parrainée figure parmi eux devient une récompense. Le montant vient du fichier de règles, pas
+   * d'un chiffre recopié ici.
+   */
+  const recus = new Set(liste(colisApres)
+    .filter((c) => c && c.status === "Livré" && c.clientAccountId)
+    .map((c) => c.clientAccountId));
+  const parClient = new Map(liste(colisApres)
+    .filter((c) => c && c.status === "Livré" && c.clientAccountId)
+    .map((c) => [c.clientAccountId, c]));
+
+  recus.forEach((clientId) => {
+    const colis = parClient.get(clientId);
+    const resultat = crediterSurReception(sortie, {
+      clientId,
+      tracking: colis?.tracking || null,
+      bordereau: colis?.bordereauReception || null,
+    });
+    sortie = resultat.parrainages;
+  });
+
+  return sortie;
+}
+
 export function fusionnerEcritureEquipe(actuel, propose, compteId, contexte = {}) {
   const base = actuel && typeof actuel === "object" && !Array.isArray(actuel) ? actuel : {};
   const recu = propose && typeof propose === "object" && !Array.isArray(propose) ? propose : {};
@@ -1361,6 +1484,15 @@ export function fusionnerEcritureEquipe(actuel, propose, compteId, contexte = {}
     if (!apres || typeof apres !== "object" || Array.isArray(apres)) return;
     const complete = completerChampsManquants(avant, apres);
     if (complete !== apres) sortie[cle] = complete;
+  });
+
+  /*
+   * Les parrainages passent par leur propre réconciliation : la page ne décide jamais d'une
+   * récompense, le serveur la calcule depuis les colis remis. Voir reconcilierParrainages.
+   */
+  sortie.parrainages = reconcilierParrainages(base, sortie, sortie.colis, {
+    peutAnnuler: peut("clients.parrainage"),
+    auteur: `${moi.prenom || ""} ${moi.nom || ""}`.trim() || moi.identifiant || null,
   });
 
   sortie.users = preserverIdentifiants(base.users, comptesDeLEquipe(base, envoye, moi, peut));

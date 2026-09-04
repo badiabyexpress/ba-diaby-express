@@ -7,6 +7,7 @@ import { ROLES, PERMISSIONS_SCHEMA, ROLE_DEFAULT_PERMISSIONS, effectivePermissio
  * variable d'environnement.
  */
 import { signauxDeFraude } from "../api/_fraude.js";
+import { bilanParrainage, creditDisponible, consommerCredit, MONTANT_RECOMPENSE_GNF } from "../api/_parrainage.js";
 import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree, relireDuServeur, oublierCacheLocal } from "./lib/storage.js";
 import { VILLES_PAR_PAYS } from "./data/villesParPays.js";
 
@@ -1880,6 +1881,51 @@ function calcCommission(colis, commissionConfig, categories) {
  * ne voit passer aucun encaissement au comptoir, et payer une commission dessus serait de l'argent
  * sorti sur une recette qui n'existe pas ici. C'est déjà la règle de calcCommission.
  */
+/**
+ * 🎁 LA RÉDUCTION DE PARRAINAGE APPLICABLE À CE COLIS, AU COMPTOIR.
+ *
+ * Rend `null` quand il n'y a rien à déduire — c'est le cas de l'immense majorité des colis, et
+ * l'appelant n'a alors rien de particulier à faire.
+ *
+ * POURQUOI ICI, ET PAS À L'ENREGISTREMENT DU COLIS.
+ *
+ * Le crédit se consomme là où l'argent change de mains. À l'enregistrement, le prix n'est pas
+ * encore certain (poids à confirmer, express, catégorie) et le colis peut encore être annulé : une
+ * récompense marquée « utilisée » sur un colis qui ne partira jamais serait perdue pour de bon.
+ *
+ * DEUX UNITÉS, ET UNE SEULE VÉRITÉ.
+ *
+ * La récompense est libellée en francs guinéens — c'est ce que le client lit dans son espace et ce
+ * que le règlement du programme annonce. Les colis, eux, se comptent en euros dans toute
+ * l'application. La conversion se fait ici, au taux du jour, et dans ce sens-là uniquement : on
+ * convertit ce qui est dû en francs pour interroger le crédit, puis on reconvertit ce qui a été
+ * réellement déduit. Convertir la récompense elle-même l'aurait arrondie deux fois.
+ *
+ * `consommerCredit` ne coupe jamais une récompense en deux : si la somme due est inférieure à
+ * 50 000 GNF, rien n'est déduit et le crédit attend le colis suivant, entier.
+ */
+function reductionParrainage(colis, data) {
+  if (!colis || estColisPartenaire(colis)) return null;
+  const clientId = colis.clientAccountId;
+  if (!clientId) return null;
+  const taux = LIVE_RATES.GNF || CURRENCIES.GNF || 0;
+  if (!taux) return null;
+  const duEUR = Math.max(+(((colis.prix || 0) - (colis.paye || 0))).toFixed(2), 0);
+  if (duEUR <= 0.005) return null;
+  const r = consommerCredit(data?.parrainages || [], {
+    clientId,
+    montantDu: duEUR * taux,
+    reference: colis.tracking,
+  });
+  if (!r.deduit) return null;
+  return {
+    montantGNF: r.deduit,
+    montantEUR: +(r.deduit / taux).toFixed(2),
+    parrainages: r.parrainages,
+    utilises: r.utilises,
+  };
+}
+
 function commissionColis(colis, auteur, data) {
   const vide = { forfait: 0, bareme: 0, total: 0 };
   if (!colis || estColisPartenaire(colis)) return vide;
@@ -6847,6 +6893,12 @@ function ClientRegisterForm({ data, persist, onRegistered, onCancel }) {
   const [email, setEmail] = useState("");
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
+  /*
+   * Le code de parrainage est FACULTATIF, et il le reste jusqu'au bout : un code mal recopié ne
+   * doit jamais empêcher quelqu'un d'ouvrir son compte. Le serveur crée le compte, refuse le
+   * rattachement, et dit pourquoi — dans cet ordre.
+   */
+  const [codeParrainage, setCodeParrainage] = useState("");
   const { honeypotField, isSpam } = useAntiSpam();
 
   async function submit(e) {
@@ -6871,11 +6923,16 @@ function ClientRegisterForm({ data, persist, onRegistered, onCancel }) {
        * faite ici portait sur une copie des données qui pouvait avoir des minutes de retard, et
        * deux personnes pouvaient prendre le même identifiant sans que rien ne s'y oppose.
        */
-      const serveur = await inscriptionServeur({ nom, prenom, identifiant, motdepasse, telephone, adresse, email });
+      const serveur = await inscriptionServeur({ nom, prenom, identifiant, motdepasse, telephone, adresse, email, codeParrainage });
       if (serveur?.refus) { setErr(serveur.refus); setLoading(false); return; }
       if (serveur?.utilisateur) {
         if (serveur.session) ecrireJetonSession(serveur.session, serveur.sessionExpireA);
-        onRegistered(serveur.utilisateur);
+        /*
+         * Un code refusé ne doit pas disparaître en silence : le client croirait avoir parrainé
+         * quelqu'un et attendrait une récompense qui ne viendra jamais. Le compte est créé, on le
+         * dit, et l'on dit aussi ce qui n'a pas marché.
+         */
+        onRegistered(serveur.utilisateur, serveur.parrainage || null);
         setLoading(false);
         return;
       }
@@ -6957,6 +7014,18 @@ function ClientRegisterForm({ data, persist, onRegistered, onCancel }) {
         </Field>
         <Field label={tcx("Téléphone *")}><PhoneInput value={telephone} onChange={setTelephone} /></Field>
         <Field label={tcx("Adresse (optionnel)")}><input value={adresse} onChange={(e) => setAdresse(e.target.value)} style={inputStyle} /></Field>
+        {/*
+          Le code d'un proche, s'il en a reçu un. Il est écrit en majuscules à la saisie parce
+          qu'il se recopie d'une capture d'écran ou se prend sous la dictée, et qu'un code refusé
+          pour une histoire de casse serait refusé pour rien.
+        */}
+        <Field label={tcx("Code de parrainage (facultatif)")}>
+          <input value={codeParrainage} onChange={(e) => setCodeParrainage(e.target.value.toUpperCase())}
+            style={inputStyle} placeholder="ex : MARIAB2C4" autoCapitalize="characters" autoCorrect="off" spellCheck={false} />
+          <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: -6 }}>
+            Si un proche vous a donné son code, saisissez-le : il recevra une réduction après votre première réception de colis.
+          </div>
+        </Field>
         <Field label={`${tcx("E-mail")} *`}>
           <input value={email} onChange={(e) => setEmail(e.target.value)} inputMode="email" style={inputStyle} />
         </Field>
@@ -8084,6 +8153,24 @@ function calculerNotificationsClient(acc, data) {
   (data.demandesRegroupement || []).filter((dm) => dm.clientAccountId === acc.id).forEach((dm) => {
     if (dm.dateMaj && new Date(dm.dateMaj) > seuil && dm.statut !== "En attente") notifs.push({ icone: "\ud83d\udcec", texte: `Demande de regroupement : ${dm.statut}`, date: dm.dateMaj });
   });
+  /*
+   * \ud83c\udf81 LE PARRAINAGE SE DIT AU CLIENT, IL NE SE DEVINE PAS DANS UN COMPTEUR.
+   *
+   * Une r\u00e9compense acquise sans un mot, c'est un client qui ne sait pas qu'il a gagn\u00e9 \u2014 et le
+   * programme ne sert plus \u00e0 rien. Une r\u00e9duction utilis\u00e9e sans un mot, c'est pire : il croit avoir
+   * encore son cr\u00e9dit, et il le r\u00e9clame au comptoir.
+   *
+   * Les deux annonces s'adressent \u00e0 celui qui PARRAINE : c'est lui qui re\u00e7oit, et lui seul.
+   */
+  (data.parrainages || []).filter((p) => p && p.parrainId === acc.id && p.statut !== "annule").forEach((p) => {
+    const r = p.recompense || {};
+    if (r.crediteeLe && new Date(r.crediteeLe) > seuil) {
+      notifs.push({ icone: "\ud83c\udf81", texte: `Votre récompense de parrainage de ${fmtGNF(r.montant)} est acquise — elle sera déduite de votre prochaine réception`, date: r.crediteeLe });
+    }
+    if (r.utiliseeLe && new Date(r.utiliseeLe) > seuil) {
+      notifs.push({ icone: "\ud83c\udf81", texte: `${fmtGNF(r.montant)} de réduction de parrainage ont été déduits${r.utiliseeSur ? ` du colis ${r.utiliseeSur}` : ""}`, date: r.utiliseeLe });
+    }
+  });
   return notifs.sort((a, b) => new Date(b.date) - new Date(a.date));
 }
 
@@ -8093,7 +8180,140 @@ function calculerNotificationsClient(acc, data) {
  * identifiant est libre, et l'espace lui-même une fois le client identifié. Chacun la réclame au
  * moment où il s'ouvre, plutôt que tout le monde d'avance.
  */
+/**
+ * 🎁 LA CARTE DE PARRAINAGE, DANS L'ESPACE DU CLIENT.
+ *
+ * Elle ne demande rien et ne peut rien casser : elle lit. Le client ne peut pas s'attribuer une
+ * récompense depuis cet écran — ni depuis aucun autre — parce que le serveur ne l'accepterait pas
+ * (voir reconcilierParrainages dans api/_cloisonnement.js). Ce qui est montré ici est donc, à la
+ * lettre, ce que le serveur a calculé.
+ *
+ * CE QU'ELLE MONTRE EN PREMIER : ce qui reste à faire.
+ *
+ * Un parrainage « en attente » n'est pas un échec, c'est une étape — la personne s'est inscrite,
+ * elle n'a pas encore retiré son premier colis. Le dire évite l'appel à l'agence pour réclamer une
+ * récompense qui n'est simplement pas encore due.
+ */
+function CarteParrainage({ compte, data, T, deviseClient }) {
+  const [copie, setCopie] = useState(false);
+  const parrainages = data?.parrainages || [];
+  const bilan = bilanParrainage(parrainages, compte.id);
+  const code = compte.codeParrainage || "";
+  const lien = `${typeof window !== "undefined" ? window.location.origin : ""}/?client=1&parrain=${encodeURIComponent(code)}`;
+  const invitation = `Bonjour ! J’utilise Ba-Diaby Express pour envoyer et recevoir mes colis. `
+    + `Ouvre ton compte avec mon code ${code} : ${lien}`;
+
+  const miens = parrainages
+    .filter((p) => p && p.parrainId === compte.id)
+    .sort((a, b) => String(b.creeLe || "").localeCompare(String(a.creeLe || "")));
+  const nomDuFilleul = (p) => {
+    const c = (data?.clientAccounts || []).find((x) => x && x.id === p.filleulId);
+    if (!c) return "Un filleul";
+    /* Prénom et initiale : le filleul est un client, pas une ligne de tableau public. */
+    return `${c.prenom || ""} ${String(c.nom || "").charAt(0)}${c.nom ? "." : ""}`.trim() || "Un filleul";
+  };
+  const ETAPES = {
+    en_attente: { texte: "Inscrit — en attente de sa première réception", part: 50, teinte: "var(--warn-fg)" },
+    recompense_validee: { texte: "Récompense acquise", part: 100, teinte: "var(--ok-fg)" },
+    reduction_utilisee: { texte: "Réduction utilisée", part: 100, teinte: "var(--muted)" },
+    annule: { texte: "Annulé", part: 0, teinte: "var(--danger-fg)" },
+  };
+
+  async function copier() {
+    try { await navigator.clipboard?.writeText(code); setCopie(true); setTimeout(() => setCopie(false), 2000); }
+    catch (e) { /* le code reste affiché, il se recopie à la main */ }
+  }
+
+  return (
+    <div style={{
+      background: "linear-gradient(135deg, #0A2647 0%, #131A6B 100%)", color: "#fff",
+      borderRadius: 16, padding: 22, marginBottom: 20, boxShadow: "0 8px 26px rgba(10,38,71,0.28)",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 9, marginBottom: 6 }}>
+        <span style={{ fontSize: 20 }}>🎁</span>
+        <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontSize: 17, fontWeight: 700 }}>{T("Parrainage")}</span>
+      </div>
+      <div style={{ fontSize: 13.5, color: "rgba(255,255,255,0.82)", lineHeight: 1.55, marginBottom: 16, maxWidth: 560 }}>
+        Invitez vos proches et recevez {fmt(MONTANT_RECOMPENSE_GNF, "GNF")} de réduction après leur première réception de colis.
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
+        <div style={{ background: "rgba(255,255,255,0.12)", border: "1px dashed rgba(255,255,255,0.35)", borderRadius: 10, padding: "10px 18px", fontSize: 19, fontWeight: 800, letterSpacing: 2 }}>
+          {code}
+        </div>
+        <button onClick={copier} style={{ background: "#fff", color: "#0A2647", border: "none", borderRadius: 9, padding: "10px 16px", fontSize: 13, fontWeight: 700, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
+          <Copy size={14} /> {copie ? T("Copié") : T("Copier mon code")}
+        </button>
+        {/*
+          On ouvre un brouillon WhatsApp plutôt que d'envoyer à la place du client : le message
+          part de SON numéro, à qui il veut, et il peut le relire avant. Envoyer pour lui aurait
+          demandé son carnet d'adresses.
+        */}
+        <a href={`https://wa.me/?text=${encodeURIComponent(invitation)}`} target="_blank" rel="noopener noreferrer"
+          style={{ background: "#25D366", color: "#fff", borderRadius: 9, padding: "10px 16px", fontSize: 13, fontWeight: 700, textDecoration: "none", display: "flex", alignItems: "center", gap: 6 }}>
+          <MessageCircle size={14} /> {T("Partager sur WhatsApp")}
+        </a>
+      </div>
+
+      <div style={{ fontSize: 11.5, color: "rgba(255,255,255,0.6)", marginBottom: 16, wordBreak: "break-all" }}>
+        {lien}
+      </div>
+
+      <div style={{ display: "flex", gap: 20, flexWrap: "wrap", borderTop: "1px solid rgba(255,255,255,0.16)", paddingTop: 14 }}>
+        {[[T("Invités"), bilan.invites, "#fff"],
+          [T("En attente"), bilan.enAttente, "#E0A63A"],
+          [T("Validés"), bilan.valides, "#3ECB84"],
+          [T("Réduction disponible"), fmt(bilan.creditDisponible, "GNF"), "#3ECB84"],
+          [T("Déjà utilisée"), fmt(bilan.creditUtilise, "GNF"), "rgba(255,255,255,0.6)"]].map(([label, valeur, teinte]) => (
+          <div key={label}>
+            <div style={{ fontSize: 10, color: "rgba(255,255,255,0.55)", fontWeight: 700, letterSpacing: 0.4 }}>{String(label).toUpperCase()}</div>
+            <div style={{ fontSize: 17, fontWeight: 800, color: teinte, whiteSpace: "nowrap" }}>{valeur}</div>
+          </div>
+        ))}
+      </div>
+
+      {miens.length > 0 && (
+        <div style={{ marginTop: 16, borderTop: "1px solid rgba(255,255,255,0.16)", paddingTop: 14 }}>
+          <div style={{ fontSize: 10.5, color: "rgba(255,255,255,0.55)", fontWeight: 700, letterSpacing: 0.4, marginBottom: 10 }}>
+            {String(T("Mes parrainages")).toUpperCase()}
+          </div>
+          {miens.slice(0, 8).map((p) => {
+            const etape = ETAPES[p.statut] || ETAPES.en_attente;
+            return (
+              <div key={p.id} style={{ marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 12.5, marginBottom: 5 }}>
+                  <span style={{ fontWeight: 600 }}>{nomDuFilleul(p)}</span>
+                  <span style={{ color: etape.teinte, fontWeight: 600, textAlign: "right" }}>{etape.texte}</span>
+                </div>
+                {/*
+                  La barre dit où en est CE parrainage — inscrit, puis récompensé. Deux étapes
+                  seulement : en inventer davantage donnerait l'impression d'un chemin plus long
+                  qu'il ne l'est.
+                */}
+                <div style={{ height: 5, borderRadius: 3, background: "rgba(255,255,255,0.16)", overflow: "hidden" }}>
+                  <div style={{ width: `${etape.part}%`, height: "100%", background: etape.teinte, transition: "width .4s" }} />
+                </div>
+              </div>
+            );
+          })}
+          {miens.length > 8 && (
+            <div style={{ fontSize: 11.5, color: "rgba(255,255,255,0.55)" }}>
+              … et {miens.length - 8} de plus.
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
+  /*
+   * Ce que le serveur a répondu sur le code de parrainage saisi à l'inscription — accepté, ou
+   * refusé avec sa raison. Il ne vit que le temps de la session : c'est une confirmation, pas un
+   * état du compte.
+   */
+  const [messageParrainage, setMessageParrainage] = useState(null);
   const [lang, setLang] = useClientLang();
   const T = (x) => tc(x, lang);
   const [mode, setMode] = useState("login"); // login | inscription | reset
@@ -8453,7 +8673,7 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
             </button>
           </form>
         ) : mode === "inscription" ? (
-          <ClientRegisterForm data={data} persist={persist} onRegistered={(acc) => { ecrireSessionClient(acc.id); setCompte(acc); onBesoinBase?.(); }} onCancel={() => setMode("login")} />
+          <ClientRegisterForm data={data} persist={persist} onRegistered={(acc, parrainage) => { ecrireSessionClient(acc.id); setCompte(acc); setMessageParrainage(parrainage || null); onBesoinBase?.(); }} onCancel={() => setMode("login")} />
         ) : mode === "reset" ? (
           <ClientResetPasswordForm data={data} persist={persist} onDone={() => { setMode("login"); setErr(""); }} onCancel={() => setMode("login")} />
         ) : (
@@ -8506,6 +8726,27 @@ function ClientPortalPage({ data, loading, persist, onBesoinBase }) {
             <button onClick={() => { oublierCacheLocal(); ecrireSessionClient(null); setCompte(null); setIdentifiant(""); setMotdepasse(""); setMode("login"); }} style={{ background: "none", border: "1px solid var(--border)", borderRadius: 9, padding: "8px 14px", fontSize: 13, color: "var(--muted)", fontWeight: 600, cursor: "pointer" }}>{T("Déconnexion")}</button>
           </div>
         </div>
+        {/*
+          LE PARRAINAGE — ce que le client peut faire pour l'entreprise, et ce qu'il y gagne.
+
+          La carte n'apparaît que s'il a un code : un bouton « Copier mon code » sur un code
+          inexistant serait pire que pas de carte du tout. Les comptes ouverts avant cette version
+          reçoivent le leur au premier passage de la tâche de nuit.
+        */}
+        {messageParrainage && (
+          <div style={{
+            background: messageParrainage.etat === "refuse" ? "var(--warn-bg)" : "var(--ok-bg)",
+            border: "1px solid " + (messageParrainage.etat === "refuse" ? "var(--warn-border)" : "var(--ok-fg)"),
+            borderRadius: 12, padding: "12px 16px", marginBottom: 16, fontSize: 13.5,
+            color: messageParrainage.etat === "refuse" ? "var(--warn-fg)" : "var(--ok-fg)", fontWeight: 600,
+          }}>
+            {messageParrainage.etat === "refuse" ? messageParrainage.raison : messageParrainage.message}
+          </div>
+        )}
+        {compte.codeParrainage && (
+          <CarteParrainage compte={compte} data={data} T={T} deviseClient={deviseClient} />
+        )}
+
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 24 }}>
           <div style={{ fontSize: 14.5, color: "var(--muted)" }}>{T(salutationSelonHeure())} {compte.prenom} {compte.nom}</div>
           <div style={{ display: "flex", alignItems: "center", gap: 8, background: remiseActuelle >= 12 ? "var(--warn-bg)" : remiseActuelle > 0 ? "var(--surface2)" : "var(--bronze-bg)", border: "1px solid " + (remiseActuelle >= 12 ? "var(--warn-border)" : "var(--border)"), borderRadius: 20, padding: "6px 14px" }}>
@@ -12858,6 +13099,11 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
     sauvegarde: { permission: "stats.exporter", rendu: () => <SauvegardePage data={data} persist={persist} notify={notify} session={session} onBack={back} /> },
     users: { permission: "users.consulter", rendu: () => <UtilisateursPage data={data} persist={persist} notify={notify} onBack={back} session={session} /> },
     performance: { permission: "stats.globales", rendu: () => <PerformanceAgentsPage data={data} onBack={back} /> },
+    /*
+     * Consulter le programme demande seulement de voir les clients ; c'est l'annulation qui est
+     * gardée à part, dans l'écran comme sur le serveur.
+     */
+    parrainages: { permission: "clients.consulter", rendu: () => <ParrainagesPage data={data} persist={persist} session={session} notify={notify} onBack={back} /> },
     /* Ouverte à tous : celui qui ne tient pas la fiche de l'équipe voit la sienne, en lecture. */
     pointage: { permission: null, rendu: () => <PointagePage data={data} persist={persist} notify={notify} onBack={back} session={session} /> },
   };
@@ -12927,6 +13173,7 @@ function ConfigurationHub({ data, persist, session, notify, onNavigateApp, offli
         {ouvrable("reception") && <Card icon={Package} tint="var(--danger-fg)" title="Tarifs de réception client" desc="Le tarif au kg appliqué sur les bordereaux de réception, selon le poids du lot." onClick={() => setSub("reception")} />}
         {ouvrable("commissions") && <Card icon={Users} tint="#16A163" title="Commissions par Agence" desc="Définissez combien chaque agence gagne par kg et par unité vendue." onClick={() => setSub("commissions")} />}
         {ouvrable("paiement") && <Card icon={Wallet} tint="#5B8DEF" title="Paiement" desc="Configurez vos numéros pour accepter les paiements de vos clients." onClick={() => setSub("paiement")} />}
+        {ouvrable("parrainages") && <Card icon={HandCoins} tint="#8B5CF6" title="Programme de parrainage" desc="Qui a parrainé qui, quelles récompenses sont acquises, lesquelles ont déjà été déduites." onClick={() => setSub("parrainages")} />}
       </div>
 
       <SectionLabel>VOTRE ÉQUIPE</SectionLabel>
@@ -16249,14 +16496,98 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
       : `Réparti sur ${nbColis} colis`);
   }
 
+  /**
+   * 🎁 POSE LA RÉDUCTION DE PARRAINAGE SUR UN COLIS, DANS UN DOCUMENT DONNÉ.
+   *
+   * Rend `{ doc, applique }` sans rien enregistrer : c'est l'appelant qui persiste, une seule fois,
+   * avec le reste de son écriture. Sans cela, encaisser aurait produit deux enregistrements
+   * successifs — et entre les deux, une seconde où la réduction est posée et le paiement non.
+   *
+   * ELLE BAISSE LE PRIX, ELLE NE SE FAIT PAS PASSER POUR UN PAIEMENT.
+   *
+   * L'inscrire en ligne de paiement aurait été plus court, et faux : le tableau de bord additionne
+   * les paiements pour annoncer ce qui a été encaissé, et l'entreprise aurait lu comme recette
+   * cinquante mille francs que personne ne lui a remis. Une réduction diminue la recette — c'est
+   * exactement ce que fait la baisse du prix, et c'est ce que la comptabilité doit voir.
+   *
+   * Le prix d'origine reste lisible dans `remiseParrainage.prixAvant` : la facture peut donc
+   * montrer le tarif, la réduction, puis le net — au lieu d'un prix mystérieusement plus bas.
+   */
+  function appliquerParrainage(courant, tracking) {
+    const colis = (courant.colis || []).find((c) => c.tracking === tracking);
+    const calc = reductionParrainage(colis, courant);
+    if (!calc) return { doc: courant, applique: null };
+    const deja = colis.remiseParrainage;
+    const prix = Math.max(+((colis.prix || 0) - calc.montantEUR).toFixed(2), 0);
+    const paye = colis.paye || 0;
+    const doc = {
+      ...courant,
+      parrainages: calc.parrainages,
+      colis: courant.colis.map((c) => (c.tracking !== tracking ? c : {
+        ...c,
+        prix,
+        reste: Math.max(+(prix - paye).toFixed(2), 0),
+        remiseParrainage: {
+          /* Le tarif d'avant la toute première réduction — pas celui d'avant la dernière. */
+          prixAvant: deja?.prixAvant ?? (colis.prix || 0),
+          montant: +(((deja?.montant) || 0) + calc.montantEUR).toFixed(2),
+          montantGNF: ((deja?.montantGNF) || 0) + calc.montantGNF,
+          parrainages: [...((deja?.parrainages) || []), ...calc.utilises.map((u) => u.parrainageId)],
+          le: new Date().toISOString(),
+          par: `${session?.prenom || ""} ${session?.nom || ""}`.trim(),
+        },
+      })),
+    };
+    return { doc, applique: calc };
+  }
+
+  /**
+   * La réduction appliquée seule, sans encaissement.
+   *
+   * Indispensable quand elle solde le colis : il n'y a plus rien à encaisser, donc plus aucun geste
+   * par lequel la réduction serait passée si elle n'avait vécu que dans `encaisser`.
+   */
+  function offrirReductionParrainage(tracking) {
+    const { doc, applique } = appliquerParrainage(data, tracking);
+    if (!applique) { notify?.("Aucune réduction de parrainage disponible sur ce colis"); return; }
+    const apres = doc.colis.find((c) => c.tracking === tracking);
+    doc.activityLog = logActivity("Réduction parrainage appliquée",
+      `${tracking} — ${fmtGNF(applique.montantGNF)} (${fmt(applique.montantEUR, "EUR")}) · reste ${fmt(apres.reste, "EUR")}`);
+    persist(doc);
+    notify?.(`Réduction de ${fmtGNF(applique.montantGNF)} appliquée — reste ${fmt(apres.reste, "EUR")}`);
+    setSelected(apres);
+  }
+
   function encaisser(tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId) {
     const receveur = receveurPaiement(session, data.users, details?.percuPar);
+    /*
+     * LA RÉDUCTION DE PARRAINAGE S'APPLIQUE AVANT L'ARGENT.
+     *
+     * Un agent pressé ne pense pas à un bouton ; il tape le montant que le client lui tend. Poser
+     * la réduction ici, dans le geste même de l'encaissement, est la seule façon qu'elle ne soit
+     * jamais oubliée — et le montant reçu est ensuite plafonné au NOUVEAU reste dû, si bien que le
+     * client ne paie pas une somme déjà couverte par sa réduction.
+     */
+    const { doc: base, applique: remise } = appliquerParrainage(data, tracking);
     // Un encaissement ne peut jamais être négatif, ni dépasser le montant restant dû : sinon une
     // faute de frappe (un zéro de trop) gonflerait le chiffre d’affaires, car la comptabilité
     // additionne le champ « payé ». Si le client remet davantage, la différence est de la monnaie
     // à lui rendre — pas une recette. On prévient l’agent quand le montant a été ajusté.
-    const cible = data.colis.find((c) => c.tracking === tracking);
+    const cible = base.colis.find((c) => c.tracking === tracking);
     const duRestant = cible ? Math.max(+(cible.prix - cible.paye).toFixed(2), 0) : 0;
+
+    /*
+     * La réduction a tout soldé : il n'y a plus rien à encaisser, mais il y a tout à enregistrer.
+     * Sortir sans persister ici aurait perdu la réduction ET marqué le colis impayé.
+     */
+    if (remise && duRestant <= 0.005) {
+      base.activityLog = logActivity("Réduction parrainage appliquée",
+        `${tracking} — ${fmtGNF(remise.montantGNF)} (${fmt(remise.montantEUR, "EUR")}) · colis soldé`);
+      persist(base);
+      notify?.(`Réduction de ${fmtGNF(remise.montantGNF)} appliquée — le colis est entièrement réglé`);
+      setSelected(base.colis.find((c) => c.tracking === tracking));
+      return;
+    }
 
     /*
      * Protection contre un double encaissement.
@@ -16275,7 +16606,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
 
     const applique = Math.min(Math.max(montant, 0), duRestant);
     const ajuste = Math.abs(applique - montant) > 0.005;
-    const next = { ...data, colis: data.colis.map((c) => {
+    const next = { ...base, colis: base.colis.map((c) => {
       if (c.tracking !== tracking) return c;
       const paye = +(c.paye + applique).toFixed(2);
       const reste = Math.max(+(c.prix - paye).toFixed(2), 0);
@@ -16288,8 +16619,23 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
       return { ...c, paye, reste, paiements: [...(c.paiements || []), paiement], declarationsPaiement };
     }) };
     next.activityLog = logActivity("Paiement encaissé", `${tracking} — ${montantSaisi} ${deviseSaisie} (${mode})${details?.reference ? ` réf. ${details.reference}` : ""}${receveur.saisiPar ? ` — argent reçu par ${receveur.par}` : ""}`);
+    /*
+     * Deux lignes de journal quand il y a eu réduction, et non une seule qui mélange tout : la
+     * réduction n'est pas un encaissement, et une caisse relue trois mois plus tard doit pouvoir
+     * distinguer les francs reçus des francs offerts.
+     */
+    if (remise) {
+      /*
+       * `pushActivity` et non `logActivity` : ce dernier repart toujours de `data.activityLog`, et
+       * la seconde ligne aurait donc effacé la première au lieu de s'y ajouter.
+       */
+      next.activityLog = pushActivity({ activityLog: next.activityLog }, session, "Réduction parrainage appliquée",
+        `${tracking} — ${fmtGNF(remise.montantGNF)} (${fmt(remise.montantEUR, "EUR")})`);
+    }
     persist(next);
-    notify(ajuste ? `Encaissement limité au solde dû (${fmt(applique, "EUR")}) — pensez à rendre la monnaie` : "Paiement encaissé");
+    notify(remise
+      ? `Réduction de ${fmtGNF(remise.montantGNF)} appliquée, puis paiement encaissé`
+      : ajuste ? `Encaissement limité au solde dû (${fmt(applique, "EUR")}) — pensez à rendre la monnaie` : "Paiement encaissé");
     const colisPaye = next.colis.find((c) => c.tracking === tracking);
     if (colisPaye) {
       /*
@@ -16593,7 +16939,7 @@ function ColisView({ data, persist, verifier, session, notify, t, demandeOuvertu
         onClose={() => setRemiseEnCours(null)} />}
       {showEncaisseGroupe && <EncaisserGroupeModal data={data} session={session} onEncaisser={encaisserGroupe} onClose={() => setShowEncaisseGroupe(false)} />}
       {showReception && <ReceptionBordereauModal onClose={() => setShowReception(false)} data={data} persist={persist} notify={notify} session={session} />}
-      {selected && <ColisDetail colis={selected} onClose={() => setSelected(null)} onAdvance={() => advance(selected.tracking)} onDelete={() => remove(selected.tracking)} onCancel={(motif) => annuler(selected.tracking, motif)} onRefuser={(motif) => refuser(selected.tracking, motif)} onDeclarerLitige={(t, d) => declarerLitige(selected.tracking, t, d)} onResoudreLitige={(r, i) => resoudreLitige(selected.tracking, r, i)} onMajRetour={(statutRetour) => majRetour(selected.tracking, statutRetour)} onUpdate={(patch) => updateColis(selected.tracking, patch)} onEncaisser={(montant, mode, montantSaisi, deviseSaisie, details, declarationId) => encaisser(selected.tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId)} onTrace={(trace) => persist((courant) => ({ ...courant, messagesWhatsApp: avecTraces(courant, [trace]) }))} canManage={!isChauffeur} isAdmin={session.role === "Administrateur"} isChauffeur={isChauffeur} data={data} session={session} notify={notify} />}
+      {selected && <ColisDetail colis={selected} onClose={() => setSelected(null)} onAdvance={() => advance(selected.tracking)} onDelete={() => remove(selected.tracking)} onCancel={(motif) => annuler(selected.tracking, motif)} onRefuser={(motif) => refuser(selected.tracking, motif)} onDeclarerLitige={(t, d) => declarerLitige(selected.tracking, t, d)} onResoudreLitige={(r, i) => resoudreLitige(selected.tracking, r, i)} onMajRetour={(statutRetour) => majRetour(selected.tracking, statutRetour)} onUpdate={(patch) => updateColis(selected.tracking, patch)} onEncaisser={(montant, mode, montantSaisi, deviseSaisie, details, declarationId) => encaisser(selected.tracking, montant, mode, montantSaisi, deviseSaisie, details, declarationId)} onAppliquerParrainage={() => offrirReductionParrainage(selected.tracking)} onTrace={(trace) => persist((courant) => ({ ...courant, messagesWhatsApp: avecTraces(courant, [trace]) }))} canManage={!isChauffeur} isAdmin={session.role === "Administrateur"} isChauffeur={isChauffeur} data={data} session={session} notify={notify} />}
     </div>
   );
 }
@@ -21959,7 +22305,7 @@ function ImpressionDirecteModal({ colis, onClose, data }) {
   );
 }
 
-function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser, onDeclarerLitige, onResoudreLitige, onMajRetour, onUpdate, onEncaisser, canManage, isAdmin, isChauffeur, data, session, notify, onTrace }) {
+function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser, onDeclarerLitige, onResoudreLitige, onMajRetour, onUpdate, onEncaisser, onAppliquerParrainage, canManage, isAdmin, isChauffeur, data, session, notify, onTrace }) {
   const [cancelling, setCancelling] = useState(false);
   const [refusing, setRefusing] = useState(false);
   const [motifRefus, setMotifRefus] = useState("");
@@ -22648,6 +22994,41 @@ function ColisDetail({ colis, onClose, onAdvance, onDelete, onCancel, onRefuser,
           </div>
         )}
         <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 12 }}>Payé : {fmt(colis.paye, "EUR")} sur {fmt(colis.prix, "EUR")}</div>
+
+        {/*
+          * 🎁 CE QUI A DÉJÀ ÉTÉ OFFERT, ET CE QUI PEUT ENCORE L'ÊTRE.
+          *
+          * Un prix plus bas que le tarif, sans un mot pour l'expliquer, est une question posée à
+          * l'agent au moment le plus mauvais — le client devant lui. La ligne dit d'où vient
+          * l'écart, et le montant en francs, qui est celui que le client connaît.
+          */}
+        {colis.remiseParrainage && (
+          <div style={{ background: "var(--ok-bg-soft)", border: "1px solid var(--ok-fg)", borderRadius: 10, padding: "10px 12px", marginBottom: 12, fontSize: 12.5, color: "var(--ok-fg)", lineHeight: 1.5 }}>
+            🎁 Réduction de parrainage déjà appliquée : <strong>{fmtGNF(colis.remiseParrainage.montantGNF)}</strong> ({fmt(colis.remiseParrainage.montant, "EUR")}).
+            Tarif avant réduction : {fmt(colis.remiseParrainage.prixAvant, "EUR")}.
+          </div>
+        )}
+        {(() => {
+          /*
+           * L'offre ne s'affiche que s'il y a réellement quelque chose à déduire. `reductionParrainage`
+           * répond exactement à cette question — la même fonction que celle qui applique, pour que
+           * l'écran ne puisse pas promettre ce que l'enregistrement refuserait.
+           */
+          if (!onAppliquerParrainage || !effectivePermission(session, "colis.enregistrer_paiement")) return null;
+          const offre = reductionParrainage(colis, data);
+          if (!offre) return null;
+          return (
+            <div style={{ background: "var(--surface2)", border: "1.5px solid #8B5CF6", borderRadius: 10, padding: "12px 14px", marginBottom: 12, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+              <div style={{ fontSize: 12.5, color: "var(--text)", lineHeight: 1.5, minWidth: 180, flex: "1 1 200px" }}>
+                🎁 Ce client a <strong>{fmtGNF(offre.montantGNF)}</strong> de réduction de parrainage disponible.
+                <div style={{ color: "var(--muted)", marginTop: 3 }}>Elle est déduite automatiquement au moment de l’encaissement.</div>
+              </div>
+              <button onClick={onAppliquerParrainage} style={{ background: "#8B5CF6", color: "#fff", border: "none", borderRadius: 8, padding: "9px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}>
+                Appliquer maintenant
+              </button>
+            </div>
+          );
+        })()}
 
         {colis.reste > 0 && effectivePermission(session, "colis.enregistrer_paiement") && (
           payerOuvert ? (
@@ -31830,6 +32211,214 @@ function PerformanceAgentsPage({ data, onBack }) {
         </div>
       )}
       <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 14 }}>Les colis créés avant cette mise à jour n’ont pas d’agent enregistré et apparaissent sous "Non renseigné". De même, le temps de réponse ne peut être calculé que pour les messages envoyés depuis cette mise à jour.</div>
+    </div>
+  );
+}
+
+/**
+ * 🎁 LE PROGRAMME DE PARRAINAGE, VU DE L'ENTREPRISE.
+ *
+ * Tout le monde peut le lire ; seul un compte portant `clients.parrainage` peut annuler. La
+ * distinction n'est pas décorative : lire ne coûte rien à personne, annuler retire une récompense
+ * à un client qui l'attend. Et l'écran ne fait pas foi — le serveur revérifie la permission avant
+ * d'accepter une annulation (voir reconcilierParrainages dans api/_cloisonnement.js).
+ *
+ * CE QUI EST MONTRÉ, ET POURQUOI CHAQUE COLONNE EXISTE.
+ *
+ * Le parrain, le filleul, le code employé, la date de l'inscription, l'état, la première réception
+ * qui a déclenché la récompense, ce qu'elle vaut, et si elle a déjà servi. Ce sont exactement les
+ * huit faits qu'il faut avoir sous les yeux pour trancher un litige — « on m'a promis une
+ * réduction » — sans ouvrir trois autres écrans.
+ *
+ * L'ANNULATION EXIGE UN MOTIF ÉCRIT.
+ *
+ * Une récompense retirée sans raison consignée est une décision que personne ne peut plus
+ * expliquer six mois plus tard, ni au client qui la conteste, ni à l'agent qui l'a prononcée.
+ */
+function ParrainagesPage({ data, persist, session, notify, onBack }) {
+  const [recherche, setRecherche] = useState("");
+  const [filtre, setFiltre] = useState("tous");
+  const [aAnnuler, setAAnnuler] = useState(null);
+  const [motif, setMotif] = useState("");
+
+  const peutAnnuler = effectivePermission(session, "clients.parrainage");
+  const parrainages = data?.parrainages || [];
+  const comptes = data?.clientAccounts || [];
+  const nomDu = (id) => {
+    const c = comptes.find((x) => x && x.id === id);
+    return c ? `${c.prenom || ""} ${c.nom || ""}`.trim() || c.identifiant || "—" : "Compte supprimé";
+  };
+  const telDu = (id) => (comptes.find((x) => x && x.id === id) || {}).telephone || "";
+
+  const ETIQUETTES = {
+    en_attente: { texte: "En attente de la 1re réception", fond: "var(--warn-bg)", encre: "var(--warn-fg)" },
+    recompense_validee: { texte: "Récompense acquise", fond: "var(--ok-bg-soft)", encre: "var(--ok-fg)" },
+    reduction_utilisee: { texte: "Réduction utilisée", fond: "var(--surface2)", encre: "var(--muted)" },
+    annule: { texte: "Annulé", fond: "var(--danger-bg)", encre: "var(--danger-fg)" },
+  };
+
+  const q = recherche.trim().toLowerCase();
+  const lignes = parrainages
+    .filter((p) => p && p.id)
+    .filter((p) => (filtre === "tous" ? true : p.statut === filtre))
+    .filter((p) => !q
+      || String(p.code || "").toLowerCase().includes(q)
+      || nomDu(p.parrainId).toLowerCase().includes(q)
+      || nomDu(p.filleulId).toLowerCase().includes(q))
+    .sort((a, b) => String(b.creeLe || "").localeCompare(String(a.creeLe || "")));
+
+  const vivants = parrainages.filter((p) => p && p.statut !== "annule");
+  const acquises = vivants.filter((p) => p.recompense?.crediteeLe);
+  const utilisees = acquises.filter((p) => p.recompense?.utiliseeLe);
+  const totaux = [
+    ["Parrainages", String(vivants.length), "var(--text)"],
+    ["En attente", String(vivants.filter((p) => p.statut === "en_attente").length), "var(--warn-fg)"],
+    ["Récompenses acquises", String(acquises.length), "var(--ok-fg)"],
+    ["Déjà déduites", fmtGNF(utilisees.reduce((s, p) => s + (Number(p.recompense?.montant) || 0), 0)), "var(--muted)"],
+    ["Restant à déduire", fmtGNF(acquises.filter((p) => !p.recompense?.utiliseeLe).reduce((s, p) => s + (Number(p.recompense?.montant) || 0), 0)), "#8B5CF6"],
+  ];
+
+  function confirmerAnnulation() {
+    const raison = motif.trim();
+    if (!raison) { notify?.("Indiquez le motif de l’annulation"); return; }
+    /*
+     * L'auteur et la date sont écrits ici pour que l'écran les affiche tout de suite, mais le
+     * serveur les réinscrit depuis la session : c'est lui qui fait foi sur qui a annulé.
+     */
+    persist({
+      ...data,
+      parrainages: parrainages.map((p) => (p.id === aAnnuler.id
+        ? { ...p, statut: "annule", annuleLe: new Date().toISOString(), annulePar: `${session.prenom} ${session.nom}`.trim(), motifAnnulation: raison.slice(0, 300) }
+        : p)),
+      activityLog: pushActivity(data, session, "Parrainage annulé",
+        `${nomDu(aAnnuler.parrainId)} → ${nomDu(aAnnuler.filleulId)} (code ${aAnnuler.code || "—"}) — ${raison.slice(0, 300)}`),
+    });
+    notify?.("Parrainage annulé");
+    setAAnnuler(null); setMotif("");
+  }
+
+  const cellule = { padding: "12px 14px", fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap" };
+
+  return (
+    <div>
+      <ConfigPageHeader title="Programme de parrainage" desc={`Qui a parrainé qui, où en est chaque récompense, et laquelle a déjà été déduite. Chaque parrainage abouti vaut ${fmtGNF(MONTANT_RECOMPENSE_GNF)} pour le parrain.`} onBack={onBack} />
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(160px,1fr))", gap: 12, marginBottom: 18 }}>
+        {totaux.map(([label, valeur, teinte]) => (
+          <div key={label} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12, padding: "14px 16px" }}>
+            <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 700, letterSpacing: 0.3 }}>{label.toUpperCase()}</div>
+            <div style={{ fontSize: 19, fontWeight: 800, color: teinte, fontFamily: "'Space Grotesk',sans-serif", marginTop: 5 }}>{valeur}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
+        <input value={recherche} onChange={(e) => setRecherche(e.target.value)} placeholder="Nom, ou code de parrainage…"
+          style={{ ...inputStyle, maxWidth: 280, flex: "1 1 200px" }} />
+        {[["tous", "Tous"], ["en_attente", "En attente"], ["recompense_validee", "Acquises"], ["reduction_utilisee", "Utilisées"], ["annule", "Annulés"]].map(([k, label]) => (
+          <button key={k} onClick={() => setFiltre(k)} style={{ padding: "7px 14px", borderRadius: 20, border: "1.5px solid " + (filtre === k ? "var(--brand-solid)" : "var(--border)"), background: filtre === k ? "var(--brand-solid)" : "var(--surface)", color: filtre === k ? "#fff" : "var(--muted)", fontSize: 12.5, fontWeight: 600, cursor: "pointer" }}>{label}</button>
+        ))}
+      </div>
+
+      {lignes.length === 0 ? (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 14, padding: 30, textAlign: "center", color: "var(--muted)", fontSize: 13.5 }}>
+          {parrainages.length === 0
+            ? "Aucun parrainage pour l’instant. Chaque client dispose d’un code dans son espace : il lui suffit de le partager."
+            : "Aucun parrainage ne correspond à cette recherche."}
+        </div>
+      ) : (
+        <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden" }}>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", minWidth: 960, borderCollapse: "collapse" }}>
+              <thead><tr style={{ background: "var(--surface2)", textAlign: "left" }}>
+                {["PARRAIN", "FILLEUL", "CODE", "INSCRIT LE", "ÉTAT", "1RE RÉCEPTION", "RÉCOMPENSE", "DÉDUITE", ""].map((h) => (
+                  <th key={h} style={{ padding: "12px 14px", fontSize: 11, color: "var(--muted)", fontWeight: 700, whiteSpace: "nowrap" }}>{h}</th>
+                ))}
+              </tr></thead>
+              <tbody>
+                {lignes.map((p) => {
+                  const et = ETIQUETTES[p.statut] || ETIQUETTES.en_attente;
+                  const r = p.recompense || {};
+                  return (
+                    <tr key={p.id} style={{ borderTop: "1px solid var(--surface2)", opacity: p.statut === "annule" ? 0.62 : 1 }}>
+                      <td style={{ ...cellule, color: "var(--text)", fontWeight: 600 }}>
+                        {nomDu(p.parrainId)}
+                        {telDu(p.parrainId) && <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>{telDu(p.parrainId)}</div>}
+                      </td>
+                      <td style={{ ...cellule, color: "var(--text)" }}>
+                        {nomDu(p.filleulId)}
+                        {telDu(p.filleulId) && <div style={{ fontSize: 11, color: "var(--muted)" }}>{telDu(p.filleulId)}</div>}
+                      </td>
+                      <td style={{ ...cellule, fontFamily: "monospace", letterSpacing: 0.6 }}>{p.code || "—"}</td>
+                      <td style={cellule}>{p.creeLe ? new Date(p.creeLe).toLocaleDateString("fr-FR") : "—"}</td>
+                      <td style={cellule}>
+                        <span style={{ background: et.fond, color: et.encre, padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>{et.texte}</span>
+                        {p.statut === "annule" && p.motifAnnulation && (
+                          <div style={{ fontSize: 11, color: "var(--danger-fg)", marginTop: 4, whiteSpace: "normal", maxWidth: 230 }}>
+                            {p.motifAnnulation}{p.annulePar ? ` — ${p.annulePar}` : ""}
+                          </div>
+                        )}
+                      </td>
+                      <td style={cellule}>
+                        {p.receptionLe ? new Date(p.receptionLe).toLocaleDateString("fr-FR") : "—"}
+                        {p.receptionTracking && <div style={{ fontSize: 11, color: "var(--muted)" }}>{p.receptionTracking}</div>}
+                      </td>
+                      <td style={{ ...cellule, color: r.crediteeLe ? "var(--ok-fg)" : "var(--muted)", fontWeight: r.crediteeLe ? 700 : 400 }}>
+                        {r.crediteeLe ? fmtGNF(r.montant) : "—"}
+                      </td>
+                      <td style={cellule}>
+                        {r.utiliseeLe
+                          ? <>{new Date(r.utiliseeLe).toLocaleDateString("fr-FR")}{r.utiliseeSur ? <div style={{ fontSize: 11, color: "var(--muted)" }}>{r.utiliseeSur}</div> : null}</>
+                          : "—"}
+                      </td>
+                      <td style={{ ...cellule, textAlign: "right" }}>
+                        {peutAnnuler && p.statut !== "annule" && (
+                          <button onClick={() => { setAAnnuler(p); setMotif(""); }}
+                            style={{ background: "none", border: "1px solid var(--danger-border)", color: "var(--danger-fg)", borderRadius: 7, padding: "6px 12px", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>
+                            Annuler
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 14, lineHeight: 1.6 }}>
+        La récompense n’est acquise qu’à la <strong>première réception du filleul</strong>, enregistrée par un agent —
+        jamais à la simple inscription. Elle se déduit ensuite automatiquement au comptoir, sur un colis du parrain,
+        et n’est jamais coupée en deux : si la somme due est inférieure à {fmtGNF(MONTANT_RECOMPENSE_GNF)}, elle attend le colis suivant.
+        {!peutAnnuler && " L’annulation d’un parrainage est réservée aux comptes qui en ont la permission."}
+      </div>
+
+      {aAnnuler && (
+        <Modal onClose={() => setAAnnuler(null)} title="Annuler ce parrainage">
+          <div style={{ fontSize: 13.5, color: "var(--text)", lineHeight: 1.6, marginBottom: 14 }}>
+            {nomDu(aAnnuler.parrainId)} → {nomDu(aAnnuler.filleulId)} (code {aAnnuler.code || "—"}).
+          </div>
+          <div style={{ background: "var(--warn-bg)", border: "1px solid var(--warn-border)", borderRadius: 10, padding: "11px 13px", fontSize: 12.5, color: "var(--warn-fg)", lineHeight: 1.55, marginBottom: 14 }}>
+            {aAnnuler.recompense?.utiliseeLe
+              ? "La réduction a déjà été déduite d’un colis : l’annulation ne la reprend pas. Elle marque le parrainage comme frauduleux et empêche toute suite."
+              : "La récompense cessera immédiatement de compter dans le crédit du parrain. Un parrainage annulé ne redevient jamais valide."}
+          </div>
+          <Field label="Motif de l’annulation (obligatoire)">
+            <textarea value={motif} onChange={(e) => setMotif(e.target.value)} rows={3}
+              placeholder="ex : comptes ouverts par la même personne avec deux numéros"
+              style={{ ...inputStyle, resize: "vertical", fontFamily: "inherit" }} />
+          </Field>
+          <div style={{ display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 16 }}>
+            <button onClick={() => setAAnnuler(null)} style={{ background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "10px 16px", fontSize: 13, cursor: "pointer" }}>Retour</button>
+            <button onClick={confirmerAnnulation} disabled={!motif.trim()}
+              style={{ background: motif.trim() ? "var(--danger-fg)" : "var(--surface2)", color: motif.trim() ? "#fff" : "var(--muted)", border: "none", borderRadius: 8, padding: "10px 18px", fontSize: 13, fontWeight: 700, cursor: motif.trim() ? "pointer" : "not-allowed" }}>
+              Annuler le parrainage
+            </button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

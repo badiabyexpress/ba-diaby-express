@@ -4986,6 +4986,16 @@ function App() {
     const unsubscribe = subscribeToChanges("bde-data", (newValueString) => {
       try {
         const next = JSON.parse(newValueString);
+        /*
+         * Le document reçu du serveur devient AUSSI la référence de travail.
+         *
+         * Sans cette ligne, `documentCourant` ne retenait que ce que cette page avait écrit
+         * elle-même. Dès la première mise à jour venue d'ailleurs — un collègue, ou le webhook
+         * WhatsApp qui écrit à chaque accusé de réception — la référence datait, et tout appelant
+         * qui ajoute quelque chose « à ce qu'il y a » repartait d'un instantané périmé. Ce qui
+         * avait été enregistré entre-temps se retrouvait réécrit par une version d'avant.
+         */
+        documentCourant.current = next;
         setData(next);
         setTheme(next.theme || "dark");
         if (next.exchangeRates) LIVE_RATES = { ...CURRENCIES, ...next.exchangeRates };
@@ -5121,9 +5131,30 @@ function App() {
    * ne redessine. Un appelant qui doit s'ajouter à ce qui vient d'être écrit passe une fonction
    * plutôt qu'un document : elle reçoit l'état réel, jamais une copie périmée.
    */
+  /*
+   * REJOUER PLUTÔT QUE JETER, QUAND LE SERVEUR A BOUGÉ ENTRE-TEMPS
+   *
+   * Le webhook WhatsApp écrit dans le même document que nous : chaque accusé de réception touche
+   * la ligne — sept cent quatre-vingt-deux fois à ce jour. Avancer un colis prend quelques
+   * secondes (facture, dépôt du PDF, appel de Meta) ; il suffit qu'un accusé arrive pendant ce
+   * temps pour que l'enregistrement de la trace revienne en conflit.
+   *
+   * Le conflit rechargeait le document du serveur — et l'ajout que l'appelant venait de faire
+   * partait avec. À l'écran, le message apparaissait puis disparaissait, sans que rien ne soit
+   * jamais enregistré : c'est ce qu'on a constaté sur les colis de Guicopress et d'Aly Tombolia,
+   * dont aucune notification d'étape n'a laissé de trace alors que le changement de statut, lui,
+   * était bien passé.
+   *
+   * Un appelant qui exprime sa modification par une FONCTION dit précisément « ajoute ceci à ce
+   * qu'il y a ». On peut donc la rejouer telle quelle sur le document frais : c'est exactement ce
+   * qu'il aurait écrit s'il avait commencé une seconde plus tard. Deux tentatives suffisent — au
+   * delà, c'est que la ligne change plus vite qu'on ne l'écrit, et il vaut mieux le dire.
+   *
+   * Un appelant qui passe un document tout fait ne peut pas être rejoué : lui, on le prévient.
+   */
   const documentCourant = useRef(data);
   useEffect(() => { documentCourant.current = data; }, [data]);
-  const persist = useCallback((suivant) => {
+  const persist = useCallback(function enregistrer(suivant, essai = 0) {
     const next = typeof suivant === "function" ? suivant(documentCourant.current) : suivant;
     documentCourant.current = next;
     setData(next);
@@ -5155,6 +5186,7 @@ function App() {
           documentCourant.current = r.latest;
           setData(r.latest);
           if (r.latest.exchangeRates) LIVE_RATES = { ...CURRENCIES, ...r.latest.exchangeRates };
+          if (typeof suivant === "function" && essai < 2) return enregistrer(suivant, essai + 1);
           setToast("Conflit détecté : les données les plus récentes ont été rechargées. Reprenez votre opération.");
           setTimeout(() => setToast(null), 8000);
           return r;

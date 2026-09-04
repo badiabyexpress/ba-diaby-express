@@ -2402,6 +2402,48 @@ function recompresserLogo(dataUrl, maxWidth = 320) {
   });
 }
 
+/**
+ * DÉPOSE UNE PIÈCE D'IDENTITÉ DANS LE COFFRE PRIVÉ.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Pas dans `colis-documents` : ce bucket-là est PUBLIC, et tout fichier qui s'y trouve est lisible
+ * par quiconque connaît son adresse. Une adresse de fichier se retrouve dans un historique de
+ * navigateur, un message, un journal de serveur — et il s'agit ici de passeports.
+ *
+ * `pieces-identite` n'est pas public. Le navigateur peut y écrire, il ne peut pas y lire : la
+ * lecture passe par un lien signé que seul le serveur fabrique, et seulement pour un
+ * administrateur (voir api/donnees.js).
+ *
+ * ON REND UN CHEMIN, PAS UNE ADRESSE.
+ *
+ * Il n'existe aucune adresse publique à rendre — c'est le but. Le chemin sert à demander un lien
+ * le jour où quelqu'un a le droit de regarder.
+ */
+async function deposerPieceIdentite(fichier, compteId) {
+  if (!fichier) return null;
+  const extension = (fichier.name || "").split(".").pop()?.toLowerCase().replace(/[^a-z0-9]/g, "") || "jpg";
+  const chemin = `identites/${String(compteId || "inconnu").replace(/[^A-Za-z0-9_-]/g, "")}/`
+    + `${Date.now()}${Math.random().toString(36).slice(2, 7)}.${extension.slice(0, 5)}`;
+  const { error } = await clientSupabase().storage
+    .from("pieces-identite")
+    .upload(chemin, fichier, { contentType: fichier.type || "image/jpeg", upsert: false });
+  if (error) throw error;
+  return { chemin, nomFichier: String(fichier.name || "").slice(0, 120), type: fichier.type || "", taille: fichier.size || 0 };
+}
+
+/**
+ * Demande au serveur un lien pour ouvrir une pièce. Il ne vaut que cinq minutes.
+ *
+ * Le refus est rendu tel quel plutôt que résumé : « pièce introuvable » et « réservé à
+ * l'administrateur » appellent deux gestes très différents, et un message unique enverrait
+ * chercher au mauvais endroit.
+ */
+async function lienPieceIdentite(chemin) {
+  const reponse = await appelServeurQuiDepense(`/api/donnees?piece=${encodeURIComponent(chemin)}`);
+  const corps = await reponse.json().catch(() => ({}));
+  if (!reponse.ok) throw new Error(corps?.error || "Lien indisponible.");
+  return corps.lien;
+}
+
 async function deposerImage(dataUrl, dossier, nom) {
   if (!estImageEmbarquee(dataUrl)) return dataUrl;
   try {
@@ -13643,6 +13685,153 @@ function ReceptionTarifsPage({ data, persist, notify, onBack }) {
   );
 }
 
+/**
+ * LA FICHE DE COMMISSION D'UN RESPONSABLE DE ZONE.
+ *
+ * C'est la pièce qu'on lui remet en le payant. Elle doit répondre seule, sans qu'il ait à ouvrir
+ * l'application, à la question qu'il posera : « d'où vient ce montant ? » — d'où le détail agent
+ * par agent, et non un total.
+ *
+ * DEUX NATURES DE REVENU, JAMAIS MÉLANGÉES.
+ *
+ * Ce qu'il a fait de sa main, et ce que son équipe lui rapporte. Les additionner sans les nommer
+ * rend le total invérifiable : il ne saurait pas lequel des deux contester.
+ *
+ * ELLE DIT AUSSI CE QUI A DÉJÀ ÉTÉ VERSÉ.
+ *
+ * Une fiche qui n'annonce que le gagné se lit comme une créance entière, et se réclame comme
+ * telle. Le reste à payer est le seul chiffre qui compte au moment de sortir l'argent.
+ */
+async function downloadFicheCommission(bilan, { entreprise = null, nomEntreprise = "", periode = null, numero = "", deja = 0, statut = "EN ATTENTE" } = {}) {
+  const jspdf = await loadJsPDF();
+  const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a4" }));
+  const W = 210, H = 297, M = 14;
+
+  // ── En-tête ───────────────────────────────────────────────────────────────
+  doc.setFillColor(10, 38, 71); doc.rect(0, 0, W, 32, "F");
+  doc.setFillColor(255, 255, 255); doc.roundedRect(M, 6, 20, 20, 2.5, 2.5, "F");
+  doc.addImage(DEFAULT_LOGO, "PNG", M + 1, 7, 18, 18);
+  doc.setTextColor(255, 255, 255); doc.setFontSize(15); doc.setFont(undefined, "bold");
+  doc.text((nomEntreprise || "BA-DIABY EXPRESS").toUpperCase(), M + 24, 15);
+  doc.setFontSize(9.5); doc.setFont(undefined, "normal"); doc.setTextColor(180, 195, 220);
+  doc.text("Fiche de commission", M + 24, 21.5);
+  doc.setFontSize(8);
+  doc.text(numero ? `N° ${numero}` : "", W - M, 15, { align: "right" });
+  doc.text(new Date().toLocaleDateString("fr-FR"), W - M, 21.5, { align: "right" });
+
+  let y = 44;
+  const etiquette = (texte, valeur, x, largeur) => {
+    doc.setFontSize(7.5); doc.setTextColor(130, 130, 130); doc.setFont(undefined, "normal");
+    doc.text(texte.toUpperCase(), x, y);
+    doc.setFontSize(11); doc.setTextColor(20, 20, 20); doc.setFont(undefined, "bold");
+    doc.text(String(valeur ?? "—"), x, y + 6, largeur ? { maxWidth: largeur } : undefined);
+  };
+  etiquette("Responsable", bilan.responsableNom || "—", M, 70);
+  etiquette("Zone", bilan.zone || "—", M + 78, 40);
+  etiquette("Période", periode || "Depuis le début", M + 124, 60);
+  y += 16;
+  doc.setDrawColor(220); doc.line(M, y, W - M, y);
+
+  // ── Activité personnelle ──────────────────────────────────────────────────
+  y += 10;
+  doc.setFontSize(11); doc.setTextColor(10, 38, 71); doc.setFont(undefined, "bold");
+  doc.text("Son activité personnelle", M, y);
+  y += 7;
+  doc.setFontSize(9.5); doc.setTextColor(60, 60, 60); doc.setFont(undefined, "normal");
+  doc.text(`${bilan.personnel.colis} colis · ${bilan.personnel.kg} kg · ${bilan.personnel.unites} unité${bilan.personnel.unites > 1 ? "s" : ""}`, M, y);
+  doc.setFont(undefined, "bold"); doc.setTextColor(20, 20, 20);
+  doc.text(fmt(bilan.personnel.montant, "EUR"), W - M, y, { align: "right" });
+
+  // ── Commissions générées par l'équipe ─────────────────────────────────────
+  y += 12;
+  doc.setFontSize(11); doc.setTextColor(10, 38, 71); doc.setFont(undefined, "bold");
+  doc.text("Commissions générées par son équipe", M, y);
+  y += 7;
+
+  const colonnes = [
+    { titre: "AGENT", x: M, largeur: 56, droite: false },
+    { titre: "COLIS", x: M + 66, largeur: 14, droite: true },
+    { titre: "KG", x: M + 88, largeur: 16, droite: true },
+    { titre: "UNITÉS", x: M + 110, largeur: 16, droite: true },
+    { titre: "COMMISSION", x: W - M, largeur: 28, droite: true },
+  ];
+  doc.setFillColor(243, 245, 249); doc.rect(M - 2, y - 4.5, W - 2 * M + 4, 7, "F");
+  doc.setFontSize(7.5); doc.setTextColor(110, 110, 110); doc.setFont(undefined, "bold");
+  colonnes.forEach((c) => doc.text(c.titre, c.droite ? c.x : c.x, y, c.droite ? { align: "right" } : undefined));
+  y += 7;
+
+  doc.setFont(undefined, "normal"); doc.setFontSize(9);
+  if (bilan.agents.length === 0) {
+    doc.setTextColor(130, 130, 130);
+    doc.text("Aucun colis enregistré par son équipe sur cette période.", M, y);
+    y += 7;
+  } else {
+    bilan.agents.forEach((a) => {
+      /* Une fiche qui déborde de la page s'imprime à moitié — pire qu'une fiche courte. */
+      if (y > H - 70) { doc.addPage(); y = 24; }
+      doc.setTextColor(30, 30, 30);
+      doc.text(String(a.nom).slice(0, 34), colonnes[0].x, y);
+      doc.setTextColor(90, 90, 90);
+      doc.text(String(a.colis), colonnes[1].x, y, { align: "right" });
+      doc.text(String(a.kg || "—"), colonnes[2].x, y, { align: "right" });
+      doc.text(String(a.unites || "—"), colonnes[3].x, y, { align: "right" });
+      doc.setTextColor(30, 30, 30); doc.setFont(undefined, "bold");
+      doc.text(fmt(a.commissionResponsable, "EUR"), colonnes[4].x, y, { align: "right" });
+      doc.setFont(undefined, "normal");
+      y += 6.5;
+    });
+  }
+
+  // ── Total ─────────────────────────────────────────────────────────────────
+  y += 4;
+  doc.setDrawColor(200); doc.line(M, y, W - M, y);
+  y += 9;
+  const reste = +(bilan.total - (Number(deja) || 0)).toFixed(2);
+  const totaux = [
+    ["Commission personnelle", fmt(bilan.personnel.montant, "EUR"), false],
+    ["Commission équipe", fmt(bilan.commissionEquipe, "EUR"), false],
+    ["Total commission", fmt(bilan.total, "EUR"), true],
+    ["Déjà payé", (Number(deja) || 0) > 0 ? `− ${fmt(Number(deja) || 0, "EUR")}` : "—", false],
+    ["Reste à payer", fmt(Math.max(0, reste), "EUR"), true],
+  ];
+  totaux.forEach(([label, valeur, fort]) => {
+    doc.setFontSize(fort ? 10.5 : 9.5);
+    doc.setFont(undefined, fort ? "bold" : "normal");
+    doc.setTextColor(fort ? 20 : 100, fort ? 20 : 100, fort ? 20 : 100);
+    doc.text(label, M, y);
+    doc.text(valeur, W - M, y, { align: "right" });
+    y += fort ? 8 : 6.5;
+  });
+
+  // ── Statut ────────────────────────────────────────────────────────────────
+  y += 2;
+  const teinte = statut === "PAYÉ" ? [22, 120, 70] : statut === "ANNULÉ" ? [190, 40, 50] : [200, 130, 20];
+  doc.setFillColor(...teinte); doc.roundedRect(M, y, 38, 9, 1.8, 1.8, "F");
+  doc.setTextColor(255, 255, 255); doc.setFontSize(9); doc.setFont(undefined, "bold");
+  doc.text(statut, M + 19, y + 6, { align: "center" });
+
+  /*
+   * Deux signatures. Une fiche de paie de commission sans trace de remise ne prouve rien : c'est
+   * exactement le document qu'on ressort six mois plus tard quand quelqu'un dit n'avoir rien reçu.
+   */
+  y += 22;
+  doc.setDrawColor(180); doc.setTextColor(120, 120, 120); doc.setFontSize(8);
+  doc.line(M, y, M + 62, y);
+  doc.text("Le responsable", M, y + 5);
+  doc.line(W - M - 62, y, W - M, y);
+  doc.text("Pour l’entreprise", W - M - 62, y + 5);
+
+  piedEntreprise(doc, entreprise, { y: H - 10, nom: nomEntreprise || "Ba-Diaby Express" });
+  /*
+   * `openPdf` et non `doc.save` — comme les six autres documents de l'application.
+   *
+   * Un téléchargement déclenché par du code est bloqué en silence dans plusieurs contextes, sans
+   * la moindre erreur : l'agent clique, rien ne se passe, et rien ne dit pourquoi. L'ouverture
+   * dans un onglet passe, et il enregistre depuis son navigateur.
+   */
+  openPdf(doc, `fiche-commission-${(bilan.responsableNom || "responsable").replace(/\s+/g, "-").toLowerCase()}-${new Date().toISOString().slice(0, 10)}.pdf`);
+}
+
 function CommissionsPage({ data, persist, session, notify, onBack }) {
   const isAdmin = session?.role === "Administrateur";
   const categories = data.categories || [];
@@ -13750,6 +13939,18 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
       parNom: `${session?.prenom || ""} ${session?.nom || ""}`.trim() || session?.identifiant || "",
       mode: modeVerse,
       note: String(noteVerse || "").slice(0, 200),
+      /*
+       * CE QUE CE VERSEMENT COUVRAIT, AU MOMENT OÙ IL A ÉTÉ FAIT.
+       *
+       * Le reste dû se recalcule à chaque affichage : il suit les colis, les taux, les
+       * rattachements. Six mois plus tard, il ne dira plus ce qu'il disait le jour du versement, et
+       * une somme réglée deviendra impossible à justifier — « pourquoi 40 € et pas 55 ? ».
+       *
+       * On fige donc le gagné et le nombre de colis tels qu'ils étaient. C'est aussi le numéro que
+       * porte la fiche PDF remise en main propre : les deux se retrouvent.
+       */
+      ficheNumero: `FC-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${String(ligne.id || "").slice(-4).toUpperCase()}`,
+      couvre: { gagne: ligne.gagne, colis: ligne.colis, resteAvant: ligne.reste },
     };
     const restant = +(ligne.reste - montant).toFixed(2);
     persist({
@@ -14014,7 +14215,8 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
             Leur activité personnelle, celle de leur équipe, et le détail agent par agent.
           </div>
           {(data.users || []).filter((u) => u?.role === "Responsable de zone").map((u) => (
-            <BlocEquipe key={u.id} compact titre="Équipe"
+            <BlocEquipe key={u.id} compact titre="Équipe" data={data}
+              deja={(gains.find((g) => g.id === u.id) || {}).paye || 0}
               bilan={bilanEquipe(u.id, { users: data.users, colis: data.colis, categories: data.categories, config: data.commissionConfig })} />
           ))}
         </div>
@@ -25211,9 +25413,11 @@ function CaissePage({ data, persist, session, notify }) {
         L'afficher vide à un agent lui poserait une question qui ne le concerne pas.
       */}
       {session?.role === "Responsable de zone" && (
-        <BlocEquipe bilan={bilanEquipe(session.id, {
-          users: data.users, colis: data.colis, categories: data.categories, config: data.commissionConfig,
-        })} />
+        <BlocEquipe data={data}
+          deja={(commissionDuCompte(data, session.id) || {}).paye || 0}
+          bilan={bilanEquipe(session.id, {
+            users: data.users, colis: data.colis, categories: data.categories, config: data.commissionConfig,
+          })} />
       )}
 
       {(() => {
@@ -32411,6 +32615,122 @@ function PerformanceAgentsPage({ data, onBack }) {
 }
 
 /**
+ * LA PIÈCE D'IDENTITÉ D'UN COMPTE, ET LA DÉCISION D'OUVRIR L'ACCÈS.
+ * ─────────────────────────────────────────────────────────────────────────────
+ * LA PIÈCE NE S'AFFICHE PAS TOUTE SEULE, ET C'EST VOULU.
+ *
+ * Une carte d'identité affichée dès l'ouverture de la fiche se retrouve dans une capture d'écran,
+ * un partage d'écran, un téléphone posé sur un comptoir. Il faut un geste pour la voir, et ce
+ * geste demande un lien au serveur — qui vérifie que celui qui le demande est administrateur, et
+ * qui ne le fait valoir que cinq minutes.
+ *
+ * LE REFUS DEMANDE UN MOTIF.
+ *
+ * Un accès refusé sans raison écrite est une décision que personne ne peut plus expliquer, ni à la
+ * personne qui l'a subie, ni six mois plus tard.
+ */
+function BlocPieceIdentite({ user, peutValider, onDecision }) {
+  const [etat, setEtat] = useState("idle");
+  const [erreur, setErreur] = useState("");
+  const [refusOuvert, setRefusOuvert] = useState(false);
+  const [motif, setMotif] = useState("");
+  const piece = user.pieceIdentite || null;
+  const statut = user.accesStatut || "actif";
+
+  const ETIQUETTES = {
+    actif: { texte: "Accès ouvert", fond: "var(--ok-bg-soft)", encre: "var(--ok-fg)" },
+    en_attente: { texte: "En attente de validation", fond: "var(--warn-bg)", encre: "var(--warn-fg)" },
+    refuse: { texte: "Demande refusée", fond: "var(--danger-bg)", encre: "var(--danger-fg)" },
+  };
+  const et = ETIQUETTES[statut] || ETIQUETTES.actif;
+
+  async function ouvrirLaPiece() {
+    if (!piece?.chemin) return;
+    setEtat("chargement"); setErreur("");
+    try {
+      const lien = await lienPieceIdentite(piece.chemin);
+      window.open(lien, "_blank", "noopener");
+      setEtat("idle");
+    } catch (e) {
+      /* La raison exacte est montrée : « introuvable » et « réservé » appellent deux gestes différents. */
+      setErreur(e?.message || "Lien indisponible.");
+      setEtat("erreur");
+    }
+  }
+
+  return (
+    <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 12, padding: 14, margin: "18px 0" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+        <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text)" }}>Pièce d’identité &amp; accès</div>
+        <span style={{ background: et.fond, color: et.encre, padding: "3px 10px", borderRadius: 20, fontSize: 11, fontWeight: 700 }}>{et.texte}</span>
+      </div>
+
+      {piece?.chemin ? (
+        <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.6 }}>
+          {piece.nomFichier || "Pièce déposée"}
+          {piece.deposeLe ? ` · déposée le ${new Date(piece.deposeLe).toLocaleDateString("fr-FR")}` : ""}
+          {piece.valideeLe && (
+            <div>
+              {piece.statut === "refusee" ? "Refusée" : "Validée"} le {new Date(piece.valideeLe).toLocaleDateString("fr-FR")}
+              {piece.valideePar ? ` par ${piece.valideePar}` : ""}
+              {piece.motifRefus ? ` — ${piece.motifRefus}` : ""}
+            </div>
+          )}
+          <button onClick={ouvrirLaPiece} disabled={etat === "chargement"}
+            style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 6, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 700, color: "var(--text)", cursor: etat === "chargement" ? "wait" : "pointer" }}>
+            <Eye size={13} /> {etat === "chargement" ? "Ouverture…" : "Voir la pièce"}
+          </button>
+          {erreur && <div style={{ color: "var(--danger-fg)", fontSize: 11.5, marginTop: 6 }}>{erreur}</div>}
+          <div style={{ fontSize: 10.5, marginTop: 6 }}>
+            Le lien ne vaut que cinq minutes et n’est délivré qu’à un administrateur. La pièce n’est
+            pas accessible par une adresse publique.
+          </div>
+        </div>
+      ) : (
+        <div style={{ fontSize: 12, color: "var(--warn-fg)", lineHeight: 1.55 }}>
+          Aucune pièce d’identité n’a été déposée pour ce compte. Sans pièce, l’accès ne peut pas
+          être ouvert — demandez une photo de la carte d’identité ou du passeport.
+        </div>
+      )}
+
+      {peutValider && statut !== "actif" && (
+        <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+          {/* Sans pièce, la demande ne peut qu'être refusée : c'était la règle posée. */}
+          <button onClick={() => onDecision("actif")} disabled={!piece?.chemin}
+            style={{ background: piece?.chemin ? "var(--ok-fg)" : "var(--surface)", color: piece?.chemin ? "#fff" : "var(--muted)", border: piece?.chemin ? "none" : "1px solid var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: piece?.chemin ? "pointer" : "not-allowed" }}>
+            Ouvrir l’accès
+          </button>
+          <button onClick={() => setRefusOuvert((o) => !o)}
+            style={{ background: "none", border: "1px solid var(--danger-border)", color: "var(--danger-fg)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+            Refuser
+          </button>
+        </div>
+      )}
+      {peutValider && statut === "actif" && piece?.chemin && (
+        <button onClick={() => setRefusOuvert((o) => !o)}
+          style={{ marginTop: 12, background: "none", border: "1px solid var(--border)", color: "var(--muted)", borderRadius: 8, padding: "7px 12px", fontSize: 12, cursor: "pointer" }}>
+          Suspendre cet accès
+        </button>
+      )}
+
+      {refusOuvert && (
+        <div style={{ marginTop: 10 }}>
+          <Field label="Motif (obligatoire)">
+            <input value={motif} onChange={(e) => setMotif(e.target.value)} style={inputStyle}
+              placeholder="ex : pièce illisible, ou identité qui ne correspond pas" />
+          </Field>
+          <button onClick={() => { if (motif.trim()) { onDecision("refuse", motif.trim()); setRefusOuvert(false); setMotif(""); } }}
+            disabled={!motif.trim()}
+            style={{ background: motif.trim() ? "var(--danger-fg)" : "var(--surface)", color: motif.trim() ? "#fff" : "var(--muted)", border: motif.trim() ? "none" : "1px solid var(--border)", borderRadius: 8, padding: "8px 14px", fontSize: 12.5, fontWeight: 700, cursor: motif.trim() ? "pointer" : "not-allowed" }}>
+            Confirmer le refus
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * MON ÉQUIPE — ce que chaque agent rattaché a produit, et ce qu'il rapporte à son responsable.
  *
  * Le même bloc sert au responsable dans sa caisse et à l'administrateur dans l'écran des
@@ -32429,10 +32749,25 @@ function PerformanceAgentsPage({ data, onBack }) {
  * inactif. Le masquer donnerait une équipe qui rétrécit toute seule — et cacherait justement
  * l'information qui intéresse un responsable.
  */
-function BlocEquipe({ bilan, compact = false, titre = "Mon équipe" }) {
+function BlocEquipe({ bilan, compact = false, titre = "Mon équipe", data = null, deja = 0 }) {
+  const [etatFiche, setEtatFiche] = useState("idle");
   if (!bilan || !bilan.responsable) return null;
   const cellule = { padding: "9px 12px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" };
   const lignes = [...bilan.agents, ...bilan.agentsInactifs];
+
+  async function editerFiche() {
+    setEtatFiche("chargement");
+    try {
+      await downloadFicheCommission(bilan, {
+        entreprise: data?.entreprise,
+        nomEntreprise: data?.branding?.companyName,
+        numero: `FC-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${String(bilan.responsable.id || "").slice(-4).toUpperCase()}`,
+        deja,
+        statut: deja >= bilan.total - 0.005 && bilan.total > 0 ? "PAYÉ" : "EN ATTENTE",
+      });
+      setEtatFiche("idle");
+    } catch (e) { console.error(e); setEtatFiche("erreur"); }
+  }
 
   return (
     <div style={{ background: "var(--surface)", border: "1.5px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 16 }}>
@@ -32440,9 +32775,21 @@ function BlocEquipe({ bilan, compact = false, titre = "Mon équipe" }) {
         <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>
           {titre}{compact ? ` — ${bilan.responsableNom}` : ""}
         </div>
-        <div style={{ fontSize: 11.5, color: "var(--muted)" }}>
-          Zone {bilan.zone} · {bilan.agentsRattaches} agent{bilan.agentsRattaches > 1 ? "s" : ""} rattaché{bilan.agentsRattaches > 1 ? "s" : ""}
-          {bilan.agentsRattaches > 0 && ` · ${bilan.agentsActifs} actif${bilan.agentsActifs > 1 ? "s" : ""}`}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ fontSize: 11.5, color: "var(--muted)" }}>
+            Zone {bilan.zone} · {bilan.agentsRattaches} agent{bilan.agentsRattaches > 1 ? "s" : ""} rattaché{bilan.agentsRattaches > 1 ? "s" : ""}
+            {bilan.agentsRattaches > 0 && ` · ${bilan.agentsActifs} actif${bilan.agentsActifs > 1 ? "s" : ""}`}
+          </div>
+          {/*
+            La fiche ne s'offre que s'il y a quelque chose à y écrire : un PDF vide se télécharge
+            aussi bien qu'un autre, et se découvre vide une fois ouvert.
+          */}
+          {data && bilan.total > 0 && (
+            <button onClick={editerFiche} disabled={etatFiche === "chargement"}
+              style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 700, color: "var(--text)", cursor: etatFiche === "chargement" ? "wait" : "pointer" }}>
+              <Printer size={13} /> {etatFiche === "chargement" ? "Édition…" : etatFiche === "erreur" ? "Réessayer" : "Fiche PDF"}
+            </button>
+          )}
         </div>
       </div>
 
@@ -35039,6 +35386,22 @@ function UtilisateursPage({ data, persist, notify, onBack, session }) {
                 <td style={{ padding: "12px 16px", fontSize: 13, whiteSpace: "nowrap" }}>
                   <span style={{ background: "var(--surface2)", color: "var(--text)", padding: "4px 10px", borderRadius: 20, fontSize: 11.5, fontWeight: 600 }}>{u.role}</span>
                   {u.role !== "Administrateur" && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 4 }}>{FLAGS[u.paysOperation || "GN"] || ""} basé {(COUNTRIES.find((c) => c.code === (u.paysOperation || "GN"))?.name) || "Guinée"}</div>}
+                  {/*
+                    UN ACCÈS EN ATTENTE SE VOIT DEPUIS LA LISTE.
+                    Une demande qu'il faut ouvrir une fiche pour découvrir est une demande qui
+                    attend une semaine — et la personne, elle, croit son compte cassé.
+                  */}
+                  {u.accesStatut && u.accesStatut !== "actif" && (
+                    <div style={{ display: "inline-block", marginTop: 4,
+                      background: u.accesStatut === "refuse" ? "var(--danger-bg)" : "var(--warn-bg)",
+                      color: u.accesStatut === "refuse" ? "var(--danger-fg)" : "var(--warn-fg)",
+                      padding: "2px 8px", borderRadius: 20, fontSize: 10.5, fontWeight: 700 }}>
+                      {u.accesStatut === "refuse" ? "ACCÈS REFUSÉ" : "À VALIDER"}
+                    </div>
+                  )}
+                  {u.remuneration === "salaire" && (
+                    <div style={{ fontSize: 10.5, color: "var(--muted)", marginTop: 3 }}>Salarié — sans commission</div>
+                  )}
                 </td>
                 <td style={{ padding: "12px 16px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" }}>{u.role === "Administrateur" ? "Tous les pays" : (u.paysAutorises?.length ? u.paysAutorises.map((c) => FLAGS[c]).join(" ") : "Tous les pays")}</td>
                 {/*
@@ -35371,6 +35734,34 @@ function UserProfilePage({ user, onSave, onBack, sites, session, tousLesComptes 
             </Field>
           )}
 
+          {/*
+            LA PIÈCE D'IDENTITÉ ET L'OUVERTURE DE L'ACCÈS.
+
+            L'examen se fait ici, sur la fiche, parce que c'est là qu'on a sous les yeux tout le
+            reste : le rôle, la zone, le rattachement. Valider un accès depuis une liste où l'on ne
+            voit qu'un nom revient à valider sans regarder.
+
+            Le refus n'efface rien. Une demande refusée qui disparaît ne laisse aucune trace de la
+            décision, et la même personne peut redéposer indéfiniment.
+          */}
+          {role !== "Partenaire" && (user.pieceIdentite || (user.accesStatut && user.accesStatut !== "actif")) && (
+            <BlocPieceIdentite
+              user={user}
+              peutValider={session?.role === "Administrateur"}
+              onDecision={(statut, motif) => onSave({
+                ...user,
+                accesStatut: statut,
+                pieceIdentite: {
+                  ...(user.pieceIdentite || {}),
+                  statut: statut === "actif" ? "validee" : "refusee",
+                  valideePar: `${session.prenom} ${session.nom}`.trim(),
+                  valideeLe: new Date().toISOString(),
+                  motifRefus: statut === "refuse" ? String(motif || "").slice(0, 300) : "",
+                },
+              })}
+            />
+          )}
+
           <div style={{ fontSize: 12, fontWeight: 600, color: "var(--muted)", margin: "18px 0 8px" }}>PAYS DE DESTINATION AUTORISÉS</div>
           {isAdmin ? (
             <div style={{ background: "var(--surface2)", borderRadius: 8, padding: "10px 12px", fontSize: 13, color: "var(--text)" }}>🌍 Tous les pays (Administrateur)</div>
@@ -35537,7 +35928,17 @@ function UserForm({ onClose, onSave, existing, sites }) {
    * c'est ce nom-là qui devient son nom commercial, dès la création du compte.
    */
   const [nomEntreprise, setNomEntreprise] = useState("");
+  /*
+   * LA PIÈCE D'IDENTITÉ, EXIGÉE À LA CRÉATION.
+   *
+   * Un accès à l'application donne les colis, les clients, la caisse. L'ouvrir à quelqu'un dont on
+   * n'a rien vérifié, c'est le faire entrer sur parole. La demande sans pièce est refusée — c'est
+   * la règle posée — et l'accès n'est pas ouvert avant que l'administrateur ait regardé.
+   */
+  const [piece, setPiece] = useState(null);
+  const [envoiPiece, setEnvoiPiece] = useState("idle");
   const estPartenaire = role === "Partenaire";
+  const pieceRequise = ["Agent", "Responsable de zone", "Chauffeur"].includes(role);
   function toggleCountry(code) {
     setPaysAutorises((list) => (list.includes(code) ? list.filter((c) => c !== code) : [...list, code]));
   }
@@ -35554,6 +35955,8 @@ function UserForm({ onClose, onSave, existing, sites }) {
     }
     if (!email || !telephone || !identifiant || !motdepasse) { setErr("Merci de renseigner tous les champs."); return; }
     if (["Agent", "Responsable de zone", "Chauffeur"].includes(role) && !agence) { setErr("Sélectionnez une ville de la zone opérationnelle."); return; }
+    /* Sans pièce, la demande est refusée : c'est le sens même de l'exigence. */
+    if (pieceRequise && !piece) { setErr("Ajoutez une photo de la carte d’identité ou du passeport : sans pièce, l’accès ne peut pas être créé."); return; }
     if (!/^\S+@\S+\.\S+$/.test(email)) { setErr("Adresse email invalide."); return; }
     if (existing.some((u) => u.identifiant === identifiant.trim())) { setErr("Cet identifiant existe déjà."); return; }
     const identifiants = await creerIdentifiantsMotDePasse(motdepasse);
@@ -35565,6 +35968,11 @@ function UserForm({ onClose, onSave, existing, sites }) {
       email: email.trim(), telephone, identifiant: identifiant.trim(), ...identifiants, role, paysOperation,
       agence: role === "Administrateur" || role === "Comptable" ? "" : agence, zoneOperation: role === "Administrateur" || role === "Comptable" ? "" : agence, twoFA,
       paysAutorises: role === "Administrateur" ? [] : paysAutorises,
+      /*
+       * L'accès n'est pas ouvert d'office : il attend l'examen. Le serveur refuse la connexion
+       * tant que ce champ ne vaut pas « actif » (voir api/login.js) — l'écran ne fait que le dire.
+       */
+      ...(pieceRequise ? { accesStatut: "en_attente", pieceIdentite: { ...piece, deposeLe: new Date().toISOString(), statut: "en_attente" } } : {}),
       // Le contrat s'ouvre ensuite déjà rempli de ce que l'administrateur vient de saisir.
       ...(estPartenaire ? { partenaire: { nomCommercial: nomEntreprise.trim(), telephone, email: email.trim() } } : {}),
     });
@@ -35627,6 +36035,41 @@ function UserForm({ onClose, onSave, existing, sites }) {
               </select>
             </Field>
             <div style={{ fontSize: 11, color: "var(--muted)", marginTop: -8, marginBottom: 10 }}>Si une agence est choisie, cet utilisateur ne verra que les colis, statistiques et bordereaux de cette agence.</div>
+          </div>
+        )}
+        {/*
+          LA PIÈCE D'IDENTITÉ — OBLIGATOIRE, ET DÉPOSÉE AVANT L'ENREGISTREMENT.
+
+          Elle part tout de suite dans un coffre à part, non public : la garder dans le formulaire
+          en attendant l'enregistrement l'aurait fait voyager avec le reste du document, où elle
+          n'a rien à faire. Ce que le compte retient n'est qu'un chemin — il ne s'ouvre qu'avec un
+          lien signé, délivré au seul administrateur.
+        */}
+        {pieceRequise && (
+          <div style={{ gridColumn: "1 / -1" }}>
+            <Field label="Pièce d’identité ou passeport *">
+              <input type="file" accept="image/*,application/pdf" capture="environment"
+                onChange={async (e) => {
+                  const fichier = e.target.files?.[0];
+                  if (!fichier) return;
+                  if (fichier.size > 8 * 1024 * 1024) { setErr("La pièce dépasse 8 Mo — prenez une photo moins lourde."); return; }
+                  setEnvoiPiece("envoi"); setErr("");
+                  try {
+                    setPiece(await deposerPieceIdentite(fichier, `n${Date.now()}`));
+                    setEnvoiPiece("fait");
+                  } catch (err) {
+                    console.error(err);
+                    setEnvoiPiece("erreur");
+                    setErr("La pièce n’a pas pu être déposée. Vérifiez la connexion et réessayez.");
+                  }
+                }}
+                style={{ ...inputStyle, padding: "8px 10px" }} />
+            </Field>
+            <div style={{ fontSize: 11, color: envoiPiece === "fait" ? "var(--ok-fg)" : "var(--muted)", marginTop: -8, marginBottom: 10, lineHeight: 1.55 }}>
+              {envoiPiece === "envoi" ? "Dépôt en cours…"
+                : envoiPiece === "fait" ? `✓ ${piece?.nomFichier || "Pièce"} déposée. L’accès s’ouvrira après votre validation.`
+                : "Photo de la carte d’identité ou du passeport. Sans pièce, la demande est refusée. Le fichier est rangé dans un coffre non public : il ne s’ouvre qu’avec un lien signé, valable cinq minutes, réservé à l’administrateur."}
+            </div>
           </div>
         )}
         {role !== "Administrateur" && (

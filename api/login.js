@@ -731,6 +731,34 @@ export default async function handler(req, res) {
     }
 
     /*
+     * L'ACCÈS N'EST PAS OUVERT TANT QUE L'ADMINISTRATEUR NE L'A PAS VALIDÉ.
+     * ─────────────────────────────────────────────────────────────────────────────
+     * Un compte d'agent ou de responsable se crée avec une pièce d'identité, et l'accès ne
+     * fonctionne qu'après examen. Le mot de passe peut donc être juste sans que la porte s'ouvre :
+     * c'est le but.
+     *
+     * LA VÉRIFICATION EST ICI, ET PAS SEULEMENT À L'ÉCRAN.
+     *
+     * Un contrôle posé dans le navigateur se contourne en appelant cette fonction directement — et
+     * c'est exactement ce que ferait quelqu'un dont la demande vient d'être refusée. Le refus doit
+     * venir du même endroit que la délivrance du jeton.
+     *
+     * `actif` PAR DÉFAUT, ET C'EST VOULU. Aucun des neuf comptes existants ne porte ce champ :
+     * exiger une validation qui n'a jamais été demandée aurait fermé la porte à toute l'équipe du
+     * jour au lendemain. Seuls les comptes créés à partir de maintenant passent par l'examen.
+     */
+    const statutAcces = compte.accesStatut || "actif";
+    if (statutAcces !== "actif") {
+      journaliser("refusee");
+      return res.status(403).json({
+        error: statutAcces === "refuse"
+          ? "Cette demande d’accès a été refusée. Rapprochez-vous de l’administrateur."
+          : "Votre accès attend la validation de l’administrateur. Vous serez prévenu dès qu’il sera ouvert.",
+        accesStatut: statutAcces,
+      });
+    }
+
+    /*
      * LE SECOND FACTEUR, S'IL EST EN PLACE — ET AVANT TOUTE DÉLIVRANCE DE JETON.
      *
      * L'ancienne double authentification vivait entièrement dans le navigateur : le code y était

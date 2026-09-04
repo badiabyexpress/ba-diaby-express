@@ -1854,6 +1854,88 @@ function calcCommission(colis, commissionConfig, categories) {
   }, 0);
 }
 /**
+ * CE QUE GAGNE LA PERSONNE QUI A ENREGISTRÉ UN COLIS.
+ *
+ * Deux parts, et elles ne se ressemblent pas.
+ *
+ * 1. UN FORFAIT PAR COLIS — un euro par défaut. Pas au poids : c'est le geste d'enregistrer et de
+ *    collecter qui est payé, et il coûte le même travail pour un carton de deux kilos que pour un
+ *    de cinquante. Celui qui a fait le geste touche, qu'il soit agent ou responsable de zone :
+ *    « il gagne comme le barème d'un agent ». Un responsable ne touche donc RIEN sur les colis
+ *    pris par ses agents — il est payé pour son propre travail, pas pour celui des autres.
+ *
+ * 2. LE BARÈME D'AGENCE EN PLUS, POUR UN RESPONSABLE DE ZONE, sur un colis de sa zone : les
+ *    2 €/kg et 5 €/unité que l'entreprise comptait déjà comme commission d'agence (calcCommission),
+ *    et les taux par catégorie quand il y en a. Dans sa zone, le responsable EST l'agence.
+ *
+ * CE QUE VEUT DIRE « DE SA ZONE », ET POURQUOI CE N'EST PAS LA FICHE DU CLIENT.
+ *
+ * Aucun des douze comptes clients ne porte d'agence, et cinquante-neuf colis sur soixante-seize
+ * n'ont aucun compte client — ce sont des gens venus au comptoir. Se fier à la fiche du client
+ * reviendrait donc à ne jamais rien verser. C'est le SITE DU COLIS qui tranche : il est inscrit à
+ * l'enregistrement avec l'agence de celui qui saisit, il est renseigné sur soixante-neuf colis, et
+ * c'est la seule chose qui dise honnêtement où le colis a été pris.
+ *
+ * AUCUNE COMMISSION SUR UN COLIS PARTENAIRE. Le partenaire facture son propre client ; l'entreprise
+ * ne voit passer aucun encaissement au comptoir, et payer une commission dessus serait de l'argent
+ * sorti sur une recette qui n'existe pas ici. C'est déjà la règle de calcCommission.
+ */
+function commissionColis(colis, auteur, data) {
+  const vide = { forfait: 0, bareme: 0, total: 0 };
+  if (!colis || estColisPartenaire(colis)) return vide;
+  const cfg = data?.commissionConfig || {};
+  /*
+   * UN EURO PAR DÉFAUT, ET NON ZÉRO.
+   *
+   * L'écran de configuration affiche « 1 » quand le réglage n'a jamais été enregistré. Calculer
+   * zéro pendant ce temps-là aurait donné un tableau vide sous un champ qui annonce un euro : de
+   * quoi croire le calcul cassé, et chercher longtemps. Le chiffre affiché et le chiffre versé
+   * doivent être le même.
+   *
+   * Un forfait explicitement mis à zéro reste zéro : c'est un geste, pas une absence.
+   */
+  const forfait = cfg.parColis === undefined || cfg.parColis === null || cfg.parColis === ""
+    ? 1
+    : Number(cfg.parColis);
+  const part = Number.isFinite(forfait) && forfait > 0 ? forfait : 0;
+  if (!auteur) return { ...vide, forfait: part, total: part };
+
+  const estResponsable = auteur.role === "Responsable de zone";
+  if (!estResponsable) return { forfait: part, bareme: 0, total: part };
+
+  /*
+   * Un colis sans site est compté comme sien : il a été enregistré par lui, et refuser sur une
+   * information manquante retirerait de l'argent pour un champ vide plutôt que pour un fait.
+   */
+  const zone = String(auteur.zoneOperation || auteur.agence || "").trim().toLowerCase();
+  const site = String(colis.site || "").trim().toLowerCase();
+  const dansSaZone = !site || !zone || site === zone;
+  if (!dansSaZone) return { forfait: part, bareme: 0, total: part };
+
+  const bareme = calcCommission(colis, data?.commissionConfig, data?.categories);
+  return { forfait: part, bareme, total: +(part + bareme).toFixed(2) };
+}
+
+/**
+ * Retrouve QUI a enregistré un colis, dans l'équipe.
+ *
+ * L'identifiant fait foi. Il n'existe que sur les colis enregistrés depuis cette version : les
+ * précédents ne portent qu'un nom écrit en toutes lettres, et l'on se rabat dessus. C'est
+ * imparfait — deux homonymes se confondraient — mais c'est tout ce que les anciens colis portent,
+ * et les ignorer reviendrait à effacer l'historique de chacun.
+ */
+function auteurDuColis(colis, users) {
+  const equipe = Array.isArray(users) ? users : [];
+  if (colis?.agentCreationId) {
+    const parId = equipe.find((u) => u && u.id === colis.agentCreationId);
+    if (parId) return parId;
+  }
+  const nom = String(colis?.agentCreation || "").trim().toLowerCase();
+  if (!nom) return null;
+  return equipe.find((u) => u && `${u.prenom || ""} ${u.nom || ""}`.trim().toLowerCase() === nom) || null;
+}
+
+/**
  * Frais de réception/récupération à l’agence, calculés sur le poids TOTAL des colis
  * sélectionnés pour un même bordereau de réception client. Tarif par paliers (ex : 1-10 kg,
  * 11-40 kg, 41-100 kg) : le palier atteint par le poids total du lot s’applique à tout le lot.
@@ -3634,7 +3716,12 @@ function defaultSeed() {
       FR: { adresse: "26 rue Saint Blaise, 75020 Paris", telephone: "+33767562963", horaires: "" },
     },
     entreprise: { adresseSiege: "Bambeto, Conakry, Guinée", telephone: "+224612479339", telephone2: "+224621764596", email: "badiabyexpress.bde@gmail.com", siteWeb: "www.ba-diaby-express.com" },
-    commissionConfig: { parKg: 2, parUnite: 5 }, // EUR — modifiable par l’Administrateur uniquement
+    /*
+     * parKg / parUnite : le barème d'agence, déjà là.
+     * parColis : le forfait versé à qui enregistre le colis — agent ou responsable, même geste,
+     * même somme. En euros, comme le reste de ce bloc.
+     */
+    commissionConfig: { parKg: 2, parUnite: 5, parColis: 1 }, // EUR — modifiable par l’Administrateur uniquement
   };
 }
 /*
@@ -12225,6 +12312,14 @@ function ColisPartenaireForm({ onClose, onSave, existingColis, session, partenai
       facturePartenaireId: null,
       site: session?.agence || "", partenaireId, clientAccountId: null, provenance: null,
       agentCreation: session ? `${session.prenom} ${session.nom}`.trim() || session.identifiant : "",
+      /*
+       * L'identifiant, à côté du nom — c'est lui qui porte la commission.
+       *
+       * Le nom seul ne suffit pas pour de l'argent : deux homonymes se confondent, et un compte
+       * renommé perd tout son historique du jour au lendemain. Le nom reste, parce qu'il s'imprime
+       * sur les bons et se lit sans rien consulter.
+       */
+      agentCreationId: session?.id || null,
       notesInternes: "",
       status: "Enregistré", historique: [{ status: "Enregistré", date: new Date().toISOString() }],
       createdAt: new Date().toISOString(), pod: null, signature: null, driverLoc: null,
@@ -13082,19 +13177,66 @@ function ReceptionTarifsPage({ data, persist, notify, onBack }) {
 
 function CommissionsPage({ data, persist, session, notify, onBack }) {
   const isAdmin = session?.role === "Administrateur";
-  const cfg = data.commissionConfig || { parKg: 2, parUnite: 5 };
+  const cfg = data.commissionConfig || { parKg: 2, parUnite: 5, parColis: 1 };
   const categories = data.categories || [];
   const [parKg, setParKg] = useState(String(cfg.parKg));
   const [parUnite, setParUnite] = useState(String(cfg.parUnite));
+  const [parColis, setParColis] = useState(String(cfg.parColis ?? 1));
   const [catEdits, setCatEdits] = useState({});
 
   function saveGeneral() {
     const k = Number(String(parKg).replace(",", "."));
     const u = Number(String(parUnite).replace(",", "."));
+    const c = Number(String(parColis).replace(",", "."));
     if (isNaN(k) || isNaN(u) || k < 0 || u < 0) return;
-    persist({ ...data, commissionConfig: { parKg: k, parUnite: u }, activityLog: pushActivity(data, session, "Taux de commission modifié", `${k} €/kg, ${u} €/unité`) });
+    if (isNaN(c) || c < 0) return;
+    persist({
+      ...data,
+      commissionConfig: { parKg: k, parUnite: u, parColis: c },
+      activityLog: pushActivity(data, session, "Taux de commission modifié", `${k} €/kg, ${u} €/unité, ${c} €/colis enregistré`),
+    });
     notify?.("Taux de commission mis à jour pour toutes les agences");
   }
+
+  /*
+   * CE QUE CHACUN A GAGNÉ — et pourquoi cet écran doit exister.
+   *
+   * Un barème qu'on ne peut pas vérifier ne se discute pas : il se subit. Un agent qui ne voit
+   * pas ce que ses colis lui ont rapporté n'a aucun moyen de signaler une erreur, et une erreur
+   * qu'on ne signale pas se répète tous les mois. On montre donc le compte, colis par colis
+   * additionnés, et la part qui vient de chaque règle.
+   *
+   * Les colis partenaires n'y figurent pas : ils ne donnent aucune commission, et les compter
+   * dans le nombre de colis laisserait croire à un oubli de calcul.
+   */
+  const gains = useMemo(() => {
+    const equipe = data.users || [];
+    const parPersonne = new Map();
+    (data.colis || []).forEach((c) => {
+      if (estColisPartenaire(c)) return;
+      const auteur = auteurDuColis(c, equipe);
+      if (!auteur) return;
+      const part = commissionColis(c, auteur, data);
+      if (part.total <= 0) return;
+      const ligne = parPersonne.get(auteur.id)
+        || { id: auteur.id, nom: `${auteur.prenom || ""} ${auteur.nom || ""}`.trim() || auteur.identifiant, role: auteur.role, agence: auteur.zoneOperation || auteur.agence || "—", colis: 0, forfait: 0, bareme: 0, total: 0 };
+      ligne.colis += 1;
+      ligne.forfait += part.forfait;
+      ligne.bareme += part.bareme;
+      ligne.total += part.total;
+      parPersonne.set(auteur.id, ligne);
+    });
+    return [...parPersonne.values()]
+      .map((l) => ({ ...l, forfait: +l.forfait.toFixed(2), bareme: +l.bareme.toFixed(2), total: +l.total.toFixed(2) }))
+      .sort((a, b) => b.total - a.total);
+  }, [data]);
+
+  /*
+   * Les colis dont on ne sait pas qui les a enregistrés. On ne les cache pas : un total juste qui
+   * laisse des colis de côté sans le dire est un total faux pour celui qui en attendait la part.
+   */
+  const sansAuteur = useMemo(() => (data.colis || [])
+    .filter((c) => !estColisPartenaire(c) && !auteurDuColis(c, data.users || [])).length, [data]);
   function saveCategoryRate(cat) {
     const raw = catEdits[cat.id];
     if (raw === undefined) return;
@@ -13134,7 +13276,88 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
             <span style={{ fontSize: 12.5, color: "var(--muted)" }}>€ / unité</span>
           </div>
         </Field>
+        {/*
+          Ce troisième taux ne va pas à l'agence mais à UNE PERSONNE : celle qui a enregistré le
+          colis. Il est au forfait et non au poids, parce que c'est le geste qui est payé — un
+          carton de deux kilos demande le même travail qu'un de cinquante.
+        */}
+        <Field label="Forfait à celui qui enregistre un colis">
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input value={parColis} onChange={(e) => setParColis(e.target.value)} disabled={!isAdmin} style={{ ...inputStyle, opacity: isAdmin ? 1 : 0.6 }} />
+            <span style={{ fontSize: 12.5, color: "var(--muted)" }}>€ / colis</span>
+          </div>
+        </Field>
+        <div style={{ fontSize: 11.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.55 }}>
+          Versé à l’agent comme au responsable de zone : c’est le même geste. Un responsable ne
+          touche rien sur les colis pris par ses agents. En revanche, sur un colis de sa zone qu’il
+          enregistre lui-même, il reçoit <strong>en plus</strong> le barème d’agence ci-dessus.
+          Aucune commission sur un colis partenaire.
+        </div>
         {isAdmin && <button onClick={saveGeneral} style={{ background: "#3D63FF", color: "#fff", border: "none", borderRadius: 8, padding: "9px 18px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>Enregistrer</button>}
+      </div>
+
+      {/*
+        CE QUE CHACUN A GAGNÉ.
+
+        Un barème qu'on ne peut pas vérifier ne se discute pas : il se subit. Un agent qui ne voit
+        pas ce que ses colis lui ont rapporté n'a aucun moyen de signaler une erreur — et une
+        erreur qu'on ne signale pas se répète tous les mois.
+      */}
+      <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", maxWidth: 760, marginBottom: 20 }}>
+        <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--border)" }}>
+          <div style={{ fontWeight: 700, color: "var(--text)", fontSize: 14 }}>Ce que chacun a gagné</div>
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
+            Depuis le début, sur tous les colis enregistrés. Les colis partenaires n’y figurent pas : ils ne donnent aucune commission.
+          </div>
+        </div>
+        {gains.length === 0 ? (
+          <div style={{ padding: 18, fontSize: 13, color: "var(--muted)" }}>
+            Aucune commission pour l’instant. Le forfait s’applique aux colis enregistrés à partir de maintenant.
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", minWidth: 620, borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ textAlign: "left", background: "var(--surface2)" }}>
+                  {["PERSONNE", "AGENCE", "COLIS", "FORFAIT", "BARÈME D’AGENCE", "TOTAL"].map((t, i) => (
+                    <th key={t} style={{ padding: "10px 16px", fontSize: 10.5, color: "var(--muted)", fontWeight: 700, textAlign: i >= 2 ? "right" : "left", whiteSpace: "nowrap" }}>{t}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {gains.map((g) => (
+                  <tr key={g.id} style={{ borderTop: "1px solid var(--border)" }}>
+                    <td style={{ padding: "10px 16px", fontSize: 13, color: "var(--text)", fontWeight: 600 }}>
+                      {g.nom}
+                      <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>{g.role}</div>
+                    </td>
+                    <td style={{ padding: "10px 16px", fontSize: 12.5, color: "var(--muted)" }}>{g.agence}</td>
+                    <td style={{ padding: "10px 16px", fontSize: 12.5, color: "var(--text)", textAlign: "right" }}>{g.colis}</td>
+                    <td style={{ padding: "10px 16px", fontSize: 12.5, color: "var(--muted)", textAlign: "right", whiteSpace: "nowrap" }}>{fmt(g.forfait, "EUR")}</td>
+                    {/* Le barème d'agence ne concerne que les responsables de zone : un tiret dit « sans objet », pas « zéro ». */}
+                    <td style={{ padding: "10px 16px", fontSize: 12.5, color: "var(--muted)", textAlign: "right", whiteSpace: "nowrap" }}>
+                      {g.role === "Responsable de zone" ? fmt(g.bareme, "EUR") : "—"}
+                    </td>
+                    <td style={{ padding: "10px 16px", fontSize: 13, color: "var(--text)", fontWeight: 700, textAlign: "right", whiteSpace: "nowrap" }}>{fmt(g.total, "EUR")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {/*
+          Les colis dont on ne sait pas qui les a enregistrés. On ne les cache pas : un total juste
+          qui laisse des colis de côté sans le dire est un total faux pour celui qui en attendait
+          la part. Le cas vient des colis d'avant cette version, qui ne portent qu'un nom écrit à
+          la main — un compte renommé depuis ne s'y retrouve plus.
+        */}
+        {sansAuteur > 0 && (
+          <div style={{ borderTop: "1px solid var(--border)", padding: "10px 18px", fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 }}>
+            {sansAuteur} colis ne sont rattachés à aucun compte de l’équipe et ne comptent dans aucun total —
+            ils portent un nom qui ne correspond plus à personne. Les colis enregistrés à partir de maintenant
+            portent l’identifiant du compte, et ne peuvent plus se perdre ainsi.
+          </div>
+        )}
       </div>
 
       <div style={{ background: "var(--surface)", borderRadius: 14, border: "1px solid var(--border)", overflow: "hidden", maxWidth: 640, marginBottom: 20 }}>
@@ -14647,6 +14870,7 @@ function CentreClientsPage({ data, persist, notify, session }) {
       referenceCommande: saisie.reference || null,
       status: "Enregistré", historique: [{ status: "Enregistré", date: maintenant }],
       agentCreation: session ? `${session.prenom} ${session.nom}`.trim() || session.identifiant : "",
+      agentCreationId: session?.id || null,
       createdAt: maintenant, pod: null, signature: null, driverLoc: null,
     };
     persist({
@@ -17420,6 +17644,7 @@ function ColisForm({ onClose, onSave, existingColis, categories, session, sites,
       destinataire: `${destPrenom} ${destNom}`.trim(), telephone: destTelephone, destinataireEmail: (destEmail || "").trim(), destinataireAdresse: destAdresse, destinataireVille: destVille, destinataireCodePostal: destCodePostal, destinatairePays: destPays,
       pays, direction, mode, produits, poids: +poidsTotal.toFixed(2), volume: 0, valeurDeclaree, site: agence, partenaireId: partenaireId || null, clientAccountId: clientAccountId || null, provenance: provenance || null, preAlerteRapprochee: preAlerteRapprochee || null,
       agentCreation: session ? `${session.prenom} ${session.nom}`.trim() || session.identifiant : "",
+      agentCreationId: session?.id || null,
       prixBrut, discountLoyalty, rabaisMontant: Number(rabaisMontant) || 0, rabaisDevise, rabaisEUR, prix, paye: payeNum, reste, photos,
       // L'acompte pris au comptoir est un encaissement comme un autre : il est nommé (l'agent qui
       // enregistre le colis), garde sa devise de saisie, son mode et la référence de la transaction.
@@ -26855,6 +27080,7 @@ function ReceptionBordereauModal({ onClose, data, persist, notify, session }) {
       provenance: boutiqueCommune || propres.map((a) => a.commande).find(Boolean) || null,
       status: "Enregistré", historique: [{ status: "Enregistré", date: maintenant }],
       agentCreation: session ? `${session.prenom} ${session.nom}`.trim() || session.identifiant : "",
+      agentCreationId: session?.id || null,
       createdAt: maintenant, pod: null, signature: null, driverLoc: null,
     };
     persist({
@@ -27329,6 +27555,7 @@ function ImportExcelModal({ onClose, onImportMany, data, session }) {
         paiements: [], notesInternes: "",
         status: "Enregistré", historique: [{ status: "Enregistré", date: new Date().toISOString() }],
         agentCreation: session ? `${session.prenom} ${session.nom}`.trim() || session.identifiant : "",
+        agentCreationId: session?.id || null,
         createdAt: new Date().toISOString(), pod: null, signature: null, driverLoc: null,
       };
     });
@@ -27435,6 +27662,7 @@ Réponds UNIQUEMENT en JSON strict, sans texte autour, avec ces clés (mets null
       prixBrut, discountLoyalty: 0, rabaisMontant: 0, rabaisDevise: "GNF", rabaisEUR: 0, prix: prixBrut, paye: 0, reste: prixBrut, photos: [],
       status: "Enregistré", historique: [{ status: "Enregistré", date: new Date().toISOString() }],
       agentCreation: session ? `${session.prenom} ${session.nom}`.trim() || session.identifiant : "",
+      agentCreationId: session?.id || null,
       createdAt: new Date().toISOString(), pod: null, signature: null, driverLoc: null,
     });
     onClose();

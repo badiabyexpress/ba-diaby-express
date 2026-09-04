@@ -13643,6 +13643,153 @@ function ReceptionTarifsPage({ data, persist, notify, onBack }) {
   );
 }
 
+/**
+ * LA FICHE DE COMMISSION D'UN RESPONSABLE DE ZONE.
+ *
+ * C'est la pièce qu'on lui remet en le payant. Elle doit répondre seule, sans qu'il ait à ouvrir
+ * l'application, à la question qu'il posera : « d'où vient ce montant ? » — d'où le détail agent
+ * par agent, et non un total.
+ *
+ * DEUX NATURES DE REVENU, JAMAIS MÉLANGÉES.
+ *
+ * Ce qu'il a fait de sa main, et ce que son équipe lui rapporte. Les additionner sans les nommer
+ * rend le total invérifiable : il ne saurait pas lequel des deux contester.
+ *
+ * ELLE DIT AUSSI CE QUI A DÉJÀ ÉTÉ VERSÉ.
+ *
+ * Une fiche qui n'annonce que le gagné se lit comme une créance entière, et se réclame comme
+ * telle. Le reste à payer est le seul chiffre qui compte au moment de sortir l'argent.
+ */
+async function downloadFicheCommission(bilan, { entreprise = null, nomEntreprise = "", periode = null, numero = "", deja = 0, statut = "EN ATTENTE" } = {}) {
+  const jspdf = await loadJsPDF();
+  const doc = preparerDocPdf(new jspdf.jsPDF({ unit: "mm", format: "a4" }));
+  const W = 210, H = 297, M = 14;
+
+  // ── En-tête ───────────────────────────────────────────────────────────────
+  doc.setFillColor(10, 38, 71); doc.rect(0, 0, W, 32, "F");
+  doc.setFillColor(255, 255, 255); doc.roundedRect(M, 6, 20, 20, 2.5, 2.5, "F");
+  doc.addImage(DEFAULT_LOGO, "PNG", M + 1, 7, 18, 18);
+  doc.setTextColor(255, 255, 255); doc.setFontSize(15); doc.setFont(undefined, "bold");
+  doc.text((nomEntreprise || "BA-DIABY EXPRESS").toUpperCase(), M + 24, 15);
+  doc.setFontSize(9.5); doc.setFont(undefined, "normal"); doc.setTextColor(180, 195, 220);
+  doc.text("Fiche de commission", M + 24, 21.5);
+  doc.setFontSize(8);
+  doc.text(numero ? `N° ${numero}` : "", W - M, 15, { align: "right" });
+  doc.text(new Date().toLocaleDateString("fr-FR"), W - M, 21.5, { align: "right" });
+
+  let y = 44;
+  const etiquette = (texte, valeur, x, largeur) => {
+    doc.setFontSize(7.5); doc.setTextColor(130, 130, 130); doc.setFont(undefined, "normal");
+    doc.text(texte.toUpperCase(), x, y);
+    doc.setFontSize(11); doc.setTextColor(20, 20, 20); doc.setFont(undefined, "bold");
+    doc.text(String(valeur ?? "—"), x, y + 6, largeur ? { maxWidth: largeur } : undefined);
+  };
+  etiquette("Responsable", bilan.responsableNom || "—", M, 70);
+  etiquette("Zone", bilan.zone || "—", M + 78, 40);
+  etiquette("Période", periode || "Depuis le début", M + 124, 60);
+  y += 16;
+  doc.setDrawColor(220); doc.line(M, y, W - M, y);
+
+  // ── Activité personnelle ──────────────────────────────────────────────────
+  y += 10;
+  doc.setFontSize(11); doc.setTextColor(10, 38, 71); doc.setFont(undefined, "bold");
+  doc.text("Son activité personnelle", M, y);
+  y += 7;
+  doc.setFontSize(9.5); doc.setTextColor(60, 60, 60); doc.setFont(undefined, "normal");
+  doc.text(`${bilan.personnel.colis} colis · ${bilan.personnel.kg} kg · ${bilan.personnel.unites} unité${bilan.personnel.unites > 1 ? "s" : ""}`, M, y);
+  doc.setFont(undefined, "bold"); doc.setTextColor(20, 20, 20);
+  doc.text(fmt(bilan.personnel.montant, "EUR"), W - M, y, { align: "right" });
+
+  // ── Commissions générées par l'équipe ─────────────────────────────────────
+  y += 12;
+  doc.setFontSize(11); doc.setTextColor(10, 38, 71); doc.setFont(undefined, "bold");
+  doc.text("Commissions générées par son équipe", M, y);
+  y += 7;
+
+  const colonnes = [
+    { titre: "AGENT", x: M, largeur: 56, droite: false },
+    { titre: "COLIS", x: M + 66, largeur: 14, droite: true },
+    { titre: "KG", x: M + 88, largeur: 16, droite: true },
+    { titre: "UNITÉS", x: M + 110, largeur: 16, droite: true },
+    { titre: "COMMISSION", x: W - M, largeur: 28, droite: true },
+  ];
+  doc.setFillColor(243, 245, 249); doc.rect(M - 2, y - 4.5, W - 2 * M + 4, 7, "F");
+  doc.setFontSize(7.5); doc.setTextColor(110, 110, 110); doc.setFont(undefined, "bold");
+  colonnes.forEach((c) => doc.text(c.titre, c.droite ? c.x : c.x, y, c.droite ? { align: "right" } : undefined));
+  y += 7;
+
+  doc.setFont(undefined, "normal"); doc.setFontSize(9);
+  if (bilan.agents.length === 0) {
+    doc.setTextColor(130, 130, 130);
+    doc.text("Aucun colis enregistré par son équipe sur cette période.", M, y);
+    y += 7;
+  } else {
+    bilan.agents.forEach((a) => {
+      /* Une fiche qui déborde de la page s'imprime à moitié — pire qu'une fiche courte. */
+      if (y > H - 70) { doc.addPage(); y = 24; }
+      doc.setTextColor(30, 30, 30);
+      doc.text(String(a.nom).slice(0, 34), colonnes[0].x, y);
+      doc.setTextColor(90, 90, 90);
+      doc.text(String(a.colis), colonnes[1].x, y, { align: "right" });
+      doc.text(String(a.kg || "—"), colonnes[2].x, y, { align: "right" });
+      doc.text(String(a.unites || "—"), colonnes[3].x, y, { align: "right" });
+      doc.setTextColor(30, 30, 30); doc.setFont(undefined, "bold");
+      doc.text(fmt(a.commissionResponsable, "EUR"), colonnes[4].x, y, { align: "right" });
+      doc.setFont(undefined, "normal");
+      y += 6.5;
+    });
+  }
+
+  // ── Total ─────────────────────────────────────────────────────────────────
+  y += 4;
+  doc.setDrawColor(200); doc.line(M, y, W - M, y);
+  y += 9;
+  const reste = +(bilan.total - (Number(deja) || 0)).toFixed(2);
+  const totaux = [
+    ["Commission personnelle", fmt(bilan.personnel.montant, "EUR"), false],
+    ["Commission équipe", fmt(bilan.commissionEquipe, "EUR"), false],
+    ["Total commission", fmt(bilan.total, "EUR"), true],
+    ["Déjà payé", (Number(deja) || 0) > 0 ? `− ${fmt(Number(deja) || 0, "EUR")}` : "—", false],
+    ["Reste à payer", fmt(Math.max(0, reste), "EUR"), true],
+  ];
+  totaux.forEach(([label, valeur, fort]) => {
+    doc.setFontSize(fort ? 10.5 : 9.5);
+    doc.setFont(undefined, fort ? "bold" : "normal");
+    doc.setTextColor(fort ? 20 : 100, fort ? 20 : 100, fort ? 20 : 100);
+    doc.text(label, M, y);
+    doc.text(valeur, W - M, y, { align: "right" });
+    y += fort ? 8 : 6.5;
+  });
+
+  // ── Statut ────────────────────────────────────────────────────────────────
+  y += 2;
+  const teinte = statut === "PAYÉ" ? [22, 120, 70] : statut === "ANNULÉ" ? [190, 40, 50] : [200, 130, 20];
+  doc.setFillColor(...teinte); doc.roundedRect(M, y, 38, 9, 1.8, 1.8, "F");
+  doc.setTextColor(255, 255, 255); doc.setFontSize(9); doc.setFont(undefined, "bold");
+  doc.text(statut, M + 19, y + 6, { align: "center" });
+
+  /*
+   * Deux signatures. Une fiche de paie de commission sans trace de remise ne prouve rien : c'est
+   * exactement le document qu'on ressort six mois plus tard quand quelqu'un dit n'avoir rien reçu.
+   */
+  y += 22;
+  doc.setDrawColor(180); doc.setTextColor(120, 120, 120); doc.setFontSize(8);
+  doc.line(M, y, M + 62, y);
+  doc.text("Le responsable", M, y + 5);
+  doc.line(W - M - 62, y, W - M, y);
+  doc.text("Pour l’entreprise", W - M - 62, y + 5);
+
+  piedEntreprise(doc, entreprise, { y: H - 10, nom: nomEntreprise || "Ba-Diaby Express" });
+  /*
+   * `openPdf` et non `doc.save` — comme les six autres documents de l'application.
+   *
+   * Un téléchargement déclenché par du code est bloqué en silence dans plusieurs contextes, sans
+   * la moindre erreur : l'agent clique, rien ne se passe, et rien ne dit pourquoi. L'ouverture
+   * dans un onglet passe, et il enregistre depuis son navigateur.
+   */
+  openPdf(doc, `fiche-commission-${(bilan.responsableNom || "responsable").replace(/\s+/g, "-").toLowerCase()}-${new Date().toISOString().slice(0, 10)}.pdf`);
+}
+
 function CommissionsPage({ data, persist, session, notify, onBack }) {
   const isAdmin = session?.role === "Administrateur";
   const categories = data.categories || [];
@@ -13750,6 +13897,18 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
       parNom: `${session?.prenom || ""} ${session?.nom || ""}`.trim() || session?.identifiant || "",
       mode: modeVerse,
       note: String(noteVerse || "").slice(0, 200),
+      /*
+       * CE QUE CE VERSEMENT COUVRAIT, AU MOMENT OÙ IL A ÉTÉ FAIT.
+       *
+       * Le reste dû se recalcule à chaque affichage : il suit les colis, les taux, les
+       * rattachements. Six mois plus tard, il ne dira plus ce qu'il disait le jour du versement, et
+       * une somme réglée deviendra impossible à justifier — « pourquoi 40 € et pas 55 ? ».
+       *
+       * On fige donc le gagné et le nombre de colis tels qu'ils étaient. C'est aussi le numéro que
+       * porte la fiche PDF remise en main propre : les deux se retrouvent.
+       */
+      ficheNumero: `FC-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${String(ligne.id || "").slice(-4).toUpperCase()}`,
+      couvre: { gagne: ligne.gagne, colis: ligne.colis, resteAvant: ligne.reste },
     };
     const restant = +(ligne.reste - montant).toFixed(2);
     persist({
@@ -14014,7 +14173,8 @@ function CommissionsPage({ data, persist, session, notify, onBack }) {
             Leur activité personnelle, celle de leur équipe, et le détail agent par agent.
           </div>
           {(data.users || []).filter((u) => u?.role === "Responsable de zone").map((u) => (
-            <BlocEquipe key={u.id} compact titre="Équipe"
+            <BlocEquipe key={u.id} compact titre="Équipe" data={data}
+              deja={(gains.find((g) => g.id === u.id) || {}).paye || 0}
               bilan={bilanEquipe(u.id, { users: data.users, colis: data.colis, categories: data.categories, config: data.commissionConfig })} />
           ))}
         </div>
@@ -25211,9 +25371,11 @@ function CaissePage({ data, persist, session, notify }) {
         L'afficher vide à un agent lui poserait une question qui ne le concerne pas.
       */}
       {session?.role === "Responsable de zone" && (
-        <BlocEquipe bilan={bilanEquipe(session.id, {
-          users: data.users, colis: data.colis, categories: data.categories, config: data.commissionConfig,
-        })} />
+        <BlocEquipe data={data}
+          deja={(commissionDuCompte(data, session.id) || {}).paye || 0}
+          bilan={bilanEquipe(session.id, {
+            users: data.users, colis: data.colis, categories: data.categories, config: data.commissionConfig,
+          })} />
       )}
 
       {(() => {
@@ -32429,10 +32591,25 @@ function PerformanceAgentsPage({ data, onBack }) {
  * inactif. Le masquer donnerait une équipe qui rétrécit toute seule — et cacherait justement
  * l'information qui intéresse un responsable.
  */
-function BlocEquipe({ bilan, compact = false, titre = "Mon équipe" }) {
+function BlocEquipe({ bilan, compact = false, titre = "Mon équipe", data = null, deja = 0 }) {
+  const [etatFiche, setEtatFiche] = useState("idle");
   if (!bilan || !bilan.responsable) return null;
   const cellule = { padding: "9px 12px", fontSize: 12.5, color: "var(--muted)", whiteSpace: "nowrap" };
   const lignes = [...bilan.agents, ...bilan.agentsInactifs];
+
+  async function editerFiche() {
+    setEtatFiche("chargement");
+    try {
+      await downloadFicheCommission(bilan, {
+        entreprise: data?.entreprise,
+        nomEntreprise: data?.branding?.companyName,
+        numero: `FC-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${String(bilan.responsable.id || "").slice(-4).toUpperCase()}`,
+        deja,
+        statut: deja >= bilan.total - 0.005 && bilan.total > 0 ? "PAYÉ" : "EN ATTENTE",
+      });
+      setEtatFiche("idle");
+    } catch (e) { console.error(e); setEtatFiche("erreur"); }
+  }
 
   return (
     <div style={{ background: "var(--surface)", border: "1.5px solid var(--border)", borderRadius: 12, padding: 16, marginBottom: 16 }}>
@@ -32440,9 +32617,21 @@ function BlocEquipe({ bilan, compact = false, titre = "Mon équipe" }) {
         <div style={{ fontSize: 13, fontWeight: 700, color: "var(--text)" }}>
           {titre}{compact ? ` — ${bilan.responsableNom}` : ""}
         </div>
-        <div style={{ fontSize: 11.5, color: "var(--muted)" }}>
-          Zone {bilan.zone} · {bilan.agentsRattaches} agent{bilan.agentsRattaches > 1 ? "s" : ""} rattaché{bilan.agentsRattaches > 1 ? "s" : ""}
-          {bilan.agentsRattaches > 0 && ` · ${bilan.agentsActifs} actif${bilan.agentsActifs > 1 ? "s" : ""}`}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <div style={{ fontSize: 11.5, color: "var(--muted)" }}>
+            Zone {bilan.zone} · {bilan.agentsRattaches} agent{bilan.agentsRattaches > 1 ? "s" : ""} rattaché{bilan.agentsRattaches > 1 ? "s" : ""}
+            {bilan.agentsRattaches > 0 && ` · ${bilan.agentsActifs} actif${bilan.agentsActifs > 1 ? "s" : ""}`}
+          </div>
+          {/*
+            La fiche ne s'offre que s'il y a quelque chose à y écrire : un PDF vide se télécharge
+            aussi bien qu'un autre, et se découvre vide une fois ouvert.
+          */}
+          {data && bilan.total > 0 && (
+            <button onClick={editerFiche} disabled={etatFiche === "chargement"}
+              style={{ display: "flex", alignItems: "center", gap: 6, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "7px 12px", fontSize: 12, fontWeight: 700, color: "var(--text)", cursor: etatFiche === "chargement" ? "wait" : "pointer" }}>
+              <Printer size={13} /> {etatFiche === "chargement" ? "Édition…" : etatFiche === "erreur" ? "Réessayer" : "Fiche PDF"}
+            </button>
+          )}
         </div>
       </div>
 

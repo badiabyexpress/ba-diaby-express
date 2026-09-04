@@ -2453,7 +2453,9 @@ async function deposerImage(dataUrl, dossier, nom) {
     const chemin = `images/${dossier}/${nom}-${Date.now()}${Math.random().toString(36).slice(2, 7)}.${extension}`;
     const { error } = await clientSupabase().storage
       .from("colis-documents")
-      .upload(chemin, blob, { contentType: blob.type || "image/jpeg", upsert: true });
+      /* Même raison que pour les factures : le seau n’accepte plus que l’écriture, et le chemin
+         porte déjà l’heure et un tirage au sort — il n’y a rien à écraser. */
+      .upload(chemin, blob, { contentType: blob.type || "image/jpeg", upsert: false });
     if (error) throw error;
     const { data: { publicUrl } } = clientSupabase().storage.from("colis-documents").getPublicUrl(chemin);
     return publicUrl || dataUrl;
@@ -6447,6 +6449,10 @@ const CLIENT_I18N = {
   "Confirmer mon numéro": { en: "Confirm my number", ar: "تأكيد رقمي" },
   "Vérification…": { en: "Checking…", ar: "جارٍ التحقق…" },
   "et par e-mail à": { en: "and by email to", ar: "وبالبريد الإلكتروني إلى" },
+  "Numéro de téléphone": { en: "Phone number", ar: "رقم الهاتف" },
+  "Adresse e-mail": { en: "Email address", ar: "عنوان البريد الإلكتروني" },
+  "Utiliser plutôt mon adresse e-mail": { en: "Use my email address instead", ar: "استخدم عنوان بريدي الإلكتروني بدلاً من ذلك" },
+  "Utiliser plutôt mon numéro de téléphone": { en: "Use my phone number instead", ar: "استخدم رقم هاتفي بدلاً من ذلك" },
   "Rien reçu ? Regardez vos indésirables, puis contactez notre agence : elle peut réinitialiser votre mot de passe après avoir vérifié votre identité.": { en: "Nothing received? Check your spam folder, then contact our agency: they can reset your password once your identity is verified.", ar: "لم يصلك شيء؟ تحقق من الرسائل غير المرغوب فيها ثم اتصل بوكالتنا: يمكنها إعادة تعيين كلمة المرور بعد التحقق من هويتك." },
   "Code de vérification": { en: "Verification code", ar: "رمز التحقق" },
   "Nous avons envoyé un code à 6 chiffres sur le WhatsApp du": { en: "We sent a 6-digit code to the WhatsApp of", ar: "أرسلنا رمزًا من 6 أرقام إلى واتساب" },
@@ -7235,6 +7241,11 @@ function ClientResetPasswordForm({ data, persist, onDone, onCancel, espace = "cl
   const [masqueEmail, setMasqueEmail] = useState("");
   /* L'identifiant se choisit librement à l'inscription : il s'oublie donc aussi. */
   const [contact, setContact] = useState("");
+  /*
+   * Le téléphone d'abord : onze des douze comptes clients n'ont pas d'adresse enregistrée, et
+   * celui qui cherche son identifiant le cherche presque toujours par son numéro.
+   */
+  const [parEmail, setParEmail] = useState(false);
   const [contactParEmail, setContactParEmail] = useState(false);
 
   /** Affiche 62•••••99 : assez pour se reconnaître, pas assez pour deviner le numéro. */
@@ -7409,12 +7420,46 @@ function ClientResetPasswordForm({ data, persist, onDone, onCancel, espace = "cl
         <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 }}>
           {tcx("Saisissez le numéro de téléphone ou l’adresse e-mail de votre compte : nous vous y enverrons votre identifiant.")}
         </div>
-        <Field label={tcx("Téléphone ou e-mail")}>
-          <input value={contact} onChange={(e) => setContact(e.target.value)} autoFocus
-            placeholder="620 11 12 22" style={inputStyle} />
-        </Field>
+        {/*
+          L'INDICATIF EST DONNÉ, IL NE SE TAPE PLUS.
+          ─────────────────────────────────────────────────────────────────────────
+          Le champ était libre, et il fallait écrire « +224 » soi-même. Sur un clavier de
+          téléphone, le « + » se trouve derrière une bascule de symboles : on l'oublie, ou l'on
+          saisit « 00224 », ou l'on tape le numéro nu. Aucune de ces trois formes ne ressemble à
+          ce qui est enregistré, et la recherche ne rend rien — sans dire pourquoi, puisque la
+          réponse doit rester la même que le compte existe ou non.
+
+          PhoneInput porte le drapeau et l'indicatif, comme partout ailleurs dans l'application,
+          et le client n'a plus que ses chiffres à composer.
+
+          L'ADRESSE E-MAIL RESTE POSSIBLE, MAIS ELLE N'EST PLUS LE DÉFAUT.
+
+          Onze de vos douze clients n'ont pas d'adresse enregistrée : le champ ordinaire servait
+          donc, en pratique, à saisir un numéro. Ceux qui ont une adresse la trouvent d'un geste.
+        */}
+        {parEmail ? (
+          <Field label={tcx("Adresse e-mail")}>
+            <input type="email" value={contact} onChange={(e) => setContact(e.target.value)} autoFocus
+              placeholder="nom@exemple.com" style={inputStyle} />
+          </Field>
+        ) : (
+          <Field label={tcx("Numéro de téléphone")}>
+            <PhoneInput value={contact} onChange={setContact} placeholder="620 11 12 22" defaultDial="224" />
+          </Field>
+        )}
+        <button type="button" onClick={() => { setParEmail((v) => !v); setContact(""); setErr(""); }}
+          style={{ background: "none", border: "none", color: "var(--brand-solid)", fontSize: 12, cursor: "pointer", padding: 0, marginTop: -6, marginBottom: 12, textDecoration: "underline" }}>
+          {parEmail ? tcx("Utiliser plutôt mon numéro de téléphone") : tcx("Utiliser plutôt mon adresse e-mail")}
+        </button>
         {err && <div style={{ color: "var(--danger-fg)", fontSize: 12.5, marginBottom: 10 }}>{err}</div>}
-        <button type="submit" disabled={loading || !contact.trim()} style={{ width: "100%", marginTop: 4, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
+        {/*
+          Un numéro à moitié composé n'aurait rien trouvé, et la réponse serait restée « envoyé » —
+          neutre par sécurité. Le client attendrait un message qui ne peut pas partir. On garde donc
+          le bouton éteint tant qu'il n'y a pas de quoi chercher.
+        */}
+        <button type="submit"
+          disabled={loading || (parEmail ? !contact.trim() : contact.replace(/\D/g, "").length < 10)}
+          style={{ width: "100%", marginTop: 4, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer" }}>
           {loading ? tcx("Envoi…") : tcx("Retrouver mon identifiant")}
         </button>
         <button type="button" onClick={() => { setEtape("demande"); setErr(""); }} style={{ width: "100%", marginTop: 8, background: "none", border: "none", color: "var(--muted)", fontSize: 12.5, cursor: "pointer" }}>
@@ -20097,9 +20142,21 @@ async function effacerAnciennesFactures(tracking, cheminActuel) {
 async function genererUrlFacture(colis, data) {
   const blob = await downloadInvoice(colis, data, { blob: true });
   const chemin = `factures/${colis.tracking}-${jetonDocument()}.pdf`;
+  /*
+   * `upsert: false`, ET C'EST UNE CORRECTION, PAS UN DÉTAIL.
+   *
+   * L’audit de sécurité a refermé le seau : le navigateur n’y a plus que le droit d’ÉCRIRE, plus
+   * celui de relire ni de remplacer. Or un écrasement demandé au dépôt exige, lui, le droit de
+   * mise à jour. Chaque facture était donc refusée depuis — « Échec de l’envoi
+   * du PDF vers le stockage » — et avec elle la facture jointe aux messages WhatsApp.
+   *
+   * Rendre le droit d’écrasement aurait rouvert la faille refermée : n’importe qui pouvait
+   * remplacer une facture déjà envoyée par une fausse, au même lien. Le nom porte déjà un jeton
+   * tiré au sort, il ne peut pas entrer en collision : il n’y a jamais rien à écraser.
+   */
   const { error: erreurUpload } = await clientSupabase().storage
     .from("colis-documents")
-    .upload(chemin, blob, { contentType: "application/pdf", upsert: true });
+    .upload(chemin, blob, { contentType: "application/pdf", upsert: false });
   if (erreurUpload) throw erreurUpload;
   const { data: { publicUrl } } = clientSupabase().storage.from("colis-documents").getPublicUrl(chemin);
   await effacerAnciennesFactures(colis.tracking, chemin);

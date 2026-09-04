@@ -1004,6 +1004,11 @@ const COLLECTIONS_PROTEGEES = [
   "colis", "clientAccounts", "repertoire", "depenses",
   "bordereaux", "facturesPartenaire", "preAlertes", "remisesCaisse", "voyages",
   "pointages", "factures", "demandesRegroupement", "paiementsCommission", "parrainages",
+  /*
+   * Le journal des ajustements dit pourquoi une commission a baissé. Le laisser effacer par une
+   * page périmée reviendrait à rendre invisible exactement ce qu'il sert à montrer.
+   */
+  "ajustementsCommission",
   "categories", "sites", "departs", "desabonnesMarketing",
 ];
 /*

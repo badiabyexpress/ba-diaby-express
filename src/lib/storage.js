@@ -676,15 +676,38 @@ export function reappliquerModification(base, propose, frais) {
  * Ne garde que la DERNIÈRE écriture par clé (inutile de rejouer des versions intermédiaires
  * dépassées). Appelée automatiquement par App.jsx dès que l'événement "online" se déclenche.
  */
-export async function flushOutbox() {
+/*
+ * ON ESPACE LES TENTATIVES QUAND ELLES ÉCHOUENT.
+ *
+ * Le document entier part à chaque essai — près d'un mégaoctet. Toutes les vingt secondes, sur le
+ * forfait mobile d'un agent, cela fait trois mégaoctets par minute pour une écriture qui ne passe
+ * pas. On double donc l'attente à chaque échec, jusqu'à cinq minutes : assez pour ne plus peser,
+ * assez court pour que la reprise soit rapide dès que le serveur revient.
+ *
+ * Le bouton « Réessayer maintenant » ne connaît pas cette attente : quand l'agent demande, on
+ * demande.
+ */
+const ATTENTE_REPRISE_MS = 20 * 1000;
+const ATTENTE_REPRISE_MAX_MS = 5 * 60 * 1000;
+function tropTotPourReessayer(item) {
+  const essais = item.essais || 0;
+  if (!essais || typeof item.dernierEssai !== "number") return false;
+  const delai = Math.min(ATTENTE_REPRISE_MAX_MS, ATTENTE_REPRISE_MS * 2 ** Math.min(essais - 1, 4));
+  return Date.now() < item.dernierEssai + delai;
+}
+
+export async function flushOutbox(options = {}) {
   const q = getQueue();
   if (q.length === 0) return { flushed: 0 };
   const latestByKey = {};
   q.forEach((item) => { latestByKey[item.key] = item; });
   let flushed = 0;
+  let differees = 0;
   const stillFailed = [];
   for (const key of Object.keys(latestByKey)) {
     const item = latestByKey[key];
+    /* Attendre n'est pas échouer : on ne compte pas de tentative, et on ne change pas le motif. */
+    if (!options.forcer && tropTotPourReessayer(item)) { stillFailed.push(item); differees++; continue; }
     try {
       /*
        * On relit d'abord ce que le serveur porte : si des collègues ont travaillé pendant la
@@ -741,6 +764,17 @@ export async function flushOutbox() {
           throw new Error(`${ecriture.corps?.error || "Enregistrement impossible"}${statut ? ` (${statut})` : ""}`);
         }
       } else {
+        /*
+         * Même règle que pour la relecture : quand une session existe, la voie directe est fermée.
+         *
+         * Elle rendait « TypeError: Failed to fetch » — le message de la bibliothèque Supabase,
+         * pas la vraie raison. La fiche affichait donc une panne de réseau là où le serveur
+         * n'avait simplement pas répondu à cet instant. Un motif faux coûte plus cher qu'un motif
+         * absent : il envoie chercher au mauvais endroit.
+         */
+        if (jetonSession) throw new Error(ecriture.reseau
+          ? "Serveur momentanément injoignable — nouvelle tentative dans 20 s"
+          : "API sécurisée indisponible");
         const { error } = await client.from(TABLE).upsert({ key: item.key, value: valeur, updated_at: new Date().toISOString() });
         if (error) throw error;
       }
@@ -763,7 +797,7 @@ export async function flushOutbox() {
     }
   }
   setQueue(stillFailed);
-  return { flushed, remaining: stillFailed.length };
+  return { flushed, remaining: stillFailed.length, differees };
 }
 
 /** Nombre d'écritures en attente de synchronisation — utilisé pour afficher le badge dans l'interface. */

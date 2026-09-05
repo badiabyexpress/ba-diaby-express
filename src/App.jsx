@@ -5700,7 +5700,8 @@ function App() {
           <div style={{ display: "flex", gap: 10, marginTop: 18, flexWrap: "wrap" }}>
             <button onClick={async () => {
               setSyncing(true);
-              try { await flushOutbox(); } catch (e) { /* le motif sera dans la fiche */ }
+              /* L'agent a demandé : on ne lui oppose pas l'attente qui espace les reprises. */
+              try { await flushOutbox({ forcer: true }); } catch (e) { /* le motif sera dans la fiche */ }
               setSyncing(false);
               rafraichirFile();
               const reste = detailFileAttente();

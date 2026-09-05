@@ -87,6 +87,16 @@ function configuration() {
  * sait qu'il doit envoyer autrement pour cette fois.
  */
 const EXPLICATIONS_META = {
+  /*
+   * LE CODE 10 EST UN REFUS DE DROITS, ET IL SE CONFOND AVEC TROIS AUTRES CHOSES.
+   *
+   * « Application does not have permission for this action » ressemble à un problème de compte,
+   * de facturation ou de contenu — ce n'en est aucun. Le même jeton lit les modèles sans peine ;
+   * c'est l'ÉCRITURE sur ce compte professionnel qui lui est refusée. Deux causes seulement, et
+   * l'écran de diagnostic (?droits=1) dit laquelle : le jeton n'a pas whatsapp_business_management,
+   * ou l'entreprise n'a pas achevé sa vérification chez Meta.
+   */
+  10: "Meta refuse cette action au jeton, pas au contenu du modèle. Soit le jeton n'a pas la permission « whatsapp_business_management », soit l'entreprise n'a pas achevé sa vérification. Le bouton « Vérifier les droits » ci-dessous demande la réponse à Meta.",
   131047: "Plus de 24 h se sont écoulées depuis le dernier message de ce client : WhatsApp exige alors un modèle validé par Meta. Envoyez le message autrement pour cette fois.",
   131026: "Ce numéro ne peut pas recevoir de message WhatsApp. Vérifiez qu'il est bien sur WhatsApp, avec son indicatif pays.",
   131030: "Ce numéro n'est pas dans la liste des destinataires autorisés. Tant que l'application Meta n'est pas publiée, seuls les numéros de test peuvent être joints.",
@@ -837,7 +847,11 @@ export default async function handler(req, res) {
     }
     try {
       const reponse = await fetch(
-        `https://graph.facebook.com/${VERSION_GRAPH}/${waba}/message_templates?fields=name,status,language,category,components&limit=100`,
+        /*
+         * `rejected_reason` manquait, et c'est la seule chose qui compte devant un modèle refusé.
+         * L'écran disait « refusé » sans dire pourquoi — donc sans rien laisser corriger.
+         */
+        `https://graph.facebook.com/${VERSION_GRAPH}/${waba}/message_templates?fields=id,name,status,language,category,components,rejected_reason&limit=100`,
         { headers: { Authorization: `Bearer ${meta.jeton}` } },
       );
       const corps = await reponse.json();
@@ -849,7 +863,9 @@ export default async function handler(req, res) {
         });
       }
       const modeles = (corps.data || []).map((m) => ({
+        id: m.id || null,
         nom: m.name, statut: m.status, langue: m.language, categorie: m.category,
+        motifRefus: m.rejected_reason && m.rejected_reason !== "NONE" ? m.rejected_reason : null,
         ...formeDuModele(m.components),
       }));
       return res.status(200).json({
@@ -857,6 +873,312 @@ export default async function handler(req, res) {
         approuves: modeles.filter((m) => m.statut === "APPROVED").length,
         enAttente: modeles.filter((m) => m.statut === "PENDING" || m.statut === "IN_APPEAL").length,
         refuses: modeles.filter((m) => m.statut === "REJECTED").length,
+      });
+    } catch (e) {
+      return res.status(502).json({ error: "Impossible de joindre Meta." });
+    }
+  }
+
+  /*
+   * CRÉER LE MODÈLE DE CODE DE VÉRIFICATION, SANS PASSER PAR L'INTERFACE DE META.
+   *
+   * Le formulaire de Meta refuse la création — « ce compte n'a pas l'autorisation de créer un
+   * modèle » — et n'en dit pas plus. La même demande envoyée à l'API rapporte, elle, un code et
+   * un message précis : c'est déjà un gain, même quand elle échoue.
+   *
+   * Un modèle d'authentification ne se rédige pas : Meta impose son texte, traduit dans chaque
+   * langue, et l'on ne choisit que trois choses — la recommandation de sécurité, le délai
+   * d'expiration affiché, et la forme du bouton. On demande donc exactement la forme que l'envoi
+   * attend plus haut (`sub_type: "copy_code"`), sans quoi le modèle serait accepté mais
+   * inutilisable : le bouton refuserait le paramètre au moment de l'envoi.
+   */
+  /*
+   * QUI A LE DROIT DE QUOI — la question qu'on posait à des captures d'écran.
+   *
+   * Le refus « code 10 » a exactement deux causes, et rien à l'écran ne les distingue : le jeton
+   * n'a pas la permission d'écriture, ou l'entreprise n'a pas achevé sa vérification chez Meta.
+   * On a perdu des heures à supposer. Meta sait répondre aux deux questions, en lecture seule :
+   * `debug_token` donne les permissions du jeton, le compte professionnel donne son état d'examen,
+   * et l'entreprise propriétaire son état de vérification.
+   *
+   * Le jeton lui-même ne ressort JAMAIS d'ici : on rapporte ses permissions, jamais sa valeur.
+   * Il est envoyé à Meta comme d'habitude, et rien de plus n'est écrit ni journalisé.
+   */
+  if (req.method === "GET" && req.query?.droits !== undefined) {
+    const waba = process.env.WHATSAPP_WABA_ID;
+    if (!metaPret) return res.status(501).json({ error: "Meta n'est pas configuré.", configure: false });
+    const sortie = { permissions: null, compte: null, entreprise: null, verdict: null };
+    try {
+      const dt = await fetch(
+        `https://graph.facebook.com/${VERSION_GRAPH}/debug_token`
+        + `?input_token=${encodeURIComponent(meta.jeton)}&access_token=${encodeURIComponent(meta.jeton)}`,
+      );
+      const corpsDt = await dt.json().catch(() => ({}));
+      if (dt.ok && corpsDt?.data) {
+        const d = corpsDt.data;
+        /*
+         * Un jeton d'utilisateur système porte ses permissions dans `scopes`. Certains jetons les
+         * portent en plus par ressource dans `granular_scopes` — on réunit les deux, sinon un
+         * jeton parfaitement valide paraîtrait démuni.
+         */
+        const larges = Array.isArray(d.scopes) ? d.scopes : [];
+        const fines = Array.isArray(d.granular_scopes) ? d.granular_scopes.map((g) => g?.scope).filter(Boolean) : [];
+        sortie.permissions = {
+          liste: [...new Set([...larges, ...fines])].sort(),
+          type: d.type || null,
+          expireLe: d.expires_at ? new Date(d.expires_at * 1000).toISOString() : null,
+          /* 0 = jamais : c'est le cas voulu pour un jeton d'utilisateur système. */
+          permanent: d.expires_at === 0,
+          valide: d.is_valid !== false,
+        };
+      } else {
+        sortie.permissions = { erreur: corpsDt?.error?.message || "Meta n'a pas décrit ce jeton." };
+      }
+    } catch (e) {
+      sortie.permissions = { erreur: "Impossible de joindre Meta." };
+    }
+
+    if (waba) {
+      try {
+        const r = await fetch(
+          `https://graph.facebook.com/${VERSION_GRAPH}/${encodeURIComponent(waba)}`
+          + "?fields=id,name,account_review_status,owner_business_info",
+          { headers: { Authorization: `Bearer ${meta.jeton}` } },
+        );
+        const c = await r.json().catch(() => ({}));
+        if (r.ok) {
+          sortie.compte = { id: c.id || waba, nom: c.name || null, examen: c.account_review_status || null };
+          const entrepriseId = c.owner_business_info?.id;
+          if (entrepriseId) {
+            const re = await fetch(
+              `https://graph.facebook.com/${VERSION_GRAPH}/${encodeURIComponent(entrepriseId)}?fields=id,name,verification_status`,
+              { headers: { Authorization: `Bearer ${meta.jeton}` } },
+            );
+            const ce = await re.json().catch(() => ({}));
+            sortie.entreprise = re.ok
+              ? { id: ce.id, nom: ce.name || c.owner_business_info?.name || null, verification: ce.verification_status || null }
+              : { erreur: ce?.error?.message || "État de vérification non lisible." };
+          }
+        } else {
+          sortie.compte = { erreur: c?.error?.message || "Compte professionnel non lisible." };
+        }
+      } catch (e) {
+        sortie.compte = { erreur: "Impossible de joindre Meta." };
+      }
+    }
+
+    /*
+     * Le verdict en une phrase. Les nombres bruts n'ont jamais dit à personne quoi faire ; c'est
+     * cette phrase-là qui doit rester à l'écran, et les détails en dessous pour qui veut vérifier.
+     */
+    const aGestion = !!sortie.permissions?.liste?.includes("whatsapp_business_management");
+    const aGestionEntreprise = !!sortie.permissions?.liste?.includes("business_management");
+    /* « Non vérifiée » et « pas pu vérifier » sont deux réponses différentes. Les confondre a déjà coûté cher. */
+    const verificationLue = !!(sortie.entreprise && !sortie.entreprise.erreur && sortie.entreprise.verification);
+    const verifiee = sortie.entreprise?.verification === "verified";
+    if (sortie.permissions?.liste && !aGestion) {
+      sortie.verdict = {
+        cause: "permission",
+        texte: "Le jeton n'a pas la permission « whatsapp_business_management ». C'est elle qui autorise "
+          + "la création de modèles. Regénérez le jeton depuis l'utilisateur système, en cochant cette "
+          + "permission en plus de « whatsapp_business_messaging », puis remplacez WHATSAPP_TOKEN dans Vercel.",
+      };
+    } else if (verificationLue && !verifiee) {
+      sortie.verdict = {
+        cause: "verification",
+        texte: `Le jeton a les droits, mais l'entreprise n'est pas vérifiée chez Meta (état : ${sortie.entreprise.verification}). `
+          + "Tant que la vérification n'est pas achevée, la création de modèles reste fermée. "
+          + "Elle se lance dans Meta Business Suite → Paramètres de l'entreprise → Centre de sécurité.",
+      };
+    } else if (aGestion && sortie.entreprise?.erreur) {
+      /*
+       * LE CAS QUI DÉSIGNE LA VRAIE CAUSE.
+       *
+       * Le jeton a le droit d'écrire sur WhatsApp, le compte est approuvé — et pourtant il ne peut
+       * même pas LIRE l'entreprise qui possède ce compte. Ce n'est pas un détail du diagnostic :
+       * c'est la signature d'un utilisateur système qui ne détient qu'un accès partiel aux
+       * ressources. Une permission cochée ne sert à rien si la ressource n'est pas confiée à celui
+       * qui la porte, et c'est précisément ce que Meta refuse ensuite avec son « code 10 ».
+       *
+       * Le premier écrit disait « l'entreprise ne paraît pas bloquée » alors qu'on n'avait pas
+       * réussi à la lire. Un diagnostic qui déduit d'un échec de lecture que tout va bien est pire
+       * qu'un diagnostic muet.
+       */
+      sortie.verdict = {
+        cause: "acces-ressource",
+        texte: "Le jeton a bien « whatsapp_business_management », et le compte WhatsApp est approuvé. "
+          + "Mais il n'a pas pu lire l'entreprise propriétaire — Meta répond qu'il faudrait la permission "
+          + "« business_management ». C'est le signe que l'utilisateur système n'a qu'un accès partiel aux "
+          + "ressources : une permission cochée ne suffit pas si la ressource ne lui est pas confiée. "
+          + "Donnez-lui le CONTRÔLE TOTAL sur le compte WhatsApp — Paramètres de l'entreprise → Comptes → "
+          + "Comptes WhatsApp → votre compte → Ajouter des personnes → l'utilisateur système, contrôle total — "
+          + "puis regénérez le jeton en cochant aussi « business_management », et remplacez WHATSAPP_TOKEN dans Vercel.",
+        manque: aGestionEntreprise ? null : "business_management",
+      };
+    } else if (aGestion) {
+      sortie.verdict = {
+        cause: "droits-ok",
+        texte: "Le jeton a la permission de gestion, et l'entreprise est vérifiée. "
+          + "Si la création échoue encore, c'est l'utilisateur système qui n'est pas administrateur de "
+          + "ce compte WhatsApp Business : donnez-lui le contrôle total dans Paramètres de l'entreprise → "
+          + "Comptes → Comptes WhatsApp.",
+      };
+    }
+    return res.status(200).json(sortie);
+  }
+
+  /*
+   * SUPPRIMER UN MODÈLE REFUSÉ, POUR POUVOIR LE REFAIRE.
+   *
+   * Meta refuse un modèle, et son nom reste pris : toute nouvelle tentative se heurte alors à un
+   * « Invalid parameter » qui ne dit rien de la vraie cause. Il faut retirer l'ancien avant de
+   * reposer le bon, et cela ne se fait pas depuis l'application tant qu'on ne l'a pas prévu.
+   *
+   * On ne supprime QUE sur demande explicite, avec le nom envoyé : un modèle approuvé qui
+   * disparaît, c'est toute une catégorie de notifications qui cesse de partir.
+   */
+  if (req.method === "POST" && req.query?.supprimerModele !== undefined) {
+    const waba = process.env.WHATSAPP_WABA_ID;
+    if (!metaPret) return res.status(501).json({ error: "Meta n'est pas configuré.", configure: false });
+    if (!waba) return res.status(501).json({ error: "WHATSAPP_WABA_ID manque.", manquant: "WHATSAPP_WABA_ID" });
+    const nom = String(req.body?.nom || "").trim().toLowerCase();
+    if (!/^[a-z0-9_]{1,512}$/.test(nom)) {
+      return res.status(400).json({ error: "Nom de modèle invalide." });
+    }
+    try {
+      const reponse = await fetch(
+        `https://graph.facebook.com/${VERSION_GRAPH}/${encodeURIComponent(waba)}/message_templates?name=${encodeURIComponent(nom)}`,
+        { method: "DELETE", headers: { Authorization: `Bearer ${meta.jeton}` } },
+      );
+      const corps = await reponse.json().catch(() => ({}));
+      if (!reponse.ok) {
+        return res.status(reponse.status).json({
+          error: corps?.error?.error_user_msg || corps?.error?.message || "Meta a refusé la suppression.",
+          code: corps?.error?.code || null,
+          nom,
+        });
+      }
+      return res.status(200).json({ supprime: true, nom });
+    } catch (e) {
+      return res.status(502).json({ error: "Impossible de joindre Meta." });
+    }
+  }
+
+  if (req.method === "POST" && req.query?.creerModele !== undefined) {
+    const waba = process.env.WHATSAPP_WABA_ID;
+    if (!metaPret) return res.status(501).json({ error: "Meta n'est pas configuré.", configure: false });
+    if (!waba) {
+      return res.status(501).json({
+        error: "Ajoutez WHATSAPP_WABA_ID dans Vercel — c'est l'« ID du compte WhatsApp Business », "
+          + "affiché au-dessus de vos numéros dans la console Meta.",
+        manquant: "WHATSAPP_WABA_ID",
+      });
+    }
+    const nom = String(req.body?.nom || "bde_code_verification").trim().toLowerCase();
+    /* Meta n'accepte que minuscules, chiffres et soulignés : on refuse ici plutôt qu'après l'aller-retour. */
+    if (!/^[a-z0-9_]{1,512}$/.test(nom)) {
+      return res.status(400).json({ error: "Le nom d'un modèle ne peut contenir que des minuscules, des chiffres et des soulignés." });
+    }
+    const minutes = Number(req.body?.minutes);
+    const expiration = Number.isFinite(minutes) && minutes >= 1 && minutes <= 90 ? Math.round(minutes) : 10;
+    /*
+     * DEUX FAÇONS DE PORTER UN CODE, ET LA SECONDE SAUVE LA MISE.
+     *
+     * Le modèle d'AUTHENTIFICATION est le bon : Meta le reconnaît, le facture moins cher, et son
+     * bouton recopie le code d'un geste. Mais cette catégorie est la plus surveillée, et un compte
+     * peut se la voir refuser alors que tout le reste passe.
+     *
+     * Un modèle UTILITAIRE fait le même travail avec une variable ordinaire : « votre code est
+     * {{1}} ». Moins élégant, un peu plus cher, mais le client reçoit son code — ce qui vaut
+     * infiniment mieux qu'un modèle parfait que Meta refuse de créer. L'envoi sait déjà s'en
+     * servir : WHATSAPP_TEMPLATE_CODE_BOUTON=aucun supprime le bouton, et le code part en variable.
+     */
+    const utilitaire = String(req.body?.categorie || "").toUpperCase() === "UTILITY";
+    const marque = String(req.body?.entreprise || "").trim().slice(0, 40);
+    const texte = `Votre code de vérification${marque ? ` ${marque}` : ""} est {{1}}. `
+      + `Il expire dans ${expiration} minutes. Ne le communiquez à personne.`;
+    const definition = utilitaire
+      ? {
+        name: nom,
+        language: meta.langue,
+        category: "UTILITY",
+        components: [
+          /* L'exemple est exigé par Meta : sans lui, le modèle est refusé sans être examiné. */
+          { type: "BODY", text: texte, example: { body_text: [["482913"]] } },
+        ],
+      }
+      : {
+        name: nom,
+        language: meta.langue,
+        category: "AUTHENTICATION",
+        components: [
+          { type: "BODY", add_security_recommendation: true },
+          { type: "FOOTER", code_expiration_minutes: expiration },
+          { type: "BUTTONS", buttons: [{ type: "OTP", otp_type: "COPY_CODE" }] },
+        ],
+      };
+    try {
+      const reponse = await fetch(
+        `https://graph.facebook.com/${VERSION_GRAPH}/${encodeURIComponent(waba)}/message_templates`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${meta.jeton}` },
+          body: JSON.stringify(definition),
+        },
+      );
+      const corps = await reponse.json().catch(() => ({}));
+      if (!reponse.ok) {
+        const code = corps?.error?.code;
+        /*
+         * LES MÊMES NUMÉROS NE VEULENT PAS DIRE LA MÊME CHOSE ICI.
+         *
+         * EXPLICATIONS_META parle d'ENVOI : son code 100 conseille de vérifier WHATSAPP_PHONE_ID.
+         * Devant un échec de CRÉATION, ce conseil envoie chercher un numéro de téléphone là où il
+         * s'agit d'un nom de modèle déjà pris — et l'on tourne en rond. Une explication qui se
+         * trompe de sujet est pire que le code brut.
+         */
+        const EXPLICATIONS_CREATION = {
+          100: "Meta a refusé la demande sans la motiver. Deux causes fréquentes : un modèle porte déjà "
+            + "ce nom dans cette langue, ou ce nom a été supprimé il y a moins de trente jours — Meta le "
+            + "garde réservé pendant tout ce temps. Essayez un autre nom, par exemple en ajoutant un chiffre.",
+          10: EXPLICATIONS_META[10],
+        };
+        /*
+         * LE MESSAGE PRÉCIS DE META PASSE AVANT LE NÔTRE.
+         *
+         * Meta range deux textes très différents dans son erreur : `message`, générique au point
+         * d'être inutile (« Invalid parameter »), et `error_user_msg`, qui dit exactement ce qui
+         * cloche — nom déjà pris, texte trop long, exemple manquant. Notre explication passait
+         * devant les deux, et masquait donc la seule phrase qui aurait réglé la question.
+         *
+         * Elle ne sert plus que lorsque Meta ne motive rien. Deviner est un dernier recours, pas
+         * un premier réflexe : on l'a payé assez cher ce soir.
+         */
+        const precisDeMeta = corps?.error?.error_user_msg || corps?.error?.error_data?.details || null;
+        const titreDeMeta = corps?.error?.error_user_title || null;
+        return res.status(reponse.status).json({
+          error: precisDeMeta
+            ? `${titreDeMeta ? `${titreDeMeta} — ` : ""}${precisDeMeta}`
+            : (EXPLICATIONS_CREATION[code] || corps?.error?.message || "Meta a refusé la création."),
+          /* Le message brut reste affiché à côté : c'est lui qui permet de chercher. */
+          detailMeta: corps?.error?.message || null,
+          sousCode: corps?.error?.error_subcode || null,
+          code: code || null,
+          /* Quand Meta ne motive pas, notre piste reste lisible sous le message brut. */
+          piste: precisDeMeta ? (EXPLICATIONS_CREATION[code] || null) : null,
+          nom,
+        });
+      }
+      return res.status(200).json({
+        cree: true,
+        nom,
+        id: corps?.id || null,
+        /* Un modèle neuf part en examen : dire « créé » sans dire « en attente » ferait croire qu'on peut s'en servir. */
+        statut: corps?.status || "PENDING",
+        categorie: corps?.category || (utilitaire ? "UTILITY" : "AUTHENTICATION"),
+        expiration,
+        /* Un modèle utilitaire n'a pas de bouton : l'envoi doit le savoir, sinon Meta refusera. */
+        bouton: utilitaire ? "aucun" : "copy_code",
       });
     } catch (e) {
       return res.status(502).json({ error: "Impossible de joindre Meta." });

@@ -29923,6 +29923,13 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
   useEffect(() => { relireConsommation(); }, []);
 
   const [modeles, setModeles] = useState(null);
+  /* Le modèle du code de vérification : son nom, et l'état de la demande de création. */
+  const [nomModeleCode, setNomModeleCode] = useState("bde_code_verification");
+  const [creationModele, setCreationModele] = useState(null);
+  /* Le diagnostic des droits : ce que Meta répond quand on lui demande au lieu de supposer. */
+  const [droitsMeta, setDroitsMeta] = useState(null);
+  /* Le retrait d'un modèle refusé, dont le nom bloque toute nouvelle tentative. */
+  const [suppressionModele, setSuppressionModele] = useState(null);
   function relireModeles() {
     return appelServeurQuiDepense("/api/whatsapp?modeles=1")
       .then((r) => r.json().then((corps) => ({ ok: r.ok, corps })))
@@ -30534,6 +30541,207 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
                 <div style={{ fontSize: 11, fontFamily: "monospace", color: "var(--muted)", marginTop: 8, lineHeight: 1.7, overflowWrap: "anywhere" }}>
                   {absents.join(" · ")}
                 </div>
+              </div>
+            );
+          })()}
+
+          {/*
+            LE MODÈLE DE CODE, CRÉÉ D'ICI PLUTÔT QUE CHEZ META.
+
+            Le formulaire de Meta refuse la création — « ce compte n'a pas l'autorisation de créer
+            un modèle » — sans dire pourquoi. La même demande envoyée à l'API rapporte, elle, un
+            code et un message précis. Et quand elle passe, le modèle est créé avec exactement la
+            forme que l'envoi attend : un modèle d'authentification à bouton « copier le code ».
+            Rempli à la main, ce détail-là est la première cause de modèle approuvé mais
+            inutilisable.
+          */}
+          {(() => {
+            const deposes = new Set((modeles.modeles || []).map((m) => m.nom));
+            const dejaLa = [...deposes].find((n) => /code|verification|otp/i.test(n));
+            /*
+             * Un modèle refusé garde son nom réservé : toute nouvelle tentative se heurte alors à
+             * un « Invalid parameter » qui ne dit rien. On montre donc son état et son motif, et
+             * on propose de le retirer — c'est le seul chemin pour en reposer un bon.
+             */
+            const fiche = dejaLa ? (modeles.modeles || []).find((m) => m.nom === dejaLa) : null;
+            const refuse = fiche?.statut === "REJECTED";
+            return (
+              <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "12px 14px", marginTop: 10 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text)" }}>
+                  Modèle du code de vérification
+                </div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 5, lineHeight: 1.55 }}>
+                  {dejaLa
+                    ? `Un modèle nommé « ${dejaLa} » existe déjà sur ce compte — statut ${fiche?.statut === "APPROVED" ? "approuvé" : fiche?.statut === "REJECTED" ? "REFUSÉ" : fiche?.statut === "PENDING" ? "en examen" : fiche?.statut || "inconnu"}.`
+                    : "C'est lui qui porte les codes de réinitialisation de mot de passe. Meta impose son texte : "
+                      + "vous ne choisissez que le nom et le délai d'expiration affiché."}
+                </div>
+                {refuse && (
+                  <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "11px 13px", marginTop: 9 }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--danger-fg)" }}>
+                      Meta a refusé ce modèle{fiche?.motifRefus ? ` — motif : ${fiche.motifRefus}` : ""}
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--text)", marginTop: 5, lineHeight: 1.55 }}>
+                      Tant qu'il existe, son nom reste pris : une nouvelle création échouera avec un
+                      « paramètre invalide » qui ne dit rien de la vraie cause. Retirez-le d'abord,
+                      puis recréez-le — en utilitaire si l'authentification vous est fermée.
+                    </div>
+                    <button disabled={suppressionModele === "en-cours"} onClick={async () => {
+                      if (!window.confirm(`Retirer le modèle « ${dejaLa} » de chez Meta ? Il est refusé, donc inutilisable en l'état.`)) return;
+                      setSuppressionModele("en-cours");
+                      const { ok, corps } = await appelServeurQuiDepense("/api/whatsapp?supprimerModele=1", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ nom: dejaLa }),
+                      }).then((r) => r.json().then((c) => ({ ok: r.ok, corps: c })))
+                        .catch(() => ({ ok: false, corps: { error: "Serveur injoignable." } }));
+                      setSuppressionModele(ok ? null : { erreur: corps?.error });
+                      if (ok) { setCreationModele(null); relireModeles(); notify?.("Modèle retiré — vous pouvez le recréer."); }
+                    }} style={{ marginTop: 9, background: "var(--surface)", color: "var(--danger-fg)", border: "1px solid var(--danger-border)", borderRadius: 7, padding: "9px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                      {suppressionModele === "en-cours" ? "Retrait…" : "Retirer ce modèle refusé"}
+                    </button>
+                    {suppressionModele?.erreur && (
+                      <div style={{ fontSize: 12, color: "var(--danger-fg)", marginTop: 7 }}>{suppressionModele.erreur}</div>
+                    )}
+                  </div>
+                )}
+                <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
+                  <input value={nomModeleCode} onChange={(e) => setNomModeleCode(e.target.value)}
+                    placeholder="bde_code_verification" spellCheck={false}
+                    style={{ flex: "1 1 190px", minWidth: 0, background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 7, padding: "9px 11px", fontSize: 12.5, fontFamily: "monospace" }} />
+                  <button disabled={creationModele === "en-cours"} onClick={async () => {
+                    setCreationModele("en-cours");
+                    const nom = (nomModeleCode || "bde_code_verification").trim();
+                    const { ok, corps } = await appelServeurQuiDepense("/api/whatsapp?creerModele=1", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ nom, minutes: 10 }),
+                    }).then((r) => r.json().then((c) => ({ ok: r.ok, corps: c })))
+                      .catch(() => ({ ok: false, corps: { error: "Serveur injoignable." } }));
+                    setCreationModele(ok ? { cree: true, ...corps } : { erreur: corps?.error, detail: corps?.detailMeta, code: corps?.code });
+                    if (ok) relireModeles();
+                  }} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 7, padding: "9px 15px", fontSize: 12.5, fontWeight: 700, cursor: creationModele === "en-cours" ? "wait" : "pointer", opacity: creationModele === "en-cours" ? 0.6 : 1 }}>
+                    {creationModele === "en-cours" ? "Création…" : "Créer ce modèle"}
+                  </button>
+                  {/*
+                    * Le refus « code 10 » a deux causes que rien ne distingue à l'écran. Meta sait
+                    * répondre aux deux, en lecture seule. On demande plutôt que de supposer.
+                    */}
+                  <button disabled={droitsMeta === "en-cours"} onClick={async () => {
+                    setDroitsMeta("en-cours");
+                    const { ok, corps } = await appelServeurQuiDepense("/api/whatsapp?droits=1")
+                      .then((r) => r.json().then((c) => ({ ok: r.ok, corps: c })))
+                      .catch(() => ({ ok: false, corps: { error: "Serveur injoignable." } }));
+                    setDroitsMeta(ok ? corps : { erreur: corps?.error || "Diagnostic indisponible." });
+                  }} style={{ background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 7, padding: "9px 15px", fontSize: 12.5, fontWeight: 700, cursor: droitsMeta === "en-cours" ? "wait" : "pointer" }}>
+                    {droitsMeta === "en-cours" ? "Vérification…" : "Vérifier les droits"}
+                  </button>
+                </div>
+                {droitsMeta && droitsMeta !== "en-cours" && (
+                  <div style={{ marginTop: 10, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "11px 13px" }}>
+                    {droitsMeta.verdict ? (
+                      <div style={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.6,
+                                    color: droitsMeta.verdict.cause === "droits-ok" ? "var(--text)" : "var(--danger-fg)" }}>
+                        {droitsMeta.verdict.texte}
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 12.5, color: "var(--danger-fg)" }}>{droitsMeta.erreur || "Meta n'a pas répondu."}</div>
+                    )}
+                    <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 8, lineHeight: 1.7, overflowWrap: "anywhere" }}>
+                      {droitsMeta.permissions?.liste && (
+                        <div>Permissions du jeton : <span style={{ fontFamily: "monospace" }}>{droitsMeta.permissions.liste.join(" · ") || "aucune"}</span></div>
+                      )}
+                      {droitsMeta.permissions?.erreur && <div>Jeton : {droitsMeta.permissions.erreur}</div>}
+                      {droitsMeta.permissions && (
+                        <div>
+                          Jeton {droitsMeta.permissions.valide === false ? "invalide" : "valide"}
+                          {/*
+                            * Le TYPE change tout, et il manquait. Un jeton d'utilisateur (USER)
+                            * dépend de la personne connectée et de ce que l'application a le droit
+                            * de faire ; un jeton d'utilisateur système (SYSTEM_USER) dépend des
+                            * ressources qu'on lui a confiées. On ne cherche pas au même endroit.
+                            */}
+                          {droitsMeta.permissions.type ? ` · type ${droitsMeta.permissions.type}` : ""}
+                          {droitsMeta.permissions.permanent ? " · sans expiration" : droitsMeta.permissions.expireLe ? ` · expire le ${new Date(droitsMeta.permissions.expireLe).toLocaleDateString("fr-FR")}` : ""}
+                        </div>
+                      )}
+                      {droitsMeta.compte?.nom && <div>Compte : {droitsMeta.compte.nom}{droitsMeta.compte.examen ? ` · examen ${droitsMeta.compte.examen}` : ""}</div>}
+                      {droitsMeta.compte?.erreur && <div>Compte : {droitsMeta.compte.erreur}</div>}
+                      {droitsMeta.entreprise?.nom && <div>Entreprise : {droitsMeta.entreprise.nom} · vérification {droitsMeta.entreprise.verification || "inconnue"}</div>}
+                      {droitsMeta.entreprise?.erreur && <div>Entreprise : {droitsMeta.entreprise.erreur}</div>}
+                    </div>
+                  </div>
+                )}
+                {creationModele?.cree && (
+                  <div style={{ fontSize: 12, color: "var(--ok-fg, #1a7f45)", marginTop: 9, lineHeight: 1.55 }}>
+                    Modèle « {creationModele.nom} » déposé en {creationModele.categorie === "UTILITY" ? "utilitaire" : "authentification"} — statut {creationModele.statut}. Un modèle
+                    neuf passe en examen chez Meta ; il ne servira qu'une fois approuvé. Renseignez
+                    ensuite WHATSAPP_TEMPLATE_CODE dans Vercel avec ce nom
+                    {creationModele.bouton === "aucun"
+                      ? ", et WHATSAPP_TEMPLATE_CODE_BOUTON avec « aucun » — un modèle utilitaire n'a pas de bouton."
+                      : ", et WHATSAPP_TEMPLATE_CODE_BOUTON avec « copy_code »."}
+                  </div>
+                )}
+                {creationModele?.erreur && (
+                  <div style={{ fontSize: 12, color: "var(--danger-fg)", marginTop: 9, lineHeight: 1.55 }}>
+                    {creationModele.erreur}
+                    {/* Le message brut de Meta reste affiché : c'est lui qui permet de chercher. */}
+                    {creationModele.detail && creationModele.detail !== creationModele.erreur && (
+                      <div style={{ color: "var(--muted)", fontFamily: "monospace", fontSize: 11, marginTop: 5, overflowWrap: "anywhere" }}>
+                        {creationModele.detail}{creationModele.code ? ` (code ${creationModele.code})` : ""}
+                      </div>
+                    )}
+                    {/* Notre piste ne passe plus devant Meta : elle complète, quand Meta a parlé. */}
+                    {creationModele.piste && (
+                      <div style={{ color: "var(--muted)", fontSize: 11.5, marginTop: 5, lineHeight: 1.55 }}>{creationModele.piste}</div>
+                    )}
+                    {/*
+                      * UN NOM SUPPRIMÉ RESTE RÉSERVÉ TRENTE JOURS CHEZ META.
+                      *
+                      * Retirer le modèle refusé ne libère donc pas son nom tout de suite, et la
+                      * création suivante échoue exactement comme la précédente — sans que rien ne
+                      * le laisse deviner. Changer de nom est la seule sortie immédiate, et elle ne
+                      * coûte rien : c'est WHATSAPP_TEMPLATE_CODE qui dira lequel utiliser.
+                      */}
+                    {creationModele.code === 100 && (
+                      <button onClick={() => {
+                        const base = (nomModeleCode || "bde_code_verification").replace(/\d+$/, "");
+                        const suivant = Number((nomModeleCode.match(/(\d+)$/) || [])[1] || 1) + 1;
+                        setNomModeleCode(`${base}${suivant}`);
+                        setCreationModele(null);
+                      }} style={{ marginTop: 9, background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 7, padding: "9px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                        Proposer un autre nom
+                      </button>
+                    )}
+                    {/*
+                      * LE REPLI QUI FAIT PARTIR LE CODE MALGRÉ TOUT.
+                      *
+                      * La catégorie « authentification » est la plus surveillée de Meta, et un
+                      * compte peut se la voir refuser alors que tout le reste passe. Un modèle
+                      * utilitaire porte le même code dans une variable ordinaire : un peu plus
+                      * cher, sans bouton de recopie — mais le client reçoit son code, ce qui vaut
+                      * infiniment mieux qu'un modèle parfait que Meta refuse de créer.
+                      */}
+                    <div style={{ marginTop: 10, color: "var(--text)" }}>
+                      Si c'est la catégorie « authentification » qui est fermée à ce compte, le même
+                      code peut partir dans un modèle utilitaire ordinaire.
+                    </div>
+                    <button disabled={creationModele === "en-cours"} onClick={async () => {
+                      const nom = (nomModeleCode || "bde_code_verification").trim();
+                      setCreationModele("en-cours");
+                      const { ok, corps } = await appelServeurQuiDepense("/api/whatsapp?creerModele=1", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ nom, minutes: 10, categorie: "UTILITY", entreprise: data.entreprise?.nom || "" }),
+                      }).then((r) => r.json().then((c) => ({ ok: r.ok, corps: c })))
+                        .catch(() => ({ ok: false, corps: { error: "Serveur injoignable." } }));
+                      setCreationModele(ok ? { cree: true, ...corps } : { erreur: corps?.error, detail: corps?.detailMeta, code: corps?.code });
+                      if (ok) relireModeles();
+                    }} style={{ marginTop: 8, background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 7, padding: "9px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                      Essayer en modèle utilitaire
+                    </button>
+                  </div>
+                )}
               </div>
             );
           })()}

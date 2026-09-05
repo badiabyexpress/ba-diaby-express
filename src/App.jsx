@@ -18,7 +18,7 @@ import {
   tauxCommission, responsableDe, equipeDe, estSalarie, bilanEquipe, responsableAuMoment,
   TAUX_PAR_DEFAUT,
 } from "../api/_commissions.js";
-import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, detailFileAttente, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree, relireDuServeur, oublierCacheLocal } from "./lib/storage.js";
+import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, detailFileAttente, reappliquerModification, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree, relireDuServeur, oublierCacheLocal } from "./lib/storage.js";
 import { VILLES_PAR_PAYS } from "./data/villesParPays.js";
 
 /* ---------- design tokens ----------
@@ -5165,7 +5165,8 @@ function App() {
   const documentCourant = useRef(data);
   useEffect(() => { documentCourant.current = data; }, [data]);
   const persist = useCallback(function enregistrer(suivant, essai = 0) {
-    const next = typeof suivant === "function" ? suivant(documentCourant.current) : suivant;
+    const avant = documentCourant.current;
+    const next = typeof suivant === "function" ? suivant(avant) : suivant;
     documentCourant.current = next;
     setData(next);
     if (next.exchangeRates) LIVE_RATES = { ...CURRENCIES, ...next.exchangeRates };
@@ -5196,7 +5197,20 @@ function App() {
           documentCourant.current = r.latest;
           setData(r.latest);
           if (r.latest.exchangeRates) LIVE_RATES = { ...CURRENCIES, ...r.latest.exchangeRates };
-          if (typeof suivant === "function" && essai < 2) return enregistrer(suivant, essai + 1);
+          /*
+           * Le geste est rejoué sur le document frais, quelle que soit la forme employée.
+           *
+           * Une écriture exprimée en fonction se rejoue telle quelle. Une écriture qui envoie un
+           * document tout fait — c'est le cas de la remise, de l'avancement, de l'encaissement —
+           * se rejoue par sa DIFFÉRENCE : ce que l'agent a modifié garde sa version, le reste
+           * garde celle du serveur. Sans cela, ces gestes-là étaient purement abandonnés.
+           */
+          if (essai < 2) {
+            const rejeu = typeof suivant === "function"
+              ? suivant
+              : (frais) => reappliquerModification(avant, next, frais);
+            return enregistrer(rejeu, essai + 1);
+          }
           setToast("Conflit détecté : les données les plus récentes ont été rechargées. Reprenez votre opération.");
           setTimeout(() => setToast(null), 8000);
           return r;

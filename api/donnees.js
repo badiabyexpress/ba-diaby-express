@@ -451,8 +451,26 @@ export default async function handler(req, res) {
              * Faute de preuve, on prend le parti sûr : ce que cette page apporte est gardé, ce
              * qu'elle ignore revient à sa place. Elle ne peut rien effacer.
              */
-            const conflit = essai > 0
-              || !versionLue
+            /*
+             * Une course d’écriture est déjà un conflit : le PATCH conditionnel n’a pas touché la
+             * ligne parce qu’un autre agent est passé entre notre lecture et notre écriture. Il ne
+             * faut surtout pas relire puis fusionner la copie ancienne, car cela transformerait un
+             * refus atomique en écrasement différé. On renvoie la vue autorisée actuelle et l’agent
+             * reprend son geste après rechargement.
+             */
+            if (essai > 0) {
+              const valeurActuelle = estClient ? vueClient(actuel, compteId)
+                : estPartenaire ? vuePartenaire(actuel, partenaireDuCompte(actuel, compteId))
+                  : vueEquipeZone(actuel, compteId);
+              return res.status(409).json({
+                conflict: true,
+                conflit: true,
+                error: "Conflit détecté : un autre agent a enregistré une modification. Les données récentes ont été rechargées.",
+                value: valeurActuelle,
+                updated_at: versionActuelle,
+              });
+            }
+            const conflit = !versionLue
               || !!(versionActuelle && versionLue !== versionActuelle);
             conflitVu = conflitVu || conflit;
             aEcrire = fusionnerEcritureEquipe(actuel, valeur, compteId, {

@@ -847,7 +847,11 @@ export default async function handler(req, res) {
     }
     try {
       const reponse = await fetch(
-        `https://graph.facebook.com/${VERSION_GRAPH}/${waba}/message_templates?fields=name,status,language,category,components&limit=100`,
+        /*
+         * `rejected_reason` manquait, et c'est la seule chose qui compte devant un modèle refusé.
+         * L'écran disait « refusé » sans dire pourquoi — donc sans rien laisser corriger.
+         */
+        `https://graph.facebook.com/${VERSION_GRAPH}/${waba}/message_templates?fields=id,name,status,language,category,components,rejected_reason&limit=100`,
         { headers: { Authorization: `Bearer ${meta.jeton}` } },
       );
       const corps = await reponse.json();
@@ -859,7 +863,9 @@ export default async function handler(req, res) {
         });
       }
       const modeles = (corps.data || []).map((m) => ({
+        id: m.id || null,
         nom: m.name, statut: m.status, langue: m.language, categorie: m.category,
+        motifRefus: m.rejected_reason && m.rejected_reason !== "NONE" ? m.rejected_reason : null,
         ...formeDuModele(m.components),
       }));
       return res.status(200).json({
@@ -1021,6 +1027,43 @@ export default async function handler(req, res) {
     return res.status(200).json(sortie);
   }
 
+  /*
+   * SUPPRIMER UN MODÈLE REFUSÉ, POUR POUVOIR LE REFAIRE.
+   *
+   * Meta refuse un modèle, et son nom reste pris : toute nouvelle tentative se heurte alors à un
+   * « Invalid parameter » qui ne dit rien de la vraie cause. Il faut retirer l'ancien avant de
+   * reposer le bon, et cela ne se fait pas depuis l'application tant qu'on ne l'a pas prévu.
+   *
+   * On ne supprime QUE sur demande explicite, avec le nom envoyé : un modèle approuvé qui
+   * disparaît, c'est toute une catégorie de notifications qui cesse de partir.
+   */
+  if (req.method === "POST" && req.query?.supprimerModele !== undefined) {
+    const waba = process.env.WHATSAPP_WABA_ID;
+    if (!metaPret) return res.status(501).json({ error: "Meta n'est pas configuré.", configure: false });
+    if (!waba) return res.status(501).json({ error: "WHATSAPP_WABA_ID manque.", manquant: "WHATSAPP_WABA_ID" });
+    const nom = String(req.body?.nom || "").trim().toLowerCase();
+    if (!/^[a-z0-9_]{1,512}$/.test(nom)) {
+      return res.status(400).json({ error: "Nom de modèle invalide." });
+    }
+    try {
+      const reponse = await fetch(
+        `https://graph.facebook.com/${VERSION_GRAPH}/${encodeURIComponent(waba)}/message_templates?name=${encodeURIComponent(nom)}`,
+        { method: "DELETE", headers: { Authorization: `Bearer ${meta.jeton}` } },
+      );
+      const corps = await reponse.json().catch(() => ({}));
+      if (!reponse.ok) {
+        return res.status(reponse.status).json({
+          error: corps?.error?.error_user_msg || corps?.error?.message || "Meta a refusé la suppression.",
+          code: corps?.error?.code || null,
+          nom,
+        });
+      }
+      return res.status(200).json({ supprime: true, nom });
+    } catch (e) {
+      return res.status(502).json({ error: "Impossible de joindre Meta." });
+    }
+  }
+
   if (req.method === "POST" && req.query?.creerModele !== undefined) {
     const waba = process.env.WHATSAPP_WABA_ID;
     if (!metaPret) return res.status(501).json({ error: "Meta n'est pas configuré.", configure: false });
@@ -1086,12 +1129,25 @@ export default async function handler(req, res) {
       const corps = await reponse.json().catch(() => ({}));
       if (!reponse.ok) {
         const code = corps?.error?.code;
+        /*
+         * LES MÊMES NUMÉROS NE VEULENT PAS DIRE LA MÊME CHOSE ICI.
+         *
+         * EXPLICATIONS_META parle d'ENVOI : son code 100 conseille de vérifier WHATSAPP_PHONE_ID.
+         * Devant un échec de CRÉATION, ce conseil envoie chercher un numéro de téléphone là où il
+         * s'agit d'un nom de modèle déjà pris — et l'on tourne en rond. Une explication qui se
+         * trompe de sujet est pire que le code brut.
+         */
+        const EXPLICATIONS_CREATION = {
+          100: "Meta a refusé la demande. Le plus souvent, un modèle porte déjà ce nom dans cette langue : "
+            + "supprimez-le avant de le recréer, ou choisissez un autre nom.",
+          10: EXPLICATIONS_META[10],
+        };
         return res.status(reponse.status).json({
           /*
            * Le message de Meta est conservé tel quel à côté de notre explication : c'est lui qui
            * permet de chercher, et une explication qui remplace la cause n'aide personne.
            */
-          error: EXPLICATIONS_META[code] || corps?.error?.error_user_msg || corps?.error?.message || "Meta a refusé la création.",
+          error: EXPLICATIONS_CREATION[code] || corps?.error?.error_user_msg || corps?.error?.message || "Meta a refusé la création.",
           detailMeta: corps?.error?.message || null,
           sousCode: corps?.error?.error_subcode || null,
           code: code || null,

@@ -712,6 +712,17 @@ export async function flushOutbox() {
         surLeServeur = lecture.corps?.value ?? null;
         versionServeur = lecture.corps?.updated_at || null;
       } else {
+        /*
+         * LE REPLI DIRECT NE MÈNE PLUS NULLE PART QUAND UNE SESSION EXISTE.
+         *
+         * Il date d'avant la fermeture de la base : la page interrogeait Supabase avec la clé
+         * publique. Depuis, cette clé est refusée — les journaux du serveur montrent la file s'y
+         * casser les dents, quinze fois 401 et sept fois 403 en deux heures, toutes venues du
+         * téléphone. Ce n'est pas un repli, c'est un échec garanti qui masque le vrai motif.
+         *
+         * `storage.set` applique déjà cette règle ; la file l'avait oubliée.
+         */
+        if (jetonSession) throw new Error("API sécurisée momentanément indisponible");
         const { data: actuel, error: erreurLecture } = await client.from(TABLE).select("value").eq("key", item.key).maybeSingle();
         if (erreurLecture) throw erreurLecture;
         surLeServeur = actuel?.value ?? null;
@@ -772,7 +783,39 @@ export function detailFileAttente() {
     depuis: typeof i.ts === "number" ? i.ts : null,
     essais: i.essais || 0,
     erreur: i.derniereErreur || null,
+    /* De quoi juger sur pièce avant d'abandonner : ce que cette écriture porte. */
+    contenu: resumeEcriture(i.value),
   }));
+}
+
+/*
+ * Ce qu'une écriture en attente contient, en une ligne par collection.
+ *
+ * Abandonner une écriture sans savoir ce qu'elle porte, c'est jeter le travail d'un agent les
+ * yeux fermés. On ne montre que des nombres — jamais le contenu lui-même, qui n'a rien à faire
+ * dans un bandeau.
+ */
+function resumeEcriture(valeur) {
+  if (!valeur || typeof valeur !== "object") return [];
+  return Object.keys(valeur)
+    .filter((cle) => Array.isArray(valeur[cle]) && valeur[cle].length > 0)
+    .map((cle) => ({ cle, nombre: valeur[cle].length }))
+    .sort((a, b) => b.nombre - a.nombre)
+    .slice(0, 6);
+}
+
+/**
+ * Retirer une écriture de la file, quand elle ne peut plus aboutir.
+ *
+ * C'est le dernier recours, et il n'existait pas : une écriture refusée pour de bon restait à
+ * l'écran indéfiniment, sans que personne puisse ni la faire passer ni s'en débarrasser. Le
+ * travail qu'elle porte a le plus souvent été refait entre-temps — mais c'est à l'agent d'en
+ * juger, pas à l'application de décider en silence.
+ */
+export function abandonnerEcriture(cle) {
+  const reste = getQueue().filter((i) => i.key !== cle);
+  setQueue(reste);
+  return { restant: reste.length };
 }
 
 /**

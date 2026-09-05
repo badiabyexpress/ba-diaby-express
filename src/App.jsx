@@ -18,7 +18,7 @@ import {
   tauxCommission, responsableDe, equipeDe, estSalarie, bilanEquipe, responsableAuMoment,
   TAUX_PAR_DEFAUT,
 } from "../api/_commissions.js";
-import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, detailFileAttente, reappliquerModification, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree, relireDuServeur, oublierCacheLocal } from "./lib/storage.js";
+import { storage, clientSupabase, subscribeToChanges, flushOutbox, pendingSyncCount, detailFileAttente, abandonnerEcriture, reappliquerModification, definirJetonAcces, definirJetonSession, jetonSessionCourant, surSessionExpiree, relireDuServeur, oublierCacheLocal } from "./lib/storage.js";
 import { VILLES_PAR_PAYS } from "./data/villesParPays.js";
 
 /* ---------- design tokens ----------
@@ -4635,6 +4635,8 @@ function App() {
    * d'échecs répétés, c'est un refus, pas une coupure.
    */
   const [fileBloquee, setFileBloquee] = useState(null);
+  /* La fiche ouverte quand l'agent touche le bandeau : ce qui coince, et que faire. */
+  const [ficheFile, setFicheFile] = useState(null);
   const rafraichirFile = useCallback(() => {
     setPendingSync(pendingSyncCount());
     setFileBloquee(detailFileAttente().find((f) => f.essais >= 3) || null);
@@ -5666,8 +5668,64 @@ function App() {
           Données non chargées — n’enregistrez rien, ce serait perdu. Nous réessayons automatiquement.
         </div>
       )}
+      {ficheFile && (
+        <Modal onClose={() => setFicheFile(null)} title="Écriture en attente">
+          <div style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.6 }}>
+            Une modification n’a pas pu être enregistrée. Elle est conservée sur cet appareil et
+            retentée toutes les vingt secondes.
+          </div>
+          <div style={{ marginTop: 14, background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 10, padding: "12px 14px", fontSize: 12.5 }}>
+            <div style={{ color: "var(--muted)" }}>
+              Depuis le {ficheFile.depuis ? new Date(ficheFile.depuis).toLocaleString("fr-FR") : "—"}
+              {ficheFile.essais ? ` · ${ficheFile.essais} tentative${ficheFile.essais > 1 ? "s" : ""}` : ""}
+            </div>
+            {ficheFile.erreur && (
+              <div style={{ marginTop: 6, color: "var(--danger-fg)", fontWeight: 600 }}>{ficheFile.erreur}</div>
+            )}
+            {ficheFile.contenu?.length > 0 && (
+              <div style={{ marginTop: 10, color: "var(--muted)" }}>
+                Elle porte : {ficheFile.contenu.map((c) => `${c.nombre} ${c.cle}`).join(" · ")}
+              </div>
+            )}
+          </div>
+          {/*
+            * Le travail porté par une écriture bloquée depuis des heures a presque toujours été
+            * refait entre-temps. Presque : c'est pourquoi c'est l'agent qui tranche, après avoir
+            * vu ce qu'elle contient — et non l'application, en silence.
+            */}
+          <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 12, lineHeight: 1.55 }}>
+            Une écriture de plus de deux heures n’ajoute que ce que le serveur ne connaît pas
+            encore : elle ne peut plus faire reculer le travail de vos collègues.
+          </div>
+          <div style={{ display: "flex", gap: 10, marginTop: 18, flexWrap: "wrap" }}>
+            <button onClick={async () => {
+              setSyncing(true);
+              try { await flushOutbox(); } catch (e) { /* le motif sera dans la fiche */ }
+              setSyncing(false);
+              rafraichirFile();
+              const reste = detailFileAttente();
+              setFicheFile(reste.find((f) => f.cle === ficheFile.cle) || null);
+              if (!reste.length) notify?.("Tout est enregistré.");
+            }} style={{ flex: 1, minWidth: 150, background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 8, padding: "11px 0", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+              Réessayer maintenant
+            </button>
+            <button onClick={() => {
+              if (!window.confirm("Abandonner cette écriture ? Ce qu’elle contient ne sera pas enregistré. Vérifiez d’abord que le travail a bien été refait.")) return;
+              abandonnerEcriture(ficheFile.cle);
+              rafraichirFile();
+              setFicheFile(null);
+              notify?.("Écriture abandonnée.");
+            }} style={{ flex: 1, minWidth: 150, background: "var(--surface2)", color: "var(--danger-fg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "11px 0", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>
+              Abandonner
+            </button>
+          </div>
+        </Modal>
+      )}
       {!modeSecours && (!isOnline || pendingSync > 0) && (
-        <div style={{ position: "fixed", bottom: 18, insetInlineStart: "50%", transform: "translateX(-50%)", zIndex: 60,
+        <div onClick={() => { const d = detailFileAttente(); if (d.length) setFicheFile(d[0]); }}
+             role={pendingSync > 0 ? "button" : undefined}
+             style={{ position: "fixed", bottom: 18, insetInlineStart: "50%", transform: "translateX(-50%)", zIndex: 60,
+                      cursor: pendingSync > 0 ? "pointer" : "default",
                       background: isOnline ? "var(--surface2)" : "var(--danger-bg)",
                       border: "1px solid " + (isOnline ? "var(--border)" : "var(--danger-border)"),
                       color: isOnline ? "var(--muted)" : "var(--danger-fg)",

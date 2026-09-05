@@ -966,6 +966,9 @@ export default async function handler(req, res) {
      * cette phrase-là qui doit rester à l'écran, et les détails en dessous pour qui veut vérifier.
      */
     const aGestion = !!sortie.permissions?.liste?.includes("whatsapp_business_management");
+    const aGestionEntreprise = !!sortie.permissions?.liste?.includes("business_management");
+    /* « Non vérifiée » et « pas pu vérifier » sont deux réponses différentes. Les confondre a déjà coûté cher. */
+    const verificationLue = !!(sortie.entreprise && !sortie.entreprise.erreur && sortie.entreprise.verification);
     const verifiee = sortie.entreprise?.verification === "verified";
     if (sortie.permissions?.liste && !aGestion) {
       sortie.verdict = {
@@ -974,19 +977,45 @@ export default async function handler(req, res) {
           + "la création de modèles. Regénérez le jeton depuis l'utilisateur système, en cochant cette "
           + "permission en plus de « whatsapp_business_messaging », puis remplacez WHATSAPP_TOKEN dans Vercel.",
       };
-    } else if (sortie.entreprise && sortie.entreprise.verification && !verifiee) {
+    } else if (verificationLue && !verifiee) {
       sortie.verdict = {
         cause: "verification",
         texte: `Le jeton a les droits, mais l'entreprise n'est pas vérifiée chez Meta (état : ${sortie.entreprise.verification}). `
           + "Tant que la vérification n'est pas achevée, la création de modèles reste fermée. "
           + "Elle se lance dans Meta Business Suite → Paramètres de l'entreprise → Centre de sécurité.",
       };
+    } else if (aGestion && sortie.entreprise?.erreur) {
+      /*
+       * LE CAS QUI DÉSIGNE LA VRAIE CAUSE.
+       *
+       * Le jeton a le droit d'écrire sur WhatsApp, le compte est approuvé — et pourtant il ne peut
+       * même pas LIRE l'entreprise qui possède ce compte. Ce n'est pas un détail du diagnostic :
+       * c'est la signature d'un utilisateur système qui ne détient qu'un accès partiel aux
+       * ressources. Une permission cochée ne sert à rien si la ressource n'est pas confiée à celui
+       * qui la porte, et c'est précisément ce que Meta refuse ensuite avec son « code 10 ».
+       *
+       * Le premier écrit disait « l'entreprise ne paraît pas bloquée » alors qu'on n'avait pas
+       * réussi à la lire. Un diagnostic qui déduit d'un échec de lecture que tout va bien est pire
+       * qu'un diagnostic muet.
+       */
+      sortie.verdict = {
+        cause: "acces-ressource",
+        texte: "Le jeton a bien « whatsapp_business_management », et le compte WhatsApp est approuvé. "
+          + "Mais il n'a pas pu lire l'entreprise propriétaire — Meta répond qu'il faudrait la permission "
+          + "« business_management ». C'est le signe que l'utilisateur système n'a qu'un accès partiel aux "
+          + "ressources : une permission cochée ne suffit pas si la ressource ne lui est pas confiée. "
+          + "Donnez-lui le CONTRÔLE TOTAL sur le compte WhatsApp — Paramètres de l'entreprise → Comptes → "
+          + "Comptes WhatsApp → votre compte → Ajouter des personnes → l'utilisateur système, contrôle total — "
+          + "puis regénérez le jeton en cochant aussi « business_management », et remplacez WHATSAPP_TOKEN dans Vercel.",
+        manque: aGestionEntreprise ? null : "business_management",
+      };
     } else if (aGestion) {
       sortie.verdict = {
         cause: "droits-ok",
-        texte: "Le jeton a bien la permission de gestion et l'entreprise ne paraît pas bloquée. "
+        texte: "Le jeton a la permission de gestion, et l'entreprise est vérifiée. "
           + "Si la création échoue encore, c'est l'utilisateur système qui n'est pas administrateur de "
-          + "ce compte WhatsApp Business : ajoutez-lui le rôle dans Paramètres de l'entreprise → Comptes WhatsApp.",
+          + "ce compte WhatsApp Business : donnez-lui le contrôle total dans Paramètres de l'entreprise → "
+          + "Comptes → Comptes WhatsApp.",
       };
     }
     return res.status(200).json(sortie);

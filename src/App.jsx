@@ -29928,6 +29928,8 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
   const [creationModele, setCreationModele] = useState(null);
   /* Le diagnostic des droits : ce que Meta répond quand on lui demande au lieu de supposer. */
   const [droitsMeta, setDroitsMeta] = useState(null);
+  /* Le retrait d'un modèle refusé, dont le nom bloque toute nouvelle tentative. */
+  const [suppressionModele, setSuppressionModele] = useState(null);
   function relireModeles() {
     return appelServeurQuiDepense("/api/whatsapp?modeles=1")
       .then((r) => r.json().then((corps) => ({ ok: r.ok, corps })))
@@ -30556,6 +30558,13 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
           {(() => {
             const deposes = new Set((modeles.modeles || []).map((m) => m.nom));
             const dejaLa = [...deposes].find((n) => /code|verification|otp/i.test(n));
+            /*
+             * Un modèle refusé garde son nom réservé : toute nouvelle tentative se heurte alors à
+             * un « Invalid parameter » qui ne dit rien. On montre donc son état et son motif, et
+             * on propose de le retirer — c'est le seul chemin pour en reposer un bon.
+             */
+            const fiche = dejaLa ? (modeles.modeles || []).find((m) => m.nom === dejaLa) : null;
+            const refuse = fiche?.statut === "REJECTED";
             return (
               <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "12px 14px", marginTop: 10 }}>
                 <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text)" }}>
@@ -30563,10 +30572,39 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
                 </div>
                 <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 5, lineHeight: 1.55 }}>
                   {dejaLa
-                    ? `Un modèle nommé « ${dejaLa} » existe déjà sur ce compte.`
+                    ? `Un modèle nommé « ${dejaLa} » existe déjà sur ce compte — statut ${fiche?.statut === "APPROVED" ? "approuvé" : fiche?.statut === "REJECTED" ? "REFUSÉ" : fiche?.statut === "PENDING" ? "en examen" : fiche?.statut || "inconnu"}.`
                     : "C'est lui qui porte les codes de réinitialisation de mot de passe. Meta impose son texte : "
                       + "vous ne choisissez que le nom et le délai d'expiration affiché."}
                 </div>
+                {refuse && (
+                  <div style={{ background: "var(--danger-bg)", border: "1px solid var(--danger-border)", borderRadius: 8, padding: "11px 13px", marginTop: 9 }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--danger-fg)" }}>
+                      Meta a refusé ce modèle{fiche?.motifRefus ? ` — motif : ${fiche.motifRefus}` : ""}
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--text)", marginTop: 5, lineHeight: 1.55 }}>
+                      Tant qu'il existe, son nom reste pris : une nouvelle création échouera avec un
+                      « paramètre invalide » qui ne dit rien de la vraie cause. Retirez-le d'abord,
+                      puis recréez-le — en utilitaire si l'authentification vous est fermée.
+                    </div>
+                    <button disabled={suppressionModele === "en-cours"} onClick={async () => {
+                      if (!window.confirm(`Retirer le modèle « ${dejaLa} » de chez Meta ? Il est refusé, donc inutilisable en l'état.`)) return;
+                      setSuppressionModele("en-cours");
+                      const { ok, corps } = await appelServeurQuiDepense("/api/whatsapp?supprimerModele=1", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ nom: dejaLa }),
+                      }).then((r) => r.json().then((c) => ({ ok: r.ok, corps: c })))
+                        .catch(() => ({ ok: false, corps: { error: "Serveur injoignable." } }));
+                      setSuppressionModele(ok ? null : { erreur: corps?.error });
+                      if (ok) { setCreationModele(null); relireModeles(); notify?.("Modèle retiré — vous pouvez le recréer."); }
+                    }} style={{ marginTop: 9, background: "var(--surface)", color: "var(--danger-fg)", border: "1px solid var(--danger-border)", borderRadius: 7, padding: "9px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                      {suppressionModele === "en-cours" ? "Retrait…" : "Retirer ce modèle refusé"}
+                    </button>
+                    {suppressionModele?.erreur && (
+                      <div style={{ fontSize: 12, color: "var(--danger-fg)", marginTop: 7 }}>{suppressionModele.erreur}</div>
+                    )}
+                  </div>
+                )}
                 <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
                   <input value={nomModeleCode} onChange={(e) => setNomModeleCode(e.target.value)}
                     placeholder="bde_code_verification" spellCheck={false}

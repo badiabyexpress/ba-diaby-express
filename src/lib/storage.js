@@ -593,6 +593,84 @@ export function fusionnerDocuments(serveur, local, options = {}) {
   return sortie;
 }
 
+/*
+ * REJOUER LE GESTE, PAS LA PHOTOGRAPHIE.
+ *
+ * Toutes les données tiennent dans un seul document : quand un agent remet un colis,
+ * l'application n'envoie pas « ce colis est remis » mais le document entier, tel qu'elle le
+ * croyait une seconde plus tôt. Si le serveur a bougé entre-temps — et il bouge sans cesse, le
+ * webhook de Meta y écrit à chaque accusé de réception — cette photographie est refusée, et le
+ * travail de l'agent était purement abandonné.
+ *
+ * C'est ce qui est arrivé au colis SF310802 : les trois messages « votre colis vous a bien été
+ * remis » sont partis et ont été acceptés par Meta, mais le colis est resté « Disponible au
+ * retrait », sans preuve de remise. Le client a été prévenu d'une livraison que le système n'a
+ * jamais enregistrée.
+ *
+ * On retrouve donc le geste en comparant trois états : ce que l'agent avait sous les yeux
+ * (`base`), ce qu'il a produit (`propose`), et ce que le serveur porte maintenant (`frais`).
+ * Ce que l'agent n'a pas touché garde la version du serveur ; ce qu'il a modifié garde la
+ * sienne ; et sur les listes, la comparaison se fait ligne à ligne — de sorte que remettre UN
+ * colis ne remet jamais en cause les soixante-quinze autres.
+ *
+ * Ce n'est pas une fusion parfaite — il faudrait horodater chaque champ pour cela. C'est la
+ * garantie qu'aucun geste ne disparaît en silence, ce qui est le seul point qui compte.
+ */
+function identique(a, b) {
+  if (a === b) return true;
+  try { return JSON.stringify(a) === JSON.stringify(b); } catch (e) { return false; }
+}
+
+function rejouerListe(avant, apres, frais) {
+  const parAvant = new Map();
+  avant.forEach((x) => parAvant.set(identiteDe(x), x));
+  const parFrais = new Map();
+  frais.forEach((x) => parFrais.set(identiteDe(x), x));
+  const identitesApres = new Set(apres.map((x) => identiteDe(x)));
+
+  /* Ce que l'agent a retiré, il l'a retiré : on ne le fait pas revenir par la fusion. */
+  const retirees = new Set([...parAvant.keys()].filter((i) => !identitesApres.has(i)));
+
+  const sortie = [];
+  const vues = new Set();
+  apres.forEach((x) => {
+    const i = identiteDe(x);
+    if (vues.has(i)) return;
+    vues.add(i);
+    const dAvant = parAvant.get(i);
+    const touchee = !dAvant || !identique(dAvant, x);
+    /* Touchée par l'agent : sa version. Intacte : celle du serveur, qui peut être plus récente. */
+    sortie.push(touchee ? x : (parFrais.has(i) ? parFrais.get(i) : x));
+  });
+  frais.forEach((x) => {
+    const i = identiteDe(x);
+    if (vues.has(i) || retirees.has(i)) return;
+    vues.add(i);
+    sortie.push(x);
+  });
+  return sortie;
+}
+
+export function reappliquerModification(base, propose, frais) {
+  if (!base || typeof base !== "object" || Array.isArray(base)) return propose;
+  if (!propose || typeof propose !== "object" || Array.isArray(propose)) return propose;
+  if (!frais || typeof frais !== "object" || Array.isArray(frais)) return propose;
+  const sortie = { ...frais };
+  new Set([...Object.keys(base), ...Object.keys(propose)]).forEach((cle) => {
+    const avant = base[cle];
+    const apres = propose[cle];
+    /* L'agent n'y a pas touché : le serveur a raison, il est plus récent. */
+    if (identique(avant, apres)) return;
+    if (!Object.prototype.hasOwnProperty.call(propose, cle)) { delete sortie[cle]; return; }
+    if (listeIdentifiable(avant) && listeIdentifiable(apres) && listeIdentifiable(frais[cle])) {
+      sortie[cle] = rejouerListe(avant, apres, frais[cle]);
+      return;
+    }
+    sortie[cle] = apres;
+  });
+  return sortie;
+}
+
 /**
  * Rejoue toutes les écritures mises en file d'attente pendant une coupure réseau.
  * Ne garde que la DERNIÈRE écriture par clé (inutile de rejouer des versions intermédiaires
@@ -646,7 +724,11 @@ export async function flushOutbox() {
         method: "PUT", body: JSON.stringify({ value: valeur, baseVersion: versionServeur }),
       });
       if (!ecriture.indisponible) {
-        if (!ecriture.ok) throw new Error(ecriture.corps?.error || "Enregistrement impossible");
+        /* Le code HTTP accompagne le motif : « injoignable » ne dit pas si c'est 502, 409 ou 413. */
+        if (!ecriture.ok) {
+          const statut = ecriture.reponse?.status;
+          throw new Error(`${ecriture.corps?.error || "Enregistrement impossible"}${statut ? ` (${statut})` : ""}`);
+        }
       } else {
         const { error } = await client.from(TABLE).upsert({ key: item.key, value: valeur, updated_at: new Date().toISOString() });
         if (error) throw error;

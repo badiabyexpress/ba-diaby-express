@@ -30617,6 +30617,13 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
                       {droitsMeta.permissions && (
                         <div>
                           Jeton {droitsMeta.permissions.valide === false ? "invalide" : "valide"}
+                          {/*
+                            * Le TYPE change tout, et il manquait. Un jeton d'utilisateur (USER)
+                            * dépend de la personne connectée et de ce que l'application a le droit
+                            * de faire ; un jeton d'utilisateur système (SYSTEM_USER) dépend des
+                            * ressources qu'on lui a confiées. On ne cherche pas au même endroit.
+                            */}
+                          {droitsMeta.permissions.type ? ` · type ${droitsMeta.permissions.type}` : ""}
                           {droitsMeta.permissions.permanent ? " · sans expiration" : droitsMeta.permissions.expireLe ? ` · expire le ${new Date(droitsMeta.permissions.expireLe).toLocaleDateString("fr-FR")}` : ""}
                         </div>
                       )}
@@ -30629,9 +30636,12 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
                 )}
                 {creationModele?.cree && (
                   <div style={{ fontSize: 12, color: "var(--ok-fg, #1a7f45)", marginTop: 9, lineHeight: 1.55 }}>
-                    Modèle « {creationModele.nom} » déposé — statut {creationModele.statut}. Un modèle
+                    Modèle « {creationModele.nom} » déposé en {creationModele.categorie === "UTILITY" ? "utilitaire" : "authentification"} — statut {creationModele.statut}. Un modèle
                     neuf passe en examen chez Meta ; il ne servira qu'une fois approuvé. Renseignez
-                    ensuite WHATSAPP_TEMPLATE_CODE dans Vercel avec ce nom.
+                    ensuite WHATSAPP_TEMPLATE_CODE dans Vercel avec ce nom
+                    {creationModele.bouton === "aucun"
+                      ? ", et WHATSAPP_TEMPLATE_CODE_BOUTON avec « aucun » — un modèle utilitaire n'a pas de bouton."
+                      : ", et WHATSAPP_TEMPLATE_CODE_BOUTON avec « copy_code »."}
                   </div>
                 )}
                 {creationModele?.erreur && (
@@ -30643,6 +30653,33 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
                         {creationModele.detail}{creationModele.code ? ` (code ${creationModele.code})` : ""}
                       </div>
                     )}
+                    {/*
+                      * LE REPLI QUI FAIT PARTIR LE CODE MALGRÉ TOUT.
+                      *
+                      * La catégorie « authentification » est la plus surveillée de Meta, et un
+                      * compte peut se la voir refuser alors que tout le reste passe. Un modèle
+                      * utilitaire porte le même code dans une variable ordinaire : un peu plus
+                      * cher, sans bouton de recopie — mais le client reçoit son code, ce qui vaut
+                      * infiniment mieux qu'un modèle parfait que Meta refuse de créer.
+                      */}
+                    <div style={{ marginTop: 10, color: "var(--text)" }}>
+                      Si c'est la catégorie « authentification » qui est fermée à ce compte, le même
+                      code peut partir dans un modèle utilitaire ordinaire.
+                    </div>
+                    <button disabled={creationModele === "en-cours"} onClick={async () => {
+                      const nom = (nomModeleCode || "bde_code_verification").trim();
+                      setCreationModele("en-cours");
+                      const { ok, corps } = await appelServeurQuiDepense("/api/whatsapp?creerModele=1", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ nom, minutes: 10, categorie: "UTILITY", entreprise: data.entreprise?.nom || "" }),
+                      }).then((r) => r.json().then((c) => ({ ok: r.ok, corps: c })))
+                        .catch(() => ({ ok: false, corps: { error: "Serveur injoignable." } }));
+                      setCreationModele(ok ? { cree: true, ...corps } : { erreur: corps?.error, detail: corps?.detailMeta, code: corps?.code });
+                      if (ok) relireModeles();
+                    }} style={{ marginTop: 8, background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 7, padding: "9px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                      Essayer en modèle utilitaire
+                    </button>
                   </div>
                 )}
               </div>

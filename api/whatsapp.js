@@ -1038,16 +1038,42 @@ export default async function handler(req, res) {
     }
     const minutes = Number(req.body?.minutes);
     const expiration = Number.isFinite(minutes) && minutes >= 1 && minutes <= 90 ? Math.round(minutes) : 10;
-    const definition = {
-      name: nom,
-      language: meta.langue,
-      category: "AUTHENTICATION",
-      components: [
-        { type: "BODY", add_security_recommendation: true },
-        { type: "FOOTER", code_expiration_minutes: expiration },
-        { type: "BUTTONS", buttons: [{ type: "OTP", otp_type: "COPY_CODE" }] },
-      ],
-    };
+    /*
+     * DEUX FAÇONS DE PORTER UN CODE, ET LA SECONDE SAUVE LA MISE.
+     *
+     * Le modèle d'AUTHENTIFICATION est le bon : Meta le reconnaît, le facture moins cher, et son
+     * bouton recopie le code d'un geste. Mais cette catégorie est la plus surveillée, et un compte
+     * peut se la voir refuser alors que tout le reste passe.
+     *
+     * Un modèle UTILITAIRE fait le même travail avec une variable ordinaire : « votre code est
+     * {{1}} ». Moins élégant, un peu plus cher, mais le client reçoit son code — ce qui vaut
+     * infiniment mieux qu'un modèle parfait que Meta refuse de créer. L'envoi sait déjà s'en
+     * servir : WHATSAPP_TEMPLATE_CODE_BOUTON=aucun supprime le bouton, et le code part en variable.
+     */
+    const utilitaire = String(req.body?.categorie || "").toUpperCase() === "UTILITY";
+    const marque = String(req.body?.entreprise || "").trim().slice(0, 40);
+    const texte = `Votre code de vérification${marque ? ` ${marque}` : ""} est {{1}}. `
+      + `Il expire dans ${expiration} minutes. Ne le communiquez à personne.`;
+    const definition = utilitaire
+      ? {
+        name: nom,
+        language: meta.langue,
+        category: "UTILITY",
+        components: [
+          /* L'exemple est exigé par Meta : sans lui, le modèle est refusé sans être examiné. */
+          { type: "BODY", text: texte, example: { body_text: [["482913"]] } },
+        ],
+      }
+      : {
+        name: nom,
+        language: meta.langue,
+        category: "AUTHENTICATION",
+        components: [
+          { type: "BODY", add_security_recommendation: true },
+          { type: "FOOTER", code_expiration_minutes: expiration },
+          { type: "BUTTONS", buttons: [{ type: "OTP", otp_type: "COPY_CODE" }] },
+        ],
+      };
     try {
       const reponse = await fetch(
         `https://graph.facebook.com/${VERSION_GRAPH}/${encodeURIComponent(waba)}/message_templates`,
@@ -1078,8 +1104,10 @@ export default async function handler(req, res) {
         id: corps?.id || null,
         /* Un modèle neuf part en examen : dire « créé » sans dire « en attente » ferait croire qu'on peut s'en servir. */
         statut: corps?.status || "PENDING",
-        categorie: corps?.category || "AUTHENTICATION",
+        categorie: corps?.category || (utilitaire ? "UTILITY" : "AUTHENTICATION"),
         expiration,
+        /* Un modèle utilitaire n'a pas de bouton : l'envoi doit le savoir, sinon Meta refusera. */
+        bouton: utilitaire ? "aucun" : "copy_code",
       });
     } catch (e) {
       return res.status(502).json({ error: "Impossible de joindre Meta." });

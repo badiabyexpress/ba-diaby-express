@@ -1138,19 +1138,34 @@ export default async function handler(req, res) {
          * trompe de sujet est pire que le code brut.
          */
         const EXPLICATIONS_CREATION = {
-          100: "Meta a refusé la demande. Le plus souvent, un modèle porte déjà ce nom dans cette langue : "
-            + "supprimez-le avant de le recréer, ou choisissez un autre nom.",
+          100: "Meta a refusé la demande sans la motiver. Deux causes fréquentes : un modèle porte déjà "
+            + "ce nom dans cette langue, ou ce nom a été supprimé il y a moins de trente jours — Meta le "
+            + "garde réservé pendant tout ce temps. Essayez un autre nom, par exemple en ajoutant un chiffre.",
           10: EXPLICATIONS_META[10],
         };
+        /*
+         * LE MESSAGE PRÉCIS DE META PASSE AVANT LE NÔTRE.
+         *
+         * Meta range deux textes très différents dans son erreur : `message`, générique au point
+         * d'être inutile (« Invalid parameter »), et `error_user_msg`, qui dit exactement ce qui
+         * cloche — nom déjà pris, texte trop long, exemple manquant. Notre explication passait
+         * devant les deux, et masquait donc la seule phrase qui aurait réglé la question.
+         *
+         * Elle ne sert plus que lorsque Meta ne motive rien. Deviner est un dernier recours, pas
+         * un premier réflexe : on l'a payé assez cher ce soir.
+         */
+        const precisDeMeta = corps?.error?.error_user_msg || corps?.error?.error_data?.details || null;
+        const titreDeMeta = corps?.error?.error_user_title || null;
         return res.status(reponse.status).json({
-          /*
-           * Le message de Meta est conservé tel quel à côté de notre explication : c'est lui qui
-           * permet de chercher, et une explication qui remplace la cause n'aide personne.
-           */
-          error: EXPLICATIONS_CREATION[code] || corps?.error?.error_user_msg || corps?.error?.message || "Meta a refusé la création.",
+          error: precisDeMeta
+            ? `${titreDeMeta ? `${titreDeMeta} — ` : ""}${precisDeMeta}`
+            : (EXPLICATIONS_CREATION[code] || corps?.error?.message || "Meta a refusé la création."),
+          /* Le message brut reste affiché à côté : c'est lui qui permet de chercher. */
           detailMeta: corps?.error?.message || null,
           sousCode: corps?.error?.error_subcode || null,
           code: code || null,
+          /* Quand Meta ne motive pas, notre piste reste lisible sous le message brut. */
+          piste: precisDeMeta ? (EXPLICATIONS_CREATION[code] || null) : null,
           nom,
         });
       }

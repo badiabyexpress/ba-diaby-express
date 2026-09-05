@@ -30691,6 +30691,28 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
                         {creationModele.detail}{creationModele.code ? ` (code ${creationModele.code})` : ""}
                       </div>
                     )}
+                    {/* Notre piste ne passe plus devant Meta : elle complète, quand Meta a parlé. */}
+                    {creationModele.piste && (
+                      <div style={{ color: "var(--muted)", fontSize: 11.5, marginTop: 5, lineHeight: 1.55 }}>{creationModele.piste}</div>
+                    )}
+                    {/*
+                      * UN NOM SUPPRIMÉ RESTE RÉSERVÉ TRENTE JOURS CHEZ META.
+                      *
+                      * Retirer le modèle refusé ne libère donc pas son nom tout de suite, et la
+                      * création suivante échoue exactement comme la précédente — sans que rien ne
+                      * le laisse deviner. Changer de nom est la seule sortie immédiate, et elle ne
+                      * coûte rien : c'est WHATSAPP_TEMPLATE_CODE qui dira lequel utiliser.
+                      */}
+                    {creationModele.code === 100 && (
+                      <button onClick={() => {
+                        const base = (nomModeleCode || "bde_code_verification").replace(/\d+$/, "");
+                        const suivant = Number((nomModeleCode.match(/(\d+)$/) || [])[1] || 1) + 1;
+                        setNomModeleCode(`${base}${suivant}`);
+                        setCreationModele(null);
+                      }} style={{ marginTop: 9, background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 7, padding: "9px 15px", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}>
+                        Proposer un autre nom
+                      </button>
+                    )}
                     {/*
                       * LE REPLI QUI FAIT PARTIR LE CODE MALGRÉ TOUT.
                       *

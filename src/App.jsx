@@ -29926,6 +29926,8 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
   /* Le modèle du code de vérification : son nom, et l'état de la demande de création. */
   const [nomModeleCode, setNomModeleCode] = useState("bde_code_verification");
   const [creationModele, setCreationModele] = useState(null);
+  /* Le diagnostic des droits : ce que Meta répond quand on lui demande au lieu de supposer. */
+  const [droitsMeta, setDroitsMeta] = useState(null);
   function relireModeles() {
     return appelServeurQuiDepense("/api/whatsapp?modeles=1")
       .then((r) => r.json().then((corps) => ({ ok: r.ok, corps })))
@@ -30583,7 +30585,48 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
                   }} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 7, padding: "9px 15px", fontSize: 12.5, fontWeight: 700, cursor: creationModele === "en-cours" ? "wait" : "pointer", opacity: creationModele === "en-cours" ? 0.6 : 1 }}>
                     {creationModele === "en-cours" ? "Création…" : "Créer ce modèle"}
                   </button>
+                  {/*
+                    * Le refus « code 10 » a deux causes que rien ne distingue à l'écran. Meta sait
+                    * répondre aux deux, en lecture seule. On demande plutôt que de supposer.
+                    */}
+                  <button disabled={droitsMeta === "en-cours"} onClick={async () => {
+                    setDroitsMeta("en-cours");
+                    const { ok, corps } = await appelServeurQuiDepense("/api/whatsapp?droits=1")
+                      .then((r) => r.json().then((c) => ({ ok: r.ok, corps: c })))
+                      .catch(() => ({ ok: false, corps: { error: "Serveur injoignable." } }));
+                    setDroitsMeta(ok ? corps : { erreur: corps?.error || "Diagnostic indisponible." });
+                  }} style={{ background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 7, padding: "9px 15px", fontSize: 12.5, fontWeight: 700, cursor: droitsMeta === "en-cours" ? "wait" : "pointer" }}>
+                    {droitsMeta === "en-cours" ? "Vérification…" : "Vérifier les droits"}
+                  </button>
                 </div>
+                {droitsMeta && droitsMeta !== "en-cours" && (
+                  <div style={{ marginTop: 10, background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "11px 13px" }}>
+                    {droitsMeta.verdict ? (
+                      <div style={{ fontSize: 12.5, fontWeight: 600, lineHeight: 1.6,
+                                    color: droitsMeta.verdict.cause === "droits-ok" ? "var(--text)" : "var(--danger-fg)" }}>
+                        {droitsMeta.verdict.texte}
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 12.5, color: "var(--danger-fg)" }}>{droitsMeta.erreur || "Meta n'a pas répondu."}</div>
+                    )}
+                    <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 8, lineHeight: 1.7, overflowWrap: "anywhere" }}>
+                      {droitsMeta.permissions?.liste && (
+                        <div>Permissions du jeton : <span style={{ fontFamily: "monospace" }}>{droitsMeta.permissions.liste.join(" · ") || "aucune"}</span></div>
+                      )}
+                      {droitsMeta.permissions?.erreur && <div>Jeton : {droitsMeta.permissions.erreur}</div>}
+                      {droitsMeta.permissions && (
+                        <div>
+                          Jeton {droitsMeta.permissions.valide === false ? "invalide" : "valide"}
+                          {droitsMeta.permissions.permanent ? " · sans expiration" : droitsMeta.permissions.expireLe ? ` · expire le ${new Date(droitsMeta.permissions.expireLe).toLocaleDateString("fr-FR")}` : ""}
+                        </div>
+                      )}
+                      {droitsMeta.compte?.nom && <div>Compte : {droitsMeta.compte.nom}{droitsMeta.compte.examen ? ` · examen ${droitsMeta.compte.examen}` : ""}</div>}
+                      {droitsMeta.compte?.erreur && <div>Compte : {droitsMeta.compte.erreur}</div>}
+                      {droitsMeta.entreprise?.nom && <div>Entreprise : {droitsMeta.entreprise.nom} · vérification {droitsMeta.entreprise.verification || "inconnue"}</div>}
+                      {droitsMeta.entreprise?.erreur && <div>Entreprise : {droitsMeta.entreprise.erreur}</div>}
+                    </div>
+                  </div>
+                )}
                 {creationModele?.cree && (
                   <div style={{ fontSize: 12, color: "var(--ok-fg, #1a7f45)", marginTop: 9, lineHeight: 1.55 }}>
                     Modèle « {creationModele.nom} » déposé — statut {creationModele.statut}. Un modèle

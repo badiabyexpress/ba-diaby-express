@@ -87,6 +87,16 @@ function configuration() {
  * sait qu'il doit envoyer autrement pour cette fois.
  */
 const EXPLICATIONS_META = {
+  /*
+   * LE CODE 10 EST UN REFUS DE DROITS, ET IL SE CONFOND AVEC TROIS AUTRES CHOSES.
+   *
+   * « Application does not have permission for this action » ressemble à un problème de compte,
+   * de facturation ou de contenu — ce n'en est aucun. Le même jeton lit les modèles sans peine ;
+   * c'est l'ÉCRITURE sur ce compte professionnel qui lui est refusée. Deux causes seulement, et
+   * l'écran de diagnostic (?droits=1) dit laquelle : le jeton n'a pas whatsapp_business_management,
+   * ou l'entreprise n'a pas achevé sa vérification chez Meta.
+   */
+  10: "Meta refuse cette action au jeton, pas au contenu du modèle. Soit le jeton n'a pas la permission « whatsapp_business_management », soit l'entreprise n'a pas achevé sa vérification. Le bouton « Vérifier les droits » ci-dessous demande la réponse à Meta.",
   131047: "Plus de 24 h se sont écoulées depuis le dernier message de ce client : WhatsApp exige alors un modèle validé par Meta. Envoyez le message autrement pour cette fois.",
   131026: "Ce numéro ne peut pas recevoir de message WhatsApp. Vérifiez qu'il est bien sur WhatsApp, avec son indicatif pays.",
   131030: "Ce numéro n'est pas dans la liste des destinataires autorisés. Tant que l'application Meta n'est pas publiée, seuls les numéros de test peuvent être joints.",
@@ -876,6 +886,112 @@ export default async function handler(req, res) {
    * attend plus haut (`sub_type: "copy_code"`), sans quoi le modèle serait accepté mais
    * inutilisable : le bouton refuserait le paramètre au moment de l'envoi.
    */
+  /*
+   * QUI A LE DROIT DE QUOI — la question qu'on posait à des captures d'écran.
+   *
+   * Le refus « code 10 » a exactement deux causes, et rien à l'écran ne les distingue : le jeton
+   * n'a pas la permission d'écriture, ou l'entreprise n'a pas achevé sa vérification chez Meta.
+   * On a perdu des heures à supposer. Meta sait répondre aux deux questions, en lecture seule :
+   * `debug_token` donne les permissions du jeton, le compte professionnel donne son état d'examen,
+   * et l'entreprise propriétaire son état de vérification.
+   *
+   * Le jeton lui-même ne ressort JAMAIS d'ici : on rapporte ses permissions, jamais sa valeur.
+   * Il est envoyé à Meta comme d'habitude, et rien de plus n'est écrit ni journalisé.
+   */
+  if (req.method === "GET" && req.query?.droits !== undefined) {
+    const waba = process.env.WHATSAPP_WABA_ID;
+    if (!metaPret) return res.status(501).json({ error: "Meta n'est pas configuré.", configure: false });
+    const sortie = { permissions: null, compte: null, entreprise: null, verdict: null };
+    try {
+      const dt = await fetch(
+        `https://graph.facebook.com/${VERSION_GRAPH}/debug_token`
+        + `?input_token=${encodeURIComponent(meta.jeton)}&access_token=${encodeURIComponent(meta.jeton)}`,
+      );
+      const corpsDt = await dt.json().catch(() => ({}));
+      if (dt.ok && corpsDt?.data) {
+        const d = corpsDt.data;
+        /*
+         * Un jeton d'utilisateur système porte ses permissions dans `scopes`. Certains jetons les
+         * portent en plus par ressource dans `granular_scopes` — on réunit les deux, sinon un
+         * jeton parfaitement valide paraîtrait démuni.
+         */
+        const larges = Array.isArray(d.scopes) ? d.scopes : [];
+        const fines = Array.isArray(d.granular_scopes) ? d.granular_scopes.map((g) => g?.scope).filter(Boolean) : [];
+        sortie.permissions = {
+          liste: [...new Set([...larges, ...fines])].sort(),
+          type: d.type || null,
+          expireLe: d.expires_at ? new Date(d.expires_at * 1000).toISOString() : null,
+          /* 0 = jamais : c'est le cas voulu pour un jeton d'utilisateur système. */
+          permanent: d.expires_at === 0,
+          valide: d.is_valid !== false,
+        };
+      } else {
+        sortie.permissions = { erreur: corpsDt?.error?.message || "Meta n'a pas décrit ce jeton." };
+      }
+    } catch (e) {
+      sortie.permissions = { erreur: "Impossible de joindre Meta." };
+    }
+
+    if (waba) {
+      try {
+        const r = await fetch(
+          `https://graph.facebook.com/${VERSION_GRAPH}/${encodeURIComponent(waba)}`
+          + "?fields=id,name,account_review_status,owner_business_info",
+          { headers: { Authorization: `Bearer ${meta.jeton}` } },
+        );
+        const c = await r.json().catch(() => ({}));
+        if (r.ok) {
+          sortie.compte = { id: c.id || waba, nom: c.name || null, examen: c.account_review_status || null };
+          const entrepriseId = c.owner_business_info?.id;
+          if (entrepriseId) {
+            const re = await fetch(
+              `https://graph.facebook.com/${VERSION_GRAPH}/${encodeURIComponent(entrepriseId)}?fields=id,name,verification_status`,
+              { headers: { Authorization: `Bearer ${meta.jeton}` } },
+            );
+            const ce = await re.json().catch(() => ({}));
+            sortie.entreprise = re.ok
+              ? { id: ce.id, nom: ce.name || c.owner_business_info?.name || null, verification: ce.verification_status || null }
+              : { erreur: ce?.error?.message || "État de vérification non lisible." };
+          }
+        } else {
+          sortie.compte = { erreur: c?.error?.message || "Compte professionnel non lisible." };
+        }
+      } catch (e) {
+        sortie.compte = { erreur: "Impossible de joindre Meta." };
+      }
+    }
+
+    /*
+     * Le verdict en une phrase. Les nombres bruts n'ont jamais dit à personne quoi faire ; c'est
+     * cette phrase-là qui doit rester à l'écran, et les détails en dessous pour qui veut vérifier.
+     */
+    const aGestion = !!sortie.permissions?.liste?.includes("whatsapp_business_management");
+    const verifiee = sortie.entreprise?.verification === "verified";
+    if (sortie.permissions?.liste && !aGestion) {
+      sortie.verdict = {
+        cause: "permission",
+        texte: "Le jeton n'a pas la permission « whatsapp_business_management ». C'est elle qui autorise "
+          + "la création de modèles. Regénérez le jeton depuis l'utilisateur système, en cochant cette "
+          + "permission en plus de « whatsapp_business_messaging », puis remplacez WHATSAPP_TOKEN dans Vercel.",
+      };
+    } else if (sortie.entreprise && sortie.entreprise.verification && !verifiee) {
+      sortie.verdict = {
+        cause: "verification",
+        texte: `Le jeton a les droits, mais l'entreprise n'est pas vérifiée chez Meta (état : ${sortie.entreprise.verification}). `
+          + "Tant que la vérification n'est pas achevée, la création de modèles reste fermée. "
+          + "Elle se lance dans Meta Business Suite → Paramètres de l'entreprise → Centre de sécurité.",
+      };
+    } else if (aGestion) {
+      sortie.verdict = {
+        cause: "droits-ok",
+        texte: "Le jeton a bien la permission de gestion et l'entreprise ne paraît pas bloquée. "
+          + "Si la création échoue encore, c'est l'utilisateur système qui n'est pas administrateur de "
+          + "ce compte WhatsApp Business : ajoutez-lui le rôle dans Paramètres de l'entreprise → Comptes WhatsApp.",
+      };
+    }
+    return res.status(200).json(sortie);
+  }
+
   if (req.method === "POST" && req.query?.creerModele !== undefined) {
     const waba = process.env.WHATSAPP_WABA_ID;
     if (!metaPret) return res.status(501).json({ error: "Meta n'est pas configuré.", configure: false });

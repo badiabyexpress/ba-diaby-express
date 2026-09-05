@@ -863,6 +863,84 @@ export default async function handler(req, res) {
     }
   }
 
+  /*
+   * CRÉER LE MODÈLE DE CODE DE VÉRIFICATION, SANS PASSER PAR L'INTERFACE DE META.
+   *
+   * Le formulaire de Meta refuse la création — « ce compte n'a pas l'autorisation de créer un
+   * modèle » — et n'en dit pas plus. La même demande envoyée à l'API rapporte, elle, un code et
+   * un message précis : c'est déjà un gain, même quand elle échoue.
+   *
+   * Un modèle d'authentification ne se rédige pas : Meta impose son texte, traduit dans chaque
+   * langue, et l'on ne choisit que trois choses — la recommandation de sécurité, le délai
+   * d'expiration affiché, et la forme du bouton. On demande donc exactement la forme que l'envoi
+   * attend plus haut (`sub_type: "copy_code"`), sans quoi le modèle serait accepté mais
+   * inutilisable : le bouton refuserait le paramètre au moment de l'envoi.
+   */
+  if (req.method === "POST" && req.query?.creerModele !== undefined) {
+    const waba = process.env.WHATSAPP_WABA_ID;
+    if (!metaPret) return res.status(501).json({ error: "Meta n'est pas configuré.", configure: false });
+    if (!waba) {
+      return res.status(501).json({
+        error: "Ajoutez WHATSAPP_WABA_ID dans Vercel — c'est l'« ID du compte WhatsApp Business », "
+          + "affiché au-dessus de vos numéros dans la console Meta.",
+        manquant: "WHATSAPP_WABA_ID",
+      });
+    }
+    const nom = String(req.body?.nom || "bde_code_verification").trim().toLowerCase();
+    /* Meta n'accepte que minuscules, chiffres et soulignés : on refuse ici plutôt qu'après l'aller-retour. */
+    if (!/^[a-z0-9_]{1,512}$/.test(nom)) {
+      return res.status(400).json({ error: "Le nom d'un modèle ne peut contenir que des minuscules, des chiffres et des soulignés." });
+    }
+    const minutes = Number(req.body?.minutes);
+    const expiration = Number.isFinite(minutes) && minutes >= 1 && minutes <= 90 ? Math.round(minutes) : 10;
+    const definition = {
+      name: nom,
+      language: meta.langue,
+      category: "AUTHENTICATION",
+      components: [
+        { type: "BODY", add_security_recommendation: true },
+        { type: "FOOTER", code_expiration_minutes: expiration },
+        { type: "BUTTONS", buttons: [{ type: "OTP", otp_type: "COPY_CODE" }] },
+      ],
+    };
+    try {
+      const reponse = await fetch(
+        `https://graph.facebook.com/${VERSION_GRAPH}/${encodeURIComponent(waba)}/message_templates`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${meta.jeton}` },
+          body: JSON.stringify(definition),
+        },
+      );
+      const corps = await reponse.json().catch(() => ({}));
+      if (!reponse.ok) {
+        const code = corps?.error?.code;
+        return res.status(reponse.status).json({
+          /*
+           * Le message de Meta est conservé tel quel à côté de notre explication : c'est lui qui
+           * permet de chercher, et une explication qui remplace la cause n'aide personne.
+           */
+          error: EXPLICATIONS_META[code] || corps?.error?.error_user_msg || corps?.error?.message || "Meta a refusé la création.",
+          detailMeta: corps?.error?.message || null,
+          sousCode: corps?.error?.error_subcode || null,
+          code: code || null,
+          nom,
+        });
+      }
+      return res.status(200).json({
+        cree: true,
+        nom,
+        id: corps?.id || null,
+        /* Un modèle neuf part en examen : dire « créé » sans dire « en attente » ferait croire qu'on peut s'en servir. */
+        statut: corps?.status || "PENDING",
+        categorie: corps?.category || "AUTHENTICATION",
+        expiration,
+      });
+    } catch (e) {
+      return res.status(502).json({ error: "Impossible de joindre Meta." });
+    }
+  }
+
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Méthode non autorisée" });
   }

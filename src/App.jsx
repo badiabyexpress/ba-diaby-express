@@ -29922,6 +29922,9 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
   useEffect(() => { relireConsommation(); }, []);
 
   const [modeles, setModeles] = useState(null);
+  /* Le modèle du code de vérification : son nom, et l'état de la demande de création. */
+  const [nomModeleCode, setNomModeleCode] = useState("bde_code_verification");
+  const [creationModele, setCreationModele] = useState(null);
   function relireModeles() {
     return appelServeurQuiDepense("/api/whatsapp?modeles=1")
       .then((r) => r.json().then((corps) => ({ ok: r.ok, corps })))
@@ -30533,6 +30536,71 @@ function NotificationsWhatsAppPage({ data, persist, notify, onBack }) {
                 <div style={{ fontSize: 11, fontFamily: "monospace", color: "var(--muted)", marginTop: 8, lineHeight: 1.7, overflowWrap: "anywhere" }}>
                   {absents.join(" · ")}
                 </div>
+              </div>
+            );
+          })()}
+
+          {/*
+            LE MODÈLE DE CODE, CRÉÉ D'ICI PLUTÔT QUE CHEZ META.
+
+            Le formulaire de Meta refuse la création — « ce compte n'a pas l'autorisation de créer
+            un modèle » — sans dire pourquoi. La même demande envoyée à l'API rapporte, elle, un
+            code et un message précis. Et quand elle passe, le modèle est créé avec exactement la
+            forme que l'envoi attend : un modèle d'authentification à bouton « copier le code ».
+            Rempli à la main, ce détail-là est la première cause de modèle approuvé mais
+            inutilisable.
+          */}
+          {(() => {
+            const deposes = new Set((modeles.modeles || []).map((m) => m.nom));
+            const dejaLa = [...deposes].find((n) => /code|verification|otp/i.test(n));
+            return (
+              <div style={{ background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 8, padding: "12px 14px", marginTop: 10 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--text)" }}>
+                  Modèle du code de vérification
+                </div>
+                <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 5, lineHeight: 1.55 }}>
+                  {dejaLa
+                    ? `Un modèle nommé « ${dejaLa} » existe déjà sur ce compte.`
+                    : "C'est lui qui porte les codes de réinitialisation de mot de passe. Meta impose son texte : "
+                      + "vous ne choisissez que le nom et le délai d'expiration affiché."}
+                </div>
+                <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
+                  <input value={nomModeleCode} onChange={(e) => setNomModeleCode(e.target.value)}
+                    placeholder="bde_code_verification" spellCheck={false}
+                    style={{ flex: "1 1 190px", minWidth: 0, background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 7, padding: "9px 11px", fontSize: 12.5, fontFamily: "monospace" }} />
+                  <button disabled={creationModele === "en-cours"} onClick={async () => {
+                    setCreationModele("en-cours");
+                    const nom = (nomModeleCode || "bde_code_verification").trim();
+                    const { ok, corps } = await appelServeurQuiDepense("/api/whatsapp?creerModele=1", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ nom, minutes: 10 }),
+                    }).then((r) => r.json().then((c) => ({ ok: r.ok, corps: c })))
+                      .catch(() => ({ ok: false, corps: { error: "Serveur injoignable." } }));
+                    setCreationModele(ok ? { cree: true, ...corps } : { erreur: corps?.error, detail: corps?.detailMeta, code: corps?.code });
+                    if (ok) relireModeles();
+                  }} style={{ background: "var(--brand-solid)", color: "#fff", border: "none", borderRadius: 7, padding: "9px 15px", fontSize: 12.5, fontWeight: 700, cursor: creationModele === "en-cours" ? "wait" : "pointer", opacity: creationModele === "en-cours" ? 0.6 : 1 }}>
+                    {creationModele === "en-cours" ? "Création…" : "Créer ce modèle"}
+                  </button>
+                </div>
+                {creationModele?.cree && (
+                  <div style={{ fontSize: 12, color: "var(--ok-fg, #1a7f45)", marginTop: 9, lineHeight: 1.55 }}>
+                    Modèle « {creationModele.nom} » déposé — statut {creationModele.statut}. Un modèle
+                    neuf passe en examen chez Meta ; il ne servira qu'une fois approuvé. Renseignez
+                    ensuite WHATSAPP_TEMPLATE_CODE dans Vercel avec ce nom.
+                  </div>
+                )}
+                {creationModele?.erreur && (
+                  <div style={{ fontSize: 12, color: "var(--danger-fg)", marginTop: 9, lineHeight: 1.55 }}>
+                    {creationModele.erreur}
+                    {/* Le message brut de Meta reste affiché : c'est lui qui permet de chercher. */}
+                    {creationModele.detail && creationModele.detail !== creationModele.erreur && (
+                      <div style={{ color: "var(--muted)", fontFamily: "monospace", fontSize: 11, marginTop: 5, overflowWrap: "anywhere" }}>
+                        {creationModele.detail}{creationModele.code ? ` (code ${creationModele.code})` : ""}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             );
           })()}

@@ -19662,17 +19662,18 @@ async function downloadRouteManifest(colisRoute, country, direction, bordereau, 
   const reglePartenaires = lignesPartenaires.reduce((s, c) => s + duPartenaire(c).paye, 0);
   const duParPartenaires = lignesPartenaires.reduce((s, c) => s + duPartenaire(c).reste, 0);
 
-  // Bandeau d’en-tête — filet rouge au pied de la bande navy, comme sur l'étiquette et le ticket
-  // d'envoi : même identité de marque bicolore sur tous les documents imprimés.
-  doc.setFillColor(10, 38, 71); doc.rect(0, 0, 210, 30, "F");
-  doc.setFillColor(214, 39, 63); doc.rect(0, 28.6, 210, 1.4, "F");
-  doc.setFillColor(255, 255, 255); doc.roundedRect(14, 5, 20, 20, 2.5, 2.5, "F");
-  doc.addImage(DEFAULT_LOGO, "PNG", 15, 6, 18, 18);
-  doc.setTextColor(255, 255, 255); doc.setFont(undefined, "bold"); doc.setFontSize(15);
-  doc.text("BA-DIABY EXPRESS", 37, 13);
-  doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(180, 195, 220);
-  doc.text(`Bordereau d’expédition${bordereau?.numero ? ` — ${bordereau.numero}` : ""}`, 37, 19.5);
-  doc.setFontSize(8); doc.text(`Route : ${label} · Généré le ${new Date().toLocaleDateString("fr-FR")}`, 37, 25);
+  // En-tête blanc premium : le document respire, tandis que le rouge reste un accent de marque.
+  // Aucun fond bleu ne masque désormais les informations de référence et d’itinéraire.
+  doc.setFillColor(255, 255, 255); doc.rect(0, 0, 210, 30, "F");
+  doc.setFillColor(247, 249, 252); doc.roundedRect(14, 4.5, 20, 20, 2.5, 2.5, "F");
+  try { doc.addImage(DEFAULT_LOGO, "PNG", 15, 5.5, 18, 18); } catch (e) { /* logo facultatif */ }
+  doc.setTextColor(10, 38, 71); doc.setFont(undefined, "bold"); doc.setFontSize(15);
+  doc.text("BA-DIABY EXPRESS", 37, 12);
+  doc.setFont(undefined, "normal"); doc.setFontSize(9); doc.setTextColor(104, 116, 134);
+  doc.text(`Bordereau d’expédition${bordereau?.numero ? ` — ${bordereau.numero}` : ""}`, 37, 18.5);
+  doc.setFontSize(8); doc.setTextColor(122, 130, 142);
+  doc.text(`Route : ${label} · Généré le ${new Date().toLocaleDateString("fr-FR")}`, 37, 24);
+  doc.setDrawColor(214, 39, 63); doc.setLineWidth(1.1); doc.line(14, 29, 196, 29);
   if (bordereau?.statut) {
     /*
      * Comparait autrefois à "Reçu", un statut disparu depuis : la pastille restait bleue en
